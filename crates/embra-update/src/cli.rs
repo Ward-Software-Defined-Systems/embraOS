@@ -3,7 +3,7 @@
 //! `embra_common::args::Flags` for the services (this binary is not one).
 
 pub const USAGE: &str = "usage: embra-update <command> [flags]
-  snapshot [--label <l>] [--taken-by <who>] [--once] [--force]   a tar.gz of STATE and DATA under /embra/data/backups
+  snapshot [--label <l>] [--taken-by <who>] [--once] [--force] [--console]   a tar.gz of STATE and DATA under /embra/data/backups
   restore [<name>] [--yes] [--console]                           replace STATE and DATA with a backup
   list [--names]                                                 the backups, newest first
   delete <name>                                                  remove one backup
@@ -14,7 +14,7 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Snapshot { label: String, taken_by: String, once: bool, force: bool },
+    Snapshot { label: String, taken_by: String, once: bool, force: bool, console: bool },
     Restore { name: Option<String>, yes: bool, console: bool },
     List { names_only: bool },
     Delete { name: String },
@@ -22,6 +22,17 @@ pub enum Command {
     Apply { source: Option<String>, tag: Option<String>, yes: bool, console: bool, allow_downgrade: bool },
     Status,
     Rollback,
+}
+
+impl Command {
+    /// `--console`: the job speaks and listens on the boot consoles (a
+    /// maintenance boot or a job before the services), not on stdio.
+    pub fn console(&self) -> bool {
+        matches!(
+            self,
+            Command::Snapshot { console: true, .. } | Command::Restore { console: true, .. } | Command::Apply { console: true, .. }
+        )
+    }
 }
 
 /// A label: a word of letters, digits, `_`, `.` and `-`, up to 32 characters.
@@ -93,7 +104,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             if !positionals.is_empty() {
                 return Err(format!("snapshot takes no positional: {}", positionals.join(" ")));
             }
-            Ok(Command::Snapshot { label, taken_by, once, force })
+            Ok(Command::Snapshot { label, taken_by, once, force, console })
         }
         "restore" => {
             if positionals.len() > 1 {
@@ -135,11 +146,11 @@ mod tests {
     fn every_subcommand_and_flag_parses_and_a_flag_without_its_value_is_an_error() {
         assert_eq!(
             p("snapshot --label pre-v0.24.0 --taken-by pending-slot --once"),
-            Ok(Command::Snapshot { label: "pre-v0.24.0".into(), taken_by: "pending-slot".into(), once: true, force: false })
+            Ok(Command::Snapshot { label: "pre-v0.24.0".into(), taken_by: "pending-slot".into(), once: true, force: false, console: false })
         );
         assert_eq!(
             p("snapshot"),
-            Ok(Command::Snapshot { label: "manual".into(), taken_by: "manual".into(), once: false, force: false })
+            Ok(Command::Snapshot { label: "manual".into(), taken_by: "manual".into(), once: false, force: false, console: false })
         );
         assert_eq!(p("restore 2026-11-05_101200_manual --yes"), Ok(Command::Restore { name: Some("2026-11-05_101200_manual".into()), yes: true, console: false }));
         assert_eq!(p("restore --console"), Ok(Command::Restore { name: None, yes: false, console: true }));
@@ -148,6 +159,7 @@ mod tests {
         assert_eq!(p("check --source https://m/x --tag v1.2.3"), Ok(Command::Check { source: Some("https://m/x".into()), tag: Some("v1.2.3".into()) }));
         assert_eq!(p("apply --yes --allow-downgrade"), Ok(Command::Apply { source: None, tag: None, yes: true, console: false, allow_downgrade: true }));
         assert_eq!(p("status"), Ok(Command::Status));
+        assert!(p("snapshot --console").unwrap().console() && p("apply --console").unwrap().console() && !p("status").unwrap().console());
         assert_eq!(p("rollback"), Ok(Command::Rollback));
         assert!(p("check --source").unwrap_err().contains("--source needs a value"));
         assert!(p("snapshot --label").unwrap_err().contains("--label needs a value"));

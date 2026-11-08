@@ -14,6 +14,8 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::io::AsRawFd;
+use std::time::{Duration, Instant};
 
 /// What a program's console write reaches: the last `console=` of the kernel line.
 pub const CONSOLE: &str = "/dev/console";
@@ -74,6 +76,143 @@ impl BootConsole {
         BootConsole { console, display }
     }
 
+    /// `from_parts` for a prompt: the files given are read as well.
+    pub fn interactive_from_parts(console: Option<File>, display: Option<File>) -> BootConsole {
+        BootConsole { console, display }
+    }
+
+    /// The consoles for a prompt: `/dev/console` and, unless it is the
+    /// display, `/dev/tty0`, each opened to read and write without being
+    /// taken as the controlling terminal (`O_NOCTTY`): a prompt needs
+    /// `read(2)` alone, and the kernel's canonical line discipline, on by
+    /// default on both, delivers a line on Enter with the echo the operator
+    /// expects. A console that will not open read-write is kept write-only.
+    pub fn open_interactive() -> BootConsole {
+        fn read_write(path: &str) -> Option<File> {
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOCTTY).open(path).ok()
+        }
+        let console = read_write(CONSOLE).or_else(|| OpenOptions::new().write(true).open(CONSOLE).ok());
+        let console_is_the_display = console
+            .as_ref()
+            .and_then(device_of)
+            .is_some_and(|(major, minor)| is_virtual_terminal(major, minor));
+        let display = if console_is_the_display {
+            None
+        } else {
+            read_write(DISPLAY).or_else(|| OpenOptions::new().write(true).open(DISPLAY).ok())
+        };
+        BootConsole { console, display }
+    }
+
+    /// A line typed on either console. The prompt goes to both; the first
+    /// complete line from either answers and is echoed on the other, so the
+    /// two transcripts read the same. A console that cannot be read drops
+    /// out — a UART that is not there answers EIO or never, a closed pipe
+    /// EOF — and its buffered bytes count as its line at EOF. `None` when no
+    /// console can answer, or when the timeout passes.
+    pub fn prompt_line(&mut self, text: &str) -> io::Result<Option<String>> {
+        self.prompt_line_timeout(text, None)
+    }
+
+    pub fn prompt_line_timeout(&mut self, text: &str, timeout: Option<Duration>) -> io::Result<Option<String>> {
+        let _ = self.write_all(text.as_bytes());
+        let _ = self.flush();
+        let started = Instant::now();
+        // Without /dev/console the prompt went to stderr; the answer comes
+        // from stdin, the terminal of a developer's run.
+        let console_fd = self.console.as_ref().map(|f| f.as_raw_fd()).unwrap_or(0);
+        let mut readers: Vec<Reader> = vec![Reader { fd: console_fd, which: Which::Console, buf: String::new(), alive: true }];
+        if let Some(d) = self.display.as_ref() {
+            readers.push(Reader { fd: d.as_raw_fd(), which: Which::Display, buf: String::new(), alive: true });
+        }
+        let answer = loop {
+            let live: Vec<usize> = readers.iter().enumerate().filter(|(_, r)| r.alive).map(|(i, _)| i).collect();
+            if live.is_empty() {
+                break None;
+            }
+            let wait_ms: libc::c_int = match timeout {
+                None => -1,
+                Some(t) => {
+                    let elapsed = started.elapsed();
+                    if elapsed >= t {
+                        break None;
+                    }
+                    (t - elapsed).as_millis().min(libc::c_int::MAX as u128) as libc::c_int
+                }
+            };
+            let mut pfds: Vec<libc::pollfd> = live.iter().map(|&i| libc::pollfd { fd: readers[i].fd, events: libc::POLLIN, revents: 0 }).collect();
+            // SAFETY: `pfds` is a live array of `pfds.len()` pollfd structs for the call.
+            let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, wait_ms) };
+            if rc < 0 {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            if rc == 0 {
+                break None;
+            }
+            let mut found: Option<(Which, String)> = None;
+            for (pfd, &i) in pfds.iter().zip(live.iter()) {
+                let r = &mut readers[i];
+                if pfd.revents == 0 {
+                    continue;
+                }
+                if pfd.revents & libc::POLLIN != 0 {
+                    let mut b = [0u8; 256];
+                    // SAFETY: `b` is a 256-byte buffer the read may fill.
+                    let n = unsafe { libc::read(r.fd, b.as_mut_ptr().cast(), b.len()) };
+                    if n > 0 {
+                        r.buf.push_str(&String::from_utf8_lossy(&b[..n as usize]));
+                        if let Some(pos) = r.buf.find('\n') {
+                            found = Some((r.which, r.buf[..pos].trim().to_string()));
+                            break;
+                        }
+                        continue;
+                    }
+                    if n < 0 {
+                        let e = io::Error::last_os_error();
+                        if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) {
+                            continue;
+                        }
+                    }
+                    // EOF, or a console that refuses to be read (EIO): gone.
+                    r.alive = false;
+                } else {
+                    // POLLHUP, POLLERR, POLLNVAL without data: gone.
+                    r.alive = false;
+                }
+                if !r.alive && !r.buf.trim().is_empty() {
+                    found = Some((r.which, r.buf.trim().to_string()));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break found;
+            }
+        };
+        if let Some((which, line)) = &answer {
+            // The kernel echoed the line where it was typed; the other
+            // console gets it too, so both transcripts read the same.
+            let echo = format!("{line}\n");
+            match which {
+                Which::Console => {
+                    if let Some(d) = self.display.as_mut() {
+                        let _ = d.write_all(echo.as_bytes());
+                    }
+                }
+                Which::Display => {
+                    if let Some(c) = self.console.as_mut() {
+                        let _ = c.write_all(echo.as_bytes());
+                    }
+                }
+            }
+        }
+        Ok(answer.map(|(_, line)| line))
+    }
+
     pub fn has_display(&self) -> bool {
         self.display.is_some()
     }
@@ -84,6 +223,20 @@ impl BootConsole {
         let _ = self.write_all(b"\n");
         let _ = self.flush();
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Which {
+    Console,
+    Display,
+}
+
+/// One console a prompt listens on.
+struct Reader {
+    fd: std::os::unix::io::RawFd,
+    which: Which,
+    buf: String,
+    alive: bool,
 }
 
 impl Write for BootConsole {
@@ -116,7 +269,6 @@ impl Write for BootConsole {
 /// The device number behind an open console, through `TIOCGDEV`.
 #[cfg(target_os = "linux")]
 fn device_of(console: &File) -> Option<(u32, u32)> {
-    use std::os::unix::io::AsRawFd;
     let mut dev: libc::c_uint = 0;
     // SAFETY: TIOCGDEV writes one unsigned int through the pointer it is
     // given, and `dev` lives for the call.
@@ -177,5 +329,59 @@ mod tests {
         assert!(!std::fs::read_to_string(&display_path).unwrap().contains("second"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use std::os::unix::io::FromRawFd;
+
+    /// A pipe as (reader, writer) files.
+    fn pipe() -> (File, File) {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: pipe fills the two-element array it is given.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: both descriptors are fresh and owned here once.
+        unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
+    }
+
+    #[test]
+    fn a_prompt_is_answered_by_the_first_console_that_sends_a_line() {
+        let (console_r, mut console_w) = pipe();
+        let (display_r, mut display_w) = pipe();
+        let mut both = BootConsole::interactive_from_parts(Some(console_r), Some(display_r));
+        display_w.write_all(b"2\r\n").unwrap();
+        assert_eq!(both.prompt_line_timeout("which? ", Some(Duration::from_secs(5))).unwrap(), Some("2".to_string()));
+        console_w.write_all(b"yes\n").unwrap();
+        assert_eq!(both.prompt_line_timeout("sure? ", Some(Duration::from_secs(5))).unwrap(), Some("yes".to_string()));
+    }
+
+    #[test]
+    fn a_dead_console_is_skipped_and_a_line_without_newline_counts_at_eof() {
+        let (console_r, console_w) = pipe();
+        let (display_r, mut display_w) = pipe();
+        drop(console_w); // the serial line is gone: EOF at once, nothing typed
+        let mut both = BootConsole::interactive_from_parts(Some(console_r), Some(display_r));
+        display_w.write_all(b"partial").unwrap();
+        drop(display_w); // EOF after a line without its newline
+        assert_eq!(both.prompt_line_timeout("? ", Some(Duration::from_secs(5))).unwrap(), Some("partial".to_string()));
+    }
+
+    #[test]
+    fn a_prompt_with_no_live_console_returns_none_and_so_does_a_timeout() {
+        let (console_r, console_w) = pipe();
+        let (display_r, display_w) = pipe();
+        drop(console_w);
+        drop(display_w);
+        let mut dead = BootConsole::interactive_from_parts(Some(console_r), Some(display_r));
+        assert_eq!(dead.prompt_line_timeout("? ", Some(Duration::from_secs(5))).unwrap(), None);
+
+        let (console_r, _console_w) = pipe();
+        let (display_r, _display_w) = pipe();
+        let mut silent = BootConsole::interactive_from_parts(Some(console_r), Some(display_r));
+        let started = Instant::now();
+        assert_eq!(silent.prompt_line_timeout("? ", Some(Duration::from_millis(150))).unwrap(), None);
+        assert!(started.elapsed() < Duration::from_secs(3), "the timeout, not a hang");
     }
 }

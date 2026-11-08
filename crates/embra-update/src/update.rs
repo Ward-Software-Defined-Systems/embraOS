@@ -112,7 +112,7 @@ pub fn apply_command(
     yes: bool,
     console: bool,
     allow_downgrade: bool,
-    out: &mut impl Write,
+    out: &mut crate::console::Operator,
 ) -> Outcome {
     let checked = match check(source_flag, tag, out) {
         Ok(c) => c,
@@ -157,10 +157,11 @@ pub fn apply_command(
         ));
     }
     if console && !yes {
-        let _ = write!(out, "Apply {} to slot {} ({})? The slot's previous content is gone from the first byte. [y/N] ", checked.manifest.version, target.other, target.dev.display());
-        let _ = out.flush();
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() || !matches!(line.trim(), "y" | "Y" | "yes") {
+        let answer = out.ask(&format!(
+            "Apply {} to slot {} ({})? The slot's previous content is gone from the first byte. [y/N] ",
+            checked.manifest.version, target.other, target.dev.display()
+        ));
+        if !crate::console::confirmed(answer.as_deref()) {
             return Outcome::Refused("apply: not confirmed; nothing was changed".into());
         }
     }

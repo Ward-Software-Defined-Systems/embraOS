@@ -103,8 +103,10 @@ struct Ran {
     reason: String,
 }
 
-/// Run the updater on the console: stdout and stdin are the console (the
-/// progress lines, the restore prompt), stderr is read for the reason.
+/// Run the updater with `--console`: it speaks and listens on both boot
+/// consoles itself (the progress lines, the prompts; `embra-update`'s
+/// `console::Operator`), stdio inherited beside that, stderr read for the
+/// reason.
 fn run_updater(args: &[&str]) -> Ran {
     let child = Command::new(UPDATER).args(args).stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::piped()).spawn();
     let mut child = match child {
@@ -123,8 +125,8 @@ fn run_updater(args: &[&str]) -> Ran {
     }
 }
 
-/// One line on both consoles (the updater's own output and the restore
-/// prompt stay on the console that is embrad's stdio, the serial line).
+/// One line on both consoles (the updater's own lines and prompts go to
+/// both as well, under `--console`).
 fn say(line: &str) {
     crate::console::emit(&format!("[embrad] {line}"));
 }
@@ -135,7 +137,7 @@ pub fn run_maintenance(mode: BootMode) {
     say(&format!("maintenance boot: {}", mode.name()));
     let ran = match mode {
         BootMode::Update => run_updater(&["apply", "--console"]),
-        BootMode::Backup => run_updater(&["snapshot", "--label", "manual", "--taken-by", "manual"]),
+        BootMode::Backup => run_updater(&["snapshot", "--label", "manual", "--taken-by", "manual", "--console"]),
         BootMode::Restore => run_updater(&["restore", "--console"]),
         BootMode::Normal => return,
     };
@@ -168,7 +170,7 @@ pub fn run_maintenance(mode: BootMode) {
 pub fn run_trial_snapshot(version: &str) -> Result<(), String> {
     let label = format!("pre-v{version}");
     say(&format!("trial boot of v{version}: taking the snapshot \"{label}\" of STATE and DATA before the knowledge graph migrates"));
-    let ran = run_updater(&["snapshot", "--label", &label, "--taken-by", "pending-slot", "--once"]);
+    let ran = run_updater(&["snapshot", "--label", &label, "--taken-by", "pending-slot", "--once", "--console"]);
     match ran.code {
         Some(0) => {
             info!("trial snapshot {label} done");
@@ -186,7 +188,7 @@ pub fn run_trial_snapshot(version: &str) -> Result<(), String> {
 /// the outcome, which is said on the console and in the log.
 pub fn run_scheduled_snapshot(label: &str) {
     say(&format!("scheduled snapshot \"{label}\" before the services start"));
-    let ran = run_updater(&["snapshot", "--label", label, "--taken-by", "scheduled"]);
+    let ran = run_updater(&["snapshot", "--label", label, "--taken-by", "scheduled", "--console"]);
     match ran.code {
         Some(0) => info!("scheduled snapshot {label} done"),
         Some(3) => info!("scheduled snapshot {label}: nothing to do"),
@@ -200,7 +202,7 @@ pub fn run_scheduled_snapshot(label: &str) {
 /// A scheduled restore; the caller reboots after it.
 pub fn run_scheduled_restore(name: &str) {
     say(&format!("scheduled restore of \"{name}\" before the services start"));
-    let ran = run_updater(&["restore", name, "--yes"]);
+    let ran = run_updater(&["restore", name, "--yes", "--console"]);
     match ran.code {
         Some(0) => say(&format!("restore of \"{name}\" done; rebooting")),
         _ => {
