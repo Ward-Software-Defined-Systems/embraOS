@@ -416,8 +416,9 @@ fi
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
     rm -rf output/target && \
+    mkdir -p output/build && \
     find output/build -maxdepth 2 -name .stamp_target_installed -delete && \
-    mkdir -p output/build && touch output/build/.embraos-target-reseeded && \
+    touch output/build/.embraos-target-reseeded && \
     rm -f output/images/rootfs.squashfs output/images/rootfs.tar output/images/embraos.img \
           output/images/boot.vfat output/images/esp.vfat)
 
