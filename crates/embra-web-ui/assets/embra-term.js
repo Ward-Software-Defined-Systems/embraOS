@@ -87,8 +87,35 @@
     };
   }
 
+  // The display console's pointer and fences (see embraTermInit).
+  function embraKioskSetup() {
+    const cur = document.createElement("div");
+    cur.id = "embra-kiosk-cursor";
+    cur.style.cssText = "position:fixed;left:0;top:0;width:18px;height:26px;pointer-events:none;z-index:2147483647;display:none;";
+    cur.innerHTML = '<svg width="18" height="26" viewBox="0 0 18 26"><path d="M1 1 L1 20 L6 15.5 L9.5 24 L12.5 22.5 L9 14 L16 14 Z" fill="#ece2d8" stroke="#0c0907" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+    document.body.appendChild(cur);
+    window.addEventListener("pointermove", (e) => {
+      cur.style.transform = "translate(" + e.clientX + "px," + e.clientY + "px)";
+      cur.style.display = "block";
+    }, { passive: true });
+    // The page is the whole screen: no new windows, no leaving the origin.
+    window.open = function () { return null; };
+    document.addEventListener("click", (e) => {
+      const a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+      if (a && a.origin !== window.location.origin) e.preventDefault();
+    }, true);
+  }
+
   window.embraTermInit = function (elId) {
     if (term) return; // once
+    // The display console (cog on the machine's own display, `?kiosk=1`):
+    // the launcher draws no pointer on a display without a cursor plane,
+    // so the page draws one; a download has nowhere to go there; the page
+    // never navigates away; the cursor does not blink (every blink is a
+    // repaint through software rendering).
+    const kiosk = /(?:^\?|&)kiosk=1(?:&|$)/.test(window.location.search);
+    window.embraKiosk = kiosk;
+    if (kiosk) embraKioskSetup();
     // fontSize is pulled from the shell's --term-fs CSS variable so
     // app.css is the single source of truth for the font-size
     // hierarchy. Falls back to 15 (xterm.js's own default) if the
@@ -104,7 +131,7 @@
       // every cell: it re-diffs every ~200ms and repaints in full on
       // attach and resize. Any scrollback would just be stale snapshots
       // the user could wheel away into.
-      fontSize: termFs, cursorBlink: true, scrollback: 0,
+      fontSize: termFs, cursorBlink: !kiosk, scrollback: 0,
       // Warm brand bg + amber (flame) cursor to blend with the shell.
       // The 16 ANSI colors are intentionally left at xterm defaults so
       // the real ratatui TUI's own colors render true (parity-safe).
@@ -149,6 +176,10 @@
     // same origin, so the `download` attribute is honoured.
     // Both routes are ASCII (percent-encoded), so column equals index.
     const embraDownload = (url) => {
+      if (kiosk) {
+        term.write("\r\n\x1b[2m[embra-web] downloads are for a remote browser: " + url + "\x1b[0m\r\n");
+        return;
+      }
       const a = document.createElement("a");
       a.href = url; a.download = ""; a.style.display = "none";
       document.body.appendChild(a); a.click(); a.remove();

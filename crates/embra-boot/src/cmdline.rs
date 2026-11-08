@@ -19,6 +19,12 @@ pub const LOG_LEVEL_KEY: &str = "embra.loglevel";
 pub const GRAPHICS_KEY: &str = "embra.graphics";
 pub const COLS_KEY: &str = "embra.cols";
 pub const ROWS_KEY: &str = "embra.rows";
+/// The display console: the web console on the machine's display.
+pub const KIOSK_KEY: &str = "embra.kiosk";
+/// The display console's keyboard layout (an XKB layout name).
+pub const KEYBOARD_KEY: &str = "embra.kbd";
+/// The display console's device scale, 1 or 2.
+pub const KIOSK_SCALE_KEY: &str = "embra.kioskscale";
 
 /// What embrad runs: the services, or one maintenance job from the boot
 /// menu (`embra.mode=update|backup|restore`), then a reboot.
@@ -164,6 +170,46 @@ impl Cmdline {
         let rows = self.last(ROWS_KEY).and_then(|v| v.parse().ok()).unwrap_or(24);
         (cols, rows)
     }
+
+    /// `embra.kiosk=1|0`, the display console: the last `1` or `0` wins,
+    /// any other value is ignored, and without one `display_console`
+    /// decides from the machine.
+    pub fn kiosk(&self) -> Option<bool> {
+        let mut kiosk = None;
+        for t in &self.tokens {
+            match t.as_str() {
+                "embra.kiosk=1" => kiosk = Some(true),
+                "embra.kiosk=0" => kiosk = Some(false),
+                _ => {}
+            }
+        }
+        kiosk
+    }
+
+    /// `embra.kbd=<layout>`, the display console's keyboard layout; the
+    /// last non-empty value.
+    pub fn keyboard_layout(&self) -> Option<&str> {
+        self.values(KEYBOARD_KEY).filter(|v| !v.is_empty()).last()
+    }
+
+    /// `embra.kioskscale=1|2`, the display console's device scale; the
+    /// last value that is one of the two.
+    pub fn kiosk_scale(&self) -> Option<u8> {
+        self.values(KIOSK_SCALE_KEY)
+            .filter_map(|v| match v {
+                "1" => Some(1),
+                "2" => Some(2),
+                _ => None,
+            })
+            .last()
+    }
+}
+
+/// Whether the display console runs: under the web console, on a machine
+/// with a display (`/dev/dri/card*`), unless `embra.kiosk=0`. `embra.kiosk=1`
+/// conjures no display, and the serial TUI (`embra.tui=1`) never has it.
+pub fn display_console(web: bool, kiosk: Option<bool>, display_present: bool) -> bool {
+    web && display_present && kiosk.unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -222,5 +268,30 @@ mod tests {
         assert_eq!(c.graphics(), Some("auto"), "an empty value does not clear an earlier one");
         assert_eq!(Cmdline::parse("embra.loglevel=debug embra.loglevel=trace").log_level(), Some("trace"));
         assert!(Cmdline::read().tokens().iter().all(|t| !t.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod display_console_tests {
+    use super::*;
+
+    #[test]
+    fn the_display_console_follows_embra_kiosk_and_is_on_by_default_where_a_display_exists() {
+        assert!(!display_console(false, None, true), "the serial TUI never has it");
+        assert!(!display_console(true, Some(true), false), "no display, no console, whatever the knob says");
+        assert!(display_console(true, None, true), "on by default under the web console with a display");
+        assert!(!display_console(true, Some(false), true), "embra.kiosk=0 turns it off");
+        assert_eq!(Cmdline::parse("embra.web=1 embra.kiosk=0 embra.kiosk=1").kiosk(), Some(true), "the last word wins");
+        assert_eq!(Cmdline::parse("embra.kiosk=maybe").kiosk(), None, "an unknown value changes nothing");
+        assert_eq!(Cmdline::parse("quiet").kiosk(), None);
+    }
+
+    #[test]
+    fn the_keyboard_layout_and_scale_knobs_take_the_last_usable_value() {
+        let c = Cmdline::parse("embra.kbd=de embra.kbd= embra.kioskscale=3 embra.kioskscale=2");
+        assert_eq!(c.keyboard_layout(), Some("de"));
+        assert_eq!(c.kiosk_scale(), Some(2));
+        assert_eq!(Cmdline::parse("quiet").keyboard_layout(), None);
+        assert_eq!(Cmdline::parse("embra.kioskscale=4").kiosk_scale(), None);
     }
 }

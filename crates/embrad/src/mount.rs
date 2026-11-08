@@ -26,6 +26,14 @@ pub fn mount_pseudofs() -> Result<()> {
     std::fs::create_dir_all("/dev/pts")?;
     mount_if_needed("devpts", "/dev/pts", "devpts", MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC)?;
 
+    // /dev/shm (the display console: GLib and WebKit use shm_open)
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all("/dev/shm")?;
+        mount_if_needed("tmpfs", "/dev/shm", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
+        let _ = std::fs::set_permissions("/dev/shm", std::fs::Permissions::from_mode(0o1777));
+    }
+
     // /tmp (tmpfs)
     mount_if_needed("tmpfs", "/tmp", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
 

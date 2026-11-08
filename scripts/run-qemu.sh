@@ -17,6 +17,8 @@
 #
 # Host-side extras (neither reaches the OS):
 #   EMBRA_VNC=1                 the display on a VNC server at 127.0.0.1:5900
+#   EMBRA_KIOSK=0|1             the display console off, or on (implies EMBRA_VNC=1); the OS's default is on with a display
+#   EMBRA_KBD=<layout>          the display console's keyboard layout (us)
 #       (password "embraos": macOS Screen Sharing refuses a server without
 #       one; loopback only, tunnel it with ssh -L). The serial line stays on
 #       this terminal. The UEFI path paints GRUB's menu and the boot banner
@@ -107,6 +109,18 @@ done
 
 # The user-mode network: the forwarded ports, and the DHCP range's first
 # address when asked for.
+# The display console: EMBRA_KIOSK=0 boots without it, EMBRA_KIOSK=1 asks
+# for it (and implies the VNC display below); the OS's own default is on
+# where a display exists. EMBRA_KBD=<xkb layout> is its keyboard layout (us).
+case "${EMBRA_KIOSK:-}" in
+    0|1) KNOBS="$KNOBS embra.kiosk=${EMBRA_KIOSK}" ;;
+    "") ;;
+    *) echo "WARNING: EMBRA_KIOSK='$EMBRA_KIOSK' is not 0 or 1 and is ignored" >&2 ;;
+esac
+if [ -n "${EMBRA_KBD:-}" ]; then
+    KNOBS="$KNOBS embra.kbd=${EMBRA_KBD}"
+fi
+
 NIC="user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345"
 if [ -n "${EMBRA_DHCP_START:-}" ]; then
     if ! [[ "$EMBRA_DHCP_START" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
@@ -118,9 +132,14 @@ fi
 
 # The display: none (the serial line on this terminal), or a VNC server on
 # the loopback beside it.
-DISPLAY_ARGS=(-nographic)
-if [ "${EMBRA_VNC:-}" = "1" ]; then
-    DISPLAY_ARGS=(-display none -object secret,id=vncpw,data=embraos -vga std -vnc 127.0.0.1:0,password-secret=vncpw)
+# Headless: no VGA device at all, so the OS sees no display and starts no
+# display console for a screen nobody watches (embra.kiosk decides on a
+# display that exists). EMBRA_VNC=1, and EMBRA_KIOSK=1 which implies it,
+# give the VM standard VGA, a USB tablet (an absolute pointer, the kind VNC
+# drives) beside the PS/2 keyboard, and the VNC server.
+DISPLAY_ARGS=(-nographic -vga none)
+if [ "${EMBRA_VNC:-}" = "1" ] || [ "${EMBRA_KIOSK:-}" = "1" ]; then
+    DISPLAY_ARGS=(-display none -object secret,id=vncpw,data=embraos -vga std -vnc 127.0.0.1:0,password-secret=vncpw -device qemu-xhci -device usb-tablet)
     echo "  Display: VNC at 127.0.0.1:5900, password embraos (EMBRA_VNC=1; from another machine: ssh -L 5901:127.0.0.1:5900 <this host>, then localhost:5901)"
 elif [ -n "${EMBRA_VNC:-}" ] && [ "$EMBRA_VNC" != "0" ]; then
     echo "WARNING: EMBRA_VNC='$EMBRA_VNC' is not 1 and is ignored (the switch is EMBRA_VNC=1)" >&2

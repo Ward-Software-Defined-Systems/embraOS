@@ -29,6 +29,11 @@ pub struct ServiceDef {
     pub env: Vec<(String, String)>,
     pub health_check: HealthCheck,
     pub restart_policy: RestartPolicy,
+    /// An essential service that fails to start halts the boot (`start_all`
+    /// returns the error). The display console and its udevd are not
+    /// essential: a start that fails is logged and the boot goes on, the
+    /// web console at its URLs.
+    pub essential: bool,
 }
 
 #[derive(Clone)]
@@ -117,6 +122,9 @@ pub struct Supervisor {
     /// The kernel line, read once: the `embra.*` knobs the services are
     /// registered with (the last occurrence of each wins).
     cmdline: Cmdline,
+    /// The display console is registered (udevd and embra-kiosk after
+    /// embra-web): the banner says so.
+    kiosk: bool,
 }
 
 impl Supervisor {
@@ -133,12 +141,20 @@ impl Supervisor {
             boot_stdio: None,
             services: Vec::new(),
             cmdline,
+            kiosk: false,
         }
     }
 
     /// Register all embraOS services in dependency order: `start_all`
     /// starts them in the order they are registered here.
     pub fn register_services(&mut self) {
+        self.register_services_with(display_present(), std::path::Path::new(KIOSK_BIN).exists());
+    }
+
+    /// `register_services` with the machine's facts passed in: whether a
+    /// display exists (`/dev/dri/card*`) and whether this image carries the
+    /// display console's launcher. The tests pass both.
+    pub fn register_services_with(&mut self, display_present: bool, kiosk_available: bool) {
         // Which engine: fixed in THIS binary when the image is built
         // (scripts/build-image.sh --storage-engine, see crates/embrad/build.rs),
         // rocksdb for a dev build that bypasses the script. WardSONDB itself
@@ -177,6 +193,7 @@ impl Supervisor {
                 timeout: Duration::from_secs(30),
             },
             restart_policy: RestartPolicy::default(),
+            essential: true,
         });
 
         // 2. embra-trustd — depends on wardsondb
@@ -197,6 +214,7 @@ impl Supervisor {
                 timeout: Duration::from_secs(15),
             },
             restart_policy: RestartPolicy::default(),
+            essential: true,
         });
 
         // 3. embra-apid — depends on embra-trustd
@@ -215,6 +233,7 @@ impl Supervisor {
                 timeout: Duration::from_secs(15),
             },
             restart_policy: RestartPolicy::default(),
+            essential: true,
         });
 
         // 4. embra-brain — depends on wardsondb, embra-apid
@@ -311,6 +330,7 @@ impl Supervisor {
                 timeout: Duration::from_secs(30),
             },
             restart_policy: RestartPolicy::default(),
+            essential: true,
         });
 
         // 5. Operator UI — depends on embra-brain.
@@ -343,7 +363,7 @@ impl Supervisor {
                     "--trust-addr".to_string(), "http://127.0.0.1:50001".to_string(),
                     "--console-bin".to_string(), "/usr/bin/embra-console".to_string(),
                 ],
-                env: vec![("EMBRA_WEB_TOKEN".to_string(), token)],
+                env: vec![("EMBRA_WEB_TOKEN".to_string(), token.clone())],
                 // embra-web only binds :3345 *after* it has fetched its
                 // serving cert from embra-trustd, so a TCP-connect on 3345
                 // is a real readiness signal (port open ⇒ cert acquired +
@@ -355,7 +375,44 @@ impl Supervisor {
                     timeout: std::time::Duration::from_secs(45),
                 },
                 restart_policy: RestartPolicy::default(),
+                essential: true,
             });
+            // 6. The display console — depends on embra-web: the web
+            // console rendered on the machine's display by WPE WebKit
+            // through cog's DRM platform, input through libinput over
+            // udev, which embrad starts first (`udevd`, seeded with the
+            // input devices once it runs). `display_console` decides: on
+            // where a display exists unless `embra.kiosk=0`. Neither
+            // service is essential: a display console that cannot start
+            // is logged and the boot continues; the web console stays at
+            // its URLs.
+            if embra_boot::cmdline::display_console(true, self.cmdline.kiosk(), display_present) {
+                if !kiosk_available {
+                    info!("A display is present, but this image carries no display console ({KIOSK_BIN} absent)");
+                } else {
+                    info!("Display console: registering udevd and embra-kiosk after embra-web (embra.kiosk=0 boots without them)");
+                    self.kiosk = true;
+                    self.add_service(ServiceDef {
+                        name: "udevd".to_string(),
+                        binary: UDEVD_BIN.to_string(),
+                        args: vec![],
+                        env: vec![],
+                        health_check: HealthCheck::ProcessAlive,
+                        restart_policy: RestartPolicy::default(),
+                        essential: false,
+                    });
+                    let scale = self.cmdline.kiosk_scale().unwrap_or_else(|| device_scale(display_width_px()));
+                    self.add_service(ServiceDef {
+                        name: "embra-kiosk".to_string(),
+                        binary: KIOSK_BIN.to_string(),
+                        args: kiosk_args(scale),
+                        env: kiosk_env(&token, self.cmdline.keyboard_layout()),
+                        health_check: HealthCheck::ProcessAlive,
+                        restart_policy: RestartPolicy::default(),
+                        essential: false,
+                    });
+                }
+            }
         } else {
             // The terminal size from the kernel line (`embra.cols`,
             // `embra.rows`, run-qemu.sh's host terminal), 80×24 without it.
@@ -382,6 +439,7 @@ impl Supervisor {
                 env: console_env,
                 health_check: HealthCheck::ProcessAlive,
                 restart_policy: RestartPolicy::default(),
+                essential: true,
             });
         }
     }
@@ -402,9 +460,23 @@ impl Supervisor {
     pub async fn start_all(&mut self) -> Result<()> {
         for i in 0..self.services.len() {
             let name = self.services[i].def.name.clone();
+            let essential = self.services[i].def.essential;
             info!("Starting service: {}", name);
 
-            self.start_service(i).await?;
+            if let Err(e) = self.start_service(i).await {
+                if essential {
+                    return Err(e);
+                }
+                // The display console and its udevd: the boot goes on, and
+                // the operator at the display learns why it stays dark.
+                warn!("{name} did not start ({e}); not essential, the boot continues");
+                embra_boot::console::BootConsole::open()
+                    .line(&format!("[embrad] {name} did not start; the web console stays at the URLs above"));
+                continue;
+            }
+            if name == "udevd" {
+                seed_udev().await;
+            }
 
             // After spawning the operator UI, redirect embrad's output to
             // a log file: serial console needs ttyS0 clean for the TUI;
@@ -437,6 +509,10 @@ impl Supervisor {
                     }
                     let _ = writeln!(b,
                         "    \x1b[2mThis boot's access token is in the URL; the URL is the credential, and it is shown here only.\x1b[0m");
+                    if self.kiosk {
+                        let _ = writeln!(b,
+                            "    \x1b[2mThe display shows this console too (embra.kiosk=0 boots without it).\x1b[0m");
+                    }
                     if let Ok(release) = embra_boot::Release::read() {
                         let slot = match self.cmdline.slot() {
                             Ok(Some(s)) if self.cmdline.trial() => format!(", slot {s} (trial boot, confirmed once every service is up)"),
@@ -520,6 +596,9 @@ impl Supervisor {
             };
             cmd.stdout(out);
             cmd.stderr(err);
+        }
+        if svc.def.name == "embra-kiosk" {
+            prepare_kiosk_dirs();
         }
         cmd.kill_on_drop(true);
 
@@ -860,6 +939,134 @@ pub(crate) fn is_http_200(response: &str) -> bool {
 /// leaves these handles on the kernel console: the serial console's
 /// restarts use them (#29). `None` when a duplicate could not be made; the
 /// console then inherits as before.
+/// The display console's launcher: cog on its DRM platform.
+const KIOSK_BIN: &str = "/usr/bin/cog";
+/// udev, for libinput's device enumeration under the display console.
+const UDEVD_BIN: &str = "/sbin/udevd";
+/// The display console's writable home, on the ephemeral tmpfs (the root
+/// is read-only; WebKit and fontconfig write caches).
+const KIOSK_HOME: &str = "/embra/ephemeral/kiosk";
+/// XDG_RUNTIME_DIR for the display console (0700).
+const XDG_RUNTIME_DIR: &str = "/run/user/0";
+
+/// A display: any `card*` under /dev/dri.
+fn display_present() -> bool {
+    std::fs::read_dir("/dev/dri")
+        .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("card")))
+        .unwrap_or(false)
+}
+
+/// The width of the display's first mode, from sysfs: a connector's `modes`
+/// file lists `<width>x<height>` lines (`/sys/class/drm/card0-Virtual-1/modes`).
+/// 0 when no connector names one.
+fn display_width_px() -> u32 {
+    let Ok(dir) = std::fs::read_dir("/sys/class/drm") else { return 0 };
+    let mut names: Vec<_> = dir.flatten().map(|e| e.path()).collect();
+    names.sort();
+    for path in names {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !name.starts_with("card") || !name.contains('-') {
+            continue;
+        }
+        if let Ok(modes) = std::fs::read_to_string(path.join("modes"))
+            && let Some(first) = modes.lines().next()
+            && let Some((w, _)) = first.split_once('x')
+            && let Ok(width) = w.trim().parse::<u32>()
+        {
+            return width;
+        }
+    }
+    0
+}
+
+/// The device scale for a display's width: 1 below 2560 pixels, 2 from there.
+fn device_scale(width_px: u32) -> u8 {
+    if width_px >= 2560 { 2 } else { 1 }
+}
+
+/// The display console's arguments: cog's DRM platform, the console's
+/// background until the first paint, TLS errors ignored on the loopback
+/// (the certificate is this machine's own, 127.0.0.1 among its names), a
+/// crashed web process restarted rather than an error page nobody can
+/// dismiss, the device scale.
+fn kiosk_args(scale: u8) -> Vec<String> {
+    vec![
+        "--platform=drm".to_string(),
+        "--bg-color=#0c0907".to_string(),
+        "--ignore-tls-errors".to_string(),
+        "--webprocess-failure=restart".to_string(),
+        format!("--device-scale={scale}"),
+    ]
+}
+
+/// The display console's environment: the console URL with this boot's
+/// token in `COG_URL` (never an argument: `ps` shows those; `?kiosk=1` tells
+/// the page it is on the display), Mesa's software path on the card
+/// (kms_swrast through GBM; never `LIBGL_ALWAYS_SOFTWARE`, which would send
+/// the web process down a path the nested display does not serve), the
+/// writable homes on the ephemeral tmpfs, the keyboard layout.
+fn kiosk_env(token: &str, layout: Option<&str>) -> Vec<(String, String)> {
+    vec![
+        ("COG_URL".to_string(), format!("https://127.0.0.1:3345/embraOS?token={token}&kiosk=1")),
+        ("MESA_LOADER_DRIVER_OVERRIDE".to_string(), "kms_swrast".to_string()),
+        ("GBM_ALWAYS_SOFTWARE".to_string(), "1".to_string()),
+        ("XDG_RUNTIME_DIR".to_string(), XDG_RUNTIME_DIR.to_string()),
+        ("HOME".to_string(), KIOSK_HOME.to_string()),
+        ("XDG_CACHE_HOME".to_string(), format!("{KIOSK_HOME}/cache")),
+        ("XDG_DATA_HOME".to_string(), format!("{KIOSK_HOME}/data")),
+        ("XDG_CONFIG_HOME".to_string(), format!("{KIOSK_HOME}/config")),
+        ("XKB_DEFAULT_LAYOUT".to_string(), layout.unwrap_or("us").to_string()),
+    ]
+}
+
+/// The display console's directories, before each spawn (a restart finds
+/// them too): XDG_RUNTIME_DIR 0700, the homes under the ephemeral tmpfs.
+/// Best effort; the launcher's own log says what it misses.
+fn prepare_kiosk_dirs() {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::create_dir_all(XDG_RUNTIME_DIR) {
+        warn!("{XDG_RUNTIME_DIR}: {e}");
+    }
+    let _ = std::fs::set_permissions(XDG_RUNTIME_DIR, std::fs::Permissions::from_mode(0o700));
+    for sub in ["cache", "data", "config"] {
+        if let Err(e) = std::fs::create_dir_all(format!("{KIOSK_HOME}/{sub}")) {
+            warn!("{KIOSK_HOME}/{sub}: {e}");
+        }
+    }
+}
+
+/// udev, once it runs, is told about the input devices devtmpfs created
+/// before it (`udevadm trigger`, the input subsystem alone: no network
+/// rule may rename eth0), and waited for; libinput enumerates what udev has
+/// tagged. Best effort, ten seconds at most each.
+async fn seed_udev() {
+    let Some(udevadm) = ["/sbin/udevadm", "/bin/udevadm", "/usr/bin/udevadm"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+    else {
+        warn!("udevadm not found; the display console sees the input devices udev tags on its own");
+        return;
+    };
+    for args in [
+        &["trigger", "--action=add", "--subsystem-match=input"][..],
+        &["settle", "--timeout=5"][..],
+    ] {
+        let run = Command::new(udevadm)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match tokio::time::timeout(Duration::from_secs(10), run).await {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(status)) => warn!("udevadm {} exited with {status}", args[0]),
+            Ok(Err(e)) => warn!("udevadm {} could not be run: {e}", args[0]),
+            Err(_) => warn!("udevadm {} took longer than 10 s", args[0]),
+        }
+    }
+    info!("udev seeded with the input devices");
+}
+
 fn keep_boot_stdio() -> Option<(std::fs::File, std::fs::File)> {
     use std::os::unix::io::FromRawFd;
     // SAFETY: dup(2) of the process's own fds 0 and 1 gives descriptors this
@@ -1232,6 +1439,7 @@ mod restart_budget_tests {
                 env: vec![],
                 health_check: HealthCheck::Http { url: "http://127.0.0.1:1/".into(), timeout: Duration::from_millis(10) },
                 restart_policy: RestartPolicy { max_restarts: 2, ..RestartPolicy::default() },
+                essential: true,
             },
             child: None,
             pid: None,
@@ -1323,6 +1531,7 @@ mod stop_and_health_tests {
                 env: vec![],
                 health_check: HealthCheck::ProcessAlive,
                 restart_policy: RestartPolicy::default(),
+                essential: true,
             },
             child: None,
             pid: None,
@@ -1359,6 +1568,7 @@ mod shutdown_during_restart_tests {
                     backoff_max: Duration::from_secs(30),
                     ..RestartPolicy::default()
                 },
+                essential: true,
             },
             child: None,
             pid: None,
@@ -1409,5 +1619,106 @@ mod launch_argument_tests {
         assert_eq!(pair[1], "127.0.0.1");
         let port = args.windows(2).find(|w| w[0] == "--port").expect("--port is passed");
         assert_eq!(port[1], "50001");
+    }
+}
+
+#[cfg(test)]
+mod display_console_tests {
+    use super::*;
+
+    fn registered(cmdline: &str, display_present: bool, kiosk_available: bool) -> Supervisor {
+        let mut sup = Supervisor::with_cmdline(Cmdline::parse(cmdline));
+        sup.register_services_with(display_present, kiosk_available);
+        sup
+    }
+
+    fn names(sup: &Supervisor) -> Vec<String> {
+        sup.services.iter().map(|s| s.def.name.clone()).collect()
+    }
+
+    /// Under the web console, with a display and the launcher in the image,
+    /// udevd and the kiosk follow embra-web, both inessential, and nothing
+    /// else is inessential; without a display, with the knob off, in an
+    /// image without the launcher, or on the serial TUI there is neither.
+    #[test]
+    fn the_display_console_is_registered_after_the_web_console_and_only_with_a_display() {
+        let sup = registered("embra.web=1", true, true);
+        let n = names(&sup);
+        let web = n.iter().position(|x| x == "embra-web").expect("embra-web registered");
+        assert_eq!(&n[web..], ["embra-web", "udevd", "embra-kiosk"]);
+        assert!(sup.services[..=web].iter().all(|s| s.def.essential), "everything up to embra-web is essential");
+        assert!(sup.services[web + 1..].iter().all(|s| !s.def.essential), "the display console is not");
+        assert!(sup.kiosk);
+        for (cmdline, display, launcher, why) in [
+            ("embra.web=1", false, true, "no display"),
+            ("embra.web=1 embra.kiosk=0", true, true, "the knob off"),
+            ("embra.web=1", true, false, "no launcher in the image"),
+            ("embra.tui=1", true, true, "the serial TUI"),
+        ] {
+            let sup = registered(cmdline, display, launcher);
+            let n = names(&sup);
+            assert!(!n.iter().any(|x| x == "udevd" || x == "embra-kiosk"), "{why}: {n:?}");
+            assert!(!sup.kiosk, "{why}");
+        }
+    }
+
+    /// The token reaches the kiosk through COG_URL with the kiosk flag, never
+    /// through an argument; the web token's own variable and the Mesa switch
+    /// that would break the nested display are absent; the software path is
+    /// named.
+    #[test]
+    fn the_display_console_takes_the_console_url_from_its_environment_and_its_argv_carries_no_token() {
+        let sup = registered("embra.web=1 embra.kbd=de", true, true);
+        let token = sup.web_token.clone().expect("a token in web mode");
+        let kiosk = sup.services.iter().find(|s| s.def.name == "embra-kiosk").expect("the kiosk");
+        let env = |k: &str| kiosk.def.env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        let url = env("COG_URL").expect("COG_URL");
+        assert!(url.starts_with("https://127.0.0.1:3345/embraOS?token="), "{url}");
+        assert!(url.contains(&format!("token={token}")) && url.ends_with("&kiosk=1"), "{url}");
+        assert!(kiosk.def.args.iter().all(|a| !a.contains(&token)), "no token in argv: {:?}", kiosk.def.args);
+        assert!(kiosk.def.args.contains(&"--platform=drm".to_string()));
+        assert_eq!(env("EMBRA_WEB_TOKEN"), None);
+        assert_eq!(env("LIBGL_ALWAYS_SOFTWARE"), None);
+        assert_eq!(env("MESA_LOADER_DRIVER_OVERRIDE").as_deref(), Some("kms_swrast"));
+        assert_eq!(env("GBM_ALWAYS_SOFTWARE").as_deref(), Some("1"));
+        assert_eq!(env("XKB_DEFAULT_LAYOUT").as_deref(), Some("de"));
+        assert_eq!(env("XDG_RUNTIME_DIR").as_deref(), Some("/run/user/0"));
+    }
+
+    #[test]
+    fn the_device_scale_is_two_from_2560_pixels() {
+        assert_eq!(device_scale(0), 1);
+        assert_eq!(device_scale(1024), 1);
+        assert_eq!(device_scale(1920), 1);
+        assert_eq!(device_scale(2559), 1);
+        assert_eq!(device_scale(2560), 2);
+        assert_eq!(device_scale(3840), 2);
+    }
+
+    /// An inessential service that exits at once is logged and the boot
+    /// goes on; an essential one that does is the boot's error.
+    #[tokio::test]
+    async fn a_failing_display_console_never_halts_the_boot() {
+        let _children = test_support::CHILDREN.lock().await;
+        let def = |name: &str, script: &str, essential: bool| ServiceDef {
+            name: name.into(),
+            binary: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            env: vec![],
+            health_check: HealthCheck::ProcessAlive,
+            restart_policy: RestartPolicy::default(),
+            essential,
+        };
+        let mut sup = Supervisor::new();
+        sup.add_service(def("stays", "sleep 30", true));
+        sup.add_service(def("embra-kiosk", "exit 1", false));
+        assert!(sup.start_all().await.is_ok(), "the boot continues past the inessential failure");
+        assert!(matches!(sup.services[1].status, ServiceStatus::Failed(_)));
+        assert_eq!(sup.services[0].status, ServiceStatus::Running);
+        sup.stop_all().await;
+
+        let mut sup = Supervisor::new();
+        sup.add_service(def("essential", "exit 1", true));
+        assert!(sup.start_all().await.is_err(), "an essential failure is the boot's error");
     }
 }
