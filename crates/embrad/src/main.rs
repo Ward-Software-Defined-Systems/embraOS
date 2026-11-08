@@ -25,6 +25,7 @@
 
 mod boot;
 mod ca_bundle;
+mod console;
 mod modes;
 mod mount;
 mod net_lease;
@@ -245,13 +246,14 @@ fn fatal_reason(e: &anyhow::Error) -> String {
 }
 
 fn init_logging() {
-    // Try /dev/kmsg first (kernel log ring buffer)
-    // Fall back to stderr
+    // stdout (the console until the log redirect, the log file after) and,
+    // during the boot phase, the display (`console::BootLog`).
     // `try_init`: a subscriber already set must not panic PID 1.
     let _ = tracing_subscriber::fmt()
         .with_target(true)
         .with_level(true)
         .with_ansi(false) // No ANSI in kernel log
+        .with_writer(console::BootLog)
         .try_init();
 }
 

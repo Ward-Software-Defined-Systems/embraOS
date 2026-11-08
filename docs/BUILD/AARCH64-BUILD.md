@@ -480,7 +480,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Acceleration on macOS | `-accel hvf` (`run-qemu.sh` passes it on every Mac; an x86_64 guest runs under HVF on an Intel Mac only) | `-accel hvf` (native — near-native speed) |
 | CPU | QEMU's default (`run-qemu.sh` passes no `-cpu`) | `-cpu host` under HVF, `-cpu max` otherwise |
 | Kernel image | `bzImage` | `Image` |
-| Consoles | `console=tty0 console=ttyS0` | `console=tty0 console=ttyAMA0` (the serial line, last, owns `/dev/console`; both rendered into `grub.cfg` by `post_image.sh`, the serial one alone passed by the direct path) |
+| Consoles | `console=tty0 console=ttyS0` | `console=tty0 console=ttyAMA0` (the serial line, last, owns `/dev/console`; embra-init's and embrad's boot messages go to it and to the display both; both consoles rendered into `grub.cfg` by `post_image.sh`, the serial one alone passed by the direct path) |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device ramfb -display cocoa` by hand ([Boot](#3-boot)) |

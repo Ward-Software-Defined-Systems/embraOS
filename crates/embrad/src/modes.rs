@@ -123,8 +123,10 @@ fn run_updater(args: &[&str]) -> Ran {
     }
 }
 
+/// One line on both consoles (the updater's own output and the restore
+/// prompt stay on the console that is embrad's stdio, the serial line).
 fn say(line: &str) {
-    eprintln!("[embrad] {line}");
+    crate::console::emit(&format!("[embrad] {line}"));
 }
 
 /// A menu entry's job. Every exit path reboots (the caller reboots): the

@@ -2,24 +2,35 @@
 //!
 //! This is a minimal, synchronous Rust binary. No tokio, no async.
 //! It must work before the full OS is available.
+//!
+//! Every line it prints goes to both boot consoles — the serial line, which
+//! `/dev/console` is, and the display (`embra_boot::console::BootConsole`):
+//! a VM with a display and no serial port sees why a boot stopped.
+
+#[cfg(target_os = "linux")]
+use embra_boot::console::BootConsole;
+
+/// One line on both consoles, prefixed like every embra-init line.
+#[cfg(target_os = "linux")]
+macro_rules! say {
+    ($console:expr, $($arg:tt)*) => {
+        $console.line(&format!("[embra-init] {}", format_args!($($arg)*)))
+    };
+}
 
 fn main() {
-    eprintln!("[embra-init] embraOS early boot starting");
-
     #[cfg(target_os = "linux")]
     {
-        if let Err(e) = boot() {
-            // The reason goes to the serial line, then the machine halts:
-            // an initramfs that cannot mount its root has nothing to wait
-            // for, and a halt is what the operator sees in QEMU, where a
-            // sleep forever looked like a hang (#29).
-            eprintln!("[embra-init] FATAL: {}", e);
-            eprintln!("[embra-init] Halting: the boot cannot continue");
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = nix::sys::reboot::reboot(nix::sys::reboot::RebootMode::RB_HALT_SYSTEM);
-            // reboot(2) returned: stay here rather than exit, which would
-            // panic the kernel ("Attempted to kill init!").
-            loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
+        // The pseudo-filesystems come first and silently: /dev/tty0 exists
+        // once devtmpfs is mounted, and the console opens after that.
+        let mut console = match early_mounts() {
+            Ok(()) => BootConsole::open(),
+            Err(e) => fatal(&mut BootConsole::open(), &e),
+        };
+        say!(console, "embraOS early boot starting");
+        say!(console, "Mounted /proc, /sys and /dev");
+        if let Err(e) = boot(&mut console) {
+            fatal(&mut console, &e);
         }
     }
 
@@ -39,27 +50,42 @@ fn main() {
     }
 }
 
+/// The reason on both consoles, then the halt: an initramfs that cannot
+/// mount its root has nothing to wait for, and a halt is what the operator
+/// sees in QEMU, where a sleep forever looked like a hang (#29).
 #[cfg(target_os = "linux")]
-fn boot() -> Result<(), Box<dyn std::error::Error>> {
+fn fatal(console: &mut BootConsole, e: &dyn std::fmt::Display) -> ! {
+    say!(console, "FATAL: {e}");
+    say!(console, "Halting: the boot cannot continue");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = nix::sys::reboot::reboot(nix::sys::reboot::RebootMode::RB_HALT_SYSTEM);
+    // reboot(2) returned: stay here rather than exit, which would
+    // panic the kernel ("Attempted to kill init!").
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+/// Step 1: the essential pseudo-filesystems. Before the console: the error
+/// names the mount that failed.
+#[cfg(target_os = "linux")]
+fn early_mounts() -> Result<(), String> {
+    use nix::mount::{mount, MsFlags};
+    for (source, target, fstype) in [("proc", "/proc", "proc"), ("sysfs", "/sys", "sysfs"), ("devtmpfs", "/dev", "devtmpfs")] {
+        std::fs::create_dir_all(target).map_err(|e| format!("mkdir {target}: {e}"))?;
+        mount(Some(source), target, Some(fstype), MsFlags::empty(), None::<&str>).map_err(|e| format!("mount {target}: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
     use embra_boot::{Cmdline, Slot, slot};
     use nix::mount::{mount, MsFlags};
     use nix::unistd::{chdir, execv};
     use std::ffi::CString;
 
     const NEWROOT: &str = "/mnt/root";
-
-    // Step 1: Mount essential pseudo-filesystems
-    eprintln!("[embra-init] Mounting /proc");
-    std::fs::create_dir_all("/proc")?;
-    mount(Some("proc"), "/proc", Some("proc"), MsFlags::empty(), None::<&str>)?;
-
-    eprintln!("[embra-init] Mounting /sys");
-    std::fs::create_dir_all("/sys")?;
-    mount(Some("sysfs"), "/sys", Some("sysfs"), MsFlags::empty(), None::<&str>)?;
-
-    eprintln!("[embra-init] Mounting /dev");
-    std::fs::create_dir_all("/dev")?;
-    mount(Some("devtmpfs"), "/dev", Some("devtmpfs"), MsFlags::empty(), None::<&str>)?;
 
     // Step 2: Find and mount the SquashFS rootfs. Partitions are found by
     // their GPT names (embra-boot reads the kernel's uevents, no udev): the
@@ -75,16 +101,16 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
         None => vec![Slot::A.partition_name(), slot::LEGACY_ROOTFS_PARTITION],
     };
     match booted {
-        Some(s) => eprintln!("[embra-init] Waiting for block devices (slot {s})..."),
-        None => eprintln!("[embra-init] Waiting for block devices (no slot on the kernel line)..."),
+        Some(s) => say!(console, "Waiting for block devices (slot {s})..."),
+        None => say!(console, "Waiting for block devices (no slot on the kernel line)..."),
     }
-    let rootfs_dev = resolve_partition(&rootfs_names, "/dev/vda2")?;
+    let rootfs_dev = resolve_partition(console, &rootfs_names, "/dev/vda2")?;
 
     std::fs::create_dir_all(NEWROOT)?;
 
     // Read-only, and it stays so: the root filesystem is immutable. What
     // is written at run time lives on STATE, DATA or tmpfs.
-    eprintln!("[embra-init] Mounting SquashFS rootfs from {}", rootfs_dev.display());
+    say!(console, "Mounting SquashFS rootfs from {}", rootfs_dev.display());
     mount(
         Some(rootfs_dev.as_path()),
         NEWROOT,
@@ -104,8 +130,8 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     // pinned to an empty directory under STATE).
     let data_flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
 
-    let state_dev = resolve_partition(&[slot::STATE_PARTITION], "/dev/vda3")?;
-    eprintln!("[embra-init] Mounting STATE partition from {} (nosuid,nodev,noexec)", state_dev.display());
+    let state_dev = resolve_partition(console, &[slot::STATE_PARTITION], "/dev/vda3")?;
+    say!(console, "Mounting STATE partition from {} (nosuid,nodev,noexec)", state_dev.display());
     mount(
         Some(state_dev.as_path()),
         state_path.as_str(),
@@ -118,8 +144,8 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     let data_path = format!("{}/embra/data", NEWROOT);
     std::fs::create_dir_all(&data_path)?;
 
-    let data_dev = resolve_partition(&[slot::DATA_PARTITION], "/dev/vda4")?;
-    eprintln!("[embra-init] Mounting DATA partition from {} (nosuid,nodev,noexec)", data_dev.display());
+    let data_dev = resolve_partition(console, &[slot::DATA_PARTITION], "/dev/vda4")?;
+    say!(console, "Mounting DATA partition from {} (nosuid,nodev,noexec)", data_dev.display());
     mount(
         Some(data_dev.as_path()),
         data_path.as_str(),
@@ -159,14 +185,14 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     // pivot_root fails with EINVAL from initramfs (rootfs). The standard
     // approach is to chdir to the new root, mount --move it to /, chroot,
     // then exec init. This is what busybox switch_root does.
-    eprintln!("[embra-init] Switching root to {}", NEWROOT);
+    say!(console, "Switching root to {}", NEWROOT);
     chdir(NEWROOT)?;
     mount(Some("."), "/", None::<&str>, MsFlags::MS_MOVE, None::<&str>)?;
     nix::unistd::chroot(".")?;
     chdir("/")?;
 
     // Step 8: exec embrad
-    eprintln!("[embra-init] Executing /sbin/embrad");
+    say!(console, "Executing /sbin/embrad");
     let embrad = CString::new("/sbin/embrad")?;
     let args = [embrad.clone()];
     execv(&embrad, &args)?;
@@ -179,14 +205,14 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
 /// else `legacy` when that node exists (a disk without GPT names, under a
 /// printed warning), else an error naming what was looked for.
 #[cfg(target_os = "linux")]
-fn resolve_partition(names: &[&str], legacy: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+fn resolve_partition(console: &mut BootConsole, names: &[&str], legacy: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
     if let Some((name, path)) = embra_boot::partitions::wait_for_partition(names, WAIT) {
-        eprintln!("[embra-init] partition '{name}' is {}", path.display());
+        say!(console, "partition '{name}' is {}", path.display());
         return Ok(path);
     }
     if std::path::Path::new(legacy).exists() {
-        eprintln!("[embra-init] WARNING: no partition named {} within {}s; falling back to {legacy}", names.join(" or "), WAIT.as_secs());
+        say!(console, "WARNING: no partition named {} within {}s; falling back to {legacy}", names.join(" or "), WAIT.as_secs());
         return Ok(std::path::PathBuf::from(legacy));
     }
     Err(format!("no partition named {} appeared within {}s, and {legacy} does not exist", names.join(" or "), WAIT.as_secs()).into())

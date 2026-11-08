@@ -420,7 +420,6 @@ impl Supervisor {
                     // web mode goes quiet after this and the operator
                     // works from the browser.
                     use std::fmt::Write as _;
-                    use std::io::Write as _;
                     let mut b = String::new();
                     let _ = writeln!(b);
                     let _ = writeln!(b,
@@ -447,16 +446,8 @@ impl Supervisor {
                         let _ = writeln!(b, "    \x1b[2membraOS {} ({}, {}){slot}\x1b[0m", release.version, release.build_id, release.engine);
                     }
                     let _ = writeln!(b);
-                    let mut o = std::io::stdout();
-                    let _ = o.write_all(b.as_bytes());
-                    let _ = o.flush();
-                    // The display console too, when the kernel drives one
-                    // (`console=tty0` on the kernel line puts the boot log
-                    // there; the banner is written to it by hand, since
-                    // stdout is the serial line). Best effort.
-                    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty0") {
-                        let _ = tty.write_all(b.as_bytes());
-                    }
+                    // Both consoles: the serial line and the display.
+                    crate::console::emit_bytes(b.as_bytes());
                 }
                 info!("Redirecting embrad output to log file");
                 if let Ok(log) = std::fs::File::create("/embra/ephemeral/embrad.log") {
@@ -468,6 +459,9 @@ impl Supervisor {
                     }
                     std::mem::forget(log);
                 }
+                // The boot phase ends here: the display got its copy of
+                // every line so far, and the log file gets the rest.
+                crate::console::end_boot_phase();
             }
 
             // After embra-trustd is up, verify the soul
@@ -552,8 +546,8 @@ impl Supervisor {
                     let name = svc.def.name.clone();
                     let msg = fold_refusal(format!("{} exited immediately with status: {:?}", name, status), &name, refusal_of(&name).as_deref());
                     // stdout+stderr were redirected to the log file — read its tail
-                    // via eprintln! so it lands on the serial console before halt.
-                    eprintln!("[embrad] DIAG: {}", msg);
+                    // onto both consoles before the halt.
+                    crate::console::emit(&format!("[embrad] DIAG: {}", msg));
                     dump_log_tail(&name, 30);
                     error!("{}", msg);
                     svc.status = ServiceStatus::Failed(msg.clone());
@@ -571,16 +565,15 @@ impl Supervisor {
         if let Err(e) = self.wait_for_health(index).await {
             let name = self.services[index].def.name.clone();
             let e = anyhow::anyhow!(fold_refusal(e.to_string(), &name, refusal_of(&name).as_deref()));
-            // Use eprintln! for guaranteed serial output (tracing may buffer)
-            eprintln!("[embrad] DIAG: {} health check failed: {}", name, e);
+            crate::console::emit(&format!("[embrad] DIAG: {} health check failed: {}", name, e));
 
             dump_log_tail(&name, 20);
             // Also check if process is still alive
             if let Some(ref mut child) = self.services[index].child {
                 match child.try_wait() {
-                    Ok(Some(status)) => eprintln!("[embrad] DIAG: {} process exited with: {:?}", name, status),
-                    Ok(None) => eprintln!("[embrad] DIAG: {} process is still running but not responding on health endpoint", name),
-                    Err(e2) => eprintln!("[embrad] DIAG: {} could not check process status: {}", name, e2),
+                    Ok(Some(status)) => crate::console::emit(&format!("[embrad] DIAG: {} process exited with: {:?}", name, status)),
+                    Ok(None) => crate::console::emit(&format!("[embrad] DIAG: {} process is still running but not responding on health endpoint", name)),
+                    Err(e2) => crate::console::emit(&format!("[embrad] DIAG: {} could not check process status: {}", name, e2)),
                 }
             }
             return Err(e);
@@ -833,23 +826,23 @@ pub(crate) async fn stop_one(child: &mut tokio::process::Child, name: &str, grac
     }
 }
 
-/// The last `lines` of a service's log on the serial console, for the
+/// The last `lines` of a service's log on both consoles, for the
 /// diagnosis before a halt (#41): the service's stdout and stderr were
 /// redirected to the file, so this is the one place its tail is seen.
 fn dump_log_tail(name: &str, lines: usize) {
     let log_path = format!("/embra/ephemeral/{}.log", name);
     match std::fs::read_to_string(&log_path) {
         Ok(log_content) if !log_content.is_empty() => {
-            eprintln!("[embrad] DIAG: {} log tail:", name);
+            crate::console::emit(&format!("[embrad] DIAG: {} log tail:", name));
             for line in log_content.lines().rev().take(lines).collect::<Vec<_>>().into_iter().rev() {
-                eprintln!("  {}", line);
+                crate::console::emit(&format!("  {}", line));
             }
         }
         Ok(_) => {
-            eprintln!("[embrad] DIAG: {} log file is empty — service produced no output", name);
+            crate::console::emit(&format!("[embrad] DIAG: {} log file is empty — service produced no output", name));
         }
         Err(log_err) => {
-            eprintln!("[embrad] DIAG: {} could not read log file {}: {}", name, log_path, log_err);
+            crate::console::emit(&format!("[embrad] DIAG: {} could not read log file {}: {}", name, log_path, log_err));
         }
     }
 }
@@ -976,7 +969,13 @@ pub(crate) fn halt_system(reason: &str) -> ! {
     let _ = std::fs::write(HALT_REASON_PATH, reason);
     // Sync filesystems
     unsafe { libc::sync(); }
-    // Let the serial console drain the log line before the halt.
+    // After the log redirect the line above went to the log file: the
+    // reason goes to both consoles by hand (during the boot phase the
+    // tracing line reached them already).
+    if !crate::console::in_boot_phase() {
+        embra_boot::console::BootConsole::open().line(&format!("[embrad] SYSTEM HALT: {reason}"));
+    }
+    // Let the consoles drain the line before the halt.
     std::thread::sleep(Duration::from_secs(2));
     // Halt
     unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
