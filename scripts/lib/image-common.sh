@@ -211,9 +211,148 @@ assert_target_is_clean() {
 # kernel, the initramfs, the release stamp, GRUB's slot line, exactly those
 # under /boot, a squashfs that fits its slot and is xz). Takes the Rust triple
 # of the build.
+# assert_kernel_fragments_applied <triple>: every `CONFIG_X=y` line of the
+# kernel fragments this architecture merges (board/embraos/linux.fragment for
+# both, linux-<arch>.fragment beside it where one exists) is `=y` in the
+# built configuration, and every `# CONFIG_X is not set` line is unset. The
+# merge drops a symbol whose dependency the base config lacks with one notice
+# in a long log; this reads the result back. A dropped symbol is a missing
+# subsystem line in the fragment (a driver is never built in above its
+# subsystem), never a reason to relax the check.
+assert_kernel_fragments_applied() {
+    local triple="$1" arch="${1%%-*}" config fragments f line sym state missing="" count=0
+    config="$BUILDROOT_DIR/output/build/linux-${LINUX_KERNEL_VERSION}/.config"
+    [ -f "$config" ] || reject_image "the built kernel configuration is missing: $config (LINUX_KERNEL_VERSION=$LINUX_KERNEL_VERSION)"
+    fragments="buildroot/board/embraos/linux.fragment"
+    [ -f "buildroot/board/embraos/linux-${arch}.fragment" ] && fragments="$fragments buildroot/board/embraos/linux-${arch}.fragment"
+    for f in $fragments; do
+        while IFS= read -r line; do
+            case "$line" in
+                CONFIG_*=y)
+                    count=$((count + 1))
+                    if ! grep -q -x "$line" "$config"; then
+                        # What the built configuration says instead: =m, unset, or nothing at all.
+                        state="$(grep -E "^(# )?${line%%=*}[ =]" "$config" | head -n1 | sed -e 's/.*=//' -e 's/# .* is not set/unset/' || true)"
+                        missing="$missing ${line%%=*}(${state:-absent})"
+                    fi
+                    ;;
+                "# CONFIG_"*" is not set")
+                    sym="${line#\# }"; sym="${sym%% is not set}"
+                    count=$((count + 1))
+                    grep -q -E "^${sym}=" "$config" && missing="$missing ${sym}(set)"
+                    ;;
+            esac
+        done < "$f"
+    done
+    [ -z "$missing" ] || reject_image "kernel fragment symbols not applied in the built configuration (a dependency the base config lacks: name the subsystem in the fragment):${missing}"
+    echo "kernel fragments applied: $count symbols of ${fragments// / + } are in the built configuration"
+    # x86_64 loads no modules: the ten the base config built as modules are
+    # built in by the fragments, so lib/modules holds the kernel's metadata
+    # and nothing else. (The arm64 base config builds about 1200 modules;
+    # that measurement waits for the Mac build.)
+    if [ "$arch" = "x86_64" ]; then
+        local kos
+        kos="$(find "$BUILDROOT_DIR/output/target/lib/modules" -name '*.ko*' 2>/dev/null | sed "s|$BUILDROOT_DIR/output/target||" | sort | tr '\n' ' ')"
+        [ -z "$kos" ] || reject_image "the x86_64 rootfs carries kernel modules nothing loads: ${kos% } (a base-config module the fragments do not build in)"
+        echo "kernel modules: none on x86_64 (lib/modules holds the metadata alone)"
+    fi
+}
+
+# assert_firmware_families: the one symbol that selects every linux-firmware
+# family (buildroot/package/embra-firmware/Config.in) names as many families
+# as Buildroot's package offers. A Buildroot bump that adds a family stops
+# here until the list is regenerated (the recipe is in that file).
+assert_firmware_families() {
+    local ours theirs
+    ours="$(grep -c '^\s*select BR2_PACKAGE_LINUX_FIRMWARE_' buildroot/package/embra-firmware/Config.in || true)"
+    theirs="$(grep -c '^config BR2_PACKAGE_LINUX_FIRMWARE_' "$BUILDROOT_DIR/package/linux-firmware/Config.in" || true)"
+    [ "$ours" = "$theirs" ] && [ "$ours" -gt 0 ] \
+        || reject_image "buildroot/package/embra-firmware/Config.in selects $ours linux-firmware families, Buildroot offers $theirs: regenerate the list (the recipe is in the file)"
+    echo "firmware: every linux-firmware family selected ($ours of $theirs)"
+}
+
+# assert_firmware_present <target dir>: the blobs and their licences are on
+# the rootfs, and the firmware names the built-in drivers declare
+# (modules.builtin.modinfo, `<driver>.firmware=<file>`) resolve under
+# /lib/firmware. The table is printed always, with the absent names; a
+# driver names blobs for hardware newer than the linux-firmware snapshot
+# (the kernel moves first), so a few absent names per driver are the
+# normal state, and the fatal case is a driver of the mandatory set (the
+# NICs that load their firmware at open and the probe-time drivers) with
+# NONE of its names present: a family that is not installed at all, which
+# is a driver that fails on its hardware with no message anyone sees.
+assert_firmware_present() {
+    local tgt="$1" fw="$1/lib/firmware" modinfo drivers drv names name have=0 lack=0 fatal=""
+    [ -d "$fw" ] || reject_image "/lib/firmware is missing from the rootfs (BR2_PACKAGE_EMBRA_FIRMWARE_ALL)"
+    [ -f "$tgt/usr/share/licenses/linux-firmware/WHENCE" ] \
+        || reject_image "/usr/share/licenses/linux-firmware/WHENCE is missing from the rootfs: the firmware's licences travel beside the blobs (post_build.sh)"
+    modinfo="$(ls "$tgt"/lib/modules/*/modules.builtin.modinfo 2>/dev/null | head -n1)"
+    [ -n "$modinfo" ] || reject_image "lib/modules/<version>/modules.builtin.modinfo is missing from the rootfs"
+    drivers="$(tr '\0' '\n' < "$modinfo" | sed -n 's/^\([a-z0-9_]*\)\.firmware=.*/\1/p' | sort -u | tr '\n' ' ')"
+    for drv in $drivers; do
+        names="$(tr '\0' '\n' < "$modinfo" | sed -n "s/^${drv}\.firmware=//p" | sort -u)"
+        local drv_have=0 drv_lack=0
+        local absent=""
+        for name in $names; do
+            if [ -e "$fw/$name" ] || [ -e "$fw/$name.xz" ] || [ -e "$fw/$name.zst" ]; then
+                drv_have=$((drv_have + 1))
+            else
+                drv_lack=$((drv_lack + 1)); absent="$absent $name"
+            fi
+        done
+        have=$((have + drv_have)); lack=$((lack + drv_lack))
+        printf '  firmware %-16s %3d of %3d names present%s\n' "$drv" "$drv_have" $((drv_have + drv_lack)) "${absent:+ (absent:$absent)}"
+        case "$drv" in
+            bnx2|bnx2x|qed|i915|ice|cxgb4|r8169|r8152|tg3|e100)
+                [ "$drv_have" -gt 0 ] || fatal="$fatal $drv"
+                ;;
+        esac
+    done
+    echo "firmware coverage: $have names present, $lack absent, over the drivers built in"
+    [ -z "$fatal" ] || reject_image "a mandatory driver has none of its firmware under /lib/firmware (the family is not installed):${fatal}"
+}
+
+# assert_boot_initrds <target dir> <triple>: the two initrds post_build.sh
+# wrote beside the repository's. ucode.cpio is a newc archive (070701) and,
+# on x86_64, carries the two microcode files as the concatenations the
+# kernel's early loader reads (GenuineIntel.bin from Buildroot's intel-ucode
+# directory, AuthenticAMD.bin from linux-firmware's amd-ucode); on another
+# architecture it is the empty archive. firmware.cpio.gz is a gzip'd newc
+# archive with every probe-time blob under lib/firmware.
+assert_boot_initrds() {
+    local tgt arch="${2%%-*}" magic tmp
+    # Absolute: the archives are read from inside a scratch directory below.
+    tgt="$(cd "$1" && pwd)"
+    magic="$(head -c 6 "$tgt/boot/ucode.cpio")"
+    [ "$magic" = "070701" ] || reject_image "/boot/ucode.cpio is not a newc cpio archive (starts with '$magic'; the early microcode loader reads newc, uncompressed)"
+    tmp="$(mktemp -d)"
+    (cd "$tmp" && cpio -id --quiet < "$tgt/boot/ucode.cpio" 2>/dev/null) || reject_image "/boot/ucode.cpio does not unpack"
+    if [ "$arch" = "x86_64" ]; then
+        [ -s "$tmp/kernel/x86/microcode/GenuineIntel.bin" ] || reject_image "/boot/ucode.cpio lacks kernel/x86/microcode/GenuineIntel.bin (BR2_PACKAGE_INTEL_MICROCODE puts intel-ucode/ in the images directory)"
+        [ -s "$tmp/kernel/x86/microcode/AuthenticAMD.bin" ] || reject_image "/boot/ucode.cpio lacks kernel/x86/microcode/AuthenticAMD.bin (linux-firmware's amd-ucode family)"
+        cat "$BUILDROOT_DIR"/output/images/intel-ucode/* | cmp -s - "$tmp/kernel/x86/microcode/GenuineIntel.bin" \
+            || reject_image "/boot/ucode.cpio's GenuineIntel.bin is not the concatenation of the images directory's intel-ucode files"
+        cat "$tgt"/lib/firmware/amd-ucode/microcode_amd*.bin | cmp -s - "$tmp/kernel/x86/microcode/AuthenticAMD.bin" \
+            || reject_image "/boot/ucode.cpio's AuthenticAMD.bin is not the concatenation of /lib/firmware/amd-ucode/microcode_amd*.bin"
+        echo "microcode: /boot/ucode.cpio carries GenuineIntel.bin ($(stat -c %s "$tmp/kernel/x86/microcode/GenuineIntel.bin") bytes) and AuthenticAMD.bin ($(stat -c %s "$tmp/kernel/x86/microcode/AuthenticAMD.bin") bytes)"
+    else
+        [ -z "$(ls -A "$tmp")" ] || reject_image "/boot/ucode.cpio is not the empty archive on $arch"
+        echo "microcode: /boot/ucode.cpio is the empty archive on $arch"
+    fi
+    rm -rf "$tmp"
+    gzip -t "$tgt/boot/firmware.cpio.gz" || reject_image "/boot/firmware.cpio.gz is not a gzip file"
+    local members
+    members="$(gzip -dc "$tgt/boot/firmware.cpio.gz" | cpio -t --quiet 2>/dev/null | grep -c '^lib/firmware/' || true)"
+    [ "$members" -gt 0 ] || reject_image "/boot/firmware.cpio.gz carries no lib/firmware member (post_build.sh builds it from the probe-time drivers' names)"
+    echo "probe-time firmware: /boot/firmware.cpio.gz carries $members files ($(stat -c %s "$tgt/boot/firmware.cpio.gz") bytes)"
+}
+
 assert_rootfs_invariants() {
     local triple="${1:-}"
     assert_target_is_clean
+    [ -n "$triple" ] && assert_kernel_fragments_applied "$triple"
+    assert_firmware_families
+    assert_firmware_present "$BUILDROOT_DIR/output/target"
     # Post-Buildroot assert. Both ways this package can fail are SILENT: a package
     # whose Config.in is not sourced from buildroot/Config.in has its defconfig
     # symbol dropped without warning, and <PKG>_NAME is a Buildroot-reserved
@@ -314,14 +453,17 @@ assert_rootfs_invariants() {
         echo "ERROR: /boot/embraos-slot.cfg is missing or malformed in the rootfs" >&2
         reject_image
     }
-    # /boot holds exactly the slot's files: anything else there is a leftover
-    # the squashfs would carry.
+    # /boot holds exactly the slot's files: the kernel, the three initrds
+    # GRUB loads (the microcode first and uncompressed, the probe-time
+    # firmware, the repository's initramfs), the slot's menu line. Anything
+    # else there is a leftover the squashfs would carry.
     local boot_files expected_boot
     boot_files="$(cd "$tgt/boot" && ls -A | sort | tr '\n' ' ')"
-    expected_boot="$(printf '%s\n' "$kernel" embraos-slot.cfg initramfs.cpio.gz | sort | tr '\n' ' ')"
+    expected_boot="$(printf '%s\n' "$kernel" embraos-slot.cfg initramfs.cpio.gz firmware.cpio.gz ucode.cpio | sort | tr '\n' ' ')"
     [ "$boot_files" = "$expected_boot" ] \
         || reject_image "/boot holds '${boot_files% }' in the rootfs, expected exactly: ${expected_boot% }"
-    echo "slot contents present: /boot/$kernel, /boot/initramfs.cpio.gz, /etc/embraos-release ($stamped), /boot/embraos-slot.cfg, nothing else under /boot"
+    assert_boot_initrds "$tgt" "$triple"
+    echo "slot contents present: /boot/$kernel, the three initrds, /etc/embraos-release ($stamped), /boot/embraos-slot.cfg, nothing else under /boot"
 
     # The network: the resolver is a link into the ephemeral tmpfs (the root
     # is read-only; embrad and the lease script write there), and the lease
@@ -590,6 +732,10 @@ write_installer_iso() {
     mkdir -p "$tree/boot/grub" "$tree/embraos/esp" "$tree/EFI/BOOT" "$stage/efi/EFI/BOOT"
     cp "$images/$kernel" "$tree/boot/$kernel"
     cp initramfs.cpio.gz "$tree/boot/initramfs.cpio.gz"
+    # The two initrds beside it, as the disk's GRUB loads them: the microcode
+    # (first, uncompressed) and the probe-time firmware (post_build.sh).
+    cp "$br/output/target/boot/ucode.cpio" "$tree/boot/ucode.cpio"
+    cp "$br/output/target/boot/firmware.cpio.gz" "$tree/boot/firmware.cpio.gz"
     cp "$images/rootfs.squashfs" "$tree/embraos/rootfs.squashfs"
     cp -r "$images/efi-part/EFI" "$tree/embraos/esp/EFI"
 

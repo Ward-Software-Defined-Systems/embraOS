@@ -100,7 +100,10 @@ if [ "$slot_active" = "a" ]; then set active_dev="$slot_a_dev"; else set active_
 function boot_slot {
     echo "embraOS: booting slot $1 from $2"
     linux "$2/boot/@KERNEL_IMAGE@" console=tty0 console=@SERIAL_CONSOLE@ quiet embra.slot=$1 embra.web=1 $3 $extra
-    initrd "$2/boot/initramfs.cpio.gz"
+    # Three initrds, in this order: the CPU microcode (first and uncompressed,
+    # the kernel's early loader reads only the first), the firmware the
+    # built-in drivers want at probe, and the initramfs with embra-init.
+    initrd "$2/boot/ucode.cpio" "$2/boot/firmware.cpio.gz" "$2/boot/initramfs.cpio.gz"
 }
 
 # A submenu opens a new environment context that holds the exported

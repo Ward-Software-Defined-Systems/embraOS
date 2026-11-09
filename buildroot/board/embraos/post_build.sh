@@ -53,6 +53,70 @@ done
 }
 install -m 0644 "${REPO_ROOT}/initramfs.cpio.gz" "${TARGET_DIR}/boot/initramfs.cpio.gz"
 
+# The firmware's licences beside the blobs: several vendors require the text
+# with the binaries, and Buildroot installs none of it. WHENCE names every
+# file's licence; the LICENCE/LICENSE files are the texts. From the
+# package's source tree, which Buildroot hands over as BUILD_DIR.
+FW_SRC="$(ls -d "${BUILD_DIR}"/linux-firmware-*/ 2>/dev/null | head -n1)"
+[ -n "$FW_SRC" ] && [ -f "${FW_SRC}/WHENCE" ] || {
+    echo "ERROR: linux-firmware's source tree is not under ${BUILD_DIR} (BR2_PACKAGE_EMBRA_FIRMWARE_ALL selects it); its licences cannot be installed" >&2
+    exit 1
+}
+LIC="${TARGET_DIR}/usr/share/licenses/linux-firmware"
+rm -rf "$LIC"; mkdir -p "$LIC"
+cp "${FW_SRC}/WHENCE" "$LIC/"
+find "$FW_SRC" -maxdepth 1 \( -name 'LICEN[CS]E*' -o -name 'GPL-*' -o -name 'COPYING' -o -name 'LICENSE' \) -type f -exec cp {} "$LIC/" \;
+echo "post_build.sh: $(ls "$LIC" | wc -l) licence files of linux-firmware under /usr/share/licenses/linux-firmware"
+
+# The probe-time firmware initrd: every file the built-in drivers that ask
+# at probe name (modules.builtin.modinfo, `<driver>.firmware=<file>`), as a
+# gzip'd newc archive GRUB loads beside the initramfs, so a driver that
+# probes before the rootfs is mounted finds its blob in the initramfs's
+# /lib/firmware. The open-time families (the NICs' blobs at ifup) stay on
+# the rootfs alone. The set is the drivers whose probe wants the blob:
+# i915 (GuC, HuC, DMC), the E800's DDP package, qed, cxgb4.
+MODINFO="$(ls "${TARGET_DIR}"/lib/modules/*/modules.builtin.modinfo | head -n1)"
+FW_STAGE="$(mktemp -d)"
+PROBE_DRIVERS="i915 ice qed cxgb4"
+for drv in $PROBE_DRIVERS; do
+    tr '\0' '\n' < "$MODINFO" | sed -n "s/^${drv}\.firmware=//p" | sort -u | while read -r name; do
+        for cand in "$name" "$name.xz" "$name.zst"; do
+            if [ -f "${TARGET_DIR}/lib/firmware/$cand" ]; then
+                mkdir -p "${FW_STAGE}/lib/firmware/$(dirname "$cand")"
+                cp "${TARGET_DIR}/lib/firmware/$cand" "${FW_STAGE}/lib/firmware/$cand"
+                break
+            fi
+        done
+    done
+done
+(cd "$FW_STAGE" && find lib -type f | LC_ALL=C sort | cpio -o -H newc --quiet 2>/dev/null | gzip -9 > "${TARGET_DIR}/boot/firmware.cpio.gz")
+echo "post_build.sh: /boot/firmware.cpio.gz holds $(find "$FW_STAGE" -type f | wc -l) probe-time files of ${PROBE_DRIVERS// /, } ($(stat -c %s "${TARGET_DIR}/boot/firmware.cpio.gz") bytes)"
+rm -rf "$FW_STAGE"
+
+# The early microcode initrd: the kernel's early loader reads the first
+# initrd, uncompressed newc, for kernel/x86/microcode/{GenuineIntel,
+# AuthenticAMD}.bin, each the concatenation of the vendor's files. Intel's
+# come from Buildroot's intel-microcode package, which leaves them in the
+# images directory (BINARIES_DIR) and off the rootfs; AMD's from
+# linux-firmware's amd-ucode family. On another architecture the archive is
+# empty, so GRUB's line is the same everywhere.
+UC_STAGE="$(mktemp -d)"
+case "$RUST_TARGET" in
+    x86_64-*)
+        mkdir -p "${UC_STAGE}/kernel/x86/microcode"
+        [ -d "${BINARIES_DIR}/intel-ucode" ] || { echo "ERROR: ${BINARIES_DIR}/intel-ucode is missing (BR2_PACKAGE_INTEL_MICROCODE)" >&2; exit 1; }
+        cat "${BINARIES_DIR}"/intel-ucode/* > "${UC_STAGE}/kernel/x86/microcode/GenuineIntel.bin"
+        ls "${TARGET_DIR}"/lib/firmware/amd-ucode/microcode_amd*.bin > /dev/null 2>&1 || { echo "ERROR: /lib/firmware/amd-ucode/microcode_amd*.bin is missing (linux-firmware's amd-ucode family)" >&2; exit 1; }
+        cat "${TARGET_DIR}"/lib/firmware/amd-ucode/microcode_amd*.bin > "${UC_STAGE}/kernel/x86/microcode/AuthenticAMD.bin"
+        (cd "$UC_STAGE" && printf 'kernel\nkernel/x86\nkernel/x86/microcode\nkernel/x86/microcode/GenuineIntel.bin\nkernel/x86/microcode/AuthenticAMD.bin\n' | cpio -o -H newc --quiet > "${TARGET_DIR}/boot/ucode.cpio")
+        ;;
+    *)
+        (cd "$UC_STAGE" && printf '' | cpio -o -H newc --quiet > "${TARGET_DIR}/boot/ucode.cpio")
+        ;;
+esac
+echo "post_build.sh: /boot/ucode.cpio written ($(stat -c %s "${TARGET_DIR}/boot/ucode.cpio") bytes)"
+rm -rf "$UC_STAGE"
+
 # The release stamp (scripts/lib/image-common.sh::write_release_file): what
 # this slot is, read by embrad, embra-update and the status surfaces.
 RELEASE_FILE="${REPO_ROOT}/target/${RUST_TARGET}/release/embraos-release"

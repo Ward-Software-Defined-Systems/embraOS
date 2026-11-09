@@ -17,15 +17,15 @@ smbios --type 11 --get-string 4 --set=extra
 
 menuentry "Install embraOS @VERSION@" --id install {
     linux /boot/@KERNEL_IMAGE@ console=tty0 console=@SERIAL_CONSOLE@ quiet embra.mode=install $extra
-    initrd /boot/initramfs.cpio.gz
+    initrd /boot/ucode.cpio /boot/firmware.cpio.gz /boot/initramfs.cpio.gz
 }
 menuentry "Install embraOS @VERSION@ (serial console only)" --id install_serial {
     linux /boot/@KERNEL_IMAGE@ console=@SERIAL_CONSOLE@ quiet embra.mode=install $extra
-    initrd /boot/initramfs.cpio.gz
+    initrd /boot/ucode.cpio /boot/firmware.cpio.gz /boot/initramfs.cpio.gz
 }
 menuentry "Install embraOS @VERSION@ (display only)" --id install_display {
     linux /boot/@KERNEL_IMAGE@ console=tty0 quiet embra.mode=install $extra
-    initrd /boot/initramfs.cpio.gz
+    initrd /boot/ucode.cpio /boot/firmware.cpio.gz /boot/initramfs.cpio.gz
 }
 menuentry "Boot the installed disk" --id disk {
     search --no-floppy --label ESP --set=root
