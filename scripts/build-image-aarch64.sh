@@ -61,7 +61,16 @@ nproc_compat() {
 # behavior — unchanged from the x86_64 build). Lower it on a memory-
 # constrained host: Buildroot's GCC + musl toolchain bootstrap can OOM
 # with many concurrent compilers in a small Docker VM (e.g. OrbStack's
-# 4 GB default). Pass through Docker with:  docker run -e JOBS=2 ...
+# 4 GB default), and WPE WebKit's compile is heavier still (a WebCore
+# unified-source bundle compiles in a 3 GiB process, the heaviest in 5;
+# the figures are in docs/BUILD/AARCH64-BUILD.md). The value reaches the
+# make-based packages through make's jobserver and the cmake ones (WebKit,
+# LLVM) through BR2_JLEVEL on the make line below: Buildroot runs a cmake
+# package's ninja at -j$(PARALLEL_JOBS), which BR2_JLEVEL=0 in the .config
+# sets to nproc+1 whatever the top-level -j says, and ninja ignores make
+# 4.3's pipe-style jobserver. The meson packages (Mesa, libinput) run
+# ninja at its own default, nproc+2; their compiles are small.
+# Pass through Docker with:  docker run -e JOBS=4 ...
 JOBS="${JOBS:-$(nproc_compat)}"
 
 BUILDROOT_ONLY=false
@@ -363,7 +372,7 @@ if [ "$FD_SOFT" != "unlimited" ]; then
     fi
 fi
 echo "fd limits: soft $(ulimit -Sn) / hard $(ulimit -Hn); system-wide $(awk '{print $1 "/" $3}' /proc/sys/fs/file-nr 2>/dev/null || echo 'n/a')"
-echo "Buildroot parallelism: -j${JOBS} (override: docker run -e JOBS=N ...)"
+echo "Buildroot parallelism: -j${JOBS}, BR2_JLEVEL=${JOBS} (override: docker run -e JOBS=N ...)"
 
 BUILDROOT_DIR="${BUILDROOT_DIR:-buildroot-src}"
 # Clone when missing OR empty: if BUILDROOT_DIR is a mountpoint (e.g. a Docker
@@ -432,7 +441,7 @@ stage_kernel_tarball "$BUILDROOT_DIR"
 # Configure and build
 (cd "$BUILDROOT_DIR" && \
     make BR2_EXTERNAL="$(pwd)/../buildroot" "$BUILDROOT_DEFCONFIG" && \
-    make -j"$JOBS")
+    make -j"$JOBS" BR2_JLEVEL="$JOBS")
 
 # The post-Buildroot checks, shared with the x86_64 script
 # (scripts/lib/image-common.sh): the embedding model, the in-OS toolchain at

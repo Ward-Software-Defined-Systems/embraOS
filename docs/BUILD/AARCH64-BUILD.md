@@ -13,8 +13,8 @@
 > `embra-rust-toolchain` packages), HVF boot, soul formation, the serial TUI
 > (`EMBRA_TUI=1`), and **embra-guardian-v1** (a dynamic tool compiled in-guest via
 > `/opt/rust` and run in the wasmtime sandbox). embra-guardian-v1 remains an
-> **experimental** feature upstream (project-wide, not aarch64-specific). On an 8 GB
-> host, cap build parallelism — see the `JOBS` knob below. Re-run the [End-to-End
+> **experimental** feature upstream (project-wide, not aarch64-specific). The build's
+> memory wants are in the `JOBS` note below (WebKit's compile sizes the Docker VM). Re-run the [End-to-End
 > Validation](#end-to-end-validation) checklist after any canonical-build bump and
 > re-stamp this date.
 >
@@ -199,21 +199,29 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > you have local changes in `buildroot-src` — commit/stash them or pin
 > `BUILDROOT_VERSION` to the current checkout.
 
-> **Build memory / parallel jobs (`JOBS`):** the Docker pass runs `make -j$(nproc)`.
-> Buildroot's GCC + musl toolchain bootstrap is RAM-hungry, and the `2026.02.1` switch
-> forces a full from-scratch rebuild — on a memory-limited host (e.g. OrbStack's 4 GB
-> default VM on an 8 GB Mac, `nproc`=8 → `-j8`) that OOMs (`ar: … Cannot allocate
-> memory`, `libc.a Error 1`). Cap parallelism with the `JOBS` env (defaults to all
-> cores — unchanged from canonical; set it **only** when constrained), passed into the
-> container with `-e`:
+> **Build memory / parallel jobs (`JOBS`):** the Docker pass runs Buildroot at `nproc`
+> jobs per package. Two phases want memory. The GCC + musl toolchain bootstrap dies in
+> a 4 GB VM at `-j8` (`ar: … Cannot allocate memory`, `libc.a Error 1`). WPE WebKit's
+> compile is the heaviest phase of the build: measured on the x86_64 build of the same
+> WebKit 2.50.5 (GCC 14.3.0, `-O2 -g0`), a WebCore unified-source bundle compiles in a
+> 3 GiB process, the heaviest in 5 GiB, and the link of libWPEWebKit takes 1.1 GiB.
+> Buildroot runs WebKit's ninja at `nproc+1` jobs, 17 on a 16-core Mac, so plan about
+> 3.5 GiB of VM memory per job: 60 GiB at 17 jobs, 16 GiB at 4. Give the VM the memory
+> (OrbStack: `orb config set memory_mib 61440 && orb restart`; Docker Desktop:
+> Settings, Resources) or cap the jobs with `JOBS`, passed into the container with
+> `-e`: the script hands it to the make-based packages through make's jobserver and to
+> the cmake ones (WebKit, LLVM) as `BR2_JLEVEL`. `JOBS` defaults to all cores; set it
+> only when the VM is smaller than the jobs want. Too little memory shows as `Killed
+> signal terminated program cc1plus`
+> ([troubleshooting](#killed-signal-terminated-program-cc1plus-oom-compiling-webkit)).
 > ```bash
-> docker run --rm -e JOBS=2 -v "$PWD":/work \
+> docker run --rm -e JOBS=4 -v "$PWD":/work \
 >   -v embraos-br-aarch64:/work/buildroot-src -w /work ubuntu:24.04 bash -c \
 >   "apt-get update && apt-get install -y build-essential gcc g++ \
 >    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils && \
 >    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
 > ```
-> On a Linux host (no Docker), just prefix: `JOBS=2 ./scripts/build-image-aarch64.sh
+> On a Linux host (no Docker), just prefix: `JOBS=4 ./scripts/build-image-aarch64.sh
 > --buildroot-only`.
 
 > **In-OS Rust toolchain (Guardian):** Step 3.5 downloads a SHA-256-verified Rust
@@ -485,7 +493,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device ramfb -display cocoa` by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
-| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU) | the same stack is in the defconfig and builds for the image; **TBD** until the launcher has a display and input device and a run shows it (WebKit's link step is the heaviest of the build: give Docker's VM the memory, **TBD** how much) |
+| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU) | the same stack is in the defconfig and builds for the image; **TBD** until the launcher has a display and input device and a run shows it (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack is **TBD** until one completes) |
 | Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps about 1200 modules nothing loads (the dry merge's figure; `du lib/modules` at the first build is the measurement) |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | none (no bare metal of this architecture to install on); the installer's tools are in the image all the same |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
@@ -864,10 +872,37 @@ docker run --rm -e JOBS=2 -v "$PWD":/work \
 ```
 
 Completed host packages are stamped and skipped, so the resume is shorter than the first
-attempt. `-j2` is slow but completes unattended in 4 GB. Raising the VM instead
-(`orb config set memory_mib 6144 && orb restart`; revert with `4096`) starves macOS on
-an 8 GB Mac, so `JOBS` is the safer lever. `JOBS` defaults to all cores — only set it
-when memory-constrained.
+attempt. `-j2` is slow but takes the toolchain through 4 GB; the image as a whole no
+longer fits a 4 GB VM, since WebKit's heaviest compile alone takes 5 GiB (next entry).
+`JOBS` defaults to all cores — only set it when the VM is smaller than the jobs want.
+
+#### `Killed signal terminated program cc1plus` (OOM compiling WebKit)
+
+**Symptom:** deep into WPE WebKit's build, one or more WebCore compiles die at once:
+
+```
+[4077/8277] Building CXX object Source/WebCore/CMakeFiles/WebCore.dir/__/__/WebCore/DerivedSources/unified-sources/UnifiedSource-3a52ce78-2.cpp.o
+FAILED: [code=1] Source/WebCore/CMakeFiles/WebCore.dir/__/__/WebCore/DerivedSources/unified-sources/UnifiedSource-3a52ce78-2.cpp.o
+aarch64-buildroot-linux-musl-g++.br_real: fatal error: Killed signal terminated program cc1plus
+compilation terminated.
+ninja: build stopped: subcommand failed.
+make: *** [package/pkg-generic.mk:273: /work/buildroot-src/output/build/wpewebkit-2.50.5/.stamp_built] Error 1
+```
+
+**Cause:** the VM's OOM killer, not the compiler. A WebCore unified-source bundle
+compiles in a 3 GiB process and the heaviest in 5 GiB (measured on the x86_64 build of
+the same WebKit; the link takes 1.1 GiB), and Buildroot runs WebKit's ninja at
+`nproc+1` jobs, 17 on a 16-core Mac: more than most VMs hold. Buildroot passes a
+cmake package's ninja `-j$(PARALLEL_JOBS)`, which `BR2_JLEVEL=0` sets to `nproc+1`
+whatever the top-level `-j` says, and ninja 1.13 ignores make 4.3's pipe-style
+jobserver (`Ignoring jobserver: Pipe-based protocol is not supported`), so `JOBS`
+reaches this phase only as `BR2_JLEVEL`, which the script passes since 2026-11-08; an
+older checkout ran it at `nproc+1` whatever `JOBS` said.
+
+**Fix:** give the VM about 3.5 GiB per job (`orb config set memory_mib 61440 && orb
+restart` for 17 jobs on OrbStack; Docker Desktop: Settings, Resources) or cap the jobs
+(`-e JOBS=4` in a 16 GiB VM), then rerun the same command. The build resumes inside
+WebKit: ninja skips the finished objects, and nothing needs a dirclean.
 
 #### `Too many open files` (EMFILE) — Buildroot tree on the bind mount
 

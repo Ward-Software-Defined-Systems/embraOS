@@ -253,15 +253,23 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > `buildroot-src` — commit/stash them or pin `BUILDROOT_VERSION` to the current
 > checkout.
 
-> **Build memory / parallel jobs (`JOBS`):** the Docker pass runs
-> `make -j$(nproc)`. Buildroot is RAM-hungry — on a memory-limited host
+> **Build memory / parallel jobs (`JOBS`):** the Docker pass runs Buildroot at
+> `nproc` jobs per package. Buildroot is RAM-hungry — on a memory-limited host
 > (e.g. OrbStack's 4 GB default VM, `nproc`=8 → `-j8`) it OOMs in several
 > flavors. The toolchain bootstrap dies with `libc.a Error 1` /
 > `ar: … Cannot allocate memory`; regular package compiles fail with bare
 > `Cannot allocate memory` while reading small headers (e.g. openssh's
 > `sshd-auth.c` on `<sys/wait.h>`); the kernel hits the same on its own
-> headers (`<uapi/linux/sem.h>`) or in `fixdep`. All have the same fix — cap
-> parallelism with `JOBS` (passed into the container with `-e`):
+> headers (`<uapi/linux/sem.h>`) or in `fixdep`; WPE WebKit's compile, the
+> heaviest phase of the build, dies with `Killed signal terminated program
+> cc1plus`: a WebCore unified-source bundle compiles in a 3 GiB process, the
+> heaviest in 5 GiB (measured on this build's WebKit 2.50.5, GCC 14.3.0; the
+> link takes 1.1 GiB), and Buildroot runs it at `nproc+1` jobs, so plan about
+> 3.5 GiB of VM memory per job (a 4 GB VM no longer completes the image at any
+> job count). All have the same fix — give the VM the memory or cap
+> parallelism with `JOBS` (passed into the container with `-e`; the script
+> hands it to the make-based packages through make's jobserver and to the
+> cmake ones, WebKit and LLVM, as `BR2_JLEVEL`):
 > ```bash
 > docker run --rm -e JOBS=2 -v "$PWD":/work \
 >   -v embraos-br-x86_64:/work/buildroot-src -w /work ubuntu:24.04 bash -c \
