@@ -99,6 +99,45 @@ BR2_PACKAGE_OPENSSH=y
 BR2_PACKAGE_OPENSSH_CLIENT=y
 # BR2_PACKAGE_OPENSSH_SERVER is not set
 
+# The installer's tools (embra-update install): the same three packages as
+# the x86_64 image, so an aarch64 disk can be partitioned and formatted the
+# same way (no aarch64 installer medium is written: no bare metal of that
+# architecture to install on). sgdisk needs the C++ toolchain below.
+BR2_PACKAGE_GPTFDISK=y
+# BR2_PACKAGE_GPTFDISK_GDISK is not set
+BR2_PACKAGE_GPTFDISK_SGDISK=y
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
+BR2_PACKAGE_DOSFSTOOLS=y
+BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
+
+# The display console (Phase 2), the block of the x86_64 defconfig: WPE WebKit
+# through cog's DRM platform, drawn in software, input through libinput over
+# eudev. The aarch64 launcher has no display or input device yet, so the
+# console on an aarch64 display is TBD until it does; the stack builds for
+# the image all the same (Docker on Apple Silicon: WebKit's link wants the
+# memory noted in docs/BUILD/AARCH64-BUILD.md).
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
+# BR2_PACKAGE_EUDEV_MODULE_LOADING is not set
+# BR2_PACKAGE_EUDEV_ENABLE_HWDB is not set
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_LLVM=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_XKEYBOARD_CONFIG=y
+BR2_PACKAGE_DEJAVU=y
+# BR2_PACKAGE_DEJAVU_SERIF is not set
+# BR2_PACKAGE_DEJAVU_SANS_CONDENSED is not set
+# BR2_PACKAGE_DEJAVU_SERIF_CONDENSED is not set
+BR2_PACKAGE_LIBSOUP3_SSL=y
+BR2_PACKAGE_WPEWEBKIT=y
+BR2_PACKAGE_COG=y
+BR2_PACKAGE_COG_PROGRAMS_HOME_URI=""
+# BR2_PACKAGE_COG_PLATFORM_FDO is not set
+BR2_PACKAGE_COG_PLATFORM_DRM=y
+
 # embraOS packages
 BR2_PACKAGE_EMBRAD=y
 BR2_PACKAGE_EMBRA_APID=y
