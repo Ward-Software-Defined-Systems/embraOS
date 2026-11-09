@@ -536,3 +536,134 @@ write_vm_images() {
 # GNU and BSD spellings of two small things the conversion needs.
 file_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
 sha256_of() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1; }
+
+# write_installer_iso <buildroot dir> <images dir> <arch> <engine>: the
+# installer medium beside the VM images, x86_64 only (there is no aarch64
+# bare metal to install on). A UEFI-bootable hybrid ISO: a virtual DVD boots
+# it through El Torito, a USB stick written with dd through the GPT entry
+# xorriso appends (the EFI System Partition, the same FAT image), both
+# proven under OVMF. It carries this build's kernel, the repository's
+# initramfs (the same embra-init as the slot), rootfs.squashfs, the disk's
+# ESP tree (what the installer copies onto the target's ESP) and
+# /embraos/install.manifest (install.v1: the release, the rootfs's size and
+# sha256), and boots a second GRUB image: the disk's module list plus
+# iso9660, part_msdos, search_fs_file and chain, with an early config that
+# finds the medium by its manifest and loads /boot/grub/grub.cfg from it
+# (board/embraos/grub-installer.cfg.in, rendered here). The FAT image is
+# labelled EMBRAISO, never ESP: the menu's "Boot the installed disk" finds
+# the disk's ESP by that label. Every tool is Buildroot's (host-xorriso,
+# host-grub2, host-dosfstools, host-mtools): the same ISO on every
+# workstation. The ISO is staged and moved whole; a failed check leaves none.
+write_installer_iso() {
+    local br="$1" out="$2" arch="$3" engine="$4"
+    if [ "$arch" != "x86_64" ]; then
+        echo "installer ISO: none for $arch (no bare metal of that architecture to install on)"
+        return 0
+    fi
+    local host="$br/output/host" images="$br/output/images" triple="${arch}-unknown-linux-musl"
+    local xorriso="$host/bin/xorriso" mkimage="$host/bin/grub-mkimage" lint="$host/bin/grub-script-check"
+    local mcopy="$host/bin/mcopy" mmd="$host/bin/mmd" mkfsfat
+    mkfsfat="$(ls "$host/sbin/mkfs.fat" "$host/sbin/mkdosfs" 2>/dev/null | head -n1)"
+    local t
+    for t in "$xorriso" "$mkimage" "$lint" "$mcopy" "$mmd" "${mkfsfat:-$host/sbin/mkfs.fat}"; do
+        [ -x "$t" ] || { echo "ERROR: installer ISO: $t is missing (BR2_PACKAGE_HOST_XORRISO, _GRUB2, _MTOOLS, _DOSFSTOOLS)" >&2; return 1; }
+    done
+    local kernel="" k
+    for k in Image bzImage; do
+        [ -f "$images/$k" ] && { kernel="$k"; break; }
+    done
+    [ -n "$kernel" ] || { echo "ERROR: installer ISO: no kernel image in $images" >&2; return 1; }
+    local grub_core
+    grub_core="$(ls -d "$br"/output/build/grub2-*/build-x86_64-efi/grub-core 2>/dev/null | head -n1)"
+    [ -d "$grub_core" ] || { echo "ERROR: installer ISO: GRUB's x86_64-efi modules are not built under $br/output/build" >&2; return 1; }
+    local modules
+    modules="$(sed -n 's/^BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="\(.*\)"$/\1/p' buildroot/configs/embraos_x86_64_defconfig)"
+    [ -n "$modules" ] || { echo "ERROR: installer ISO: no BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI in the x86_64 defconfig" >&2; return 1; }
+    local release="target/$triple/release/embraos-release"
+    [ -f "$release" ] || { echo "ERROR: installer ISO: $release is missing" >&2; return 1; }
+    [ -f initramfs.cpio.gz ] || { echo "ERROR: installer ISO: initramfs.cpio.gz is missing (scripts/create_initramfs.sh)" >&2; return 1; }
+    [ -d "$images/efi-part/EFI/BOOT" ] || { echo "ERROR: installer ISO: $images/efi-part/EFI/BOOT (the disk's ESP tree) is missing" >&2; return 1; }
+
+    local stage="$out/.iso-stage" tree
+    rm -rf "$stage"
+    tree="$stage/tree"
+    mkdir -p "$tree/boot/grub" "$tree/embraos/esp" "$tree/EFI/BOOT" "$stage/efi/EFI/BOOT"
+    cp "$images/$kernel" "$tree/boot/$kernel"
+    cp initramfs.cpio.gz "$tree/boot/initramfs.cpio.gz"
+    cp "$images/rootfs.squashfs" "$tree/embraos/rootfs.squashfs"
+    cp -r "$images/efi-part/EFI" "$tree/embraos/esp/EFI"
+
+    # The menu.
+    local version
+    version="$(sed -n 's/^VERSION=//p' "$release" | head -n1)"
+    sed -e "s|@KERNEL_IMAGE@|$kernel|g" -e "s|@SERIAL_CONSOLE@|ttyS0|g" -e "s|@VERSION@|$version|g" \
+        buildroot/board/embraos/grub-installer.cfg.in > "$tree/boot/grub/grub.cfg"
+    if grep -q '@[A-Z_]*@' "$tree/boot/grub/grub.cfg"; then
+        echo "ERROR: installer ISO: an unrendered placeholder in grub.cfg: $(grep -o '@[A-Z_]*@' "$tree/boot/grub/grub.cfg" | sort -u | tr '\n' ' ')" >&2
+        rm -rf "$stage"; return 1
+    fi
+    "$lint" "$tree/boot/grub/grub.cfg" || { echo "ERROR: installer ISO: grub-script-check refused the menu" >&2; rm -rf "$stage"; return 1; }
+
+    # The loader: the disk's modules and the medium's, an early config that
+    # finds the medium by its manifest.
+    printf 'search --no-floppy --file /embraos/install.manifest --set=root\nset prefix=($root)/boot/grub\n' > "$stage/early.cfg"
+    "$lint" "$stage/early.cfg" || { rm -rf "$stage"; return 1; }
+    # shellcheck disable=SC2086
+    "$mkimage" -d "$grub_core" -O x86_64-efi -p /boot/grub -c "$stage/early.cfg" -o "$stage/efi/EFI/BOOT/BOOTX64.EFI" \
+        $modules iso9660 part_msdos search_fs_file chain \
+        || { echo "ERROR: installer ISO: grub-mkimage failed" >&2; rm -rf "$stage"; return 1; }
+    cp "$stage/efi/EFI/BOOT/BOOTX64.EFI" "$tree/EFI/BOOT/BOOTX64.EFI"
+
+    # The manifest and the sums.
+    local sq_size sq_sha
+    sq_size="$(stat -c %s "$tree/embraos/rootfs.squashfs")"
+    sq_sha="$(sha256sum "$tree/embraos/rootfs.squashfs" | cut -d' ' -f1)"
+    {
+        echo "FORMAT=install.v1"
+        grep -E '^(VERSION|BUILD_ID|ARCH|ENGINE|BUILT)=' "$release"
+        echo "KERNEL=boot/$kernel"
+        echo "ROOTFS=embraos/rootfs.squashfs"
+        echo "ROOTFS_SIZE=$sq_size"
+        echo "ROOTFS_SHA256=$sq_sha"
+    } > "$tree/embraos/install.manifest"
+    [ "$(sed -n 's/^ENGINE=//p' "$tree/embraos/install.manifest")" = "$engine" ] \
+        || { echo "ERROR: installer ISO: the release stamp says ENGINE=$(sed -n 's/^ENGINE=//p' "$release"), the build $engine" >&2; rm -rf "$stage"; return 1; }
+    cp "$release" "$tree/embraos/embraos-release"
+    (cd "$tree" && find . -type f ! -name SHA256SUMS -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS)
+
+    # The El Torito EFI image: FAT, the loader alone, at least 8 MiB.
+    local efi_bytes efi_mib
+    efi_bytes="$(stat -c %s "$stage/efi/EFI/BOOT/BOOTX64.EFI")"
+    [ "$efi_bytes" -lt $((4 * 1024 * 1024)) ] || { echo "ERROR: installer ISO: the loader is $efi_bytes bytes; look at its module list" >&2; rm -rf "$stage"; return 1; }
+    efi_mib=$(( (efi_bytes + 1024 * 1024 + 1024 * 1024 - 1) / (1024 * 1024) ))
+    [ "$efi_mib" -ge 8 ] || efi_mib=8
+    dd if=/dev/zero of="$stage/efiboot.img" bs=1M count="$efi_mib" status=none
+    "$mkfsfat" -n EMBRAISO "$stage/efiboot.img" > /dev/null
+    "$mmd" -i "$stage/efiboot.img" ::EFI ::EFI/BOOT
+    "$mcopy" -i "$stage/efiboot.img" "$stage/efi/EFI/BOOT/BOOTX64.EFI" ::EFI/BOOT/
+
+    # The ISO: ISO 9660 level 3 (a file over 4 GiB would be allowed), Rock
+    # Ridge and Joliet, the EFI image as the El Torito boot image and as GPT
+    # partition 2 (type EFI System), the MBR a protective one.
+    local iso="$stage/embraos.iso"
+    "$xorriso" -as mkisofs -iso-level 3 -rational-rock -joliet -joliet-long \
+        -volid EMBRAOS_INSTALL -appid "embraOS installer $version" \
+        -eltorito-alt-boot -e --interval:appended_partition_2:all:: -no-emul-boot \
+        -append_partition 2 0xef "$stage/efiboot.img" -appended_part_as_gpt \
+        -o "$iso" "$tree" > "$stage/xorriso.log" 2>&1 \
+        || { echo "ERROR: installer ISO: xorriso failed:" >&2; tail -n 5 "$stage/xorriso.log" >&2; rm -rf "$stage"; return 1; }
+
+    # The checks: one UEFI El Torito image, a GPT, the manifest inside equal
+    # to the one written, the squashfs's hash in it.
+    "$xorriso" -indev "$iso" -report_el_torito plain 2>/dev/null | grep -q 'El Torito boot img.*UEFI' \
+        || { echo "ERROR: installer ISO: no UEFI El Torito boot image in $iso" >&2; rm -rf "$stage"; return 1; }
+    "$xorriso" -indev "$iso" -report_system_area plain 2>/dev/null | grep -q '^GPT' \
+        || { echo "ERROR: installer ISO: no GPT in $iso (the USB stick path)" >&2; rm -rf "$stage"; return 1; }
+    "$xorriso" -osirrox on -indev "$iso" -extract /embraos/install.manifest "$stage/manifest.read" > /dev/null 2>&1
+    cmp -s "$stage/manifest.read" "$tree/embraos/install.manifest" \
+        || { echo "ERROR: installer ISO: the manifest read back from $iso differs" >&2; rm -rf "$stage"; return 1; }
+    grep -q "^ROOTFS_SHA256=$sq_sha\$" "$stage/manifest.read" || { rm -rf "$stage"; return 1; }
+    mv "$iso" "$out/embraos.iso"
+    echo "installer ISO in $out: embraos.iso ($(( $(file_size "$out/embraos.iso") / 1048576 )) MiB; a DVD through El Torito, a USB stick through its GPT; the loader $efi_bytes bytes in a $efi_mib MiB FAT)"
+    rm -rf "$stage"
+}

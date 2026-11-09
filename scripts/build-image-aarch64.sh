@@ -451,8 +451,11 @@ cp "$BUILDROOT_DIR/output/images/${KERNEL_NAME}" output/images/
 cp "$BUILDROOT_DIR/output/images/rootfs.squashfs" output/images/
 # The same disk for the other hypervisors: embraos.vmdk, embraos.vhdx and
 # embraos.ova beside the raw image (write_vm_images, scripts/lib/image-common.sh).
-write_vm_images output/images/embraos.img output/images aarch64 \
-    "${STORAGE_ENGINE:-$(sed -n 's/^ENGINE=//p' "target/${RUST_TARGET}/release/embraos-release")}"
+IMAGE_ENGINE="${STORAGE_ENGINE:-$(sed -n 's/^ENGINE=//p' "target/${RUST_TARGET}/release/embraos-release")}"
+write_vm_images output/images/embraos.img output/images aarch64 "$IMAGE_ENGINE"
+# No installer medium for aarch64: there is no bare metal of that
+# architecture to install on (write_installer_iso says so and writes none).
+write_installer_iso "$BUILDROOT_DIR" output/images aarch64 "$IMAGE_ENGINE"
 
 echo ""
 echo "Build complete! (aarch64)"

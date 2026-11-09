@@ -1,0 +1,43 @@
+# The installer medium's menu, rendered into the ISO's /boot/grub/grub.cfg by
+# write_installer_iso (scripts/lib/image-common.sh): @KERNEL_IMAGE@ is the
+# kernel's name, @SERIAL_CONSOLE@ the serial line, @VERSION@ the release. The
+# loader's early config found this medium by /embraos/install.manifest and
+# made it $root, with $prefix at its /boot/grub. Every install entry boots
+# the medium's kernel and initramfs with embra.mode=install: embra-init finds
+# the medium itself, loop-mounts the rootfs it carries and hands over to
+# embrad, which runs the installer on both consoles. No serial/terminal_*
+# setup, as in grub.cfg.in: the firmware splits its console already. The
+# host's knobs ride the SMBIOS type 11 string (run-qemu.sh); a machine
+# without that table gets GRUB's one-line error for the lookup, which the
+# menu's own redraw covers (an `if` around the command does not silence it).
+set timeout=10
+set timeout_style=menu
+set extra=""
+smbios --type 11 --get-string 4 --set=extra
+
+menuentry "Install embraOS @VERSION@" --id install {
+    linux /boot/@KERNEL_IMAGE@ console=tty0 console=@SERIAL_CONSOLE@ quiet embra.mode=install $extra
+    initrd /boot/initramfs.cpio.gz
+}
+menuentry "Install embraOS @VERSION@ (serial console only)" --id install_serial {
+    linux /boot/@KERNEL_IMAGE@ console=@SERIAL_CONSOLE@ quiet embra.mode=install $extra
+    initrd /boot/initramfs.cpio.gz
+}
+menuentry "Install embraOS @VERSION@ (display only)" --id install_display {
+    linux /boot/@KERNEL_IMAGE@ console=tty0 quiet embra.mode=install $extra
+    initrd /boot/initramfs.cpio.gz
+}
+menuentry "Boot the installed disk" --id disk {
+    search --no-floppy --label ESP --set=root
+    chainloader ($root)/EFI/BOOT/BOOTX64.EFI
+    boot
+}
+menuentry "Firmware setup" --id fwsetup {
+    fwsetup
+}
+menuentry "Reboot" --id reboot {
+    reboot
+}
+menuentry "Halt" --id halt {
+    halt
+}

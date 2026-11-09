@@ -362,8 +362,11 @@ cp "$BUILDROOT_DIR/output/images/bzImage" output/images/
 cp "$BUILDROOT_DIR/output/images/rootfs.squashfs" output/images/
 # The same disk for the other hypervisors: embraos.vmdk, embraos.vhdx and
 # embraos.ova beside the raw image (write_vm_images, scripts/lib/image-common.sh).
-write_vm_images output/images/embraos.img output/images x86_64 \
-    "${STORAGE_ENGINE:-$(sed -n 's/^ENGINE=//p' target/x86_64-unknown-linux-musl/release/embraos-release)}"
+IMAGE_ENGINE="${STORAGE_ENGINE:-$(sed -n 's/^ENGINE=//p' target/x86_64-unknown-linux-musl/release/embraos-release)}"
+write_vm_images output/images/embraos.img output/images x86_64 "$IMAGE_ENGINE"
+# The installer medium for bare metal and the hypervisors: embraos.iso,
+# the same build on a bootable ISO (write_installer_iso, image-common.sh).
+write_installer_iso "$BUILDROOT_DIR" output/images x86_64 "$IMAGE_ENGINE"
 
 echo ""
 echo "Build complete!"
