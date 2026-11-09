@@ -485,6 +485,11 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device ramfb -display cocoa` by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
+| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU) | the same stack is in the defconfig and builds for the image; **TBD** until the launcher has a display and input device and a run shows it (WebKit's link step is the heaviest of the build: give Docker's VM the memory, **TBD** how much) |
+| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps about 1200 modules nothing loads (the dry merge's figure; `du lib/modules` at the first build is the measurement) |
+| Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | none (no bare metal of this architecture to install on); the installer's tools are in the image all the same |
+| Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
+| Pre-wave-6 tree | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
 
 ### Backup & Restore
 

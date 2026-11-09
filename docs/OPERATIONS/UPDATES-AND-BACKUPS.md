@@ -9,12 +9,12 @@ The image is a GPT aligned to 1 MiB with five partitions (`buildroot/board/embra
 | Partition | Size | Content |
 |---|---|---|
 | `esp` | 64 MiB | The EFI System Partition: GRUB (`EFI/BOOT/BOOTX64.EFI` or `BOOTAA64.EFI`), `grub.cfg`, `grubenv` |
-| `rootfs_a` | 1 GiB | OS slot A: one SquashFS with the kernel and the initramfs under `/boot`, the release stamp at `/etc/embraos-release` |
-| `rootfs_b` | 1 GiB | OS slot B, empty until the first update |
+| `rootfs_a` | 2 GiB | OS slot A: one SquashFS with the kernel and the initramfs under `/boot`, the release stamp at `/etc/embraos-release` |
+| `rootfs_b` | 2 GiB | OS slot B, empty until the first update |
 | `state` | 256 MiB | STATE: the seal, the CA, the operator's settings and drop-ins |
 | `data` | 4 GiB | DATA: the database, the workspace, and the backups under `backups/` |
 
-The disk is 6466 MiB, a whole number of MiB: 1 MiB before the first partition, the partitions, and 1 MiB that holds the backup GPT on the last sector (`layout.sh` computes the size; the build reads it back from the image). The converted disks beside the raw image, `embraos.vmdk`, `embraos.vhdx` and `embraos.ova`, have the same capacity.
+The slots were 1 GiB until 2026-11-08 and are 2 GiB since the firmware for bare metal joined the image; a slot's size is fixed on the disk that carries it, and the updater refuses a release larger than the slot partition it would write, so a disk installed or deployed with the older layout takes no release that outgrows 1 GiB. DATA is the last partition, and it grows to the disk's end at boot when a gibibyte or more follows it: the installer leaves no gap, but a VM's virtual disk enlarged afterwards has one. `embra-update grow-data` runs before the services at every normal boot (embrad, the database stopped): sgdisk moves the backup GPT to the new end and recreates the entry from the same start, the kernel is told the new length (`BLKPG_RESIZE_PARTITION`, while the partition is mounted), and resize2fs grows ext4 online; one line on both consoles when it grew, nothing when there was nothing to do, and a failure is a line and a normal boot with the partition as it was. The disk is 8514 MiB, a whole number of MiB: 1 MiB before the first partition, the partitions, and 1 MiB that holds the backup GPT on the last sector (`layout.sh` computes the size; the build reads it back from the image). The converted disks beside the raw image, `embraos.vmdk`, `embraos.vhdx` and `embraos.ova`, have the same capacity.
 
 GRUB boots the active slot by default and shows its menu for three seconds: each slot that holds a release, a Diagnostics submenu, Update embraOS, Backup and restore, Reboot, Halt and Firmware setup. A slot without `/boot/embraos-slot.cfg` has no entry and no "Make slot … the default" or "Boot slot … once" line under Diagnostics: a fresh image lists slot A alone, and slot B appears after the first update. `grubenv` holds the A/B state (`slot_active`, a staged `slot_try` with its `tries_left`, a status per slot). A slot an update staged is booted with `embra.trial=1` while it has tries left; embrad confirms it once every service is healthy, and GRUB marks it failed and falls back to the previous slot when the tries run out.
 
@@ -78,6 +78,6 @@ The default source is the GitHub releases of the public mirror, `https://github.
 
 A rollback onto a knowledge graph the newer release migrated: the older brain refuses to start — the halt reason names both schemas and the `pre-` snapshot — and the boot menu's Restore entry puts that snapshot back. The Guardian's dynamic tools are rebuilt with `/guardian rebuild --all` when a release moves the in-OS toolchain ([COMMAND-REFERENCE.md](COMMAND-REFERENCE.md)).
 
-Whether a release also publishes `embraos.iso` (the installer medium, about 560 MB per architecture and engine) beside the four manifests is an open decision; until it is taken the ISO is a build output only.
+Whether a release also publishes `embraos.iso` (the installer medium, about 900 MB per architecture and engine with the firmware) beside the four manifests is an open decision; until it is taken the ISO is a build output only.
 
 From the boot menu, Update embraOS boots the active slot with `embra.mode=update`: embrad brings the network up and runs the updater on both consoles (`Apply … to slot b? [y/N]`, answered on the serial line or at the display's keyboard), then reboots into the staged slot, or back to the menu with the reason.

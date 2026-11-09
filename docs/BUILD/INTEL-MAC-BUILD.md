@@ -290,7 +290,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > embra-guardian-v1. Needs `xz` + `sha256sum` on PATH — `brew install xz
 > coreutils` + the gnubin PATH from step 1 satisfies both. First build needs
 > network for this. The toolchain is the largest item in the image: about
-> 320 MiB of a root filesystem of about 445 MiB, as compressed in the SquashFS
+> 320 MiB of a root filesystem of about 813 MiB, as compressed in the SquashFS (the firmware for bare metal is about 270 MiB of that and the display console's stack about 90 MiB)
 > (measured on the x86_64 Linux build, 2026-11-08).
 > Override the pin with `RUST_TOOLCHAIN_VERSION=...`. An image with a different
 > pin leaves existing Guardian tools unloaded until the operator runs
