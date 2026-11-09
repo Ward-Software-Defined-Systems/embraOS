@@ -140,6 +140,10 @@ submenu "Diagnostics" --id diagnostics {
         shift
         boot_slot "$slot_active" "$active_dev" "embra.tui=1 $*"
     }
+    menuentry "Boot the active slot without the display console (embra.kiosk=0)" {
+        shift
+        boot_slot "$slot_active" "$active_dev" "embra.kiosk=0 $*"
+    }
     menuentry "Boot the active slot with debug logging (embra.loglevel=debug)" {
         shift
         boot_slot "$slot_active" "$active_dev" "embra.loglevel=debug $*"
@@ -195,6 +199,8 @@ submenu "Diagnostics" --id diagnostics {
         echo "  embra.loglevel=<spec>       the brain's log filter, e.g. info,kg::traversal=debug"
         echo "  embra.dbverbose=1           WardSONDB per-request log lines"
         echo "  embra.graphics=<mode>       serial image protocol: halfblocks|sixel|kitty|iterm2|auto|off"
+        echo "  embra.kiosk=0               the display stays a boot console (no web console on it)"
+        echo "  embra.kbd=<layout>          the display console's keyboard layout (us)"
         echo "  embra.mode=update|backup|restore   a maintenance boot instead of the services"
         echo "Press any key to return"
         sleep --interruptible 60

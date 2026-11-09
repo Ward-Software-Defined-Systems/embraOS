@@ -99,10 +99,6 @@ BR2_PACKAGE_OPENSSH=y
 BR2_PACKAGE_OPENSSH_CLIENT=y
 # BR2_PACKAGE_OPENSSH_SERVER is not set
 
-# embraOS packages
-BR2_PACKAGE_EMBRAD=y
-BR2_PACKAGE_EMBRA_APID=y
-BR2_PACKAGE_EMBRA_TRUSTD=y
 # The installer's tools (embra-update install, the image's own partitioning
 # and filesystems on a local disk): sgdisk writes the GPT, mke2fs makes STATE
 # and DATA, mkfs.fat the ESP, resize2fs grows DATA to the disk. The same
@@ -117,6 +113,10 @@ BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
 BR2_PACKAGE_DOSFSTOOLS=y
 BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
 
+# embraOS packages
+BR2_PACKAGE_EMBRAD=y
+BR2_PACKAGE_EMBRA_APID=y
+BR2_PACKAGE_EMBRA_TRUSTD=y
 BR2_PACKAGE_EMBRA_BRAIN=y
 BR2_PACKAGE_EMBRA_CONSOLE=y
 BR2_PACKAGE_EMBRA_WEB=y

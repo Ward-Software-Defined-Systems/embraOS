@@ -983,6 +983,10 @@ pub fn App() -> impl IntoView {
                                 on:click=move |_| {
                                     term::takeover();
                                     takeover_open.set(false);
+                                    // The dialog's button held the focus; the
+                                    // keyboard goes back to the terminal (on the
+                                    // display console nothing else would click it).
+                                    term::focus();
                                 }>"Take control"</button>
                         </div>
                     </div>

@@ -222,10 +222,35 @@ struct Viz {
     last_retrieval: Option<(Retrieval, f64)>,
     reduced_motion: bool,
     last_frame: f64,
+    /// A frame is owed: the feed or the socket changed since the last draw
+    /// (the display console draws nothing while idle and unchanged).
+    dirty: bool,
+}
+
+/// The kind of a feed message, for the frame bookkeeping in `apply`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MsgKind {
+    Snapshot,
+    Tick,
+    Offline,
+}
+
+impl MsgKind {
+    fn of(msg: &ActivityMsg) -> Self {
+        match msg {
+            ActivityMsg::Snapshot(_) => Self::Snapshot,
+            ActivityMsg::Tick(_) => Self::Tick,
+            ActivityMsg::Offline => Self::Offline,
+        }
+    }
 }
 
 impl Viz {
     fn apply(&mut self, msg: ActivityMsg, now: f64) {
+        let msg_kind = MsgKind::of(&msg);
+        if !matches!(msg_kind, MsgKind::Tick) {
+            self.dirty = true;
+        }
         match msg {
             ActivityMsg::Snapshot(s) => {
                 self.online = true;
@@ -240,6 +265,18 @@ impl Viz {
                 self.snapshot = Some(s);
             }
             ActivityMsg::Tick(t) => {
+                // A tick of housekeeping reads alone (the brain's own
+                // polls, about one a second while idle) owes the display
+                // console no frame; anything the operator would notice does.
+                let worth_a_frame = t.in_turn != self.in_turn
+                    || !self.online
+                    || t.text_chars > 0
+                    || t.reasoning_chars > 0
+                    || t.model_calls > 0
+                    || !t.tools.is_empty()
+                    || !t.retrievals.is_empty()
+                    || t.db.iter().any(|d| !matches!(d.verb.as_str(), "read" | "query"));
+                self.dirty = self.dirty && !matches!(msg_kind, MsgKind::Tick) || worth_a_frame;
                 self.online = true;
                 self.in_turn = t.in_turn;
                 if !t.session.is_empty() {
@@ -331,6 +368,23 @@ impl Viz {
             let excess = self.particles.len() - MAX_PARTICLES;
             self.particles.drain(0..excess);
         }
+    }
+
+    /// Something is moving, fading or in a turn: a frame changes the picture.
+    /// False on an idle, unchanged strip, which the display console then
+    /// leaves alone (every frame there is a software composite of the whole
+    /// screen).
+    fn animating(&self) -> bool {
+        const FLOOR: f64 = 0.01;
+        self.dirty
+            || self.in_turn
+            || self.tool_running.is_some()
+            || !self.particles.is_empty()
+            || !self.chips.is_empty()
+            || self.model_pulse > FLOOR
+            || self.link_model > FLOOR
+            || self.link_graph > FLOOR
+            || self.twinkle.iter().any(|t| *t > FLOOR)
     }
 
     /// Advance everything that moves or fades by `dt` seconds.
@@ -697,7 +751,11 @@ fn start_ws(state: Rc<RefCell<Viz>>, aria: RwSignal<String>, running: RwSignal<O
         let mut backoff_ms: u32 = 1000;
         loop {
             if let Ok(ws) = WebSocket::open(&activity_ws_url()) {
-                state.borrow_mut().connected = true;
+                {
+                    let mut v = state.borrow_mut();
+                    v.connected = true;
+                    v.dirty = true;
+                }
                 let (_sink, mut stream) = ws.split();
                 let mut delivered = false;
                 while let Some(item) = stream.next().await {
@@ -730,6 +788,7 @@ fn start_ws(state: Rc<RefCell<Viz>>, aria: RwSignal<String>, running: RwSignal<O
                 v.connected = false;
                 v.online = false;
                 v.tool_running = None;
+                v.dirty = true;
             }
             if running.get_untracked().is_some() {
                 running.set(None);
@@ -757,12 +816,30 @@ fn describe(v: &Viz) -> String {
     )
 }
 
+/// On the display console every frame is a software composite of the whole
+/// screen (WPE on llvmpipe, copied to the display by cog): the strip's
+/// 60 Hz animation alone kept two cores busy on an idle machine. There the
+/// strip redraws a few times a second: faster during a turn, slowly idle.
+const KIOSK_FRAME_MS_BUSY: i32 = 100;
+const KIOSK_FRAME_MS_IDLE: i32 = 500;
+
+/// The display console: `?kiosk=1` in the page's query (the same flag
+/// `pick_mode` reads; the body class is set by the same code path).
+fn kiosk_display() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .is_some_and(|q| q.split(['?', '&']).any(|kv| kv == "kiosk=1"))
+}
+
 /// The render loop. The closure holds itself through `RafClosure` and lives
-/// for the app's lifetime, like the terminal's callbacks in `term.rs`.
+/// for the app's lifetime, like the terminal's callbacks in `term.rs`. A
+/// browser's frames follow `requestAnimationFrame`; the display console's
+/// come from a timer (`KIOSK_FRAME_MS_*`) and then one animation frame.
 fn start_raf(canvas: HtmlCanvasElement, state: Rc<RefCell<Viz>>) {
     let Some(window) = web_sys::window() else {
         return;
     };
+    let kiosk = kiosk_display();
     let Some(ctx) = canvas
         .get_context("2d")
         .ok()
@@ -776,24 +853,39 @@ fn start_raf(canvas: HtmlCanvasElement, state: Rc<RefCell<Viz>>) {
     let again = window.clone();
     *kick.borrow_mut() = Some(Closure::new(move |_: f64| {
         let now = now_ms();
-        {
-            let mut v = state.borrow_mut();
-            let dt = if v.last_frame > 0.0 { ((now - v.last_frame) / 1000.0).min(0.25) } else { 0.0 };
-            v.last_frame = now;
-            v.step(now, dt);
+        // The display console skips the frame of an idle, unchanged strip
+        // and checks again later; a browser always draws.
+        let skip = kiosk && !state.borrow().animating();
+        if !skip {
+            {
+                let mut v = state.borrow_mut();
+                let dt = if v.last_frame > 0.0 { ((now - v.last_frame) / 1000.0).min(0.25) } else { 0.0 };
+                v.last_frame = now;
+                v.step(now, dt);
+                v.dirty = false;
+            }
+            let rect = canvas.get_bounding_client_rect();
+            let (w, h) = (rect.width(), rect.height());
+            let dpr = again.device_pixel_ratio().max(1.0);
+            let (pw, ph) = ((w * dpr).round() as u32, (h * dpr).round() as u32);
+            if canvas.width() != pw || canvas.height() != ph {
+                canvas.set_width(pw);
+                canvas.set_height(ph);
+            }
+            let _ = ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
+            draw(&ctx, w, h, &state.borrow(), now);
         }
-        let rect = canvas.get_bounding_client_rect();
-        let (w, h) = (rect.width(), rect.height());
-        let dpr = again.device_pixel_ratio().max(1.0);
-        let (pw, ph) = ((w * dpr).round() as u32, (h * dpr).round() as u32);
-        if canvas.width() != pw || canvas.height() != ph {
-            canvas.set_width(pw);
-            canvas.set_height(ph);
-        }
-        let _ = ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
-        draw(&ctx, w, h, &state.borrow(), now);
         if let Some(cb) = holder.borrow().as_ref() {
-            let _ = again.request_animation_frame(cb.as_ref().unchecked_ref());
+            if kiosk {
+                let busy = {
+                    let v = state.borrow();
+                    v.in_turn || v.tool_running.is_some()
+                };
+                let wait = if busy { KIOSK_FRAME_MS_BUSY } else { KIOSK_FRAME_MS_IDLE };
+                let _ = again.set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), wait);
+            } else {
+                let _ = again.request_animation_frame(cb.as_ref().unchecked_ref());
+            }
         }
     }));
     if let Some(cb) = kick.borrow().as_ref() {

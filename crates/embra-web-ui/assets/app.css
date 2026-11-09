@@ -980,3 +980,8 @@ body.is-observer .term-wrap {
 }
 .lightbox-img { max-width: 100vw; max-height: 88dvh; object-fit: contain; }
 .lightbox-cap { color: #ddd; font-size: 13px; padding: 0 12px; text-align: center; }
+
+/* The display console (cog on the machine's own display, `<body class="kiosk">`):
+   the page is the whole screen and never leaves it, so the switch to the mobile
+   chat view (a reload into another shell) is not offered there. */
+body.kiosk .mobile-toggle { display: none; }

@@ -160,6 +160,9 @@
       }));
     } catch (e) { console.warn("embra-web: image addon unavailable", e); }
     term.open(document.getElementById(elId));
+    // On the display console nobody clicks first: the terminal takes the
+    // keyboard as soon as it is open (a remote browser focuses on its own).
+    if (kiosk) setTimeout(() => { try { term.focus(); } catch (e) {} }, 0);
     // Grid-locked glyph rendering. xterm's default DOM renderer places
     // glyphs by their natural font advance, so on long/wrapped rows the
     // characters drift off the integer cell grid and visually bunch/
