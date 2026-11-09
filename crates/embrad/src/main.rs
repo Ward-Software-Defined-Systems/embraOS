@@ -82,7 +82,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         modes::Decision::Maintenance(m) => {
-            modes::run_maintenance(m);
+            modes::run_maintenance(m, cmdline.install_disk());
             if pid == 1 {
                 reboot_system();
             }

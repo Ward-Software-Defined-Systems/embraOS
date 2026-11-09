@@ -123,6 +123,16 @@ impl GrubEnv {
         GrubEnv::parse(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 
+    /// A new environment block: the file is created, or replaced whole, with
+    /// the 1024 bytes (the installer's grubenv on a fresh ESP; `write_file`
+    /// refuses a file that is not a block already).
+    pub fn write_new(&self, path: &Path) -> io::Result<()> {
+        let block = self.to_block().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let mut f = OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+        f.write_all(&block)?;
+        f.sync_all()
+    }
+
     /// Rewrite the block in place: the file must exist and be 1024 bytes
     /// already (never truncated, never created here), then fsync.
     pub fn write_file(&self, path: &Path) -> io::Result<()> {
@@ -144,6 +154,24 @@ impl GrubEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_block_is_created_whole_and_rereads() {
+        let dir = std::env::temp_dir().join(format!("embra-boot-grubenv-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("grubenv");
+        let mut env = GrubEnv::new();
+        env.set("slot_active", "a").unwrap();
+        env.set("menu_timeout", "3").unwrap();
+        env.write_new(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), BLOCK_LEN as u64);
+        let back = GrubEnv::read_file(&path).unwrap();
+        assert_eq!(back.get("slot_active"), Some("a"));
+        assert_eq!(back.get("menu_timeout"), Some("3"));
+        GrubEnv::new().write_new(&path).unwrap();
+        assert_eq!(GrubEnv::read_file(&path).unwrap().get("slot_active"), None, "written again whole: no stale tail");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_fresh_block_is_the_header_and_hash_padding_to_1024_bytes() {

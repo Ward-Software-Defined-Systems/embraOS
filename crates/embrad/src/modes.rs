@@ -131,14 +131,31 @@ fn say(line: &str) {
     crate::console::emit(&format!("[embrad] {line}"));
 }
 
+/// The medium embra-init left mounted for the installer (its install mode
+/// moves it there before the switch root).
+pub const INSTALL_MEDIA: &str = "/run/embra/media";
+
+/// The installer's arguments: the medium, the consoles, and the target disk
+/// with `--yes` when the kernel line names one (`embra.install=<disk>`,
+/// run-qemu's unattended form); otherwise the installer asks.
+pub fn install_args(install_disk: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = ["install", "--console", "--media", INSTALL_MEDIA].iter().map(|s| s.to_string()).collect();
+    if let Some(disk) = install_disk {
+        args.extend(["--disk".to_string(), disk.to_string(), "--yes".to_string()]);
+    }
+    args
+}
+
 /// A menu entry's job. Every exit path reboots (the caller reboots): the
 /// menu is where the operator returns.
-pub fn run_maintenance(mode: BootMode) {
+pub fn run_maintenance(mode: BootMode, install_disk: Option<&str>) {
     say(&format!("maintenance boot: {}", mode.name()));
+    let install = install_args(install_disk);
     let ran = match mode {
         BootMode::Update => run_updater(&["apply", "--console"]),
         BootMode::Backup => run_updater(&["snapshot", "--label", "manual", "--taken-by", "manual", "--console"]),
         BootMode::Restore => run_updater(&["restore", "--console"]),
+        BootMode::Install => run_updater(&install.iter().map(String::as_str).collect::<Vec<_>>()),
         BootMode::Normal => return,
     };
     match ran.code {
@@ -222,6 +239,7 @@ mod tests {
     fn a_menu_entry_on_the_cmdline_wins_over_the_marker() {
         let snap = Some(Scheduled::Snapshot { label: "nightly".into() });
         assert_eq!(resolve(BootMode::Update, snap.clone()), Decision::Maintenance(BootMode::Update));
+        assert_eq!(resolve(BootMode::Install, snap.clone()), Decision::Maintenance(BootMode::Install), "an install boot is a maintenance boot: the marker waits");
         assert_eq!(resolve(BootMode::Restore, None), Decision::Maintenance(BootMode::Restore));
         assert_eq!(resolve(BootMode::Normal, snap), Decision::SnapshotThenServices { label: "nightly".into() });
         assert_eq!(resolve(BootMode::Normal, Some(Scheduled::Restore { name: "x".into() })), Decision::RestoreThenReboot { name: "x".into() });
@@ -247,5 +265,16 @@ mod tests {
         assert_eq!(parse_marker("mode=restore\n"), None, "a restore needs a name");
         assert_eq!(parse_marker("mode=dance\n"), None);
         assert_eq!(parse_marker(""), None);
+    }
+}
+
+#[cfg(test)]
+mod install_args_tests {
+    use super::*;
+
+    #[test]
+    fn an_install_boot_runs_the_installer_on_the_media_and_a_disk_knob_makes_it_unattended() {
+        assert_eq!(install_args(None), ["install", "--console", "--media", "/run/embra/media"]);
+        assert_eq!(install_args(Some("vda")), ["install", "--console", "--media", "/run/embra/media", "--disk", "vda", "--yes"]);
     }
 }

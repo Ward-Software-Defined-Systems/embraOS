@@ -25,9 +25,15 @@ pub const KIOSK_KEY: &str = "embra.kiosk";
 pub const KEYBOARD_KEY: &str = "embra.kbd";
 /// The display console's device scale, 1 or 2.
 pub const KIOSK_SCALE_KEY: &str = "embra.kioskscale";
+/// The installation medium, instead of the scan (`embra.media=/dev/sr0`).
+pub const MEDIA_KEY: &str = "embra.media";
+/// The installer's target disk, unattended (`embra.install=vda`).
+pub const INSTALL_KEY: &str = "embra.install";
 
 /// What embrad runs: the services, or one maintenance job from the boot
-/// menu (`embra.mode=update|backup|restore`), then a reboot.
+/// menu (`embra.mode=update|backup|restore`), or the installer from the
+/// installation medium (`embra.mode=install`: embra-init boots the rootfs
+/// the medium carries), then a reboot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BootMode {
     #[default]
@@ -35,6 +41,7 @@ pub enum BootMode {
     Update,
     Backup,
     Restore,
+    Install,
 }
 
 impl BootMode {
@@ -44,6 +51,7 @@ impl BootMode {
             "update" => Some(BootMode::Update),
             "backup" => Some(BootMode::Backup),
             "restore" => Some(BootMode::Restore),
+            "install" => Some(BootMode::Install),
             _ => None,
         }
     }
@@ -54,6 +62,7 @@ impl BootMode {
             BootMode::Update => "update",
             BootMode::Backup => "backup",
             BootMode::Restore => "restore",
+            BootMode::Install => "install",
         }
     }
 }
@@ -205,6 +214,22 @@ impl Cmdline {
     }
 }
 
+impl Cmdline {
+    /// `embra.media=<device>`, the installation medium, instead of the scan
+    /// of every block device; the last non-empty value.
+    pub fn media(&self) -> Option<&str> {
+        self.values(MEDIA_KEY).filter(|v| !v.is_empty()).last()
+    }
+
+    /// `embra.install=<disk>`, the installer's target, unattended: a bare
+    /// device name (`vda`, `sda`, `nvme0n1`); anything else is ignored.
+    pub fn install_disk(&self) -> Option<&str> {
+        self.values(INSTALL_KEY)
+            .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+            .last()
+    }
+}
+
 /// Whether the display console runs: under the web console, on a machine
 /// with a display (`/dev/dri/card*`), unless `embra.kiosk=0`. `embra.kiosk=1`
 /// conjures no display, and the serial TUI (`embra.tui=1`) never has it.
@@ -293,5 +318,28 @@ mod display_console_tests {
         assert_eq!(c.kiosk_scale(), Some(2));
         assert_eq!(Cmdline::parse("quiet").keyboard_layout(), None);
         assert_eq!(Cmdline::parse("embra.kioskscale=4").kiosk_scale(), None);
+    }
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[test]
+    fn install_mode_is_a_boot_mode_and_rescue_is_still_unknown() {
+        assert_eq!(Cmdline::parse("embra.mode=install").mode(), Ok(BootMode::Install));
+        assert_eq!(BootMode::Install.name(), "install");
+        assert_eq!(BootMode::parse("install"), Some(BootMode::Install));
+        assert!(matches!(Cmdline::parse("embra.mode=rescue").mode(), Err(CmdlineError::UnknownMode(_))));
+    }
+
+    #[test]
+    fn the_medium_and_the_unattended_disk_come_from_their_knobs() {
+        let c = Cmdline::parse("embra.mode=install embra.media=/dev/sr0 embra.install=sda embra.install=vda");
+        assert_eq!(c.media(), Some("/dev/sr0"));
+        assert_eq!(c.install_disk(), Some("vda"), "the last wins");
+        assert_eq!(Cmdline::parse("embra.install=/dev/sda").install_disk(), None, "a bare name only");
+        assert_eq!(Cmdline::parse("embra.install=sd;rm").install_disk(), None);
+        assert_eq!(Cmdline::parse("quiet").media(), None);
     }
 }

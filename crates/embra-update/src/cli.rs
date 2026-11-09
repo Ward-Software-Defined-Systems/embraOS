@@ -10,7 +10,8 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
   check [--source <url>] [--tag <v…>]                            the release at the source against this one
   apply [--yes] [--console] [--allow-downgrade] [--source <url>] [--tag <v…>]   write the release into the inactive slot and stage it
   status                                                         the booted, active and pending slots and what each holds
-  rollback                                                       make the other slot the default again";
+  rollback                                                       make the other slot the default again
+  install --media <dir> [--disk <name>] [--yes] [--console] [--force]   write embraOS from the installation medium to a local disk";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -22,6 +23,7 @@ pub enum Command {
     Apply { source: Option<String>, tag: Option<String>, yes: bool, console: bool, allow_downgrade: bool },
     Status,
     Rollback,
+    Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool },
 }
 
 impl Command {
@@ -30,7 +32,10 @@ impl Command {
     pub fn console(&self) -> bool {
         matches!(
             self,
-            Command::Snapshot { console: true, .. } | Command::Restore { console: true, .. } | Command::Apply { console: true, .. }
+            Command::Snapshot { console: true, .. }
+                | Command::Restore { console: true, .. }
+                | Command::Apply { console: true, .. }
+                | Command::Install { console: true, .. }
         )
     }
 }
@@ -68,6 +73,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut source: Option<String> = None;
     let mut tag: Option<String> = None;
     let mut allow_downgrade = false;
+    let mut media: Option<String> = None;
+    let mut disk: Option<String> = None;
     let mut i = 0;
     while i < rest.len() {
         let a = rest[i].as_str();
@@ -86,6 +93,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--source" => source = Some(value("--source")?),
             "--tag" => tag = Some(value("--tag")?),
             "--allow-downgrade" => allow_downgrade = true,
+            "--media" => media = Some(value("--media")?),
+            "--disk" => disk = Some(value("--disk")?),
             s if s.starts_with("--") => return Err(format!("unknown flag {s}")),
             s => positionals.push(s.to_string()),
         }
@@ -130,6 +139,18 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "apply" => Ok(Command::Apply { source, tag, yes, console, allow_downgrade }),
         "status" => Ok(Command::Status),
         "rollback" => Ok(Command::Rollback),
+        "install" => {
+            let media = media.ok_or_else(|| "install needs --media <dir>, the mounted installation medium".to_string())?;
+            if let Some(d) = &disk
+                && (d.is_empty() || !d.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+            {
+                return Err(format!("not a disk name: {d:?} (a bare device name such as sda or nvme0n1)"));
+            }
+            if !positionals.is_empty() {
+                return Err(format!("install takes no positional: {}", positionals.join(" ")));
+            }
+            Ok(Command::Install { media, disk, yes, console, force })
+        }
         other => Err(format!("unknown command {other:?}")),
     }
 }
@@ -160,6 +181,14 @@ mod tests {
         assert_eq!(p("apply --yes --allow-downgrade"), Ok(Command::Apply { source: None, tag: None, yes: true, console: false, allow_downgrade: true }));
         assert_eq!(p("status"), Ok(Command::Status));
         assert!(p("snapshot --console").unwrap().console() && p("apply --console").unwrap().console() && !p("status").unwrap().console());
+        assert_eq!(
+            p("install --media /run/embra/media --disk vda --yes --console"),
+            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: true, force: false })
+        );
+        assert!(!p("install --media /run/embra/media").unwrap().console());
+        assert!(p("install").unwrap_err().contains("--media"));
+        assert!(p("install --media /m --disk /dev/sda").unwrap_err().contains("not a disk name"));
+        assert!(p("install --media /m sda").unwrap_err().contains("no positional"));
         assert_eq!(p("rollback"), Ok(Command::Rollback));
         assert!(p("check --source").unwrap_err().contains("--source needs a value"));
         assert!(p("snapshot --label").unwrap_err().contains("--label needs a value"));

@@ -52,6 +52,14 @@ impl Operator {
         let _ = self.flush();
     }
 
+    /// `ask` with a time limit on the boot consoles (stdio waits).
+    pub fn ask_timeout(&mut self, prompt: &str, timeout: std::time::Duration) -> Option<String> {
+        match self {
+            Operator::Boot(console) => console.prompt_line_timeout(prompt, Some(timeout)).ok().flatten(),
+            _ => self.ask(prompt),
+        }
+    }
+
     /// A prompt and the line that answers it, trimmed; `None` when nobody can.
     pub fn ask(&mut self, prompt: &str) -> Option<String> {
         match self {

@@ -46,6 +46,8 @@ fn main() {
         eprintln!("[embra-init]   5. Mount ephemeral tmpfs → /mnt/root/embra/ephemeral");
         eprintln!("[embra-init]   6. Switch root to /mnt/root (move the mount, chroot; pivot_root fails from an initramfs)");
         eprintln!("[embra-init]   7. exec /sbin/embrad");
+        eprintln!("[embra-init] With embra.mode=install: the installation medium is found by its manifest, the rootfs it");
+        eprintln!("[embra-init]   carries is the root (a loop device), STATE and DATA are tmpfs, the medium stays at /run/embra/media");
         std::process::exit(1);
     }
 }
@@ -78,14 +80,30 @@ fn early_mounts() -> Result<(), String> {
     Ok(())
 }
 
+/// Where the root to be is assembled before the switch.
+#[cfg(target_os = "linux")]
+const NEWROOT: &str = "/mnt/root";
+
+/// STATE and DATA hold files, never programs: `nosuid,nodev,noexec` (#6,
+/// #29). The Guardian's build writes under DATA and executes nothing there
+/// (rustc and rust-lld run from the rootfs), wasmtime runs a tool from
+/// memory, and git runs no hook (the hooks path is pinned to an empty
+/// directory under STATE).
+#[cfg(target_os = "linux")]
+const DATA_FLAGS: nix::mount::MsFlags = nix::mount::MsFlags::MS_NOSUID.union(nix::mount::MsFlags::MS_NODEV).union(nix::mount::MsFlags::MS_NOEXEC);
+
 #[cfg(target_os = "linux")]
 fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
-    use embra_boot::{Cmdline, Slot, slot};
+    use embra_boot::{BootMode, Cmdline, Slot, slot};
     use nix::mount::{mount, MsFlags};
-    use nix::unistd::{chdir, execv};
-    use std::ffi::CString;
 
-    const NEWROOT: &str = "/mnt/root";
+    let cmdline = Cmdline::read();
+    // The installer's boot: the rootfs the medium carries, STATE and DATA
+    // on tmpfs, the medium kept for the installer. An unknown mode value is
+    // embrad's to report; a disk boot goes on below.
+    if cmdline.mode().ok() == Some(BootMode::Install) {
+        return install_boot(console, &cmdline);
+    }
 
     // Step 2: Find and mount the SquashFS rootfs. Partitions are found by
     // their GPT names (embra-boot reads the kernel's uevents, no udev): the
@@ -94,7 +112,6 @@ fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
     // path of run-qemu.sh, a Phase 1 disk) tries slot A and then the Phase 1
     // name `rootfs`; /dev/vda2 is the last resort. A kernel from one slot
     // never gets the rootfs of another: an invalid slot value is fatal.
-    let cmdline = Cmdline::read();
     let booted = cmdline.slot()?;
     let rootfs_names: Vec<&str> = match booted {
         Some(s) => vec![s.partition_name()],
@@ -122,13 +139,7 @@ fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
     // Step 3: Mount STATE partition
     let state_path = format!("{}/embra/state", NEWROOT);
     std::fs::create_dir_all(&state_path)?;
-
-    // STATE and DATA hold files, never programs: `nosuid,nodev,noexec`
-    // (#6, #29). The Guardian's build writes under DATA and executes
-    // nothing there (rustc and rust-lld run from the rootfs), wasmtime
-    // runs a tool from memory, and git runs no hook (the hooks path is
-    // pinned to an empty directory under STATE).
-    let data_flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
+    let data_flags = DATA_FLAGS;
 
     let state_dev = resolve_partition(console, &[slot::STATE_PARTITION], "/dev/vda3")?;
     say!(console, "Mounting STATE partition from {} (nosuid,nodev,noexec)", state_dev.display());
@@ -153,6 +164,75 @@ fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
         data_flags,
         None::<&str>,
     )?;
+
+    switch_and_exec(console)
+}
+
+/// The installer's boot (`embra.mode=install`): the installation medium is
+/// found by trying every block device as ISO 9660 until one carries
+/// /embraos/install.manifest (a USB stick enumerates seconds after the
+/// kernel starts, so up to 30 s; `embra.media=<device>` names one), the
+/// rootfs squashfs it carries is attached to a loop device and mounted as
+/// the root, STATE and DATA are tmpfs (nothing of this boot persists), and
+/// the medium moves under the new root at /run/embra/media, where embrad's
+/// install mode hands it to the installer.
+#[cfg(target_os = "linux")]
+fn install_boot(console: &mut BootConsole, cmdline: &embra_boot::Cmdline) -> Result<(), Box<dyn std::error::Error>> {
+    use embra_boot::{loopdev, media, partitions};
+    use nix::mount::{mount, MsFlags};
+    use std::path::Path;
+    use std::time::Duration;
+
+    const MEDIA: &str = "/media";
+    const WAIT: Duration = Duration::from_secs(30);
+
+    match cmdline.media() {
+        Some(dev) => say!(console, "Installer boot: looking for the installation medium on {dev}..."),
+        None => say!(console, "Installer boot: looking for the installation medium (every block device, up to {} s)...", WAIT.as_secs()),
+    }
+    let found = {
+        let mut say_line = |l: &str| say!(console, "{l}");
+        media::probe(Path::new(partitions::SYS_CLASS_BLOCK), Path::new(partitions::DEV), Path::new(MEDIA), WAIT, cmdline.media(), &mut say_line)
+    }
+    .ok_or_else(|| format!("no installation medium: no block device carries /{} within {} s", media::MANIFEST_RELATIVE, WAIT.as_secs()))?;
+    let m = &found.manifest;
+    say!(console, "Installation medium: {} (embraOS {} {}, {} {})", found.device.display(), m.version, m.build_id, m.arch, m.engine);
+
+    // The medium's rootfs, on a loop device, as the root.
+    let squash = Path::new(MEDIA).join(&m.rootfs);
+    let loop_dev = loopdev::attach_read_only(&squash).map_err(|e| format!("loop device over {}: {e}", squash.display()))?;
+    std::fs::create_dir_all(NEWROOT)?;
+    say!(console, "Mounting the medium's rootfs ({}) from {}", m.rootfs, loop_dev.display());
+    mount(Some(loop_dev.as_path()), NEWROOT, Some("squashfs"), MsFlags::MS_RDONLY, None::<&str>)?;
+
+    // STATE and DATA: tmpfs, the flags of a disk boot.
+    for (sub, size) in [("state", "size=64M"), ("data", "size=256M")] {
+        let path = format!("{NEWROOT}/embra/{sub}");
+        std::fs::create_dir_all(&path)?;
+        mount(Some("tmpfs"), path.as_str(), Some("tmpfs"), DATA_FLAGS, Some(size))?;
+    }
+    say!(console, "STATE and DATA are tmpfs for this boot: nothing of it persists");
+
+    // The medium moves under the new root; embrad's own /run mount is
+    // skipped when /run is mounted already, so it survives.
+    let run = format!("{NEWROOT}/run");
+    std::fs::create_dir_all(&run)?;
+    mount(Some("tmpfs"), run.as_str(), Some("tmpfs"), MsFlags::MS_NOSUID | MsFlags::MS_NODEV, None::<&str>)?;
+    let media_in_root = format!("{NEWROOT}/run/embra/media");
+    std::fs::create_dir_all(&media_in_root)?;
+    mount(Some(MEDIA), media_in_root.as_str(), None::<&str>, MsFlags::MS_MOVE, None::<&str>)?;
+    say!(console, "The medium stays mounted at /run/embra/media for the installer");
+
+    switch_and_exec(console)
+}
+
+/// The tail every boot shares: the ephemeral tmpfs, the pseudo-filesystems
+/// moved into the new root, the switch, embrad.
+#[cfg(target_os = "linux")]
+fn switch_and_exec(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
+    use nix::mount::{mount, MsFlags};
+    use nix::unistd::{chdir, execv};
+    use std::ffi::CString;
 
     // Step 5: Mount EPHEMERAL (tmpfs). size= is a CAP, not a reservation —
     // pages allocate only on write. 512M (was 256M, 2026-07-31) gives the
