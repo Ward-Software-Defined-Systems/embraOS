@@ -2,6 +2,12 @@
 # Base: QEMU x86_64
 
 BR2_x86_64=y
+# Patches embraOS carries on Buildroot's packages, one directory per package
+# under buildroot/patches/ (mesa3d: a NULL device name in
+# eglBindWaylandDisplayWL on a software GBM device), applied after the
+# package's own. Empty directories are fine; a patch is removed when it lands
+# upstream and the bump arrives.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_EMBRAOS_PATH)/patches"
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 
 # Kernel — the 6.18 longterm line, pinned (LINUX_KERNEL_VERSION in
@@ -100,3 +106,35 @@ BR2_PACKAGE_EMBRA_RUST_TOOLCHAIN=y
 BR2_PACKAGE_EMBRA_EMBEDDING_MODEL=y
 BR2_PACKAGE_WARDSONDB=y
 BR2_PACKAGE_EMBRA_UPDATE=y
+
+
+# The display console (Phase 2): the web console rendered on the machine's
+# display by WPE WebKit through cog's DRM platform, drawn in software (Mesa's
+# kms_swrast/llvmpipe on LLVM), input through libinput over eudev, which
+# embrad starts (no hardware database, no module loading: this image loads no
+# modules). No compositor: cog's Wayland platform needs a DRM render node,
+# and the displays this image boots on (simpledrm, bochs, hyperv_drm) have
+# none, so cage and cog's Wayland platform could never show a frame. The C++
+# toolchain is for this stack and for sgdisk; switching it on rebuilds the
+# tree once. Sandbox, multimedia and WebDriver stay off; libsoup3 gets HTTPS
+# (not selected by wpewebkit); DejaVu Sans and Sans Mono are the fonts.
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
+# BR2_PACKAGE_EUDEV_MODULE_LOADING is not set
+# BR2_PACKAGE_EUDEV_ENABLE_HWDB is not set
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_LLVM=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_XKEYBOARD_CONFIG=y
+BR2_PACKAGE_DEJAVU=y
+# BR2_PACKAGE_DEJAVU_SERIF is not set
+# BR2_PACKAGE_DEJAVU_SANS_CONDENSED is not set
+# BR2_PACKAGE_DEJAVU_SERIF_CONDENSED is not set
+BR2_PACKAGE_LIBSOUP3_SSL=y
+BR2_PACKAGE_WPEWEBKIT=y
+BR2_PACKAGE_COG=y
+BR2_PACKAGE_COG_PROGRAMS_HOME_URI=""
+# BR2_PACKAGE_COG_PLATFORM_FDO is not set
+BR2_PACKAGE_COG_PLATFORM_DRM=y

@@ -2,6 +2,13 @@
 # Base: QEMU virt (ARM64) — Apple Silicon native via HVF
 
 BR2_aarch64=y
+# Patches embraOS carries on Buildroot's packages, one directory per package
+# under buildroot/patches/ (mesa3d: a NULL device name in
+# eglBindWaylandDisplayWL on a software GBM device), applied after the
+# package's own. Empty directories are fine; a patch is removed when it lands
+# upstream and the bump arrives.
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_EMBRAOS_PATH)/patches"
+
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 
 # Kernel — the 6.18 longterm line, pinned (LINUX_KERNEL_VERSION in

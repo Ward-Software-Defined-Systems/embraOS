@@ -1,0 +1,72 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] drm: the buffer resource's user data is not the renderer's
+
+The modeset renderer stored itself in the user data of every wl_buffer
+resource it made a framebuffer for, and read it back from the resource's
+destroy listener. That slot belongs to the buffer's implementation:
+libwayland keeps the wl_shm_buffer there (wl_shm_buffer_get returns it)
+and WPEBackend-fdo its linux-dmabuf buffer. Once overwritten, the second
+export of the same buffer (the client reuses its buffers after a release)
+hands the renderer struct back as the shm buffer: a libwayland log line
+about a deferred pool resize, then a read past the end of the mapping,
+and the web view has no second frame. Keep the renderer in the renderer's
+own buffer object and leave the resource's user data alone.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+ platform/drm/cog-drm-modeset-renderer.c | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+--- a/platform/drm/cog-drm-modeset-renderer.c
++++ b/platform/drm/cog-drm-modeset-renderer.c
+@@ -75,6 +75,7 @@ struct buffer_object {
+     uint32_t            fb_id;
+     struct gbm_bo      *bo;
+     struct wl_resource *buffer_resource;
++    void               *renderer; /* the CogDrmModesetRenderer, typedef'd below */
+ 
+     struct {
+         struct wl_resource                 *resource;
+@@ -137,14 +138,12 @@ static void
+ destroy_buffer_notify(struct wl_listener *listener, void *data)
+ {
+     struct buffer_object  *buffer = wl_container_of(listener, buffer, destroy_listener);
+-    CogDrmModesetRenderer *renderer = wl_resource_get_user_data(buffer->buffer_resource);
++    CogDrmModesetRenderer *renderer = buffer->renderer;
+ 
+     if (renderer->committed_buffer == buffer)
+         renderer->committed_buffer = NULL;
+ 
+     wl_list_remove(&buffer->link);
+-
+-    wl_resource_set_user_data(buffer->buffer_resource, NULL);
+     destroy_buffer(renderer, buffer);
+ }
+ 
+@@ -216,11 +215,11 @@ drm_create_buffer_for_bo(CogDrmModesetRenderer *self,
+     wl_list_insert(&self->buffer_list, &buffer->link);
+     buffer->destroy_listener.notify = destroy_buffer_notify;
+     wl_resource_add_destroy_listener(buffer_resource, &buffer->destroy_listener);
+-    wl_resource_set_user_data(buffer_resource, self);
+ 
+     buffer->fb_id = fb_id;
+     buffer->bo = bo;
+     buffer->buffer_resource = buffer_resource;
++    buffer->renderer = self;
+ 
+     return buffer;
+ }
+@@ -271,11 +270,11 @@ drm_create_buffer_for_shm_buffer(CogDrmModesetRenderer *self,
+     wl_list_insert(&self->buffer_list, &buffer->link);
+     buffer->destroy_listener.notify = destroy_buffer_notify;
+     wl_resource_add_destroy_listener(buffer_resource, &buffer->destroy_listener);
+-    wl_resource_set_user_data(buffer_resource, self);
+ 
+     buffer->fb_id = fb_id;
+     buffer->bo = bo;
+     buffer->buffer_resource = buffer_resource;
++    buffer->renderer = self;
+ 
+     return buffer;
+ }

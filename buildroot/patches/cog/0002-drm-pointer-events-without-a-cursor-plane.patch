@@ -1,0 +1,68 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] drm: pointer events without a cursor plane
+
+The DRM platform dropped every pointer event unless it had set up a
+hardware cursor: a card with no cursor plane (simpledrm on the firmware's
+framebuffer, bochs, Hyper-V's synthetic video) had a keyboard but no
+mouse. The cursor plane only draws the arrow; the position is tracked
+here and the events go to the web view either way. Without a plane the
+arrow is the page's to draw (a kiosk page can), and the events flow.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/platform/drm/cog-platform-drm.c
++++ b/platform/drm/cog-platform-drm.c
+@@ -635,12 +635,14 @@
+     uint32_t format = choose_format(cursor.plane);
+     if (!format) {
+         g_clear_pointer(&cursor.device, kms_device_free);
++        cursor.plane = NULL;
+         return FALSE;
+     }
+ 
+     cursor.cursor = create_cursor_framebuffer(cursor.device, format);
+     if (!cursor.cursor) {
+         g_clear_pointer(&cursor.device, kms_device_free);
++        cursor.plane = NULL;
+         return FALSE;
+     }
+ 
+@@ -652,6 +654,7 @@
+     if (kms_plane_set(cursor.plane, cursor.cursor, cursor.x, cursor.y)) {
+         g_clear_pointer(&cursor.device, kms_device_free);
+         g_clear_pointer(&cursor.cursor, kms_framebuffer_free);
++        cursor.plane = NULL;
+         return FALSE;
+     }
+ 
+@@ -895,7 +898,8 @@
+     };
+ 
+     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
+-    kms_plane_set(cursor.plane, cursor.cursor, cursor.x, cursor.y);
++    if (cursor.plane)
++        kms_plane_set(cursor.plane, cursor.cursor, cursor.x, cursor.y);
+ }
+ 
+ static void
+@@ -1425,9 +1429,18 @@
+         return FALSE;
+     }
+ 
++    /* The pointer is tracked from the mode whether or not a plane draws
++     * it: a card without a cursor plane (simpledrm, bochs, hyperv) still
++     * delivers its motion and buttons to the view, and the page draws the
++     * arrow. COG_PLATFORM_DRM_CURSOR adds the hardware arrow where one is. */
++    cursor.screen_width = drm_data.width;
++    cursor.screen_height = drm_data.height;
++    cursor.x = cursor.screen_width / 2;
++    cursor.y = cursor.screen_height / 2;
++    cursor.enabled = TRUE;
+     if (g_getenv ("COG_PLATFORM_DRM_CURSOR")) {
+         if (!init_cursor ()) {
+-            g_warning ("Failed to initialize cursor");
++            g_warning ("Failed to initialize the hardware cursor; the pointer is drawn by the page");
+         }
+     }
+ 

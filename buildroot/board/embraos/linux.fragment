@@ -59,6 +59,14 @@ CONFIG_FB=y
 CONFIG_DRM_FBDEV_EMULATION=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
 CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+# The display console's pointer: VMware's vmmouse, the absolute pointer on
+# the PS/2 port ESXi presents (x86-only; dropped from the aarch64 kernel by
+# the merge with a notice), and Hyper-V's synthetic mouse, the one pointer a
+# generation 2 VM has. QEMU's USB and virtio tablets, Parallels' USB tablet
+# and bare-metal USB mice ride USB_HID, HID_GENERIC and VIRTIO_INPUT, built
+# in by the base configuration.
+CONFIG_MOUSE_PS2_VMMOUSE=y
+CONFIG_HID_HYPERV_MOUSE=y
 CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
 CONFIG_NFT_CT=y
