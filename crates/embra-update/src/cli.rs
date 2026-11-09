@@ -11,7 +11,8 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
   apply [--yes] [--console] [--allow-downgrade] [--source <url>] [--tag <v…>]   write the release into the inactive slot and stage it
   status                                                         the booted, active and pending slots and what each holds
   rollback                                                       make the other slot the default again
-  install --media <dir> [--disk <name>] [--yes] [--console] [--force]   write embraOS from the installation medium to a local disk";
+  install --media <dir> [--disk <name>] [--yes] [--console] [--force]   write embraOS from the installation medium to a local disk
+  grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -24,6 +25,7 @@ pub enum Command {
     Status,
     Rollback,
     Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool },
+    GrowData { console: bool },
 }
 
 impl Command {
@@ -36,6 +38,7 @@ impl Command {
                 | Command::Restore { console: true, .. }
                 | Command::Apply { console: true, .. }
                 | Command::Install { console: true, .. }
+                | Command::GrowData { console: true }
         )
     }
 }
@@ -139,6 +142,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "apply" => Ok(Command::Apply { source, tag, yes, console, allow_downgrade }),
         "status" => Ok(Command::Status),
         "rollback" => Ok(Command::Rollback),
+        "grow-data" => {
+            if !positionals.is_empty() {
+                return Err(format!("grow-data takes no positional: {}", positionals.join(" ")));
+            }
+            Ok(Command::GrowData { console })
+        }
         "install" => {
             let media = media.ok_or_else(|| "install needs --media <dir>, the mounted installation medium".to_string())?;
             if let Some(d) = &disk
@@ -189,6 +198,9 @@ mod tests {
         assert!(p("install").unwrap_err().contains("--media"));
         assert!(p("install --media /m --disk /dev/sda").unwrap_err().contains("not a disk name"));
         assert!(p("install --media /m sda").unwrap_err().contains("no positional"));
+        assert_eq!(p("grow-data --console"), Ok(Command::GrowData { console: true }));
+        assert!(p("grow-data --console").unwrap().console() && !p("grow-data").unwrap().console());
+        assert!(p("grow-data vda").unwrap_err().contains("no positional"));
         assert_eq!(p("rollback"), Ok(Command::Rollback));
         assert!(p("check --source").unwrap_err().contains("--source needs a value"));
         assert!(p("snapshot --label").unwrap_err().contains("--label needs a value"));

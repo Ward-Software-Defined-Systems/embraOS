@@ -146,6 +146,20 @@ pub fn install_args(install_disk: Option<&str>) -> Vec<String> {
     args
 }
 
+/// DATA takes the rest of its disk when a gibibyte or more follows it (an
+/// installed disk, a VM disk enlarged since): `embra-update grow-data` on
+/// both consoles, before the services, the database stopped. It says one
+/// line when it grew the partition and nothing otherwise; a failure is its
+/// line and a normal boot. Never a halt.
+pub fn run_grow_data() {
+    let ran = run_updater(&["grow-data", "--console"]);
+    match ran.code {
+        Some(0) => {}
+        Some(code) => tracing::warn!("grow-data exited with {code}: {}", ran.reason),
+        None => tracing::warn!("grow-data did not run: {}", ran.reason),
+    }
+}
+
 /// A menu entry's job. Every exit path reboots (the caller reboots): the
 /// menu is where the operator returns.
 pub fn run_maintenance(mode: BootMode, install_disk: Option<&str>) {

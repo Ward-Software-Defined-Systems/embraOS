@@ -15,6 +15,7 @@ mod cli;
 mod console;
 mod db;
 mod fetch;
+mod grow;
 mod install;
 mod manifest;
 mod paths;
@@ -166,5 +167,6 @@ fn run(cmd: Command, op: &mut console::Operator) -> anyhow::Result<Outcome> {
         Command::Status => Ok(update::status_command(op)),
         Command::Rollback => Ok(update::rollback_command(op)),
         Command::Install { media, disk, yes, console: _, force } => Ok(install::install_command(std::path::Path::new(&media), disk.as_deref(), yes, force, op)),
+        Command::GrowData { console: _ } => Ok(grow::grow_data_command(op)),
     }
 }

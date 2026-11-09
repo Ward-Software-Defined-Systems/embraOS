@@ -206,3 +206,103 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Where a partition lies on its disk, from sysfs (`sys_block` is
+/// `/sys/block`: the whole disks, each partition a directory under its
+/// disk): sectors are the kernel's 512-byte ones. `last` says no other
+/// partition of the disk starts after this one, the case a partition can
+/// grow in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Geometry {
+    pub disk: String,
+    pub partition: String,
+    pub number: u32,
+    pub start_sectors: u64,
+    pub len_sectors: u64,
+    pub disk_sectors: u64,
+    pub last: bool,
+}
+
+impl Geometry {
+    /// The sectors between this partition's end and the disk's: what a
+    /// growth to the disk's end would add (the backup GPT's 33 sectors
+    /// stay out of it).
+    pub fn free_after_sectors(&self) -> u64 {
+        self.disk_sectors.saturating_sub(self.start_sectors + self.len_sectors + 33)
+    }
+}
+
+pub fn geometry_in(sys_block: &Path, partition: &str) -> std::io::Result<Geometry> {
+    let read = |path: std::path::PathBuf| -> std::io::Result<u64> {
+        let text = std::fs::read_to_string(&path)?;
+        text.trim()
+            .parse::<u64>()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {text:?}", path.display())))
+    };
+    let disk = parent_disk_in(sys_block, partition);
+    if disk == partition {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{partition} is a whole disk, not a partition")));
+    }
+    let disk_dir = sys_block.join(&disk);
+    let part_dir = disk_dir.join(partition);
+    let start_sectors = read(part_dir.join("start"))?;
+    let len_sectors = read(part_dir.join("size"))?;
+    let number = u32::try_from(read(part_dir.join("partition"))?).unwrap_or(0);
+    let disk_sectors = read(disk_dir.join("size"))?;
+    // The siblings: the disk's other partitions, by their `partition` file.
+    let mut last = true;
+    for entry in std::fs::read_dir(&disk_dir)?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == partition || !entry.path().join("partition").exists() {
+            continue;
+        }
+        if let Ok(other_start) = read(entry.path().join("start"))
+            && other_start > start_sectors
+        {
+            last = false;
+        }
+    }
+    Ok(Geometry { disk, partition: partition.to_string(), number, start_sectors, len_sectors, disk_sectors, last })
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    fn fake(dir: &Path, disk_sectors: u64, parts: &[(&str, u32, u64, u64)]) {
+        // /sys/block/<disk>/<partition>/{start,size,partition}, as the
+        // kernel lays it out; parent_disk_in walks it.
+        let d = dir.join("vda");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("size"), disk_sectors.to_string()).unwrap();
+        for (name, number, start, len) in parts {
+            let pd = d.join(name);
+            std::fs::create_dir_all(&pd).unwrap();
+            std::fs::write(pd.join("partition"), number.to_string()).unwrap();
+            std::fs::write(pd.join("start"), start.to_string()).unwrap();
+            std::fs::write(pd.join("size"), len.to_string()).unwrap();
+        }
+    }
+
+    /// DATA last on a 40 GiB disk the installer wrote, and the same disk
+    /// enlarged to 60 GiB: the free run after it is what sysfs says.
+    #[test]
+    fn a_partitions_geometry_comes_from_sysfs_and_says_whether_it_is_last() {
+        let dir = std::env::temp_dir().join(format!("embra-geom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_start = 4_851_712u64;
+        let disk40 = 83_886_080u64; // 40 GiB
+        fake(&dir, disk40, &[("vda1", 1, 2048, 131_072), ("vda4", 4, 4_327_424, 524_288), ("vda5", 5, data_start, disk40 - 33 - data_start)]);
+        let g = geometry_in(&dir, "vda5").unwrap();
+        assert_eq!((g.disk.as_str(), g.number, g.start_sectors, g.last), ("vda", 5, data_start, true));
+        assert_eq!(g.free_after_sectors(), 0, "nothing after DATA on the disk as installed");
+        std::fs::write(dir.join("vda/size"), (125_829_120u64).to_string()).unwrap(); // 60 GiB now
+        let g = geometry_in(&dir, "vda5").unwrap();
+        assert_eq!(g.free_after_sectors(), 125_829_120 - 83_886_080, "the enlarged disk's tail");
+        let g4 = geometry_in(&dir, "vda4").unwrap();
+        assert!(!g4.last, "STATE has DATA after it");
+        assert!(geometry_in(&dir, "vda").is_err(), "a whole disk has no geometry of its own");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

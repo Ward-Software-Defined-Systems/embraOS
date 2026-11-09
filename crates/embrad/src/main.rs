@@ -90,6 +90,13 @@ fn main() -> Result<()> {
         }
     }
 
+    // Step 5.3: DATA grows to its disk's end when a gibibyte or more follows
+    // it (the installer's disk, a VM disk enlarged since), before any
+    // service touches it; nothing is said unless it grew or failed.
+    if pid == 1 {
+        modes::run_grow_data();
+    }
+
     // Step 5.5: a trial boot snapshots STATE and DATA before any service,
     // so the previous release has a consistent copy to come back to once
     // the new brain has migrated the knowledge graph. A snapshot that cannot
