@@ -8,6 +8,7 @@
 
 use anyhow::{Result, bail};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tracing::{info, warn, error};
@@ -599,6 +600,12 @@ impl Supervisor {
         }
         if svc.def.name == "embra-kiosk" {
             prepare_kiosk_dirs();
+            // The display's VT is parked while the kiosk draws: fbcon off
+            // the framebuffer, the keyboard out of the VT layer (no
+            // Ctrl+Alt+Fn, SysRq or Ctrl+Alt+Del). Given back when it stops.
+            if let Err(e) = embra_boot::vt::take_graphics() {
+                warn!("the display's VT could not be parked ({e}); the kernel console may draw over the display console");
+            }
         }
         cmd.kill_on_drop(true);
 
@@ -612,6 +619,9 @@ impl Supervisor {
         svc.child = Some(child);
         svc.pid = pid;
         svc.started_at = Some(Instant::now());
+        if svc.def.name == "embra-kiosk" {
+            KIOSK_PID.store(pid.unwrap_or(0), Ordering::Relaxed);
+        }
 
         info!("Spawned {} (pid={:?})", svc.def.name, pid);
 
@@ -770,6 +780,9 @@ impl Supervisor {
             }
             self.services[i].status = ServiceStatus::Stopped;
             self.services[i].child = None;
+            if name == "embra-kiosk" {
+                release_display();
+            }
         }
     }
 
@@ -847,6 +860,13 @@ impl Supervisor {
         if svc.restart_count >= svc.def.restart_policy.max_restarts {
             error!("{} exceeded max restarts ({})", svc.def.name, svc.def.restart_policy.max_restarts);
             svc.status = ServiceStatus::Halted;
+            if svc.def.name == "embra-kiosk" {
+                // The display gets its text console back and says why it
+                // changed; the web console is unaffected.
+                release_display();
+                embra_boot::console::BootConsole::open()
+                    .line("[embrad] the display console stopped and is not restarted; the web console stays at the URLs above");
+            }
             bail!("{} permanently failed", svc.def.name);
         }
 
@@ -1158,6 +1178,46 @@ pub fn scrub_boot_environment() {
 /// `file_read`; the operator by loop-mounting STATE.
 pub(crate) const HALT_REASON_PATH: &str = "/embra/state/halt_reason";
 
+/// The display console's pid while it runs (0 otherwise): a halt kills it
+/// and gives the display's VT back before the reason is written there.
+static KIOSK_PID: AtomicU32 = AtomicU32::new(0);
+
+/// The display console stopped: the VT's text console and keyboard are back
+/// (`embra_boot::vt`), so the display shows text again. Idempotent; a
+/// failure is logged (a machine without a VT).
+pub(crate) fn release_display() {
+    KIOSK_PID.store(0, Ordering::Relaxed);
+    if let Err(e) = embra_boot::vt::release() {
+        info!("the display's VT was not given back: {e}");
+    }
+}
+
+/// Before a halt reason goes to the display: the kiosk, if any, is killed
+/// (SIGKILL, up to half a second for it to go) and the VT released, so the
+/// text is drawn rather than hidden behind the kiosk's last frame.
+#[cfg(target_os = "linux")]
+fn clear_the_display_for_the_reason() {
+    let pid = KIOSK_PID.swap(0, Ordering::Relaxed);
+    if pid > 1 {
+        // SAFETY: a signal to the pid this process recorded when it spawned
+        // the kiosk; a stale pid is a kill(2) failure, nothing more.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            let mut status = 0;
+            // SAFETY: a non-blocking wait on the child this process owns.
+            let r = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            if r != 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = embra_boot::vt::release();
+}
+
 /// Halt the machine with `reason` written to STATE. Every fatal path of
 /// PID 1 ends here (`main.rs`: the panic hook, a fatal `run()` error, the
 /// soul gate); PID 1 never exits.
@@ -1176,6 +1236,7 @@ pub(crate) fn halt_system(reason: &str) -> ! {
     let _ = std::fs::write(HALT_REASON_PATH, reason);
     // Sync filesystems
     unsafe { libc::sync(); }
+    clear_the_display_for_the_reason();
     // After the log redirect the line above went to the log file: the
     // reason goes to both consoles by hand (during the boot phase the
     // tracing line reached them already).

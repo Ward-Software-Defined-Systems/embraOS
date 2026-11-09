@@ -18,6 +18,7 @@ pub mod media;
 pub mod partitions;
 pub mod release;
 pub mod slot;
+pub mod vt;
 pub mod state;
 pub mod status;
 
