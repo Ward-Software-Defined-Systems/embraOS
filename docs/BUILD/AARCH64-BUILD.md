@@ -32,6 +32,20 @@
 > `vmnet-bridged` with the leased URL opened from another machine, DHCP, and the
 > backup wrapper on a RocksDB image. Step 1 of the checklist below carries it.
 >
+> **2026-11-09 — the wave-6 image on Apple Silicon.** The operator's build of
+> 2026-11-09 (branch `phase2`: the display console's stack, every firmware family,
+> 2048 MiB slots) completed in Docker under OrbStack with the VM's memory at 64 GiB
+> and Buildroot's 17 jobs, in about 45 minutes; every assert passed (128 fragment
+> symbols read back, 134 of 134 firmware families, 1383 modules in 71 MB, the
+> squashfs 753 MiB of the 2048 MiB slot, the image 8514 MiB), and the image booted
+> through GRUB's menu to the banner under QEMU/HVF, the lease in 0.2 s. The one
+> kernel line of that boot, `PCI: OF: of_root node is NULL, cannot create PCI host
+> bridge node`, is the arm64 base configuration's Raspberry Pi RP1 driver selecting
+> `PCI_DYNAMIC_OF_NODES`, printed under an ACPI boot where there is no device tree:
+> expected and harmless. The same boot's `Freed the initramfs: 0 MiB` line showed
+> the probe-time firmware archive unpacking to nothing on both architectures, fixed
+> in `fb6399c`; an image built before it carries the old archive until rebuilt.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
 > exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
@@ -206,7 +220,8 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > WebKit 2.50.5 (GCC 14.3.0, `-O2 -g0`), a WebCore unified-source bundle compiles in a
 > 3 GiB process, the heaviest in 5 GiB, and the link of libWPEWebKit takes 1.1 GiB.
 > Buildroot runs WebKit's ninja at `nproc+1` jobs, 17 on a 16-core Mac, so plan about
-> 3.5 GiB of VM memory per job: 60 GiB at 17 jobs, 16 GiB at 4. Give the VM the memory
+> 3.5 GiB of VM memory per job: 60 GiB at 17 jobs, 16 GiB at 4; a 64 GiB VM completed
+> the build at 17 jobs in about 45 minutes (2026-11-09). Give the VM the memory
 > (OrbStack: `orb config set memory_mib 61440 && orb restart`; Docker Desktop:
 > Settings, Resources) or cap the jobs with `JOBS`, passed into the container with
 > `-e`: the script hands it to the make-based packages through make's jobserver and to
@@ -493,8 +508,8 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device ramfb -display cocoa` by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
-| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU) | the same stack is in the defconfig and builds for the image; **TBD** until the launcher has a display and input device and a run shows it (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack is **TBD** until one completes) |
-| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps about 1200 modules nothing loads (the dry merge's figure; `du lib/modules` at the first build is the measurement) |
+| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU) | the same stack is in the defconfig and builds for the image; **TBD** until the launcher has a display and input device and a run shows it (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
+| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps 1383 modules nothing loads, 71 MB uncompressed under `/lib/modules` (the 2026-11-09 build) |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | none (no bare metal of this architecture to install on); the installer's tools are in the image all the same |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
 | Pre-wave-6 tree | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
