@@ -69,9 +69,17 @@ workflow:
 frontend:
   stage: build
   timeout: 30m
+  variables:
+    # trunk downloads its tools (wasm-bindgen, binaryen's wasm-opt) from
+    # GitHub's release archives into its cache directory, which is the
+    # container's home unless XDG_CACHE_HOME says otherwise. Here it lands
+    # under .cache/trunk, inside the project dir, where the cache below keeps
+    # it: the download happens once per branch cache, not on every run
+    # (GitHub answered 504 to it on three runs of 2026-11-08).
+    XDG_CACHE_HOME: "$CI_PROJECT_DIR/.cache"
   cache:
     - key: "frontend-cargo-$CI_COMMIT_REF_SLUG"
-      paths: [.cargo/bin/, .cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
+      paths: [.cargo/bin/, .cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/, .cache/trunk/]
     - key:
         # the crate has its own lockfile; the workspace's says nothing about it
         files: [crates/embra-web-ui/Cargo.lock]
