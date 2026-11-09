@@ -7,7 +7,7 @@
 use crate::slot::PARTITION_NAMES;
 
 pub const ESP_MIB: u64 = 64;
-pub const SLOT_MIB: u64 = 1024;
+pub const SLOT_MIB: u64 = 2048;
 pub const STATE_MIB: u64 = 256;
 /// The image's DATA; an installed disk's DATA is the rest of the disk.
 pub const DATA_MIB: u64 = 4096;
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn the_planned_starts_follow_the_layout_and_a_partition_is_named_after_its_disk() {
-        assert_eq!(planned_starts_mib(), [1, 65, 1089, 2113, 2369]);
+        assert_eq!(planned_starts_mib(), [1, 65, 2113, 4161, 4417]);
         assert_eq!(partition_dev("sda", 1), "sda1");
         assert_eq!(partition_dev("vda", 5), "vda5");
         assert_eq!(partition_dev("nvme0n1", 2), "nvme0n1p2");

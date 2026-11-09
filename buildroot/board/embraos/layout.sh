@@ -5,7 +5,7 @@
 # and crates/embra-boot's test reads it so the names the OS looks partitions
 # up by are the names genimage writes. A size is a genimage size (K, M, G).
 EMBRAOS_ESP_SIZE="64M"
-EMBRAOS_SLOT_SIZE="1024M"      # each rootfs slot; the squashfs must fit with the margin free
+EMBRAOS_SLOT_SIZE="2048M"      # each rootfs slot; the squashfs must fit with the margin free (2048 since wave 6: the firmware)
 EMBRAOS_STATE_SIZE="256M"
 EMBRAOS_DATA_SIZE="4G"
 EMBRAOS_SLOT_MARGIN_PCT=10
