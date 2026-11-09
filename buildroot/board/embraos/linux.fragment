@@ -21,16 +21,17 @@ CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
 # Phase 2: the storage and network devices other hypervisors present (NVMe,
-# VMware's vmxnet3, pvscsi and its two LSI Logic controllers, Hyper-V's
-# synthetic storage, network, video and keyboard; the x86-only symbols are
-# dropped from the aarch64 kernel by the merge with a notice), the display
-# console (the firmware's framebuffer through sysfb and simpledrm, QEMU's
-# standard VGA through bochs, fbcon on the kernel line as console=tty0 beside
-# the serial line), and nf_tables for the packet filter to come (built,
-# unused until then).
+# VMware's vmxnet3 and its two LSI Logic controllers, Hyper-V's synthetic
+# storage, network, video and keyboard; VMware's pvscsi is x86-only and
+# lives in linux-x86_64.fragment), the display console (the firmware's
+# framebuffer through sysfb and simpledrm, QEMU's standard VGA through
+# bochs, fbcon on the kernel line as console=tty0 beside the serial line),
+# and nf_tables for the packet filter to come (built, unused until then).
+# Every line of this file merges on both architectures with nothing dropped
+# (the read-back assert in scripts/lib/image-common.sh), so a symbol names
+# the subsystems it needs built in beside it.
 CONFIG_BLK_DEV_NVME=y
 CONFIG_VMXNET3=y
-CONFIG_VMWARE_PVSCSI=y
 # VMware's LSI Logic Parallel (LSI 53C1030) and LSI Logic SAS (SAS1068)
 # controllers, ESXi's defaults for most guest types and the pick when a
 # controller list is blank: the Fusion MPT drivers mptspi and mptsas, under
@@ -44,6 +45,7 @@ CONFIG_HYPERV=y
 CONFIG_HYPERV_STORAGE=y
 CONFIG_HYPERV_NET=y
 CONFIG_HYPERV_BALLOON=y
+CONFIG_CONNECTOR=y
 CONFIG_HYPERV_UTILS=y
 CONFIG_HYPERV_KEYBOARD=y
 CONFIG_DRM_HYPERV=y
@@ -59,19 +61,116 @@ CONFIG_FB=y
 CONFIG_DRM_FBDEV_EMULATION=y
 CONFIG_FRAMEBUFFER_CONSOLE=y
 CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
-# The display console's pointer: VMware's vmmouse, the absolute pointer on
-# the PS/2 port ESXi presents (x86-only; dropped from the aarch64 kernel by
-# the merge with a notice), and Hyper-V's synthetic mouse, the one pointer a
-# generation 2 VM has. QEMU's USB and virtio tablets, Parallels' USB tablet
-# and bare-metal USB mice ride USB_HID, HID_GENERIC and VIRTIO_INPUT, built
-# in by the base configuration.
-CONFIG_MOUSE_PS2_VMMOUSE=y
+# The display console's pointers: Hyper-V's synthetic mouse (the one pointer
+# a generation 2 VM has), QEMU's virtio tablet and virtio-gpu, named because
+# the arm64 base config leaves them out. QEMU's USB tablet, Parallels' and
+# bare-metal USB mice ride USB_HID and HID_GENERIC, built in by both base
+# configurations; VMware's vmmouse is PS/2 and lives in the x86 fragment.
 CONFIG_HID_HYPERV_MOUSE=y
+CONFIG_VIRTIO_INPUT=y
+CONFIG_DRM_VIRTIO_GPU=y
+CONFIG_IPV6=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_NAT=y
+CONFIG_NETFILTER_XTABLES=y
 CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NF_TABLES_IPV6=y
 CONFIG_NFT_CT=y
-CONFIG_NFT_COUNTER=y
 CONFIG_NFT_LOG=y
 CONFIG_NFT_LIMIT=y
 CONFIG_NFT_REJECT=y
 CONFIG_NFT_NAT=y
+# The packet filter's helpers, built in rather than as the modules the x86
+# base config makes of them: this image loads no modules (the x86 rootfs
+# carries none; the read-back assert in scripts/lib/image-common.sh checks
+# every line of this file against the built configuration).
+CONFIG_NETFILTER_XT_MARK=y
+CONFIG_NETFILTER_XT_TARGET_LOG=y
+CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
+CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+CONFIG_NF_LOG_SYSLOG=y
+CONFIG_NF_LOG_ARP=y
+CONFIG_NF_LOG_IPV4=y
+CONFIG_NF_LOG_IPV6=y
+# Bare metal and the wider hypervisor fleet (Phase 2 wave 6), every driver
+# built in. The wired NICs of servers and desktops on PCIe (the e1000, e1000e,
+# r8169, tg3, sky2, 8139too and forcedeth of the base configs stay):
+CONFIG_IGB=y
+CONFIG_IGC=y
+CONFIG_IXGBE=y
+CONFIG_I40E=y
+# (the E800's driver wants the GNSS subsystem built in or absent; the arm64
+# base config builds it as a module)
+CONFIG_GNSS=y
+CONFIG_ICE=y
+CONFIG_BNX2=y
+CONFIG_BNX2X=y
+CONFIG_BNXT=y
+CONFIG_AQTION=y
+CONFIG_MLX4_CORE=y
+CONFIG_MLX4_EN=y
+CONFIG_MLX5_CORE=y
+CONFIG_MLX5_CORE_EN=y
+CONFIG_ALX=y
+CONFIG_8139CP=y
+CONFIG_QED=y
+CONFIG_QEDE=y
+CONFIG_CHELSIO_T4=y
+# USB network adapters (the dock and the dongle):
+CONFIG_USB_USBNET=y
+CONFIG_USB_RTL8152=y
+CONFIG_USB_NET_AX88179_178A=y
+CONFIG_USB_NET_AX8817X=y
+CONFIG_USB_NET_CDCETHER=y
+CONFIG_USB_NET_CDC_NCM=y
+CONFIG_USB_NET_CDC_EEM=y
+CONFIG_USB_NET_RNDIS_HOST=y
+# Storage: the RAID and SAS HBAs of servers, SD/eMMC, the remaining SATA
+# controllers, the NVMe temperature sensor, USB 3 sticks as UAS, Thunderbolt
+# and PCIe hotplug.
+CONFIG_MEGARAID_SAS=y
+CONFIG_SCSI_MPT3SAS=y
+CONFIG_SCSI_MPI3MR=y
+CONFIG_SCSI_SMARTPQI=y
+CONFIG_SCSI_HPSA=y
+CONFIG_SCSI_AACRAID=y
+CONFIG_SCSI_ARCMSR=y
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PCI=y
+CONFIG_MMC_SDHCI_ACPI=y
+CONFIG_ATA_GENERIC=y
+CONFIG_SATA_SIL24=y
+CONFIG_SATA_NV=y
+CONFIG_SATA_VIA=y
+CONFIG_SATA_SIL=y
+CONFIG_SATA_PROMISE=y
+CONFIG_NVME_HWMON=y
+CONFIG_USB_UAS=y
+CONFIG_USB4=y
+CONFIG_HOTPLUG_PCI=y
+CONFIG_HOTPLUG_PCI_PCIE=y
+# Input on laptops and touch displays: multitouch HID and the Synaptics RMI4
+# bus (HID over I2C is selected by its ACPI transport in the x86 fragment).
+CONFIG_HID_MULTITOUCH=y
+CONFIG_RMI4_CORE=y
+CONFIG_RMI4_SMB=y
+# Filesystems and the platform: UDF for optical media, EFI variables for the
+# installer's follow-ups, the DMI tables in sysfs, the TPM for the encryption
+# to come, the BMC video of servers (ASPEED, Matrox), the console fonts the
+# kernel picks from by display size (Terminus 16x32 for 4K).
+CONFIG_UDF_FS=y
+CONFIG_EFIVAR_FS=y
+CONFIG_DMI_SYSFS=y
+CONFIG_TCG_TPM=y
+CONFIG_TCG_TIS=y
+CONFIG_TCG_CRB=y
+CONFIG_DRM_AST=y
+CONFIG_DRM_MGAG200=y
+CONFIG_FONTS=y
+CONFIG_FONT_8x8=y
+CONFIG_FONT_8x16=y
+CONFIG_FONT_TER16x32=y

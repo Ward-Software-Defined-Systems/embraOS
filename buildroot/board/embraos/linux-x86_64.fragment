@@ -1,0 +1,49 @@
+# The x86_64 kernel's own fragment, merged after the shared linux.fragment
+# (BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES in embraos_x86_64_defconfig names
+# both). Every symbol here exists on x86 alone, or depends on a bus the
+# aarch64 base config does not have; the shared fragment must merge on both
+# architectures with no symbol dropped, so these stay out of it. The
+# read-back assert in scripts/lib/image-common.sh checks every line.
+
+# VMware's paravirtual SCSI controller, the disk of embraos.ova (x86-only
+# in the kernel; its LSI Logic siblings are in the shared fragment).
+CONFIG_VMWARE_PVSCSI=y
+# The display console's pointers that are PS/2: VMware's vmmouse, the absolute
+# pointer ESXi presents on the PS/2 port, and the touchpad protocols of
+# laptops (Elantech, Synaptics over SMBus).
+CONFIG_MOUSE_PS2_VMMOUSE=y
+CONFIG_MOUSE_PS2_ELANTECH=y
+CONFIG_MOUSE_PS2_SYNAPTICS_SMBUS=y
+# Intel's Volume Management Device: NVMe behind it is invisible without this
+# (the "VMD" or "RAID On" setting of many desktops and laptops).
+CONFIG_VMD=y
+# The buses laptop touchpads and touch panels hang on: HID over I2C through
+# ACPI, Intel's LPSS I2C controllers, the pin controllers that gate them,
+# and AMD's.
+CONFIG_I2C_HID_ACPI=y
+CONFIG_MFD_INTEL_LPSS_PCI=y
+CONFIG_MFD_INTEL_LPSS_ACPI=y
+CONFIG_COMMON_CLK=y
+CONFIG_I2C_DESIGNWARE_CORE=y
+CONFIG_I2C_DESIGNWARE_PLATFORM=y
+CONFIG_PINCTRL=y
+CONFIG_PINCTRL_INTEL=y
+CONFIG_PINCTRL_INTEL_PLATFORM=y
+CONFIG_PINCTRL_ALDERLAKE=y
+CONFIG_PINCTRL_TIGERLAKE=y
+CONFIG_PINCTRL_METEORLAKE=y
+CONFIG_PINCTRL_CANNONLAKE=y
+CONFIG_PINCTRL_SUNRISEPOINT=y
+CONFIG_PINCTRL_ICELAKE=y
+CONFIG_PINCTRL_JASPERLAKE=y
+CONFIG_PINCTRL_ELKHARTLAKE=y
+CONFIG_PINCTRL_GEMINILAKE=y
+CONFIG_PINCTRL_LYNXPOINT=y
+CONFIG_PINCTRL_BAYTRAIL=y
+CONFIG_PINCTRL_CHERRYVIEW=y
+CONFIG_PINCTRL_AMD=y
+# Temperatures: the CPU sensors of Intel and AMD, and the package thermal
+# driver the base config builds as a module (this image loads none).
+CONFIG_SENSORS_CORETEMP=y
+CONFIG_SENSORS_K10TEMP=y
+CONFIG_X86_PKG_TEMP_THERMAL=y
