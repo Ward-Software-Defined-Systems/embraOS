@@ -261,6 +261,18 @@ fn switch_and_exec(console: &mut BootConsole) -> Result<(), Box<dyn std::error::
     mount(Some("/sys"), new_sys.as_str(), None::<&str>, MsFlags::MS_MOVE, None::<&str>)?;
     mount(Some("/dev"), new_dev.as_str(), None::<&str>, MsFlags::MS_MOVE, None::<&str>)?;
 
+    // Step 6.5: the initramfs is freed. Its files live in RAM for the life
+    // of the boot unless somebody removes them (the classic switch_root
+    // does), and with the firmware and microcode initrds GRUB loads beside
+    // it (/lib/firmware, /kernel/x86/microcode) that is tens of MiB. Every
+    // entry of the old root goes but the new root's mount point under
+    // /mnt; the moved mount points are empty directories by now, and this
+    // binary keeps running from memory after its file is gone.
+    match free_initramfs(std::path::Path::new("/"), std::path::Path::new(NEWROOT)) {
+        Ok(bytes) => say!(console, "Freed the initramfs: {} MiB back to the system", bytes / (1024 * 1024)),
+        Err(e) => say!(console, "The initramfs was not freed ({e}); the boot continues"),
+    }
+
     // Step 7: Switch root
     // pivot_root fails with EINVAL from initramfs (rootfs). The standard
     // approach is to chdir to the new root, mount --move it to /, chroot,
@@ -281,6 +293,55 @@ fn switch_and_exec(console: &mut BootConsole) -> Result<(), Box<dyn std::error::
     Err("execv returned unexpectedly".into())
 }
 
+/// Remove everything of the initramfs under `root` except the new root's
+/// mount point (`newroot`, a path under `root`): files, links and the empty
+/// directories the moved mounts left. Returns the bytes of regular files
+/// removed. A directory that is a mount point is never entered: the only
+/// one left by now is `newroot` itself.
+fn free_initramfs(root: &std::path::Path, newroot: &std::path::Path) -> std::io::Result<u64> {
+    let keep: Vec<std::path::PathBuf> = newroot.ancestors().map(std::path::Path::to_path_buf).collect();
+    let mut freed = 0u64;
+    fn walk(dir: &std::path::Path, keep: &[std::path::PathBuf], newroot: &std::path::Path, freed: &mut u64) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path == newroot {
+                continue;
+            }
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_dir() {
+                if keep.contains(&path) {
+                    // An ancestor of the new root: descend, remove the rest.
+                    walk(&path, keep, newroot, freed)?;
+                } else {
+                    remove_tree(&path, freed)?;
+                }
+            } else {
+                *freed += meta.len();
+                std::fs::remove_file(&path)?;
+            }
+        }
+        Ok(())
+    }
+    fn remove_tree(dir: &std::path::Path, freed: &mut u64) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_dir() {
+                remove_tree(&path, freed)?;
+            } else {
+                *freed += meta.len();
+                std::fs::remove_file(&path)?;
+            }
+        }
+        std::fs::remove_dir(dir)
+    }
+    walk(root, &keep, newroot, &mut freed)?;
+    Ok(freed)
+}
+
+
 /// The partition of the first of `names` that appears within five seconds,
 /// else `legacy` when that node exists (a disk without GPT names, under a
 /// printed warning), else an error naming what was looked for.
@@ -296,4 +357,34 @@ fn resolve_partition(console: &mut BootConsole, names: &[&str], legacy: &str) ->
         return Ok(std::path::PathBuf::from(legacy));
     }
     Err(format!("no partition named {} appeared within {}s, and {legacy} does not exist", names.join(" or "), WAIT.as_secs()).into())
+}
+
+#[cfg(test)]
+mod free_initramfs_tests {
+    use super::free_initramfs;
+    use std::path::Path;
+
+    /// A stand-in initramfs: the new root's tree stays whole, everything
+    /// else goes, and the bytes of what went are counted.
+    #[test]
+    fn the_initramfs_is_freed_around_the_new_root() {
+        let dir = std::env::temp_dir().join(format!("embra-init-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["mnt/root/embra/state", "mnt/other", "lib/firmware/i915", "kernel/x86/microcode", "dev", "proc", "sys"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("init"), vec![7u8; 4096]).unwrap();
+        std::fs::write(dir.join("lib/firmware/i915/guc.bin"), vec![1u8; 10_000]).unwrap();
+        std::fs::write(dir.join("kernel/x86/microcode/GenuineIntel.bin"), vec![2u8; 6_000]).unwrap();
+        std::fs::write(dir.join("mnt/other/stale"), vec![3u8; 100]).unwrap();
+        std::fs::write(dir.join("mnt/root/embra/state/keep"), b"the new root").unwrap();
+        let freed = free_initramfs(&dir, &dir.join("mnt/root")).unwrap();
+        assert_eq!(freed, 4096 + 10_000 + 6_000 + 100);
+        assert!(dir.join("mnt/root/embra/state/keep").exists(), "the new root is untouched");
+        for gone in ["init", "lib", "kernel", "dev", "proc", "sys", "mnt/other"] {
+            assert!(!dir.join(gone).exists(), "{gone} should be gone");
+        }
+        assert!(Path::new(&dir.join("mnt")).exists(), "the new root's parent stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
