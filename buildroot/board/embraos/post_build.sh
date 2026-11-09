@@ -89,7 +89,12 @@ for drv in $PROBE_DRIVERS; do
         done
     done
 done
-(cd "$FW_STAGE" && find lib -type f | LC_ALL=C sort | cpio -o -H newc --quiet 2>/dev/null | gzip -9 > "${TARGET_DIR}/boot/firmware.cpio.gz")
+# The directories are members too, each before what it holds (the sort puts a
+# path before the paths under it): the kernel's cpio unpacker creates no parent
+# directory and skips a file whose directory is not there yet without a word,
+# so an archive of files alone unpacks to nothing. assert_boot_initrds checks
+# the order.
+(cd "$FW_STAGE" && find lib | LC_ALL=C sort | cpio -o -H newc --quiet 2>/dev/null | gzip -9 > "${TARGET_DIR}/boot/firmware.cpio.gz")
 echo "post_build.sh: /boot/firmware.cpio.gz holds $(find "$FW_STAGE" -type f | wc -l) probe-time files of ${PROBE_DRIVERS// /, } ($(stat -c %s "${TARGET_DIR}/boot/firmware.cpio.gz") bytes)"
 rm -rf "$FW_STAGE"
 

@@ -319,14 +319,31 @@ assert_firmware_present() {
 # directory, AuthenticAMD.bin from linux-firmware's amd-ucode); on another
 # architecture it is the empty archive. firmware.cpio.gz is a gzip'd newc
 # archive with every probe-time blob under lib/firmware.
+# assert_cpio_parents_precede <cpio -tv listing> <archive name>: every
+# directory on a member's path is a member of its own, listed before it. The
+# kernel's cpio unpacker creates no parent directory and skips a file whose
+# directory is not there yet without a word, so an archive of files alone
+# unpacks to nothing and no boot message says so (the probe-time firmware
+# archive did exactly that until 2026-11-09).
+assert_cpio_parents_precede() {
+    local missing
+    missing="$(awk '{ name = ($1 ~ /^l/) ? $(NF-2) : $NF }
+        /^d/ { dirs[name] = 1; next }
+        { p = name; while (sub(/\/[^\/]*$/, "", p)) if (!(p in dirs)) print p }' "$1" | sort -u | head -n 3 | tr '\n' ' ')"
+    [ -z "$missing" ] || reject_image "$2 has members under directories that are not members before them (${missing% }): the kernel's cpio unpacker creates no parent directory and skips such a file without a word"
+}
+
 assert_boot_initrds() {
-    local tgt arch="${2%%-*}" magic tmp
+    local tgt arch="${2%%-*}" magic tmp listing
     # Absolute: the archives are read from inside a scratch directory below.
     tgt="$(cd "$1" && pwd)"
     magic="$(head -c 6 "$tgt/boot/ucode.cpio")"
     [ "$magic" = "070701" ] || reject_image "/boot/ucode.cpio is not a newc cpio archive (starts with '$magic'; the early microcode loader reads newc, uncompressed)"
     tmp="$(mktemp -d)"
     (cd "$tmp" && cpio -id --quiet < "$tgt/boot/ucode.cpio" 2>/dev/null) || reject_image "/boot/ucode.cpio does not unpack"
+    listing="$(mktemp)"
+    cpio -tv --quiet < "$tgt/boot/ucode.cpio" > "$listing" 2>/dev/null
+    assert_cpio_parents_precede "$listing" "/boot/ucode.cpio"
     if [ "$arch" = "x86_64" ]; then
         [ -s "$tmp/kernel/x86/microcode/GenuineIntel.bin" ] || reject_image "/boot/ucode.cpio lacks kernel/x86/microcode/GenuineIntel.bin (BR2_PACKAGE_INTEL_MICROCODE puts intel-ucode/ in the images directory)"
         [ -s "$tmp/kernel/x86/microcode/AuthenticAMD.bin" ] || reject_image "/boot/ucode.cpio lacks kernel/x86/microcode/AuthenticAMD.bin (linux-firmware's amd-ucode family)"
@@ -344,9 +361,12 @@ assert_boot_initrds() {
     rm -rf "$tmp"
     gzip -t "$tgt/boot/firmware.cpio.gz" || reject_image "/boot/firmware.cpio.gz is not a gzip file"
     local members
-    members="$(gzip -dc "$tgt/boot/firmware.cpio.gz" | cpio -t --quiet 2>/dev/null | grep -c '^lib/firmware/' || true)"
-    [ "$members" -gt 0 ] || reject_image "/boot/firmware.cpio.gz carries no lib/firmware member (post_build.sh builds it from the probe-time drivers' names)"
-    echo "probe-time firmware: /boot/firmware.cpio.gz carries $members files ($(stat -c %s "$tgt/boot/firmware.cpio.gz") bytes)"
+    gzip -dc "$tgt/boot/firmware.cpio.gz" | cpio -tv --quiet > "$listing" 2>/dev/null
+    members="$(grep -c '^-.* lib/firmware/' "$listing" || true)"
+    [ "$members" -gt 0 ] || reject_image "/boot/firmware.cpio.gz carries no lib/firmware file (post_build.sh builds it from the probe-time drivers' names)"
+    assert_cpio_parents_precede "$listing" "/boot/firmware.cpio.gz"
+    rm -f "$listing"
+    echo "probe-time firmware: /boot/firmware.cpio.gz carries $members files with their directories ($(stat -c %s "$tgt/boot/firmware.cpio.gz") bytes)"
 }
 
 assert_rootfs_invariants() {
