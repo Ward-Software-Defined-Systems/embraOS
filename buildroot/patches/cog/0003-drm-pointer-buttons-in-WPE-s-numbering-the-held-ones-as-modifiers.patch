@@ -1,0 +1,98 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] drm: pointer buttons in WPE's numbering, the held ones as
+ modifiers
+
+The DRM platform handed the web view a button as libinput names it, the
+evdev code (BTN_LEFT is 0x110), and no button modifiers. WPE WebKit knows
+the buttons as 1, 2 and 3, so every press and release reached the page as
+a mouse event without a button, and a page is sent `click` for the left
+button alone: the pointer moved, the wheel scrolled, a drag selected text,
+and no control could be pressed. The Wayland platform already counts the
+buttons from one. This does the same here and keeps the held buttons as
+WPE's pointer modifiers on button and motion events, so the page's
+`MouseEvent.buttons` is right and the view can tell a drag from a move.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/platform/drm/cog-platform-drm.c
++++ b/platform/drm/cog-platform-drm.c
+@@ -18,6 +18,7 @@
+ #include <gbm.h>
+ #include <libinput.h>
+ #include <libudev.h>
++#include <linux/input-event-codes.h>
+ #include <string.h>
+ #include <wayland-server.h>
+ #include <wpe/fdo-egl.h>
+@@ -861,6 +862,35 @@
+     }
+ }
+ 
++/* The buttons held down, as WPE's pointer modifiers: a button event names
++ * them beside the button that changed, and a motion event names them too,
++ * which is how the web view tells a drag from a move. */
++static uint32_t pointer_buttons;
++
++/* libinput names a button by its evdev code (BTN_LEFT is 0x110). WPE counts
++ * them from one, left, right, middle, as the Wayland platform hands them
++ * over; a code below BTN_MOUSE is no pointer button. */
++static uint32_t
++input_pointer_button_number(uint32_t code)
++{
++    return code >= BTN_MOUSE ? code - BTN_MOUSE + 1 : 0;
++}
++
++static uint32_t
++input_pointer_button_modifier(uint32_t number)
++{
++    switch (number) {
++    case 1:
++        return wpe_input_pointer_modifier_button1;
++    case 2:
++        return wpe_input_pointer_modifier_button2;
++    case 3:
++        return wpe_input_pointer_modifier_button3;
++    default:
++        return 0;
++    }
++}
++
+ static void
+ input_handle_pointer_motion_event(struct libinput_event_pointer *pointer_event, bool absolute)
+ {
+@@ -894,7 +924,7 @@
+         .y = cursor.y,
+         .button = 0,
+         .state = 0,
+-        .modifiers = 0,
++        .modifiers = pointer_buttons,
+     };
+ 
+     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);
+@@ -908,14 +938,22 @@
+     if (!cursor.enabled)
+         return;
+ 
++    const uint32_t button = input_pointer_button_number(libinput_event_pointer_get_button(pointer_event));
++    const bool pressed = libinput_event_pointer_get_button_state(pointer_event) == LIBINPUT_BUTTON_STATE_PRESSED;
++
++    if (pressed)
++        pointer_buttons |= input_pointer_button_modifier(button);
++    else
++        pointer_buttons &= ~input_pointer_button_modifier(button);
++
+     struct wpe_input_pointer_event event = {
+         .type = wpe_input_pointer_event_type_button,
+         .time = libinput_event_pointer_get_time(pointer_event),
+         .x = cursor.x,
+         .y = cursor.y,
+-        .button = libinput_event_pointer_get_button(pointer_event),
+-        .state = libinput_event_pointer_get_button_state(pointer_event),
+-        .modifiers = 0,
++        .button = button,
++        .state = pressed,
++        .modifiers = pointer_buttons,
+     };
+ 
+     wpe_view_backend_dispatch_pointer_event(wpe_view_data.backend, &event);

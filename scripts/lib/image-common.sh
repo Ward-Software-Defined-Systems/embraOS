@@ -113,6 +113,72 @@ stage_kernel_tarball() {
         || { rm -f "$dl/$tb"; echo "ERROR: ${tb} does not match its pin in $KERNEL_PINS; the file was removed" >&2; exit 1; }
 }
 
+# clean_packages_with_changed_patches <buildroot dir> <patches dir>: Buildroot
+# applies a package's patches once, when it extracts the package, so a patch
+# added, changed or removed under buildroot/patches/<package>/
+# (BR2_GLOBAL_PATCH_DIR) never reaches a build directory that exists already:
+# the image is built without it and nothing says so. Each package with a
+# patch directory therefore has a stamp beside the build directories, the
+# sha256 over its patch files' names and bytes, and a package whose stamp
+# differs is cleaned here, before make, to build again from its tarball with
+# the patches of this checkout; so is a package whose patch directory is gone.
+# A tree built before the stamps existed is taken at Buildroot's word: when
+# the patches it recorded as applied (.applied_patches_list) carry the names
+# this checkout has, the stamp is written and nothing is cleaned.
+clean_packages_with_changed_patches() {
+    local br="$1" patches="$2" stamps dir pkg have sum stamp built applied d
+    stamps="$br/output/build"
+    mkdir -p "$stamps"
+    for dir in "$patches"/*/; do
+        [ -d "$dir" ] || continue
+        pkg="$(basename "$dir")"
+        stamp="$stamps/.embraos-patches-$pkg"
+        have="$(cd "$dir" && find . -type f | LC_ALL=C sort)"
+        [ -n "$have" ] || [ -e "$stamp" ] || continue
+        sum="$(cd "$dir" && printf '%s\n' "$have" | while IFS= read -r f; do
+                   [ -n "$f" ] || continue; printf '%s\n' "$f"; cat "$f"
+               done | sha256sum | cut -d' ' -f1)"
+        [ "$(cat "$stamp" 2>/dev/null || true)" = "$sum" ] && continue
+        built=""
+        for d in "$stamps/$pkg"-[0-9]*/; do
+            [ -d "$d" ] && { built="${d%/}"; break; }
+        done
+        if [ ! -e "$stamp" ] && [ -n "$built" ] && [ -f "$built/.applied_patches_list" ]; then
+            applied="$(grep -F "/patches/$pkg/" "$built/.applied_patches_list" | sed 's|.*/|./|' | LC_ALL=C sort || true)"
+            if [ "$applied" = "$have" ]; then
+                printf '%s\n' "$sum" > "$stamp"
+                continue
+            fi
+        fi
+        # nothing built yet says nothing: the package is about to be built with these patches anyway
+        [ -z "$built" ] || echo "patches: buildroot/patches/$pkg is not what $pkg was built with; the package builds again from its tarball"
+        clean_buildroot_package "$br" "$pkg"
+        printf '%s\n' "$sum" > "$stamp"
+    done
+    for stamp in "$stamps"/.embraos-patches-*; do
+        [ -e "$stamp" ] || continue
+        pkg="${stamp##*/.embraos-patches-}"
+        [ -d "$patches/$pkg" ] && continue
+        echo "patches: buildroot/patches/$pkg is gone; $pkg builds again from its tarball without them"
+        clean_buildroot_package "$br" "$pkg"
+        rm -f "$stamp"
+    done
+}
+
+# clean_buildroot_package <buildroot dir> <package>: make <package>-dirclean,
+# and the check that it worked. A package this configuration does not build
+# has no such target and no build directory, which is fine; a build directory
+# still there afterwards would keep the old patches, and stops the build.
+clean_buildroot_package() {
+    local br="$1" pkg="$2" d
+    ( cd "$br" && make "${pkg}-dirclean" ) >/dev/null 2>&1 || true
+    for d in "$br/output/build/$pkg"-[0-9]*/; do
+        [ -d "$d" ] || continue
+        echo "ERROR: $pkg was not cleaned (${d%/} is still there): run 'make ${pkg}-dirclean' in $br, then build again" >&2
+        exit 1
+    done
+}
+
 # size_to_bytes <genimage size>: 64M, 1024M, 4G → bytes.
 size_to_bytes() {
     local s="$1" n unit
