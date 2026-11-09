@@ -22,9 +22,18 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable, released as `v0.23.0-phase1` (2026-11-01; the code-review pit stop, `v0.16.0-phase1` through `v0.23.0-phase1`, closed on `main`). Phase 2 — In progress on branch `phase2`: the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, the drivers other hypervisors present, a display console and DHCP ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
+**Current Status:** Phase 1 — Stable, released as `v0.23.0-phase1` (2026-11-01; the code-review pit stop, `v0.16.0-phase1` through `v0.23.0-phase1`, closed on `main`). Phase 2 — In progress on branch `phase2`: the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, DHCP, the drivers of the hypervisors and of wired hardware with their firmware and microcode, the web console on the machine's display with keyboard and mouse, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
-Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors and bare metal (the A/B slots with rollback, the signed update and the hypervisor drivers landed in Phase 2's core wave; LUKS and mTLS follow); a governed module system with an `embractl` management CLI; a custom kernel; and a sovereign-intelligence tier — the embraOS-QNM-Core model option and Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
+> **⚠️ `phase2` is a testing branch and unstable.** Bare-metal and hypervisor installs
+> are being tested on it right now: the installer ISO, the display console, the
+> bare-metal drivers with their firmware and microcode, and the 2 GiB OS slots are
+> validated under QEMU on this branch and nowhere else yet, the slot size changed
+> the disk layout, and a build from this branch may not boot on your hardware or
+> update cleanly from an earlier image. For a working embraOS use the latest release
+> on `main`, `v0.23.0-phase1`; what each surface has been validated on is in
+> [docs/OPERATIONS/OPERATION.md](docs/OPERATIONS/OPERATION.md).
+
+Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors and bare metal (the A/B slots with rollback, the signed update, the hypervisor and bare-metal drivers with their firmware, the display console and the installer ISO landed in Phase 2's waves; LUKS and mTLS follow); a governed module system with an `embractl` management CLI; a custom kernel; and a sovereign-intelligence tier — the embraOS-QNM-Core model option and Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
 > **Pair it with WSDS Local AI Gateway — under evaluation.** embraOS can route every
 > provider request through [WSDS Local AI Gateway](https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway),
