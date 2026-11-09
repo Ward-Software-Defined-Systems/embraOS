@@ -25,7 +25,7 @@ A backup is a snapshot of STATE and DATA: a `tar.gz` under `/embra/data/backups/
 A snapshot runs only while the database is stopped, so a copy of its files is consistent: before the services start. Two ways to ask for one:
 
 - **From a session:** `/backup create [label]` schedules it for the next boot and `/reboot now` boots; embrad takes the snapshot before WardSONDB starts and the boot continues into the session. `/backup status` shows what is scheduled.
-- **From the boot menu:** Backup and restore → Back up STATE and DATA. embrad takes the snapshot on the console and reboots to the menu.
+- **From the boot menu:** Backup and restore → Back up STATE and DATA. embrad takes the snapshot, its progress on both consoles (the serial line and the display), and reboots to the menu.
 
 The free-space rule: DATA must have the snapshot's size plus 256 MiB free, or the snapshot is refused with both figures. `/backup list` shows every backup, newest first, each complete one with its download route (`web: /api/backups/<name>`): the web console streams the archive to the browser behind the console's token, with no size cap. `/backup delete <name>` removes one. The automatic snapshots an update takes (labels `pre-<version>`) rotate: the newest two stay; a snapshot with any other label is never removed on its own.
 
@@ -36,7 +36,7 @@ The archives are outside the workspace and the model's tools are refused them (`
 A restore replaces STATE and DATA's database and workspace with a snapshot and keeps the other backups. It runs before the services start, like a snapshot:
 
 - **From a session:** `/backup restore <name>` answers with the confirmation to type, `restore <name>`; anything else, a slash command included, cancels. Confirmed, the next boot restores and reboots: `/reboot now` when ready.
-- **From the boot menu:** Backup and restore → Restore STATE and DATA. A numbered list on the console, the number asked twice, anything else reboots without restoring.
+- **From the boot menu:** Backup and restore → Restore STATE and DATA. A numbered list on both consoles, the number asked twice and answered on whichever console the operator types on (the first line typed wins and is echoed on the other), anything else reboots without restoring.
 
 A restore refuses an incomplete entry (a `.partial` directory a crash left, which `/backup delete` removes), an archive that does not match its record, and a snapshot whose database engine is not the running release's (a database of the other engine cannot be opened; `seed-state.sh --wipe data` on the host is the way to start over). The sealed identity comes back whole: STATE's `soul.sha256` and DATA's soul document are from one snapshot, so trustd's seal check passes at the next boot.
 
@@ -78,4 +78,6 @@ The default source is the GitHub releases of the public mirror, `https://github.
 
 A rollback onto a knowledge graph the newer release migrated: the older brain refuses to start — the halt reason names both schemas and the `pre-` snapshot — and the boot menu's Restore entry puts that snapshot back. The Guardian's dynamic tools are rebuilt with `/guardian rebuild --all` when a release moves the in-OS toolchain ([COMMAND-REFERENCE.md](COMMAND-REFERENCE.md)).
 
-From the boot menu, Update embraOS boots the active slot with `embra.mode=update`: embrad brings the network up and runs the updater on the console (`Apply … to slot b? [y/N]`), then reboots into the staged slot, or back to the menu with the reason.
+Whether a release also publishes `embraos.iso` (the installer medium, about 560 MB per architecture and engine) beside the four manifests is an open decision; until it is taken the ISO is a build output only.
+
+From the boot menu, Update embraOS boots the active slot with `embra.mode=update`: embrad brings the network up and runs the updater on both consoles (`Apply … to slot b? [y/N]`, answered on the serial line or at the display's keyboard), then reboots into the staged slot, or back to the menu with the reason.
