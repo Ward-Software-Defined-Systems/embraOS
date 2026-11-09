@@ -21,6 +21,16 @@
 //! `save_cursor_position` / `restore_cursor_position` pair whose defaults
 //! go through `get_cursor_position`, so the wrapper keeps holding as it is.
 //! Do not forward either of them to a backend that asks.
+//!
+//! The wrapper also keeps an unchanged frame silent. ratatui ends every
+//! `draw` with the colour and attribute resets and hides or places the
+//! cursor again, whether or not a cell changed: 21 bytes every 200 ms on
+//! an idle screen. On the web console each of those writes had xterm.js
+//! repaint and, on the display console, the whole screen composited in
+//! software. A draw of no cells is not forwarded, and the cursor's
+//! visibility and position go out only when they differ from what the
+//! terminal was last told; a `clear()` forgets both, so the repaint that
+//! follows an attach says everything again.
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell;
@@ -30,33 +40,55 @@ pub struct QuietBackend<B> {
     inner: B,
     /// Where the cursor was last put through this backend.
     cursor: Position,
+    /// What the terminal was last told about the cursor's visibility, or
+    /// nothing since the last clear.
+    shown: Option<bool>,
+    /// The terminal's cursor is known to stand at `cursor`: nothing drew or
+    /// cleared since it was placed there.
+    placed: bool,
 }
 
 impl<B> QuietBackend<B> {
     pub fn new(inner: B) -> Self {
-        Self { inner, cursor: Position::ORIGIN }
+        Self { inner, cursor: Position::ORIGIN, shown: None, placed: false }
     }
 }
 
 impl<B: Backend> Backend for QuietBackend<B> {
     type Error = B::Error;
 
+    /// A frame with no changed cell is not forwarded: the wrapped backend
+    /// would still write its resets.
     fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
+        let mut content = content.peekable();
+        if content.peek().is_none() {
+            return Ok(());
+        }
+        self.placed = false;
         self.inner.draw(content)
     }
 
     fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
+        self.placed = false;
         self.inner.append_lines(n)
     }
 
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        if self.shown == Some(false) {
+            return Ok(());
+        }
+        self.shown = Some(false);
         self.inner.hide_cursor()
     }
 
     fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        if self.shown == Some(true) {
+            return Ok(());
+        }
+        self.shown = Some(true);
         self.inner.show_cursor()
     }
 
@@ -68,15 +100,24 @@ impl<B: Backend> Backend for QuietBackend<B> {
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
         let position = position.into();
+        if self.placed && self.cursor == position {
+            return Ok(());
+        }
         self.cursor = position;
+        self.placed = true;
         self.inner.set_cursor_position(position)
     }
 
+    /// A cleared screen is told everything again: a browser that attached
+    /// meanwhile started from nothing.
     fn clear(&mut self) -> Result<(), Self::Error> {
+        self.shown = None;
+        self.placed = false;
         self.inner.clear()
     }
 
     fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        self.placed = false;
         self.inner.clear_region(clear_type)
     }
 
@@ -129,9 +170,11 @@ mod tests {
             Ok(())
         }
         fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+            self.note("hide");
             Ok(())
         }
         fn show_cursor(&mut self) -> Result<(), Self::Error> {
+            self.note("show");
             Ok(())
         }
         fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
@@ -212,6 +255,72 @@ mod tests {
             // is one more draw.)
             assert!(log.iter().filter(|l| l.starts_with("draw")).count() >= 3, "{name}: {log:?}");
         }
+    }
+
+    /// The idle console: the same frame drawn again writes nothing at all,
+    /// neither cells nor resets nor the cursor.
+    #[test]
+    fn an_unchanged_frame_writes_nothing() {
+        for (name, viewport) in viewports() {
+            let terminal = Unanswering::default();
+            let mut screen = Terminal::with_options(
+                QuietBackend::new(terminal.clone()),
+                TerminalOptions { viewport },
+            )
+            .unwrap();
+            let frame = |f: &mut ratatui::Frame| {
+                f.render_widget(Paragraph::new("Enter a name"), f.area());
+                f.set_cursor_position(Position::new(7, 3));
+            };
+            screen.draw(frame).unwrap();
+            let after_first = terminal.log.borrow().len();
+            assert!(terminal.log.borrow().iter().any(|l| l == "show"), "{name}: {:?}", terminal.log.borrow());
+            assert!(terminal.log.borrow().iter().any(|l| l == "cursor 7,3"), "{name}: {:?}", terminal.log.borrow());
+            for _ in 0..5 {
+                screen.draw(frame).unwrap();
+            }
+            assert_eq!(terminal.log.borrow().len(), after_first, "{name}: {:?}", terminal.log.borrow());
+            // A frame without a cursor hides it once, then stays silent.
+            let no_cursor = |f: &mut ratatui::Frame| f.render_widget(Paragraph::new("Enter a name"), f.area());
+            screen.draw(no_cursor).unwrap();
+            screen.draw(no_cursor).unwrap();
+            let log = terminal.log.borrow();
+            assert_eq!(log.iter().filter(|l| l.as_str() == "hide").count(), 1, "{name}: {log:?}");
+        }
+    }
+
+    /// After a clear (the attach path, a resize) the cursor's state is said
+    /// again, since a fresh terminal knows nothing.
+    #[test]
+    fn a_clear_resends_the_cursor_state() {
+        let terminal = Unanswering::default();
+        let mut screen = Terminal::with_options(
+            QuietBackend::new(terminal.clone()),
+            TerminalOptions { viewport: Viewport::Fullscreen },
+        )
+        .unwrap();
+        let frame = |f: &mut ratatui::Frame| {
+            f.render_widget(Paragraph::new("x"), f.area());
+            f.set_cursor_position(Position::new(2, 1));
+        };
+        screen.draw(frame).unwrap();
+        screen.draw(frame).unwrap();
+        screen.clear().unwrap();
+        let before = terminal.log.borrow().len();
+        screen.draw(frame).unwrap();
+        {
+            let log = terminal.log.borrow();
+            let tail: Vec<&String> = log.iter().skip(before).collect();
+            assert!(tail.iter().any(|l| l.as_str() == "cursor 2,1"), "{tail:?}");
+        }
+        // A frame without a cursor hides it once; the library itself says
+        // hide only on the transition, so the wrapper has nothing to
+        // repeat after a clear (the console's screens all place a cursor).
+        let no_cursor = |f: &mut ratatui::Frame| f.render_widget(Paragraph::new("x"), f.area());
+        screen.draw(no_cursor).unwrap();
+        screen.draw(no_cursor).unwrap();
+        let hides = terminal.log.borrow().iter().filter(|l| l.as_str() == "hide").count();
+        assert_eq!(hides, 1, "{:?}", terminal.log.borrow());
     }
 
     #[test]
