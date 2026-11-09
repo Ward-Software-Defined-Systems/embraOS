@@ -105,6 +105,10 @@ case "$RUST_TARGET" in
     x86_64-*)
         mkdir -p "${UC_STAGE}/kernel/x86/microcode"
         [ -d "${BINARIES_DIR}/intel-ucode" ] || { echo "ERROR: ${BINARIES_DIR}/intel-ucode is missing (BR2_PACKAGE_INTEL_MICROCODE)" >&2; exit 1; }
+        # Intel's licence permits the binary redistribution on the condition
+        # that its notice travels with the distribution: the text goes beside
+        # the firmware's licences (Buildroot installs none of it).
+        install -D -m 0644 "$(ls -d "${BUILD_DIR}"/intel-microcode-*/ | head -n1)license" "${TARGET_DIR}/usr/share/licenses/intel-microcode/license"
         cat "${BINARIES_DIR}"/intel-ucode/* > "${UC_STAGE}/kernel/x86/microcode/GenuineIntel.bin"
         ls "${TARGET_DIR}"/lib/firmware/amd-ucode/microcode_amd*.bin > /dev/null 2>&1 || { echo "ERROR: /lib/firmware/amd-ucode/microcode_amd*.bin is missing (linux-firmware's amd-ucode family)" >&2; exit 1; }
         cat "${TARGET_DIR}"/lib/firmware/amd-ucode/microcode_amd*.bin > "${UC_STAGE}/kernel/x86/microcode/AuthenticAMD.bin"

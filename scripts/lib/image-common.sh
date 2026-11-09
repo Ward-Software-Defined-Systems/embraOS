@@ -334,7 +334,9 @@ assert_boot_initrds() {
             || reject_image "/boot/ucode.cpio's GenuineIntel.bin is not the concatenation of the images directory's intel-ucode files"
         cat "$tgt"/lib/firmware/amd-ucode/microcode_amd*.bin | cmp -s - "$tmp/kernel/x86/microcode/AuthenticAMD.bin" \
             || reject_image "/boot/ucode.cpio's AuthenticAMD.bin is not the concatenation of /lib/firmware/amd-ucode/microcode_amd*.bin"
-        echo "microcode: /boot/ucode.cpio carries GenuineIntel.bin ($(stat -c %s "$tmp/kernel/x86/microcode/GenuineIntel.bin") bytes) and AuthenticAMD.bin ($(stat -c %s "$tmp/kernel/x86/microcode/AuthenticAMD.bin") bytes)"
+        [ -s "$tgt/usr/share/licenses/intel-microcode/license" ] \
+            || reject_image "/usr/share/licenses/intel-microcode/license is missing from the rootfs: Intel's microcode is redistributed on the condition that its notice travels with it (post_build.sh)"
+        echo "microcode: /boot/ucode.cpio carries GenuineIntel.bin ($(stat -c %s "$tmp/kernel/x86/microcode/GenuineIntel.bin") bytes) and AuthenticAMD.bin ($(stat -c %s "$tmp/kernel/x86/microcode/AuthenticAMD.bin") bytes); Intel's licence under /usr/share/licenses/intel-microcode"
     else
         [ -z "$(ls -A "$tmp")" ] || reject_image "/boot/ucode.cpio is not the empty archive on $arch"
         echo "microcode: /boot/ucode.cpio is the empty archive on $arch"
