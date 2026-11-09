@@ -44,7 +44,11 @@
 > `PCI_DYNAMIC_OF_NODES`, printed under an ACPI boot where there is no device tree:
 > expected and harmless. The same boot's `Freed the initramfs: 0 MiB` line showed
 > the probe-time firmware archive unpacking to nothing on both architectures, fixed
-> in `fb6399c`; an image built before it carries the old archive until rebuilt.
+> in `fb6399c`; an image built before it carries the old archive until rebuilt. The
+> image rebuilt after the fix (`--buildroot-only`, from `182e731`) booted the same
+> way on 2026-11-09 and said `Freed the initramfs: 4 MiB`: the five probe-time
+> blobs (cxgb4, ice, qed) and the init, there being no microcode on aarch64; an
+> x86_64 image of the same build says 31 MiB, its microcode archive included.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
