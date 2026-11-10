@@ -97,9 +97,23 @@ if [ "$slot_active" = "a" ]; then set active_dev="$slot_a_dev"; else set active_
 # embrad takes the last occurrence of each embra.* knob. Two consoles: the display
 # (tty0, fbcon on the firmware's framebuffer) and the serial line, which
 # comes last and so owns /dev/console — embrad's stdio, the TUI, the banner.
+#
+# The firmware framebuffer's mode is asked of the kernel's EFI stub
+# (video=efifb:<width>x<height>; a mode the firmware does not offer leaves
+# the firmware's own): 1920x1080 holds the console's status row on one line,
+# where a virtual machine's default (1280x800 under OVMF) wraps it.
+# embra.kioskmode=<width>x<height> asks for another and embra.kioskmode=native
+# for none, the last well-formed one among the entry's knobs and the host's,
+# exactly as embrad reads the knob for a display with a driver of its own
+# (embra_boot::cmdline::KioskMode). A video=efifb: typed after it wins in
+# the stub. The mode is set once, at boot.
 function boot_slot {
     echo "embraOS: booting slot $1 from $2"
-    linux "$2/boot/@KERNEL_IMAGE@" console=tty0 console=@SERIAL_CONSOLE@ quiet embra.slot=$1 embra.web=1 $3 $extra
+    set embra_video="video=efifb:1920x1080"
+    if regexp --set=2:embra_kmode '(.* |^)embra\.kioskmode=([0-9]+x[0-9]+|native)( |$)' "$3 $extra"; then
+        if [ "$embra_kmode" = "native" ]; then set embra_video=; else set embra_video="video=efifb:$embra_kmode"; fi
+    fi
+    linux "$2/boot/@KERNEL_IMAGE@" console=tty0 console=@SERIAL_CONSOLE@ quiet $embra_video embra.slot=$1 embra.web=1 $3 $extra
     # Three initrds, in this order: the CPU microcode (first and uncompressed,
     # the kernel's early loader reads only the first), the firmware the
     # built-in drivers want at probe, and the initramfs with embra-init.
@@ -204,6 +218,7 @@ submenu "Diagnostics" --id diagnostics {
         echo "  embra.graphics=<mode>       serial image protocol: halfblocks|sixel|kitty|iterm2|auto|off"
         echo "  embra.kiosk=0               the display stays a boot console (no web console on it)"
         echo "  embra.kbd=<layout>          the display console's keyboard layout (us)"
+        echo "  embra.kioskmode=<W>x<H>     the display console's video mode (1920x1080 where the display offers it); native = the display's own"
         echo "  embra.mode=update|backup|restore   a maintenance boot instead of the services"
         echo "Press any key to return"
         sleep --interruptible 60

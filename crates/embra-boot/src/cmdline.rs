@@ -25,6 +25,38 @@ pub const KIOSK_KEY: &str = "embra.kiosk";
 pub const KEYBOARD_KEY: &str = "embra.kbd";
 /// The display console's device scale, 1 or 2.
 pub const KIOSK_SCALE_KEY: &str = "embra.kioskscale";
+/// The display console's video mode: `<width>x<height>`, or `native` for the
+/// display's own. GRUB reads the same knob for the firmware's framebuffer
+/// (`buildroot/board/embraos/grub.cfg.in`, `boot_slot`).
+pub const KIOSK_MODE_KEY: &str = "embra.kioskmode";
+
+/// What `embra.kioskmode=` asks of the display console's video mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KioskMode {
+    /// The display's own: the firmware's mode, a driver's preferred one.
+    Native,
+    /// `<width>x<height>`, in pixels.
+    Size(u32, u32),
+}
+
+impl KioskMode {
+    /// `native`, or `<width>x<height>` in decimal digits alone and neither
+    /// zero: the two forms GRUB's pattern takes, so both read a line alike.
+    pub fn parse(value: &str) -> Option<Self> {
+        if value == "native" {
+            return Some(Self::Native);
+        }
+        let (w, h) = value.split_once('x')?;
+        let digits = |s: &str| !s.is_empty() && s.len() <= 5 && s.chars().all(|c| c.is_ascii_digit());
+        if !digits(w) || !digits(h) {
+            return None;
+        }
+        match (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?) {
+            (0, _) | (_, 0) => None,
+            (w, h) => Some(Self::Size(w, h)),
+        }
+    }
+}
 /// The installation medium, instead of the scan (`embra.media=/dev/sr0`).
 pub const MEDIA_KEY: &str = "embra.media";
 /// The installer's target disk, unattended (`embra.install=vda`).
@@ -212,6 +244,13 @@ impl Cmdline {
             })
             .last()
     }
+
+    /// `embra.kioskmode=<width>x<height>|native`, the display console's
+    /// video mode; the last value that is one of the two forms. Without one
+    /// the display console asks for its default where the display offers it.
+    pub fn kiosk_mode(&self) -> Option<KioskMode> {
+        self.values(KIOSK_MODE_KEY).filter_map(KioskMode::parse).last()
+    }
 }
 
 impl Cmdline {
@@ -318,6 +357,21 @@ mod display_console_tests {
         assert_eq!(c.kiosk_scale(), Some(2));
         assert_eq!(Cmdline::parse("quiet").keyboard_layout(), None);
         assert_eq!(Cmdline::parse("embra.kioskscale=4").kiosk_scale(), None);
+    }
+
+    #[test]
+    fn the_video_mode_knob_takes_a_size_or_native_and_the_last_well_formed_one_wins() {
+        let mode = |line: &str| Cmdline::parse(line).kiosk_mode();
+        assert_eq!(mode("quiet"), None);
+        assert_eq!(mode("embra.kioskmode=1280x800"), Some(KioskMode::Size(1280, 800)));
+        assert_eq!(mode("embra.kioskmode=native"), Some(KioskMode::Native));
+        assert_eq!(mode("embra.kioskmode=1280x800 embra.kioskmode=native"), Some(KioskMode::Native), "the last one wins");
+        assert_eq!(mode("embra.kioskmode=native embra.kioskmode=1600x900"), Some(KioskMode::Size(1600, 900)));
+        // a value that is neither form is skipped, as GRUB's pattern skips it
+        assert_eq!(mode("embra.kioskmode=1600x900 embra.kioskmode=big"), Some(KioskMode::Size(1600, 900)));
+        for bad in ["", "1920", "1920x", "x1080", "0x1080", "1920x0", "+1920x1080", "1920x1080-32", "1920X1080", "Native", "123456x1"] {
+            assert_eq!(KioskMode::parse(bad), None, "{bad:?}");
+        }
     }
 }
 

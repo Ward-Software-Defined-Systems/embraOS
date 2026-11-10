@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tracing::{info, warn, error};
 
-use embra_boot::Cmdline;
+use embra_boot::{Cmdline, KioskMode};
 
 /// WardSONDB's data directory on DATA: the `--data-dir` the database is
 /// started with, and where its engine marker lives (`boot::remove_empty_engine_marker`).
@@ -402,12 +402,18 @@ impl Supervisor {
                         restart_policy: RestartPolicy::default(),
                         essential: false,
                     });
-                    let scale = self.cmdline.kiosk_scale().unwrap_or_else(|| device_scale(display_width_px()));
+                    let wanted = self.cmdline.kiosk_mode();
+                    let mode = kiosk_video_mode(wanted, &connected_display_modes());
+                    if let (Some(KioskMode::Size(w, h)), None) = (wanted, mode) {
+                        warn!("embra.kioskmode={w}x{h}: not a mode every connected display offers; the display console keeps the display's own");
+                    }
+                    let width = mode.map_or_else(display_width_px, |(w, _)| w);
+                    let scale = self.cmdline.kiosk_scale().unwrap_or_else(|| device_scale(width));
                     self.add_service(ServiceDef {
                         name: "embra-kiosk".to_string(),
                         binary: KIOSK_BIN.to_string(),
                         args: kiosk_args(scale),
-                        env: kiosk_env(&token, self.cmdline.keyboard_layout()),
+                        env: kiosk_env(&token, self.cmdline.keyboard_layout(), mode),
                         health_check: HealthCheck::ProcessAlive,
                         restart_policy: RestartPolicy::default(),
                         essential: false,
@@ -999,6 +1005,53 @@ fn display_width_px() -> u32 {
     0
 }
 
+/// The mode the display console asks for when `embra.kioskmode` names none:
+/// wide enough for the console's status row on one line, where a virtual
+/// display's own default (1280x800 under OVMF, 1024x768 elsewhere) wraps it.
+const DEFAULT_KIOSK_MODE: (u32, u32) = (1920, 1080);
+
+/// The mode names of every connected connector, from sysfs
+/// (`/sys/class/drm/card0-Virtual-1/status` and `modes`): what the display
+/// console's mode is chosen from.
+fn connected_display_modes() -> Vec<Vec<String>> {
+    let Ok(dir) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
+    let mut paths: Vec<_> = dir.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    let mut displays = Vec::new();
+    for path in paths {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !name.starts_with("card") || !name.contains('-') {
+            continue;
+        }
+        let connected = std::fs::read_to_string(path.join("status")).is_ok_and(|s| s.trim() == "connected");
+        let modes: Vec<String> = std::fs::read_to_string(path.join("modes"))
+            .map(|m| m.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+            .unwrap_or_default();
+        if connected && !modes.is_empty() {
+            displays.push(modes);
+        }
+    }
+    displays
+}
+
+/// The video mode cog is told to set (`COG_PLATFORM_DRM_VIDEO_MODE`), or
+/// `None` for the display's own, which is cog's choice without the variable:
+/// the connector's preferred mode. `embra.kioskmode=native` asks for none;
+/// a size, or the default without the knob, is asked for only when every
+/// connected display lists it, because cog takes the named mode or no mode at
+/// all and a display console that names a missing mode does not start. The
+/// firmware's framebuffer has one mode, the one GRUB asked the kernel for
+/// (`video=efifb:`), and lists that alone.
+fn kiosk_video_mode(wanted: Option<KioskMode>, displays: &[Vec<String>]) -> Option<(u32, u32)> {
+    let (w, h) = match wanted {
+        Some(KioskMode::Native) => return None,
+        Some(KioskMode::Size(w, h)) => (w, h),
+        None => DEFAULT_KIOSK_MODE,
+    };
+    let name = format!("{w}x{h}");
+    (!displays.is_empty() && displays.iter().all(|modes| modes.contains(&name))).then_some((w, h))
+}
+
 /// The device scale for a display's width: 1 below 2560 pixels, 2 from there.
 fn device_scale(width_px: u32) -> u8 {
     if width_px >= 2560 { 2 } else { 1 }
@@ -1024,9 +1077,10 @@ fn kiosk_args(scale: u8) -> Vec<String> {
 /// the page it is on the display), Mesa's software path on the card
 /// (kms_swrast through GBM; never `LIBGL_ALWAYS_SOFTWARE`, which would send
 /// the web process down a path the nested display does not serve), the
-/// writable homes on the ephemeral tmpfs, the keyboard layout.
-fn kiosk_env(token: &str, layout: Option<&str>) -> Vec<(String, String)> {
-    vec![
+/// writable homes on the ephemeral tmpfs, the keyboard layout, and the video
+/// mode when the display console asks for one (`kiosk_video_mode`).
+fn kiosk_env(token: &str, layout: Option<&str>, mode: Option<(u32, u32)>) -> Vec<(String, String)> {
+    let mut env = vec![
         ("COG_URL".to_string(), format!("https://127.0.0.1:3345/embraOS?token={token}&kiosk=1")),
         ("MESA_LOADER_DRIVER_OVERRIDE".to_string(), "kms_swrast".to_string()),
         ("GBM_ALWAYS_SOFTWARE".to_string(), "1".to_string()),
@@ -1036,7 +1090,11 @@ fn kiosk_env(token: &str, layout: Option<&str>) -> Vec<(String, String)> {
         ("XDG_DATA_HOME".to_string(), format!("{KIOSK_HOME}/data")),
         ("XDG_CONFIG_HOME".to_string(), format!("{KIOSK_HOME}/config")),
         ("XKB_DEFAULT_LAYOUT".to_string(), layout.unwrap_or("us").to_string()),
-    ]
+    ];
+    if let Some((w, h)) = mode {
+        env.push(("COG_PLATFORM_DRM_VIDEO_MODE".to_string(), format!("{w}x{h}")));
+    }
+    env
 }
 
 /// The display console's directories, before each spawn (a restart finds
@@ -1744,6 +1802,40 @@ mod display_console_tests {
         assert_eq!(env("GBM_ALWAYS_SOFTWARE").as_deref(), Some("1"));
         assert_eq!(env("XKB_DEFAULT_LAYOUT").as_deref(), Some("de"));
         assert_eq!(env("XDG_RUNTIME_DIR").as_deref(), Some("/run/user/0"));
+    }
+
+    /// 1920x1080 is asked for where every connected display lists it, and
+    /// nothing is asked where one does not: cog takes the named mode or none.
+    #[test]
+    fn the_display_console_asks_for_1920x1080_only_where_every_connected_display_offers_it() {
+        let d = |modes: &[&str]| modes.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+        let vm = d(&["1280x800", "1920x1080", "1024x768"]);
+        let small = d(&["1024x768", "800x600"]);
+        assert_eq!(kiosk_video_mode(None, std::slice::from_ref(&vm)), Some((1920, 1080)));
+        assert_eq!(kiosk_video_mode(None, std::slice::from_ref(&small)), None, "a display without it keeps its own");
+        assert_eq!(kiosk_video_mode(None, &[vm.clone(), small.clone()]), None, "one display without it is enough");
+        assert_eq!(kiosk_video_mode(None, &[]), None, "no connected display read: cog decides");
+        // the firmware's framebuffer lists the one mode GRUB asked the kernel for
+        assert_eq!(kiosk_video_mode(None, &[d(&["1920x1080"])]), Some((1920, 1080)));
+        assert_eq!(kiosk_video_mode(None, &[d(&["1920x1080i"])]), None, "an interlaced mode is another name");
+    }
+
+    #[test]
+    fn embra_kioskmode_names_another_mode_or_the_displays_own() {
+        let vm = vec![vec!["1280x800".to_string(), "1920x1080".to_string(), "1600x900".to_string()]];
+        assert_eq!(kiosk_video_mode(Some(KioskMode::Size(1600, 900)), &vm), Some((1600, 900)));
+        assert_eq!(kiosk_video_mode(Some(KioskMode::Size(2560, 1440)), &vm), None, "not offered: the display's own, never the default");
+        assert_eq!(kiosk_video_mode(Some(KioskMode::Native), &vm), None);
+    }
+
+    /// cog is named a mode only when the display console asks for one, and
+    /// the scale follows the mode in use.
+    #[test]
+    fn the_display_console_names_its_video_mode_to_cog_only_when_it_asks_for_one() {
+        let env = |mode| kiosk_env("t", None, mode).into_iter().find(|(k, _)| k == "COG_PLATFORM_DRM_VIDEO_MODE").map(|(_, v)| v);
+        assert_eq!(env(Some((1920, 1080))).as_deref(), Some("1920x1080"));
+        assert_eq!(env(None), None);
+        assert_eq!(DEFAULT_KIOSK_MODE, (1920, 1080));
     }
 
     #[test]

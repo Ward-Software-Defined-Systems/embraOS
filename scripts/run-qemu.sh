@@ -23,6 +23,7 @@
 #       there; the direct path's kernel line names only the serial console.
 #   EMBRA_KIOSK=0|1             the display console off, or on (implies EMBRA_VNC=1); the OS's default is on with a display
 #   EMBRA_KBD=<layout>          the display console's keyboard layout (us)
+#   EMBRA_KIOSK_MODE=<W>x<H>    the display console's video mode (1920x1080 where the display offers it); native = the display's own
 #   EMBRA_ISO=<embraos.iso>     boot the installer medium first; the image argument is then the
 #                               TARGET disk (a blank qemu-img disk, raw or .qcow2, the installer writes)
 #   EMBRA_ISO_AS=cdrom|usb      the medium as a virtual DVD (default) or a USB stick on xHCI (the hybrid GPT path)
@@ -121,6 +122,9 @@ case "${EMBRA_KIOSK:-}" in
     "") ;;
     *) echo "WARNING: EMBRA_KIOSK='$EMBRA_KIOSK' is not 0 or 1 and is ignored" >&2 ;;
 esac
+if [ -n "${EMBRA_KIOSK_MODE:-}" ]; then
+    KNOBS="$KNOBS embra.kioskmode=${EMBRA_KIOSK_MODE}"
+fi
 if [ -n "${EMBRA_KBD:-}" ]; then
     KNOBS="$KNOBS embra.kbd=${EMBRA_KBD}"
 fi

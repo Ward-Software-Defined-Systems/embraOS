@@ -22,7 +22,7 @@ pub mod vt;
 pub mod state;
 pub mod status;
 
-pub use cmdline::{BootMode, Cmdline, CmdlineError};
+pub use cmdline::{BootMode, Cmdline, CmdlineError, KioskMode};
 pub use grubenv::{GrubEnv, GrubEnvError};
 pub use release::{Release, ReleaseError};
 pub use slot::Slot;
