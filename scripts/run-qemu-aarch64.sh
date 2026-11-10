@@ -64,10 +64,12 @@ elif [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
 fi
 
 # Detect host terminal size and pass it to the guest (the serial TUI's size).
-# Without a terminal on stdin stty fails: `|| true` keeps that failure from
-# ending the script under `set -e -o pipefail`, so the 80x24 below applies.
-HOST_COLS=$(stty size 2>/dev/null | awk '{print $2}' || true)
-HOST_ROWS=$(stty size 2>/dev/null | awk '{print $1}' || true)
+# An unknown size is 80x24. Without a terminal on stdin stty fails: `|| true`
+# keeps that failure from ending the script under `set -e -o pipefail`. A
+# pseudo-terminal nobody gave a size answers "0 0": awk prints a dimension
+# only when it is above zero.
+HOST_COLS=$(stty size 2>/dev/null | awk '$2 > 0 {print $2}' || true)
+HOST_ROWS=$(stty size 2>/dev/null | awk '$1 > 0 {print $1}' || true)
 HOST_COLS=${HOST_COLS:-80}
 HOST_ROWS=${HOST_ROWS:-24}
 
