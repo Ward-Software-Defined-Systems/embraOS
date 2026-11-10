@@ -63,9 +63,11 @@ elif [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     CPU_MODEL="-cpu host"
 fi
 
-# Detect host terminal size and pass it to the guest (the serial TUI's size)
-HOST_COLS=$(stty size 2>/dev/null | awk '{print $2}')
-HOST_ROWS=$(stty size 2>/dev/null | awk '{print $1}')
+# Detect host terminal size and pass it to the guest (the serial TUI's size).
+# Without a terminal on stdin stty fails: `|| true` keeps that failure from
+# ending the script under `set -e -o pipefail`, so the 80x24 below applies.
+HOST_COLS=$(stty size 2>/dev/null | awk '{print $2}' || true)
+HOST_ROWS=$(stty size 2>/dev/null | awk '{print $1}' || true)
 HOST_COLS=${HOST_COLS:-80}
 HOST_ROWS=${HOST_ROWS:-24}
 
