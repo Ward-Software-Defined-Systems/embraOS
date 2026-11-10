@@ -7,6 +7,7 @@
 //! - Graceful shutdown in reverse order
 
 use anyhow::{Result, bail};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -149,13 +150,14 @@ impl Supervisor {
     /// Register all embraOS services in dependency order: `start_all`
     /// starts them in the order they are registered here.
     pub fn register_services(&mut self) {
-        self.register_services_with(display_present(), std::path::Path::new(KIOSK_BIN).exists());
+        self.register_services_with(display_present(), Path::new(KIOSK_BIN).exists(), Path::new(DRM_SYSFS));
     }
 
     /// `register_services` with the machine's facts passed in: whether a
-    /// display exists (`/dev/dri/card*`) and whether this image carries the
-    /// display console's launcher. The tests pass both.
-    pub fn register_services_with(&mut self, display_present: bool, kiosk_available: bool) {
+    /// display exists (`/dev/dri/card*`), whether this image carries the
+    /// display console's launcher, and the directory where the kernel lists
+    /// the displays (`/sys/class/drm`). The tests pass all three.
+    pub fn register_services_with(&mut self, display_present: bool, kiosk_available: bool, drm: &Path) {
         // Which engine: fixed in THIS binary when the image is built
         // (scripts/build-image.sh --storage-engine, see crates/embrad/build.rs),
         // rocksdb for a dev build that bypasses the script. WardSONDB itself
@@ -403,11 +405,31 @@ impl Supervisor {
                         essential: false,
                     });
                     let wanted = self.cmdline.kiosk_mode();
-                    let mode = kiosk_video_mode(wanted, &connected_display_modes());
+                    let mut mode = kiosk_video_mode(wanted, &connected_display_modes(drm));
+                    if mode.is_none() {
+                        // The kernel's list may be a shortened one
+                        // (`redetect_displays`): the displays are detected
+                        // once more before the display console is left
+                        // with the display's own mode, and before the
+                        // device scale is taken from that list.
+                        if video_option_forces_a_connector(self.cmdline.tokens()) {
+                            info!("Display console: a video= option on the kernel line forces a connector; the displays are not detected again");
+                        } else {
+                            redetect_displays(drm);
+                            mode = kiosk_video_mode(wanted, &connected_display_modes(drm));
+                            if let Some((w, h)) = mode {
+                                info!("Display console: {w}x{h} is in the kernel's list after the displays were detected again");
+                            }
+                        }
+                    }
                     if let (Some(KioskMode::Size(w, h)), None) = (wanted, mode) {
                         warn!("embra.kioskmode={w}x{h}: not a mode every connected display offers; the display console keeps the display's own");
                     }
-                    let width = mode.map_or_else(display_width_px, |(w, _)| w);
+                    match mode {
+                        Some((w, h)) => info!("Display console: asking the display for {w}x{h}"),
+                        None => info!("Display console: the display's own video mode"),
+                    }
+                    let width = mode.map_or_else(|| display_width_px(drm), |(w, _)| w);
                     let scale = self.cmdline.kiosk_scale().unwrap_or_else(|| device_scale(width));
                     self.add_service(ServiceDef {
                         name: "embra-kiosk".to_string(),
@@ -982,18 +1004,31 @@ fn display_present() -> bool {
         .unwrap_or(false)
 }
 
+/// Where the kernel lists the displays: a directory per connector
+/// (`card0-Virtual-1`) with its `status` and its `modes`.
+const DRM_SYSFS: &str = "/sys/class/drm";
+
+/// The connector directories of the kernel's list (`card0-Virtual-1`; never
+/// `card0` itself, a render node or `version`), in name order.
+fn connector_dirs(drm: &Path) -> Vec<PathBuf> {
+    let Ok(dir) = std::fs::read_dir(drm) else { return Vec::new() };
+    let mut paths: Vec<_> = dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|path| {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            name.starts_with("card") && name.contains('-')
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
 /// The width of the display's first mode, from sysfs: a connector's `modes`
 /// file lists `<width>x<height>` lines (`/sys/class/drm/card0-Virtual-1/modes`).
 /// 0 when no connector names one.
-fn display_width_px() -> u32 {
-    let Ok(dir) = std::fs::read_dir("/sys/class/drm") else { return 0 };
-    let mut names: Vec<_> = dir.flatten().map(|e| e.path()).collect();
-    names.sort();
-    for path in names {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if !name.starts_with("card") || !name.contains('-') {
-            continue;
-        }
+fn display_width_px(drm: &Path) -> u32 {
+    for path in connector_dirs(drm) {
         if let Ok(modes) = std::fs::read_to_string(path.join("modes"))
             && let Some(first) = modes.lines().next()
             && let Some((w, _)) = first.split_once('x')
@@ -1013,16 +1048,9 @@ const DEFAULT_KIOSK_MODE: (u32, u32) = (1920, 1080);
 /// The mode names of every connected connector, from sysfs
 /// (`/sys/class/drm/card0-Virtual-1/status` and `modes`): what the display
 /// console's mode is chosen from.
-fn connected_display_modes() -> Vec<Vec<String>> {
-    let Ok(dir) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
-    let mut paths: Vec<_> = dir.flatten().map(|e| e.path()).collect();
-    paths.sort();
+fn connected_display_modes(drm: &Path) -> Vec<Vec<String>> {
     let mut displays = Vec::new();
-    for path in paths {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if !name.starts_with("card") || !name.contains('-') {
-            continue;
-        }
+    for path in connector_dirs(drm) {
         let connected = std::fs::read_to_string(path.join("status")).is_ok_and(|s| s.trim() == "connected");
         let modes: Vec<String> = std::fs::read_to_string(path.join("modes"))
             .map(|m| m.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
@@ -1032,6 +1060,40 @@ fn connected_display_modes() -> Vec<Vec<String>> {
         }
     }
     displays
+}
+
+/// Asks the kernel to detect every display again: `detect` written to a
+/// connector's `status` makes the kernel read that connector's modes afresh,
+/// up to the largest the device takes (`status_store`, drm_sysfs.c). A
+/// connector's `modes` is otherwise the list its last reader left, and the
+/// kernel's own console reads it again after every display event (a monitor
+/// plugged in, a VM window reporting its size) with its own framebuffer's
+/// size as the limit, so every larger mode leaves the list
+/// (`drm_fb_helper_hotplug_event`). Under a QEMU window that event arrives a
+/// second after the kernel's console appears at 1280x800, and 1920x1080 is
+/// gone from the list before it is read here. Best effort: a connector that
+/// cannot be written keeps the list it has.
+fn redetect_displays(drm: &Path) {
+    for path in connector_dirs(drm) {
+        // Never created: sysfs has the file, or the connector is gone.
+        if let Ok(mut status) = std::fs::OpenOptions::new().write(true).truncate(true).open(path.join("status")) {
+            let _ = std::io::Write::write_all(&mut status, b"detect");
+        }
+    }
+}
+
+/// Whether a `video=` option on the kernel line forces a connector on or off
+/// (`video=HDMI-A-1:D`, `video=1024x768e`; the letters `e`, `D` and `d` after
+/// the connector's name, drm_modes.c). `detect` written to a connector's
+/// `status` clears that force, so a line with such an option keeps the
+/// displays from being detected again. A firmware-framebuffer option whose
+/// value carries one of the letters (`video=efifb:mode=3`) counts too: the
+/// cost is the second look, never an operator's word undone.
+fn video_option_forces_a_connector(tokens: &[String]) -> bool {
+    tokens.iter().filter_map(|t| t.strip_prefix("video=")).any(|value| {
+        let spec = value.rsplit_once(':').map_or(value, |(_, spec)| spec);
+        spec.split(',').next().unwrap_or("").contains(['e', 'D', 'd'])
+    })
 }
 
 /// The video mode cog is told to set (`COG_PLATFORM_DRM_VIDEO_MODE`), or
@@ -1745,10 +1807,40 @@ mod launch_argument_tests {
 mod display_console_tests {
     use super::*;
 
+    /// Registered on a machine whose kernel lists no display: the tests
+    /// read nothing from the host's own `/sys/class/drm`.
     fn registered(cmdline: &str, display_present: bool, kiosk_available: bool) -> Supervisor {
+        registered_on(cmdline, display_present, kiosk_available, Path::new("/nonexistent/embrad-test/drm"))
+    }
+
+    fn registered_on(cmdline: &str, display_present: bool, kiosk_available: bool, drm: &Path) -> Supervisor {
         let mut sup = Supervisor::with_cmdline(Cmdline::parse(cmdline));
-        sup.register_services_with(display_present, kiosk_available);
+        sup.register_services_with(display_present, kiosk_available, drm);
         sup
+    }
+
+    /// A stand-in for the kernel's `/sys/class/drm`: a directory per
+    /// connector with its `status` and its `modes`, beside the entries that
+    /// are no connectors (`card0`, a render node, `version`). A plain
+    /// directory answers no `detect`: the file keeps what was written.
+    fn drm_tree(name: &str, connectors: &[(&str, &str, &[&str])]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("embrad-drm-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["card0", "renderD128"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("version"), "drm 1.1.0 20060810\n").unwrap();
+        for (connector, status, modes) in connectors {
+            let dir = root.join(connector);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("status"), format!("{status}\n")).unwrap();
+            std::fs::write(dir.join("modes"), modes.iter().map(|m| format!("{m}\n")).collect::<String>()).unwrap();
+        }
+        root
+    }
+
+    fn status_of(root: &Path, connector: &str) -> String {
+        std::fs::read_to_string(root.join(connector).join("status")).unwrap()
     }
 
     fn names(sup: &Supervisor) -> Vec<String> {
@@ -1826,6 +1918,111 @@ mod display_console_tests {
         assert_eq!(kiosk_video_mode(Some(KioskMode::Size(1600, 900)), &vm), Some((1600, 900)));
         assert_eq!(kiosk_video_mode(Some(KioskMode::Size(2560, 1440)), &vm), None, "not offered: the display's own, never the default");
         assert_eq!(kiosk_video_mode(Some(KioskMode::Native), &vm), None);
+    }
+
+    /// The displays are the kernel's list: the connected connectors that
+    /// name a mode, in name order; the width is the first mode's.
+    #[test]
+    fn the_connected_displays_and_their_modes_are_read_from_the_kernels_list() {
+        let root = drm_tree("read", &[
+            ("card0-HDMI-A-1", "disconnected", &[]),
+            ("card0-Virtual-1", "connected", &["2560x1600", "1920x1080"]),
+            ("card1-DP-1", "connected", &[]),
+        ]);
+        assert_eq!(connected_display_modes(&root), vec![vec!["2560x1600".to_string(), "1920x1080".to_string()]]);
+        assert_eq!(display_width_px(&root), 2560);
+        assert_eq!(connector_dirs(&root).len(), 3, "card0, the render node and version are no connectors");
+        let nowhere = Path::new("/nonexistent/embrad-test/drm");
+        assert!(connected_display_modes(nowhere).is_empty());
+        assert_eq!(display_width_px(nowhere), 0);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `detect` goes to every connector's `status` and to nothing else, and
+    /// no file is created.
+    #[test]
+    fn a_detect_is_asked_of_every_connector_and_of_nothing_else() {
+        let root = drm_tree("detect", &[
+            ("card0-Virtual-1", "connected", &["1280x800"]),
+            ("card0-HDMI-A-1", "disconnected", &[]),
+        ]);
+        std::fs::create_dir_all(root.join("card1-DP-2")).unwrap(); // a connector that went away: no status
+        std::fs::write(root.join("card0/status"), "no connector\n").unwrap();
+        redetect_displays(&root);
+        assert_eq!(status_of(&root, "card0-Virtual-1"), "detect");
+        assert_eq!(status_of(&root, "card0-HDMI-A-1"), "detect");
+        assert_eq!(std::fs::read_to_string(root.join("card0-Virtual-1/modes")).unwrap(), "1280x800\n");
+        assert!(!root.join("card1-DP-2/status").exists(), "no file is created");
+        assert_eq!(status_of(&root, "card0"), "no connector\n", "the card itself is not written");
+        assert!(!root.join("renderD128/status").exists());
+        assert_eq!(std::fs::read_to_string(root.join("version")).unwrap(), "drm 1.1.0 20060810\n");
+        redetect_displays(Path::new("/nonexistent/embrad-test/drm")); // nothing to ask
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The displays are detected again only when the mode asked for is not
+    /// in the kernel's list (or the display's own mode is asked for, whose
+    /// width sets the device scale), and never on a kernel line that forces
+    /// a connector.
+    #[test]
+    fn the_displays_are_detected_again_only_when_the_mode_is_missing_and_no_connector_is_forced() {
+        let mode = |sup: &Supervisor| {
+            let kiosk = sup.services.iter().find(|s| s.def.name == "embra-kiosk").expect("the kiosk");
+            kiosk.def.env.iter().find(|(k, _)| k == "COG_PLATFORM_DRM_VIDEO_MODE").map(|(_, v)| v.clone())
+        };
+        // listed: asked for, and nothing is written
+        let listed = drm_tree("listed", &[("card0-Virtual-1", "connected", &["1280x800", "1920x1080"])]);
+        let sup = registered_on("embra.web=1", true, true, &listed);
+        assert_eq!(mode(&sup).as_deref(), Some("1920x1080"));
+        assert_eq!(status_of(&listed, "card0-Virtual-1"), "connected\n");
+        // missing: a detect is asked for (a plain directory answers none, so the mode stays missing)
+        let cut = drm_tree("cut", &[("card0-Virtual-1", "connected", &["1280x800", "1024x768"])]);
+        let sup = registered_on("embra.web=1", true, true, &cut);
+        assert_eq!(mode(&sup), None);
+        assert_eq!(status_of(&cut, "card0-Virtual-1"), "detect");
+        // missing on a line that forces a connector: left as it is
+        let forced = drm_tree("forced", &[("card0-Virtual-1", "connected", &["1280x800", "1024x768"])]);
+        let sup = registered_on("embra.web=1 video=HDMI-A-1:D", true, true, &forced);
+        assert_eq!(mode(&sup), None);
+        assert_eq!(status_of(&forced, "card0-Virtual-1"), "connected\n");
+        // the display's own mode by the knob: read afresh for the device scale
+        let native = drm_tree("native", &[("card0-Virtual-1", "connected", &["1280x800", "1920x1080"])]);
+        let sup = registered_on("embra.web=1 embra.kioskmode=native", true, true, &native);
+        assert_eq!(mode(&sup), None);
+        assert_eq!(status_of(&native, "card0-Virtual-1"), "detect");
+        for root in [listed, cut, forced, native] {
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// The letters that force a connector (`e`, `D`, `d`) count after the
+    /// connector's name and before the first comma; a name that carries
+    /// them (`eDP-1`, `HDMI-A-1`) forces nothing.
+    #[test]
+    fn a_video_option_that_forces_a_connector_is_told_from_one_that_does_not() {
+        let forces = |line: &str| video_option_forces_a_connector(Cmdline::parse(line).tokens());
+        for line in [
+            "video=HDMI-A-1:D",
+            "video=eDP-1:d",
+            "video=VGA-1:1024x768e",
+            "video=1024x768e",
+            "quiet video=DP-1:1920x1080@60e embra.web=1",
+            "video=HDMI-A-1:e,rotate=180",
+        ] {
+            assert!(forces(line), "{line}");
+        }
+        for line in [
+            "",
+            "quiet embra.web=1",
+            "video=efifb:1920x1080",
+            "video=efifb:1920x1080 video=Virtual-1:1920x1080@60",
+            "video=eDP-1:1920x1080",
+            "video=DP-1:1280x720M@60,rotate=180",
+        ] {
+            assert!(!forces(line), "{line}");
+        }
+        // a firmware-framebuffer option with one of the letters: counted, the cautious side
+        assert!(forces("video=efifb:mode=3"));
     }
 
     /// cog is named a mode only when the display console asks for one, and
