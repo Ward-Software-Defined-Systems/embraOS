@@ -202,14 +202,13 @@ Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge pac
 load before the wizard writes a configuration, so their nodes have no vectors until
 backfilled (see `docs/BUILD/QUICK-START.md`).
 
-> **Display window and a bridged network (validated 2026-11-07 on the Intel Mac; the display console in the window is TBD).**
+> **Display window and a bridged network (the bridged network and the standard-VGA window validated 2026-11-07 on the Intel Mac; the virtio-gpu window is TBD there).**
 > `run-qemu.sh`'s display switch, `EMBRA_VNC=1`, binds a VNC server to
 > `127.0.0.1:5900`, the port macOS Screen Sharing holds on a Mac. To see the
-> console on a window — GRUB's menu, the boot log, the banner with the URL, and
-> then the display console, the web console with keyboard and mouse — run QEMU by
-> hand with the devices that switch uses and a Cocoa display: the standard VGA
-> device (the firmware drives it, the kernel's `bochs` driver takes it over) and a
-> USB tablet on xHCI for the pointer; the machine's own PS/2 keyboard types:
+> console on a window — the boot log and then the display console, the web console
+> with keyboard and mouse — run QEMU by hand with a virtio-gpu device, a USB tablet
+> on xHCI for the pointer (the machine's own PS/2 keyboard types) and a Cocoa
+> display:
 > ```bash
 > cp "$(brew --prefix)/share/qemu/edk2-i386-vars.fd" /tmp/embraos-vars.fd
 > qemu-system-x86_64 -machine q35 -accel hvf -m 4G -smp 4 \
@@ -217,14 +216,16 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 >   -drive if=pflash,format=raw,file=/tmp/embraos-vars.fd \
 >   -drive file=output/images/embraos.img,format=raw,if=virtio \
 >   -smbios "type=11,value=embra.cols=$(tput cols) embra.rows=$(tput lines)" \
->   -vga std -display cocoa -serial mon:stdio \
+>   -vga virtio -display cocoa -serial mon:stdio \
 >   -device qemu-xhci -device usb-tablet \
 >   -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
 > ```
-> The window with GRUB's menu, the boot log and the banner is validated on the
-> Intel Mac (2026-11-07, without the tablet line). The display console on these
-> devices is validated under QEMU on Linux ([QUICK-START.md](QUICK-START.md)); in
-> this window on the Intel Mac it is **TBD** until run.
+> These devices are validated under QEMU on Linux (2026-11-10: the boot log on the
+> display, then the display console at 1920x1080 with the keyboard, the pointer
+> and the click); this window on the Intel Mac is **TBD** until run. `-vga std` in
+> place of `-vga virtio` gives the standard VGA device, which the kernel's `bochs`
+> driver takes over: GRUB's menu, the boot log and the banner with the URL are
+> validated on it on the Intel Mac (2026-11-07, without the tablet line).
 >
 > For a lease from the LAN instead of QEMU's user network, replace the `-nic user,…`
 > line with `-nic vmnet-bridged,ifname=en0,model=virtio-net-pci` (`en0`, or the
@@ -233,8 +234,8 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > port forwards in that mode; the banner's second URL, on the leased address, is the
 > one to open, from this Mac or from another machine on the LAN (the certificate
 > names `localhost`, so the browser warns about the name once). The same recipe
-> for Apple Silicon, with a virtio-gpu device in place of the VGA device and a USB
-> keyboard beside the tablet, is in [AARCH64-BUILD.md](AARCH64-BUILD.md).
+> for Apple Silicon, with `-device virtio-gpu-pci` and a USB keyboard beside the
+> tablet, is in [AARCH64-BUILD.md](AARCH64-BUILD.md).
 
 > **Upgrading from the pre-volume flow? Delete the stale Mac-side
 > `buildroot-src/`.** `run-qemu.sh` prefers `buildroot-src/output/images/` over
