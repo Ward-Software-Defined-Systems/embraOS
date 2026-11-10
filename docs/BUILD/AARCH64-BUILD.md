@@ -50,6 +50,12 @@
 > blobs (cxgb4, ice, qed) and the init, there being no microcode on aarch64; an
 > x86_64 image of the same build says 31 MiB, its microcode archive included.
 >
+> **2026-11-10 — the display console on Apple Silicon.** The operator's run of
+> 2026-11-10 under QEMU/HVF with a virtio-gpu display and a USB keyboard and tablet
+> on xHCI (the command under [Boot](#3-boot)): after the boot log the window shows
+> the web console, which takes the keyboard, the pointer and a click. The `ramfb`
+> window of 2026-11-06 showed the boot log; the display console has not run on it.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
 > exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
@@ -163,11 +169,12 @@ EMBRA_BOOT=direct ./scripts/run-qemu-aarch64.sh    # kernel + initramfs from the
 EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu-aarch64.sh   # QEMU's DHCP leases this address: the banner's second URL
 ```
 
-> **Display window and a bridged network (validated 2026-11-06 on Apple Silicon).**
+> **Display window and a bridged network (validated on Apple Silicon: the window 2026-11-10, the bridged network 2026-11-06).**
 > `run-qemu-aarch64.sh` has no display switch (the x86_64 launcher's `EMBRA_VNC=1`
-> has no aarch64 counterpart yet). To see the console on a window — GRUB's menu,
-> the boot log and the banner with the URL — run QEMU by hand with a `ramfb`
-> device, which the edk2 firmware drives and the kernel's `simpledrm` takes over:
+> has no aarch64 counterpart yet). To see the console on a window — the boot log
+> and then the display console, the web console with keyboard and mouse — run QEMU
+> by hand with a virtio-gpu device and a USB keyboard and tablet on xHCI (the
+> `virt` machine has no keyboard or pointer of its own):
 > ```bash
 > cp "$(brew --prefix)/share/qemu/edk2-arm-vars.fd" /tmp/embraos-vars.fd
 > qemu-system-aarch64 -machine virt -accel hvf -cpu host -m 4G -smp 4 \
@@ -175,9 +182,15 @@ EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu-aarch64.sh   # QEMU's DHCP leases
 >   -drive if=pflash,format=raw,file=/tmp/embraos-vars.fd \
 >   -drive file=output/images/embraos.img,format=raw,if=virtio \
 >   -smbios "type=11,value=embra.cols=$(tput cols) embra.rows=$(tput lines)" \
->   -device ramfb -display cocoa -serial mon:stdio \
+>   -device virtio-gpu-pci -display cocoa -serial mon:stdio \
+>   -device qemu-xhci -device usb-kbd -device usb-tablet \
 >   -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
 > ```
+> `-device ramfb` in place of `-device virtio-gpu-pci` gives the firmware's own
+> framebuffer, which the kernel's `simpledrm` takes over: GRUB's menu, the boot log
+> and the banner with the URL are validated on it (2026-11-06), the display console
+> on it is **TBD**.
+>
 > For a lease from the LAN instead of QEMU's user network, replace the `-nic user,…`
 > line with `-nic vmnet-bridged,ifname=en0,model=virtio-net-pci` (`en0`, or the
 > interface `route -n get default` names) and run the command under `sudo`:
@@ -510,9 +523,9 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Consoles | `console=tty0 console=ttyS0` | `console=tty0 console=ttyAMA0` (the serial line, last, owns `/dev/console`; embra-init's and embrad's boot messages go to it and to the display both; both consoles rendered into `grub.cfg` by `post_image.sh`, the serial one alone passed by the direct path) |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
-| Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device ramfb -display cocoa` by hand ([Boot](#3-boot)) |
+| Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
-| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi and on Hyper-V) | the same stack is in the defconfig and builds for the image; **TBD** until the launcher has a display and input device and a run shows it (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
+| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi and on Hyper-V) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page, the keyboard, the pointer and a click; the command under [Boot](#3-boot)); on `ramfb` it is **TBD**, and the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
 | Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps 1383 modules nothing loads, 71 MB uncompressed under `/lib/modules` (the 2026-11-09 build) |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | none (no bare metal of this architecture to install on); the installer's tools are in the image all the same |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
