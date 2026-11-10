@@ -985,3 +985,16 @@ body.is-observer .term-wrap {
    the page is the whole screen and never leaves it, so the switch to the mobile
    chat view (a reload into another shell) is not offered there. */
 body.kiosk .mobile-toggle { display: none; }
+
+/* Its own menu on the right mouse button (`embraKioskMenu`, embra-term.js):
+   placed by a transform like the page-drawn pointer and just below it, above
+   everything else. Flat: no shadow and no transition, every frame on that
+   display being painted in software. */
+.kiosk-menu { position: fixed; left: 0; top: 0; z-index: 2147483000; display: none;
+  min-width: 176px; padding: 4px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 8px; }
+.kiosk-menu button { display: block; width: 100%; padding: 8px 12px; text-align: left;
+  font: inherit; font-size: var(--text-sm); color: var(--txt); background: transparent;
+  border: 0; border-radius: 5px; cursor: default; }
+.kiosk-menu button:hover:not(:disabled) { background: var(--accent); color: #1a0e06; }
+.kiosk-menu button:disabled { color: var(--txt-dim); opacity: .6; }

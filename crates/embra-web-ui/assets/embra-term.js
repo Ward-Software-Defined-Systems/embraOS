@@ -104,6 +104,105 @@
       const a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
       if (a && a.origin !== window.location.origin) e.preventDefault();
     }, true);
+    embraKioskMenu();
+  }
+
+  // The display console's own menu, on the right mouse button. The launcher
+  // draws no menus on the machine's display, so the page draws this one, as
+  // it draws the pointer. Copy takes the terminal's selection, or the page's
+  // where the terminal has none. Paste hands the text to xterm's paste path
+  // (one bracketed paste: the console reads it as a paste, never as typed
+  // lines) or puts it into the text field that was clicked. The clipboard is
+  // the page's own and lives as long as the page does: the display has no
+  // other, and nothing leaves the machine through it.
+  let kioskClip = "";
+  function embraKioskMenu() {
+    const menu = document.createElement("div");
+    menu.id = "embra-kiosk-menu";
+    menu.className = "kiosk-menu";
+    menu.setAttribute("role", "menu");
+    const item = (act, label) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.setAttribute("role", "menuitem");
+      b.dataset.act = act; b.textContent = label;
+      menu.appendChild(b);
+      return b;
+    };
+    const copy = item("copy", "Copy"), paste = item("paste", "Paste");
+    document.body.appendChild(menu);
+
+    // What the menu was opened on: the text selected then, and the page's
+    // text field under the pointer (xterm's own textarea is the terminal).
+    let picked = "", field = null;
+    const open = () => menu.style.display === "block";
+    const close = () => { menu.style.display = "none"; picked = ""; field = null; };
+    const textField = (el) => {
+      if (!el || !el.matches || el.closest(".xterm")) return null;
+      if (el.matches("textarea")) return el;
+      // The input types that have a caret to paste at.
+      return el.matches("input") && /^(text|search|password|url|tel|)$/.test(el.getAttribute("type") || "") ? el : null;
+    };
+    const selected = () => {
+      // A masked field gives nothing to copy, as in any browser.
+      if (field && field.type === "password") return "";
+      if (field && field.selectionEnd > field.selectionStart) {
+        return field.value.substring(field.selectionStart, field.selectionEnd);
+      }
+      if (term && term.hasSelection()) return term.getSelection();
+      const s = window.getSelection ? window.getSelection() : null;
+      return s ? s.toString() : "";
+    };
+
+    document.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      field = textField(e.target);
+      picked = selected();
+      copy.disabled = picked === "";
+      // An observer types nothing into the terminal; a page field is its own.
+      paste.disabled = kioskClip === "" || !(field || writable);
+      menu.style.display = "block";
+      const x = Math.max(0, Math.min(e.clientX, window.innerWidth - menu.offsetWidth - 4));
+      const y = Math.max(0, Math.min(e.clientY, window.innerHeight - menu.offsetHeight - 4));
+      menu.style.transform = "translate(" + x + "px," + y + "px)";
+    }, true);
+
+    // A press on the menu keeps the focus and the selection where they are.
+    menu.addEventListener("mousedown", (e) => { e.preventDefault(); });
+    menu.addEventListener("click", (e) => {
+      const b = e.target && e.target.closest ? e.target.closest("button[data-act]") : null;
+      if (!b || b.disabled) return;
+      const text = picked, into = field;
+      close();
+      if (b.dataset.act === "copy") {
+        kioskClip = text;
+      } else if (b.dataset.act === "paste") {
+        if (into && into.isConnected) {
+          // The shell's fields are bound to their `input` event.
+          try {
+            into.focus();
+            into.setRangeText(kioskClip, into.selectionStart, into.selectionEnd, "end");
+            into.dispatchEvent(new Event("input", { bubbles: true }));
+          } catch (err) {}
+        } else if (writable && term) {
+          term.paste(kioskClip);
+          term.focus();
+        }
+      }
+    });
+
+    // Anything else closes it: a press elsewhere, the wheel, a new size, and
+    // Escape, which stops here (in the console Esc is /stop).
+    document.addEventListener("mousedown", (e) => {
+      if (open() && !menu.contains(e.target)) close();
+    }, true);
+    window.addEventListener("wheel", () => { if (open()) close(); }, { passive: true, capture: true });
+    window.addEventListener("resize", () => { if (open()) close(); });
+    window.addEventListener("keydown", (e) => {
+      if (open() && e.key === "Escape") {
+        e.preventDefault(); e.stopImmediatePropagation();
+        close();
+      }
+    }, true);
   }
 
   window.embraTermInit = function (elId) {
