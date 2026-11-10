@@ -53,8 +53,9 @@
 > **2026-11-10 — the display console on Apple Silicon.** The operator's run of
 > 2026-11-10 under QEMU/HVF with a virtio-gpu display and a USB keyboard and tablet
 > on xHCI (the command under [Boot](#3-boot)): after the boot log the window shows
-> the web console, which takes the keyboard, the pointer and a click. The `ramfb`
-> window of 2026-11-06 showed the boot log; the display console has not run on it.
+> the web console at 1920x1080, which takes the keyboard, the pointer and a click.
+> The `ramfb` window of 2026-11-06 showed the boot log; the display console has not
+> run on it.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
@@ -525,7 +526,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
-| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi and on Hyper-V) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page, the keyboard, the pointer and a click; the command under [Boot](#3-boot)); on `ramfb` it is **TBD**, and the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
+| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi and on Hyper-V) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)); on `ramfb` it is **TBD**, and the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
 | Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps 1383 modules nothing loads, 71 MB uncompressed under `/lib/modules` (the 2026-11-09 build) |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | none (no bare metal of this architecture to install on); the installer's tools are in the image all the same |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
