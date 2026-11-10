@@ -25,9 +25,9 @@
 **Current Status:** Phase 1 — Stable, released as `v0.23.0-phase1` (2026-11-01; the code-review pit stop, `v0.16.0-phase1` through `v0.23.0-phase1`, closed on `main`). Phase 2 — In progress on branch `phase2`: the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, DHCP, the drivers of the hypervisors and of wired hardware with their firmware and microcode, the web console on the machine's display with keyboard and mouse, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
 > **⚠️ `phase2` is a testing branch and unstable.** Bare-metal and hypervisor installs
-> are being tested on it right now: the installer ISO, the display console, the
-> bare-metal drivers with their firmware and microcode, and the 2 GiB OS slots are
-> validated under QEMU on this branch and nowhere else yet, the slot size changed
+> are being tested on it right now: the installer ISO and the display console are
+> validated under QEMU, on ESXi and on Hyper-V; the bare-metal drivers with their
+> firmware and microcode have not run on real hardware yet, the slot size changed
 > the disk layout, and a build from this branch may not boot on your hardware or
 > update cleanly from an earlier image. For a working embraOS use the latest release
 > on `main`, `v0.23.0-phase1`; what each surface has been validated on is in
