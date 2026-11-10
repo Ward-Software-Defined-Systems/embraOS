@@ -29,6 +29,17 @@
 > The Config Wizard, the soul and the steps after them in the
 > [End-to-End Validation](#end-to-end-validation) were not re-run on this date.
 >
+> **2026-11-10 — the display console on the Intel Mac.** Verified by William on
+> the Intel MacBook Pro 16" under QEMU/HVF with a virtio-gpu display and a USB
+> tablet on xHCI (the command under [Boot](#4-boot)): after the boot log the window
+> shows the web console, which takes the keyboard, the pointer and a click. An
+> image of `22022ff` came up at 1280x800 there; one of `1ba8df5` comes up at
+> 1920x1080, by default and with `embra.kioskmode=1920x1080` in the `-smbios`
+> value. QEMU's window reports its size to the guest a second after every resize,
+> the kernel's own console then keeps only the display modes its 1280x800
+> framebuffer holds, and embrad found no 1920x1080 in that list; from `1ba8df5` it
+> asks the kernel to detect the displays again before it gives up on a mode.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
 > named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
 > Docker runtime's macOS-side file-provider fd pool (`Too many open files` —
@@ -202,7 +213,7 @@ Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge pac
 load before the wizard writes a configuration, so their nodes have no vectors until
 backfilled (see `docs/BUILD/QUICK-START.md`).
 
-> **Display window and a bridged network (the bridged network and the standard-VGA window validated 2026-11-07 on the Intel Mac; the virtio-gpu window is TBD there).**
+> **Display window and a bridged network (validated on the Intel Mac: the bridged network and the standard-VGA window 2026-11-07, the virtio-gpu window 2026-11-10).**
 > `run-qemu.sh`'s display switch, `EMBRA_VNC=1`, binds a VNC server to
 > `127.0.0.1:5900`, the port macOS Screen Sharing holds on a Mac. To see the
 > console on a window — the boot log and then the display console, the web console
@@ -220,9 +231,10 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 >   -device qemu-xhci -device usb-tablet \
 >   -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
 > ```
-> These devices are validated under QEMU on Linux (2026-11-10: the boot log on the
+> This window is validated on the Intel Mac (2026-11-10: the boot log on the
 > display, then the display console at 1920x1080 with the keyboard, the pointer
-> and the click); this window on the Intel Mac is **TBD** until run. `-vga std` in
+> and a click; the mode needs an image from `1ba8df5` on, an older one comes up
+> at 1280x800 in this window), and the devices under QEMU on Linux. `-vga std` in
 > place of `-vga virtio` gives the standard VGA device, which the kernel's `bochs`
 > driver takes over: GRUB's menu, the boot log and the banner with the URL are
 > validated on it on the Intel Mac (2026-11-07, without the tablet line).
