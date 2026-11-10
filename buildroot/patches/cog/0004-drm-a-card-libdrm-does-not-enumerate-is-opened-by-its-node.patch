@@ -1,0 +1,98 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] drm: a card libdrm does not enumerate is opened by its node
+
+The DRM platform took its card from drmGetDevices2() alone. libdrm tells a
+card by the bus of the device behind it (PCI, USB, platform, virtio, host1x,
+faux) and leaves out every other one: Hyper-V's synthetic video is a VMBus
+device, the enumeration returns nothing for it, and the platform found no
+display on a machine whose /dev/dri/card0 works. When the enumeration yields
+no card that opens, the card nodes themselves are tried, and the first with
+mode-setting resources is the display.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/platform/drm/cog-platform-drm.c
++++ b/platform/drm/cog-platform-drm.c
+@@ -330,6 +330,35 @@
+     }
+ }
+ 
++/* The first card node that opens and has mode-setting resources, for a card
++ * libdrm's enumeration leaves out: drmGetDevices2() tells a card by the bus
++ * of the device behind it (PCI, USB, platform, virtio, host1x, faux) and
++ * skips every other one. Hyper-V's synthetic video is a VMBus device: the
++ * enumeration is empty there, and /dev/dri/card0 works all the same. Returns
++ * the descriptor and the resources, or -1. */
++static int
++open_card_node(drmModeRes **resources)
++{
++    for (int minor = 0; minor < 64; ++minor) {
++        char path[64];
++        g_snprintf(path, sizeof(path), DRM_DEV_NAME, DRM_DIR_NAME, minor);
++
++        int fd = open(path, O_RDWR);
++        if (fd < 0)
++            continue;
++
++        *resources = drmModeGetResources(fd);
++        if (*resources) {
++            g_debug("init_drm: using %s, a card libdrm does not enumerate", path);
++            return fd;
++        }
++
++        close(fd);
++    }
++
++    return -1;
++}
++
+ static gboolean
+ check_drm(void)
+ {
+@@ -338,7 +367,7 @@
+ 
+     int num_devices = drmGetDevices2(0, devices, 64);
+     if (num_devices < 0)
+-        return FALSE;
++        num_devices = 0;
+ 
+     gboolean supported = FALSE;
+     for (int i = 0; !supported && i < num_devices; ++i) {
+@@ -349,6 +378,17 @@
+     }
+ 
+     drmFreeDevices(devices, num_devices);
++
++    if (!supported) {
++        drmModeRes *resources = NULL;
++        int fd = open_card_node(&resources);
++        if (fd >= 0) {
++            drmModeFreeResources(resources);
++            close(fd);
++            supported = TRUE;
++        }
++    }
++
+     return supported;
+ }
+ 
+@@ -375,7 +415,7 @@
+ 
+     int num_devices = drmGetDevices2(0, devices, 64);
+     if (num_devices < 0)
+-        return FALSE;
++        num_devices = 0;
+ 
+     for (int i = 0; i < num_devices; ++i) {
+         drmDevice* device = devices[i];
+@@ -413,6 +453,9 @@
+     drmFreeDevices(devices, num_devices);
+ 
+     if (!drm_data.base_resources)
++        drm_data.fd = open_card_node(&drm_data.base_resources);
++
++    if (!drm_data.base_resources)
+         return FALSE;
+ 
+     if (drm_data.atomic_modesetting) {
