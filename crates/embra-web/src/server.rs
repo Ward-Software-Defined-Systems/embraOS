@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::connect_info::Connected;
 use axum::routing::{get, post, put};
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
@@ -23,6 +24,7 @@ use crate::access;
 use crate::api_tools::api_tools_list;
 use crate::assets::static_handler;
 use crate::config::WebConfig;
+use crate::console_url::api_console_url;
 use crate::media::{MEDIA_BODY_LIMIT, api_media_get, api_media_put};
 use crate::files::api_file_get;
 use crate::sessions::api_sessions_list;
@@ -112,6 +114,18 @@ impl axum::serve::Listener for RustlsListener {
     }
 }
 
+/// The address a connection came from, for the one route that asks where
+/// its caller sits (`console_url.rs`: the machine's own display, or
+/// elsewhere). It is the TCP peer the listener accepted, never a header.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Peer(pub SocketAddr);
+
+impl Connected<axum::serve::IncomingStream<'_, RustlsListener>> for Peer {
+    fn connect_info(stream: axum::serve::IncomingStream<'_, RustlsListener>) -> Self {
+        Peer(*stream.remote_addr())
+    }
+}
+
 pub async fn serve(
     cfg: &WebConfig,
     state: AppState,
@@ -141,6 +155,9 @@ pub async fn serve(
         // the route; the archive carries STATE's secrets and never enters
         // the workspace).
         .route("/api/backups/{name}", get(crate::backups::api_backup_get))
+        // The console's URLs with the token, for the display console's
+        // menu: answered to this machine's own browser alone.
+        .route("/api/console-url", get(api_console_url))
         .fallback(static_handler)
         // The gate (`access.rs`) over every route and the fallback: the
         // boot's token in the query once, the cookie after, 401 otherwise.
@@ -152,7 +169,7 @@ pub async fn serve(
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
     tracing::info!(%addr, "embra-web HTTPS listening");
 
-    axum::serve(RustlsListener::new(tcp, acceptor), app).await?;
+    axum::serve(RustlsListener::new(tcp, acceptor), app.into_make_service_with_connect_info::<Peer>()).await?;
     Ok(())
 }
 

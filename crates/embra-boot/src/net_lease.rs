@@ -2,9 +2,11 @@
 //! one `key=value` per line, written by the udhcpc lease script
 //! (`/usr/share/embra/udhcpc.script`, `source=dhcp`) or by embrad itself when
 //! no lease arrived and the static QEMU user-network address was applied
-//! (`source=static`). The boot banner reads it for the console URL on the
-//! leased address; a missing or unreadable file reads as the static
-//! configuration, which is what every boot before DHCP ran.
+//! (`source=static`). Two readers take the console's URLs from it
+//! (`console_urls`): embrad for the boot banner, and embra-web for the
+//! display console's menu, which shows them again. A missing or unreadable
+//! file reads as the static configuration, which is what every boot before
+//! DHCP ran.
 
 use std::fmt;
 

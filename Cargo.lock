@@ -1575,6 +1575,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bytes",
+ "embra-boot",
  "embra-common",
  "futures-util",
  "libc",

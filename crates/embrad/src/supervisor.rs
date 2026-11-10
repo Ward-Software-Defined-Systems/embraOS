@@ -536,8 +536,17 @@ impl Supervisor {
                         let _ = writeln!(b,
                             "    \x1b[1;36m{leased}\x1b[0m  \x1b[2m(the address DHCP leased to this machine, {}/{})\x1b[0m", lease.ip, lease.prefix);
                     }
+                    // Printed here and nowhere else, except where the display
+                    // console runs: its menu shows the URL again (embra-web's
+                    // `/api/console-url`, answered to the machine's own browser
+                    // alone), the display console covering this copy.
+                    let shown = if self.kiosk {
+                        "it is shown here and in the display console's menu (the right mouse button)"
+                    } else {
+                        "it is shown here only"
+                    };
                     let _ = writeln!(b,
-                        "    \x1b[2mThis boot's access token is in the URL; the URL is the credential, and it is shown here only.\x1b[0m");
+                        "    \x1b[2mThis boot's access token is in the URL; the URL is the credential, and {shown}.\x1b[0m");
                     if self.kiosk {
                         let _ = writeln!(b,
                             "    \x1b[2mThe display shows this console too (embra.kiosk=0 boots without it).\x1b[0m");

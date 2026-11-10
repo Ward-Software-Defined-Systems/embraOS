@@ -20,6 +20,7 @@ mod chat_bridge;
 mod files;
 mod media;
 mod config;
+mod console_url;
 mod metrics;
 mod pty_bridge;
 mod server;

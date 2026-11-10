@@ -28,11 +28,12 @@ mod ca_bundle;
 mod console;
 mod modes;
 mod mount;
-mod net_lease;
 mod reconcile;
 mod supervisor;
 
 use anyhow::Result;
+// The lease record lives in the boot contract: embra-web reads it too.
+use embra_boot::net_lease;
 use embra_boot::{BootMode, Cmdline, Release};
 use tracing::{error, info, warn};
 

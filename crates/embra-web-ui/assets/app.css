@@ -998,3 +998,23 @@ body.kiosk .mobile-toggle { display: none; }
   border: 0; border-radius: 5px; cursor: default; }
 .kiosk-menu button:hover:not(:disabled) { background: var(--accent); color: #1a0e06; }
 .kiosk-menu button:disabled { color: var(--txt-dim); opacity: .6; }
+.kiosk-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
+
+/* The console's URL over the page (the menu's last entry): one panel on a
+   dimmed page, the URL in the terminal's face and large enough to be read
+   off the display and typed on another machine. */
+.kiosk-sheet-bg { position: fixed; inset: 0; z-index: 2147482000; display: none;
+  align-items: center; justify-content: center; background: rgba(8, 5, 3, .8); }
+.kiosk-sheet { width: min(980px, 92vw); padding: 22px 24px; display: flex;
+  flex-direction: column; gap: 14px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 10px; }
+.kiosk-sheet .ks-title { font-size: var(--text-lg); color: var(--txt); }
+.kiosk-sheet .ks-body { display: flex; flex-direction: column; gap: 4px; }
+.kiosk-sheet .ks-url { margin-top: 8px; font-size: 18px; color: var(--accent-2);
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; overflow-wrap: anywhere; }
+.kiosk-sheet .ks-where { font-size: var(--text-sm); color: var(--txt-dim); }
+.kiosk-sheet .ks-note { padding-top: 12px; border-top: 1px solid var(--line);
+  font-size: var(--text-sm); color: var(--txt-dim); }
+.kiosk-sheet .ks-close { align-self: flex-end; padding: 8px 18px; font: inherit;
+  font-size: var(--text-sm); color: #1a0e06; background: var(--accent); border: 0;
+  border-radius: 6px; cursor: default; }

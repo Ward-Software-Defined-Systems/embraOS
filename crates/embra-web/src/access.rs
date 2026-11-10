@@ -32,7 +32,7 @@ pub const TOKEN_ENV: &str = "EMBRA_WEB_TOKEN";
 /// The cookie the first visit sets.
 pub const COOKIE: &str = "embra_token";
 /// What a request without the token is told. Never the token.
-pub const REFUSAL: &str = "embraOS web console: open the URL printed at boot on the serial console and on the display; it carries this boot's access token.\n";
+pub const REFUSAL: &str = "embraOS web console: open the URL printed at boot on the serial console and on the display; it carries this boot's access token. On the display the console's menu (the right mouse button) shows it again.\n";
 /// What a socket handshake or a write from another origin is told.
 pub const ORIGIN_REFUSAL: &str = "embraOS web console: refused — the request came from a page on another origin; the console answers the pages it serves itself.\n";
 

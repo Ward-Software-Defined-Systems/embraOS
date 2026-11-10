@@ -129,7 +129,59 @@
       return b;
     };
     const copy = item("copy", "Copy"), paste = item("paste", "Paste");
+    menu.appendChild(document.createElement("hr"));
+    item("url", "This console\u2019s URL\u2026");
     document.body.appendChild(menu);
+
+    // This console's URL with the boot's token, for a browser on another
+    // machine. The boot banner printed it once and the display console
+    // covers that copy; embra-web gives it to the machine's own browser and
+    // to no other (`/api/console-url`). It is on the page only while the
+    // sheet is up.
+    const sheet = document.createElement("div");
+    sheet.id = "embra-kiosk-url";
+    sheet.className = "kiosk-sheet-bg";
+    const box = document.createElement("div");
+    box.className = "kiosk-sheet";
+    box.setAttribute("role", "dialog");
+    sheet.appendChild(box);
+    document.body.appendChild(sheet);
+    const sheetOpen = () => sheet.style.display === "flex";
+    const closeSheet = () => {
+      sheet.style.display = "none";
+      box.textContent = "";
+      if (term) try { term.focus(); } catch (e) {}
+    };
+    const el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    };
+    const showUrl = async () => {
+      box.textContent = "";
+      box.appendChild(el("b", "ks-title", "This console from another machine"));
+      const rows = el("div", "ks-body", null);
+      box.appendChild(rows);
+      box.appendChild(el("div", "ks-note", "The URL carries this boot\u2019s access token: whoever has it has the console, until the next boot. The browser asks about the certificate once (embraOS-CA)."));
+      const bye = el("button", "ks-close", "Close");
+      bye.type = "button";
+      bye.addEventListener("click", closeSheet);
+      box.appendChild(bye);
+      sheet.style.display = "flex";
+      try {
+        const resp = await fetch("/api/console-url", { cache: "no-store" });
+        if (!resp.ok) throw new Error("the web console answered " + resp.status);
+        const data = await resp.json();
+        for (const row of (data.urls || [])) {
+          rows.appendChild(el("code", "ks-url", row.url));
+          rows.appendChild(el("div", "ks-where", row.where));
+        }
+      } catch (err) {
+        rows.appendChild(el("div", "ks-where", "The URL could not be read: " + (err && err.message ? err.message : err)));
+      }
+    };
+    sheet.addEventListener("mousedown", (e) => { if (e.target === sheet) closeSheet(); });
 
     // What the menu was opened on: the text selected then, and the page's
     // text field under the pointer (xterm's own textarea is the terminal).
@@ -155,6 +207,7 @@
 
     document.addEventListener("contextmenu", (e) => {
       e.preventDefault();
+      if (sheetOpen()) return;
       field = textField(e.target);
       picked = selected();
       copy.disabled = picked === "";
@@ -173,7 +226,9 @@
       if (!b || b.disabled) return;
       const text = picked, into = field;
       close();
-      if (b.dataset.act === "copy") {
+      if (b.dataset.act === "url") {
+        showUrl();
+      } else if (b.dataset.act === "copy") {
         kioskClip = text;
       } else if (b.dataset.act === "paste") {
         if (into && into.isConnected) {
@@ -190,8 +245,8 @@
       }
     });
 
-    // Anything else closes it: a press elsewhere, the wheel, a new size, and
-    // Escape, which stops here (in the console Esc is /stop).
+    // Anything else closes the menu: a press elsewhere, the wheel, a new
+    // size, and Escape, which stops here (in the console Esc is /stop).
     document.addEventListener("mousedown", (e) => {
       if (open() && !menu.contains(e.target)) close();
     }, true);
@@ -201,6 +256,11 @@
       if (open() && e.key === "Escape") {
         e.preventDefault(); e.stopImmediatePropagation();
         close();
+      } else if (sheetOpen()) {
+        // The sheet holds the keyboard: Escape closes it, nothing is typed
+        // into the console behind it.
+        e.preventDefault(); e.stopImmediatePropagation();
+        if (e.key === "Escape") closeSheet();
       }
     }, true);
   }
