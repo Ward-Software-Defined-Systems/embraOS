@@ -1,0 +1,58 @@
+@@ embraOS VMX template. write_vm_images (scripts/lib/image-common.sh) renders
+@@ it for x86_64 into parallels/, beside a copy of the VMDK: a line that starts
+@@ with @@ goes into no file and the @NAME@-style placeholders take their
+@@ values. The settings are the machine Parallels Desktop 26.5.0 converted and
+@@ booted as written (Intel Mac, 2026-11-11): after a change to one of them
+@@ that import is to be run again.
+@@   guestOS      VMware's legacy "Other Linux (64-bit)". Parallels' converter
+@@                reads it as its own "Other Linux", a machine with virtio
+@@                network and display adapters, where the display console gets
+@@                its 1920x1080. The newer generic types (other3xlinux-64 to
+@@                other6xlinux-64, the OVF's) it does not know: they convert
+@@                as "Other", with Parallels' own display adapter and the
+@@                firmware's 1024x768.
+@@   displayName  the machine's name and its bundle's. Spelt embraOS, because
+@@                Parallels refuses a later rename that differs from the
+@@                machine's name in the case of its letters alone.
+@@   numvcpus     the converter sets two whatever this says. It, the hardware
+@@                version and the PCI Express bridges are for a VMware product
+@@                given this file; the OVA is the machine built for those.
+# embraOS @VERSION@ (@ARCH@, @ENGINE@), build @BUILD_ID@: the machine around
+# @DISK_FILE@ for Parallels Desktop, which converts a VMware machine and runs
+# none from a bare VMDK. From the folder that holds this file and the disk:
+#   prl_convert @NAME@.vmx --dst="$HOME/Parallels" --reg=n --allow-no-os --no-reconfig
+#   prlctl register "$HOME/Parallels/embraOS.pvm"
+# Rendered by write_vm_images (scripts/lib/image-common.sh) from embraos.vmx.in.
+.encoding = "UTF-8"
+config.version = "8"
+virtualHW.version = "@HW_VERSION@"
+displayName = "embraOS"
+annotation = "embraOS @VERSION@ (@ARCH@, @ENGINE@), build @BUILD_ID@"
+guestOS = "otherlinux-64"
+firmware = "efi"
+uefi.secureBoot.enabled = "FALSE"
+numvcpus = "@CPUS@"
+memsize = "@MEMORY_MB@"
+pciBridge0.present = "TRUE"
+pciBridge4.present = "TRUE"
+pciBridge4.virtualDev = "pcieRootPort"
+pciBridge4.functions = "8"
+pciBridge5.present = "TRUE"
+pciBridge5.virtualDev = "pcieRootPort"
+pciBridge5.functions = "8"
+pciBridge6.present = "TRUE"
+pciBridge6.virtualDev = "pcieRootPort"
+pciBridge6.functions = "8"
+pciBridge7.present = "TRUE"
+pciBridge7.virtualDev = "pcieRootPort"
+pciBridge7.functions = "8"
+sata0.present = "TRUE"
+sata0:0.present = "TRUE"
+sata0:0.fileName = "@DISK_FILE@"
+ethernet0.present = "TRUE"
+ethernet0.virtualDev = "e1000e"
+ethernet0.connectionType = "nat"
+ethernet0.addressType = "generated"
+usb.present = "TRUE"
+ehci.present = "TRUE"
+usb_xhci.present = "TRUE"

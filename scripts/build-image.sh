@@ -374,8 +374,10 @@ cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/
 # the squashfs is the slot image an OS update ships (scripts/release-update.sh).
 cp "$BUILDROOT_DIR/output/images/bzImage" output/images/
 cp "$BUILDROOT_DIR/output/images/rootfs.squashfs" output/images/
-# The same disk for the other hypervisors: embraos.vmdk, embraos.vhdx and
-# embraos.ova beside the raw image (write_vm_images, scripts/lib/image-common.sh).
+# The same disk for the other hypervisors, a folder each under output/images:
+# vmware/ (embraos.ova, embraos.vmdk), hyper-v/ (embraos.vhdx) and parallels/
+# (embraos.vmx with its VMDK); the raw image and the installer medium stay
+# beside them (write_vm_images, scripts/lib/image-common.sh).
 IMAGE_ENGINE="${STORAGE_ENGINE:-$(sed -n 's/^ENGINE=//p' target/x86_64-unknown-linux-musl/release/embraos-release)}"
 write_vm_images output/images/embraos.img output/images x86_64 "$IMAGE_ENGINE"
 # The installer medium for bare metal and the hypervisors: embraos.iso,
