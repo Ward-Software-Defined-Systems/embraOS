@@ -16,6 +16,19 @@
 # Firmware for the UEFI path: EMBRA_FW_CODE/EMBRA_FW_VARS, else the host's
 # images (macOS: Homebrew's qemu ships edk2-aarch64-code.fd; Ubuntu: the
 # qemu-efi-aarch64 package). The variable store is copied per run.
+#
+# Host-side extras (none reaches the OS):
+#   EMBRA_ISO=<embraos.iso>         boot the installer medium first; the image argument is then the
+#                                   TARGET disk (a blank qemu-img disk, raw or .qcow2, the installer writes)
+#   EMBRA_ISO_AS=cdrom|usb          the medium as a virtual DVD on virtio-scsi (default) or a USB stick
+#                                   on xHCI (the hybrid GPT path)
+#   EMBRA_DISK_IF=virtio|nvme|scsi  the disk's bus, with the medium or without: virtio-blk (default),
+#                                   NVMe or virtio-scsi
+# An image named *.qcow2 is opened as qcow2 (a disk the installer wrote).
+#
+# macOS runs this file with its own /bin/bash, 3.2: an array that may be empty
+# is expanded as ${A[@]+"${A[@]}"}, because that shell takes "${A[@]}" of an
+# empty array for an unset variable under `set -u` and stops.
 
 set -euo pipefail
 
@@ -164,6 +177,42 @@ else
     echo "  Web console: the URL embraOS prints below at boot (it carries this boot's access token; accept the embraOS-CA cert)"
 fi
 
+# The disk and the installer medium. Without any of the knobs the disk is the
+# one line it always was (virtio-blk, raw). EMBRA_DISK_IF names its bus:
+# virtio-blk, NVMe or virtio-scsi (the virt machine has no IDE or SATA of its
+# own); an image named *.qcow2 is opened as qcow2. EMBRA_ISO boots the
+# installer medium first and makes the image argument the disk it writes: the
+# medium is a virtual DVD on a virtio-scsi controller of its own, or a USB
+# stick on xHCI (the hybrid GPT xorriso writes). UEFI only: the medium has no
+# direct-kernel path.
+case "${EMBRA_ISO_AS:-cdrom}" in cdrom|usb) ;; *) echo "ERROR: EMBRA_ISO_AS must be 'cdrom' or 'usb', got '$EMBRA_ISO_AS'" >&2; exit 2 ;; esac
+case "${EMBRA_DISK_IF:-virtio}" in virtio|nvme|scsi) ;; *) echo "ERROR: EMBRA_DISK_IF must be 'virtio', 'nvme' or 'scsi', got '$EMBRA_DISK_IF'" >&2; exit 2 ;; esac
+case "$IMAGE" in *.qcow2) DISK_FMT=qcow2 ;; *) DISK_FMT=raw ;; esac
+DISK_ARGS=(-drive "file=$IMAGE,format=raw,if=virtio")
+MEDIA_ARGS=()
+if [ -n "${EMBRA_ISO:-}" ] || [ -n "${EMBRA_DISK_IF:-}" ] || [ "$DISK_FMT" = "qcow2" ]; then
+    # With a medium the firmware tries it first and the disk second; without
+    # one the disk is the only thing to boot.
+    DISK_BOOT=""
+    if [ -n "${EMBRA_ISO:-}" ]; then DISK_BOOT=",bootindex=1"; fi
+    DISK_DRIVE=(-drive "file=$IMAGE,format=$DISK_FMT,if=none,id=disk0")
+    case "${EMBRA_DISK_IF:-virtio}" in
+        virtio) DISK_ARGS=("${DISK_DRIVE[@]}" -device "virtio-blk-pci,drive=disk0$DISK_BOOT") ;;
+        nvme)   DISK_ARGS=("${DISK_DRIVE[@]}" -device "nvme,drive=disk0,serial=embraos-disk0$DISK_BOOT") ;;
+        scsi)   DISK_ARGS=(-device virtio-scsi-pci,id=scsi-disk "${DISK_DRIVE[@]}" -device "scsi-hd,drive=disk0,bus=scsi-disk.0$DISK_BOOT") ;;
+    esac
+    echo "  Disk: $IMAGE ($DISK_FMT) on ${EMBRA_DISK_IF:-virtio}"
+fi
+if [ -n "${EMBRA_ISO:-}" ]; then
+    [ -f "$EMBRA_ISO" ] || { echo "ERROR: EMBRA_ISO=$EMBRA_ISO is not a file" >&2; exit 2; }
+    [ "$EMBRA_BOOT" = "uefi" ] || { echo "ERROR: the installer medium boots through the firmware; EMBRA_BOOT=direct has no medium" >&2; exit 2; }
+    case "${EMBRA_ISO_AS:-cdrom}" in
+        cdrom) MEDIA_ARGS=(-device virtio-scsi-pci,id=scsi-medium -drive "file=$EMBRA_ISO,format=raw,if=none,id=medium,media=cdrom,readonly=on" -device scsi-cd,drive=medium,bus=scsi-medium.0,bootindex=0) ;;
+        usb)   MEDIA_ARGS=(-device qemu-xhci,id=xhci-medium -drive "file=$EMBRA_ISO,format=raw,if=none,id=medium,snapshot=on" -device usb-storage,drive=medium,bus=xhci-medium.0,bootindex=0) ;;
+    esac
+    echo "  Installer: $EMBRA_ISO as ${EMBRA_ISO_AS:-cdrom}; the target disk is $IMAGE ($DISK_FMT, ${EMBRA_DISK_IF:-virtio}); embra.install=<disk> on the knobs makes it unattended"
+fi
+
 if [ "$EMBRA_BOOT" = "direct" ]; then
     # Kernel and initramfs from the host, as before GRUB.
     IMAGE_DIR="$(dirname "$IMAGE")"
@@ -198,7 +247,7 @@ if [ "$EMBRA_BOOT" = "direct" ]; then
         $CPU_MODEL \
         -m "$MEMORY" \
         -smp "$CPUS" \
-        -drive file="$IMAGE",format=raw,if=virtio \
+        "${DISK_ARGS[@]}" \
         -kernel "$KERNEL" \
         -initrd "$INITRD" \
         -append "console=ttyAMA0 ro quiet embra.slot=a $WEB_CMDLINE $KNOBS" \
@@ -228,7 +277,8 @@ qemu-system-aarch64 \
     -smp "$CPUS" \
     -drive if=pflash,format=raw,readonly=on,file="$FW_CODE" \
     -drive if=pflash,format=raw,file="$VARS_SCRATCH" \
-    -drive file="$IMAGE",format=raw,if=virtio \
+    "${DISK_ARGS[@]}" \
+    ${MEDIA_ARGS[@]+"${MEDIA_ARGS[@]}"} \
     -smbios "type=11,value=${SMBIOS_VALUE}" \
     -nographic \
     -serial mon:stdio \
