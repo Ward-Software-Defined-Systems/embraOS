@@ -1,14 +1,32 @@
+@@ embraOS OVF descriptor template. write_vm_images (scripts/lib/image-common.sh)
+@@ renders it once per architecture: a line that starts with @x86_64@ or
+@@ @aarch64@ goes into that architecture's descriptor alone, the tag removed; a
+@@ line that starts with @@ goes into neither; the @NAME@-style placeholders
+@@ take their values. The x86_64 lines are the descriptor ESXi 8.0 U2 imports
+@@ as written: change one and that import is to be run again.
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- embraOS OVF descriptor, rendered by write_vm_images (scripts/lib/image-common.sh).
-     One disk (the whole embraOS GPT image as a streamOptimized VMDK), EFI firmware
-     with Secure Boot off (GRUB and the kernel are unsigned), a paravirtual SCSI
-     controller and a VMXNET3 adapter (both drivers are in the kernel), at virtual
-     hardware version 20 (ESXi 8.0, Fusion 13, Workstation 17). The guest type is
-     "Other 6.x or later Linux (64-bit)", vSphere 8.0's name for a kernel like the
-     6.18 here: ESXi offers a VM the devices its guest type lists, and the legacy
-     "Other Linux (64-bit)" lists neither the paravirtual controller nor VMXNET3,
-     so the imported devices showed as blank selections and every edit of the VM
-     was refused as invalid. The CIM id 101 is "Linux 64-Bit". -->
+@x86_64@<!-- embraOS OVF descriptor, rendered by write_vm_images (scripts/lib/image-common.sh).
+@x86_64@     One disk (the whole embraOS GPT image as a streamOptimized VMDK), EFI firmware
+@x86_64@     with Secure Boot off (GRUB and the kernel are unsigned), a paravirtual SCSI
+@x86_64@     controller and a VMXNET3 adapter (both drivers are in the kernel), at virtual
+@x86_64@     hardware version 20 (ESXi 8.0, Fusion 13, Workstation 17). The guest type is
+@x86_64@     "Other 6.x or later Linux (64-bit)", vSphere 8.0's name for a kernel like the
+@x86_64@     6.18 here: ESXi offers a VM the devices its guest type lists, and the legacy
+@x86_64@     "Other Linux (64-bit)" lists neither the paravirtual controller nor VMXNET3,
+@x86_64@     so the imported devices showed as blank selections and every edit of the VM
+@x86_64@     was refused as invalid. The CIM id 101 is "Linux 64-Bit". -->
+@aarch64@<!-- embraOS OVF descriptor for an Arm machine, rendered by write_vm_images
+@aarch64@     (scripts/lib/image-common.sh). One disk (the whole embraOS GPT image as a
+@aarch64@     streamOptimized VMDK), EFI firmware with Secure Boot off (GRUB and the kernel
+@aarch64@     are unsigned), an NVMe controller and a VMXNET3 adapter (the storage and the
+@aarch64@     network VMware recommends for an Arm guest; both drivers are in the kernel,
+@aarch64@     and the paravirtual SCSI controller of the x86_64 descriptor has no driver in
+@aarch64@     an arm64 kernel), and a USB 3 controller for the keyboard and the pointer
+@aarch64@     (VMware recommends the USB mouse on the XHCI controller for an Arm guest; its
+@aarch64@     vmmouse is not available there). Virtual hardware version 20 (Fusion 13). The
+@aarch64@     guest type is "Other 6.x or later Linux (64-bit)", the identifier of the
+@aarch64@     x86_64 descriptor: the vSphere API has no guest types of its own for Arm.
+@aarch64@     The CIM id 101 is "Linux 64-Bit". -->
 <Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
           xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
           xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
@@ -59,14 +77,22 @@
         <rasd:ResourceType>4</rasd:ResourceType>
         <rasd:VirtualQuantity>@MEMORY_MB@</rasd:VirtualQuantity>
       </Item>
-      <Item>
-        <rasd:Address>0</rasd:Address>
-        <rasd:Description>SCSI Controller</rasd:Description>
-        <rasd:ElementName>SCSI Controller 0</rasd:ElementName>
-        <rasd:InstanceID>3</rasd:InstanceID>
-        <rasd:ResourceSubType>VirtualSCSI</rasd:ResourceSubType>
-        <rasd:ResourceType>6</rasd:ResourceType>
-      </Item>
+@x86_64@      <Item>
+@x86_64@        <rasd:Address>0</rasd:Address>
+@x86_64@        <rasd:Description>SCSI Controller</rasd:Description>
+@x86_64@        <rasd:ElementName>SCSI Controller 0</rasd:ElementName>
+@x86_64@        <rasd:InstanceID>3</rasd:InstanceID>
+@x86_64@        <rasd:ResourceSubType>VirtualSCSI</rasd:ResourceSubType>
+@x86_64@        <rasd:ResourceType>6</rasd:ResourceType>
+@x86_64@      </Item>
+@aarch64@      <Item>
+@aarch64@        <rasd:Address>0</rasd:Address>
+@aarch64@        <rasd:Description>NVME Controller</rasd:Description>
+@aarch64@        <rasd:ElementName>NVME Controller 0</rasd:ElementName>
+@aarch64@        <rasd:InstanceID>3</rasd:InstanceID>
+@aarch64@        <rasd:ResourceSubType>vmware.nvme.controller</rasd:ResourceSubType>
+@aarch64@        <rasd:ResourceType>20</rasd:ResourceType>
+@aarch64@      </Item>
       <Item>
         <rasd:AddressOnParent>0</rasd:AddressOnParent>
         <rasd:ElementName>Hard Disk 1</rasd:ElementName>
@@ -85,6 +111,14 @@
         <rasd:ResourceSubType>VmxNet3</rasd:ResourceSubType>
         <rasd:ResourceType>10</rasd:ResourceType>
       </Item>
+@aarch64@      <Item ovf:required="false">
+@aarch64@        <rasd:Address>0</rasd:Address>
+@aarch64@        <rasd:Description>USB Controller (XHCI)</rasd:Description>
+@aarch64@        <rasd:ElementName>USB Controller</rasd:ElementName>
+@aarch64@        <rasd:InstanceID>6</rasd:InstanceID>
+@aarch64@        <rasd:ResourceSubType>vmware.usb.xhci</rasd:ResourceSubType>
+@aarch64@        <rasd:ResourceType>23</rasd:ResourceType>
+@aarch64@      </Item>
       <vmw:Config ovf:required="false" vmw:key="firmware" vmw:value="efi"/>
       <vmw:Config ovf:required="false" vmw:key="bootOptions.efiSecureBootEnabled" vmw:value="false"/>
     </VirtualHardwareSection>

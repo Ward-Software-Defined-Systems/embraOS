@@ -656,21 +656,33 @@ assert_image_layout() {
 # Workstation, VirtualBox), embraos.vhdx (dynamic: Hyper-V generation 2 with
 # Secure Boot off) and embraos.ova (the OVF descriptor rendered from
 # embraos.ovf.in beside this file, the disk as a streamOptimized VMDK and the
-# SHA256 manifest, in that order: ESXi, vCenter, Fusion). The zero regions,
-# the empty slot B and the unused DATA, are not stored, so each file is about
-# the size of the data written. Needs qemu-img (Ubuntu: qemu-utils; macOS:
-# Homebrew's qemu). Each converted disk must report the raw image's virtual
-# size, a VMDK's capacity must be whole 64 KiB grains (VMware's sparse-extent
-# format asks for it; a whole-MiB image gives it) and its embedded descriptor
-# must name the file it is in; the OVA's member order and manifest are checked
-# after packing. A failure removes the staged file and stops the build.
+# SHA256 manifest, in that order: ESXi, vCenter, Fusion). The descriptor is
+# rendered for the architecture: a template line that starts with @x86_64@ or
+# @aarch64@ goes into that architecture's descriptor alone, one that starts
+# with @@ is the template's own comment. x86_64 declares VMware's paravirtual
+# SCSI controller; the kernel builds that driver for x86 alone, so aarch64
+# declares an NVMe controller in its place, and a USB 3 controller for the
+# keyboard and the pointer. The zero regions, the empty slot B and the unused
+# DATA, are not stored, so each file is about the size of the data written.
+# Needs qemu-img (Ubuntu: qemu-utils; macOS: Homebrew's qemu). Each converted
+# disk must report the raw image's virtual size, a VMDK's capacity must be
+# whole 64 KiB grains (VMware's sparse-extent format asks for it; a whole-MiB
+# image gives it) and its embedded descriptor must name the file it is in; the
+# OVA's member order and manifest are checked after packing. A failure removes
+# the staged file and stops the build.
 write_vm_images() {
     local raw="$1" out="$2" arch="$3" engine="$4"
-    local name="embraos" template version build_id raw_size
+    local name="embraos" template version build_id raw_size other_arch
     command -v qemu-img >/dev/null 2>&1 || {
         echo "ERROR: qemu-img not found; the VM images need it (Ubuntu: apt-get install qemu-utils; macOS: brew install qemu)" >&2
         exit 1
     }
+    # The architecture whose tagged template lines stay out of this descriptor.
+    case "$arch" in
+        x86_64)  other_arch="aarch64" ;;
+        aarch64) other_arch="x86_64" ;;
+        *) echo "ERROR: write_vm_images has no OVF hardware for the architecture '$arch' (x86_64 or aarch64)" >&2; exit 1 ;;
+    esac
     template="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/embraos.ovf.in"
     [ -f "$template" ] || { echo "ERROR: $template is missing" >&2; exit 1; }
     version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
@@ -737,13 +749,16 @@ write_vm_images() {
     mkdir -p "$stage"
     convert_checked vmdk "subformat=streamOptimized" "$stage/$disk"
     disk_size="$(file_size "$stage/$disk")"
-    sed -e "s|@DISK_FILE@|$disk|g" -e "s|@DISK_FILE_SIZE@|$disk_size|g" \
+    # The template's own comments and the other architecture's lines go first,
+    # then this architecture's tag, then the values.
+    sed -e '/^@@/d' -e "/^@${other_arch}@/d" -e "s|^@${arch}@||" \
+        -e "s|@DISK_FILE@|$disk|g" -e "s|@DISK_FILE_SIZE@|$disk_size|g" \
         -e "s|@CAPACITY@|$raw_size|g" -e "s|@NAME@|$name|g" \
         -e "s|@VERSION@|$version|g" -e "s|@BUILD_ID@|$build_id|g" \
         -e "s|@ARCH@|$arch|g" -e "s|@ENGINE@|$engine|g" \
         -e "s|@CPUS@|4|g" -e "s|@MEMORY_MB@|4096|g" -e "s|@SYSTEM_TYPE@|vmx-20|g" \
         "$template" > "$stage/$ovf"
-    grep -q '@[A-Z_]*@' "$stage/$ovf" && { echo "ERROR: an OVF placeholder was not rendered" >&2; exit 1; }
+    grep -q '@[A-Za-z0-9_]*@' "$stage/$ovf" && { echo "ERROR: an OVF placeholder or architecture tag was not rendered" >&2; exit 1; }
     (
         cd "$stage" || exit 1
         {

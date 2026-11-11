@@ -30,6 +30,9 @@ CONFIG_NLS_ISO8859_1=y
 # Every line of this file merges on both architectures with nothing dropped
 # (the read-back assert in scripts/lib/image-common.sh), so a symbol names
 # the subsystems it needs built in beside it.
+# NVMe and VMware's vmxnet3 are also what the OVA declares
+# (scripts/lib/embraos.ovf.in): the adapter on both architectures, and the
+# disk controller on aarch64, where pvscsi has no driver.
 CONFIG_BLK_DEV_NVME=y
 CONFIG_VMXNET3=y
 # virtio-scsi (QEMU's virtio-scsi-pci; VirtualBox's default disk controller
