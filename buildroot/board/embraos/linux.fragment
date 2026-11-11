@@ -21,9 +21,9 @@ CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
 # Phase 2: the storage and network devices other hypervisors present (NVMe,
-# VMware's vmxnet3 and its two LSI Logic controllers, Hyper-V's synthetic
-# storage, network, video and keyboard; VMware's pvscsi is x86-only and
-# lives in linux-x86_64.fragment), the display console (the firmware's
+# virtio-scsi, VMware's vmxnet3 and its two LSI Logic controllers, Hyper-V's
+# synthetic storage, network, video and keyboard; VMware's pvscsi is x86-only
+# and lives in linux-x86_64.fragment), the display console (the firmware's
 # framebuffer through sysfb and simpledrm, QEMU's standard VGA through
 # bochs, fbcon on the kernel line as console=tty0 beside the serial line),
 # and nf_tables for the packet filter to come (built, unused until then).
@@ -32,6 +32,12 @@ CONFIG_NLS_ISO8859_1=y
 # the subsystems it needs built in beside it.
 CONFIG_BLK_DEV_NVME=y
 CONFIG_VMXNET3=y
+# virtio-scsi (QEMU's virtio-scsi-pci; VirtualBox's default disk controller
+# for an Arm Linux guest): the x86_64 base config builds it in and the arm64
+# one leaves it out, so without this line a disk behind it is invisible to
+# the aarch64 kernel. SCSI and the SCSI disk driver are built in by both
+# base configurations.
+CONFIG_SCSI_VIRTIO=y
 # VMware's LSI Logic Parallel (LSI 53C1030) and LSI Logic SAS (SAS1068)
 # controllers, ESXi's defaults for most guest types and the pick when a
 # controller list is blank: the Fusion MPT drivers mptspi and mptsas, under
