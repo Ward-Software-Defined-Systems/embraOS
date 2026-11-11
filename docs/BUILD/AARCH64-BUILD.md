@@ -61,11 +61,13 @@
 >
 > **2026-11-11 — the installer medium on Apple Silicon.** The aarch64 build writes
 > `embraos.iso` from `9e42bd1` on. The operator's runs of 2026-11-11: the medium
-> works under QEMU and under VMware Fusion, where an ISO is a VM's DVD drive; the
-> QEMU commands are under [Boot](#3-boot). Under QEMU the stick route
-> (`EMBRA_ISO_AS=usb`) and the `EMBRA_DISK_IF` buses are **TBD** until run, and so
-> are the VM images of this architecture (`embraos.ova`, `embraos.vmdk`,
-> `embraos.vhdx`) on a hypervisor.
+> works under VMware Fusion, where an ISO is a VM's DVD drive, and under QEMU in
+> three layouts of the launcher: the DVD onto a virtio-blk disk (the default), the
+> DVD onto a virtio-scsi disk (`EMBRA_DISK_IF=scsi`) and the USB stick onto an
+> NVMe disk (`EMBRA_ISO_AS=usb` with `EMBRA_DISK_IF=nvme`). Each installed disk
+> then boots alone on its bus. The commands are under [Boot](#3-boot). The VM
+> images of this architecture (`embraos.ova`, `embraos.vmdk`, `embraos.vhdx`) are
+> **TBD** on a hypervisor until run.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
@@ -202,9 +204,10 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 > the ISO as a new VM's DVD drive, with a blank disk beside it. A release carries
 > the medium as `embraos-<tag>-aarch64-<engine>.iso` with its checksum line and
 > signature ([UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)).
-> Validated on Apple Silicon on 2026-11-11 under QEMU and under VMware Fusion. The
-> stick route and the `EMBRA_DISK_IF` buses under QEMU, and every other hypervisor
-> of this architecture, are **TBD** until run.
+> Validated on Apple Silicon on 2026-11-11 under VMware Fusion and under QEMU: as
+> a DVD onto a virtio-blk disk and onto a virtio-scsi disk, and as a USB stick
+> onto an NVMe disk, each installed disk booting alone on its bus. Every other
+> hypervisor of this architecture is **TBD** until run.
 
 > **Display window and a bridged network (validated on Apple Silicon: the window 2026-11-10, the bridged network 2026-11-06).**
 > `run-qemu-aarch64.sh` has no display switch (the x86_64 launcher's `EMBRA_VNC=1`
