@@ -117,6 +117,7 @@ EMBRA_KIOSK_MODE=1280x800 ./scripts/run-qemu.sh      # the display console's vid
                                                      # display offers it; native = the display's own)
 EMBRA_ISO=output/images/embraos.iso ./scripts/run-qemu.sh disk.qcow2   # boot the installer onto a blank qemu-img disk
 EMBRA_ISO_AS=usb EMBRA_DISK_IF=ahci ...              # the medium as a USB stick, the target on AHCI (cdrom and virtio by default)
+./scripts/run-qemu.sh disk.qcow2                     # the installed disk on its own (an image named *.qcow2 is opened as qcow2)
 EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu.sh    # QEMU's DHCP leases this address: the banner's second URL
 ```
 
