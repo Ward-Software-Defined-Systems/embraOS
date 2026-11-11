@@ -56,8 +56,8 @@
 > the web console at 1920x1080, which takes the keyboard, the pointer and a click.
 > With `-device ramfb` in place of the virtio-gpu device (the firmware's framebuffer,
 > which had shown the boot log on 2026-11-06) the same run passed that day: after
-> the boot log the window shows the web console, which takes the keyboard, the
-> pointer and a click.
+> the boot log the window shows the web console at 800x600, which takes the
+> keyboard, the pointer and a click.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
@@ -192,7 +192,10 @@ EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu-aarch64.sh   # QEMU's DHCP leases
 > `-device ramfb` in place of `-device virtio-gpu-pci` gives the firmware's own
 > framebuffer, which the kernel's `simpledrm` takes over: GRUB's menu, the boot log
 > and the banner with the URL are validated on it (2026-11-06), and the display
-> console with the keyboard, the pointer and a click (2026-11-10).
+> console with the keyboard, the pointer and a click (2026-11-10). The display is
+> 800x600 there: edk2's `ramfb` driver (`OvmfPkg/QemuRamfbDxe`) offers 640x480,
+> 800x600 and 1024x768 and starts in the second, so the request for 1920x1080
+> leaves it as it is.
 >
 > For a lease from the LAN instead of QEMU's user network, replace the `-nic user,…`
 > line with `-nic vmnet-bridged,ifname=en0,model=virtio-net-pci` (`en0`, or the
@@ -528,7 +531,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
-| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi and on Hyper-V) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
+| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi and on Hyper-V) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page at 800x600, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
 | Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps 1383 modules nothing loads, 71 MB uncompressed under `/lib/modules` (the 2026-11-09 build) |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | none (no bare metal of this architecture to install on); the installer's tools are in the image all the same |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
