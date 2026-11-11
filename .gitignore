@@ -35,6 +35,12 @@ embraOS-Phase2-Implementation/
 embraOS-Phase_Code-Review/
 EXPR-*-*.md
 
+# The builder's own certificate authorities for an image (Imported_CAs/):
+# never committed. Every push is public, and a private CA's certificate names
+# the hosts behind it. The folder's README alone is tracked.
+Imported_CAs/*
+!Imported_CAs/README.md
+
 # Docker
 *.tar
 

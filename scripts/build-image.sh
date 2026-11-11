@@ -105,6 +105,10 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/image-common.sh"
 # The defconfig names the pinned kernel and its headers series, or the build
 # stops here, before anything is compiled.
 assert_kernel_pin_in_defconfig buildroot/configs/embraos_x86_64_defconfig
+# The builder's own certificate authorities (Imported_CAs/) are checked here,
+# before anything is compiled: a file that cannot be baked stops the build
+# now, and what will be trusted is listed (scripts/lib/imported-cas.sh).
+imported_cas_check "$(cd "$(dirname "$0")/.." && pwd)" "$(command -v openssl || true)"
 # --buildroot-only reuses the binaries and the release stamp of the last full
 # build; without the stamp post_build.sh would stop inside Buildroot.
 if [ "$BUILDROOT_ONLY" = true ] && [ ! -f target/x86_64-unknown-linux-musl/release/embraos-release ]; then

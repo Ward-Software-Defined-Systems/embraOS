@@ -119,6 +119,11 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/image-common.sh"
 # stops here, before anything is compiled (on a Mac as well: the check is a
 # grep).
 assert_kernel_pin_in_defconfig buildroot/configs/embraos_aarch64_defconfig
+# The builder's own certificate authorities (Imported_CAs/) are checked here,
+# before anything is compiled, on the Mac and again inside the Docker pass: a
+# file that cannot be baked stops the build now, and what will be trusted is
+# listed (scripts/lib/imported-cas.sh).
+imported_cas_check "$(cd "$(dirname "$0")/.." && pwd)" "$(command -v openssl || true)"
 # --buildroot-only reuses the binaries and the release stamp of the last full
 # build; without the stamp post_build.sh would stop inside Buildroot.
 if [ "$BUILDROOT_ONLY" = true ] && [ ! -f "target/$RUST_TARGET/release/embraos-release" ]; then

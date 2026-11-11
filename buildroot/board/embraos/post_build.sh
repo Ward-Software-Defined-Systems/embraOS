@@ -182,6 +182,21 @@ if ls "${REPO_ROOT}/Imported_Intelligence"/*.graph.json >/dev/null 2>&1; then
        "${TARGET_DIR}/usr/share/embra/imported-intelligence/"
 fi
 
+# The builder's own certificate authorities: bake the *.pem and *.crt files
+# of the repo's Imported_CAs/ read-only into the rootfs, where embrad and the
+# brain trust them beside STATE's ca-certificates/. A machine installed from
+# the ISO, a hypervisor's disk or bare metal has no seed-state.sh step, so a
+# CA it needs travels in the image. The folder's contents are not in git.
+# imported_cas_install checks the folder first (a private key, a file that
+# is no PEM certificate and one the readers would skip each stop the build)
+# and writes the directory whole; with Buildroot's own openssl every
+# certificate is parsed.
+# shellcheck source=scripts/lib/imported-cas.sh
+source "${REPO_ROOT}/scripts/lib/imported-cas.sh"
+IMPORTED_CAS_OPENSSL="${HOST_DIR:-}/bin/openssl"
+[ -x "$IMPORTED_CAS_OPENSSL" ] || IMPORTED_CAS_OPENSSL="$(command -v openssl || true)"
+imported_cas_install "${REPO_ROOT}" "${TARGET_DIR}" "$IMPORTED_CAS_OPENSSL"
+
 # Seed knowledge packs (knowledge.v1): bake the repo's committed
 # Seed_Knowledge/*.knowledge.json packs read-only into the rootfs — the
 # brain's boot reconcile ensures their nodes/edges exist in the live KG on

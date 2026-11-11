@@ -14,6 +14,11 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/board/embraos/layout.sh"
 # shellcheck source=scripts/lib/disk-layout.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/disk-layout.sh"
+# The builder's own certificate authorities (Imported_CAs/): the check both
+# image scripts run before anything is built, shared with post_build.sh, which
+# bakes the folder, and with release-update.sh, which signs no release from it.
+# shellcheck source=scripts/lib/imported-cas.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/imported-cas.sh"
 
 # embra-guardian-v1 in-OS Rust toolchain pin (musl host + wasm32 std).
 # Staged into vendor/rust-toolchain by Step 3.5 and installed at /opt/rust.
@@ -577,6 +582,7 @@ assert_rootfs_invariants() {
     else
         echo "release signing keys: none yet (scripts/update-signing.pub holds no key; the updater refuses every manifest until one is added)"
     fi
+    assert_imported_cas
 
     # The squashfs fits its slot with the margin free (layout.sh), and it is
     # xz: GRUB 2.12's squash4 reads gzip, lzo and xz, never zstd.
@@ -594,6 +600,42 @@ assert_rootfs_invariants() {
         reject_image
     }
     echo "rootfs.squashfs: $sq_size bytes of a $slot_bytes-byte slot, xz"
+}
+
+# assert_imported_cas: the root filesystem trusts the certificate authorities
+# of Imported_CAs/ and no other. /usr/share/embra/ca-certificates holds the
+# folder's *.pem and *.crt files byte for byte and nothing else, and no such
+# directory when the folder holds none: a file dropped in or taken out after
+# Buildroot ran would leave an image that trusts something other than what
+# the build's log said. The folder is checked once more with Buildroot's own
+# openssl, so every certificate of an image has been parsed, whatever the
+# host had at hand when the build began.
+assert_imported_cas() {
+    local root tgt="$BUILDROOT_DIR/output/target" openssl="$BUILDROOT_DIR/output/host/bin/openssl"
+    local dest want have base
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    dest="$tgt/$IMPORTED_CAS_ROOTFS_DIR"
+    [ -x "$openssl" ] || openssl="$(command -v openssl || true)"
+    imported_cas_check "$root" "$openssl" > /dev/null \
+        || reject_image "$IMPORTED_CAS_FOLDER/ does not pass its check (the lines above)"
+    want="$(imported_cas_list "$root" | tr '\n' ' ')"
+    # `|| true`: without the directory `ls` fails, and under the callers'
+    # pipefail that would end the build here without a word.
+    have="$( (ls "$dest" 2>/dev/null || true) | LC_ALL=C sort | tr '\n' ' ')"
+    [ "$want" = "$have" ] \
+        || reject_image "/$IMPORTED_CAS_ROOTFS_DIR in the rootfs holds '${have% }' and $IMPORTED_CAS_FOLDER/ holds '${want% }': the folder changed after post_build.sh baked it"
+    for base in $want; do
+        cmp -s "$root/$IMPORTED_CAS_FOLDER/$base" "$dest/$base" \
+            || reject_image "/$IMPORTED_CAS_ROOTFS_DIR/$base in the rootfs is not $IMPORTED_CAS_FOLDER/$base: the file changed after post_build.sh baked it"
+    done
+    if [ -z "$want" ]; then
+        echo "imported CAs in the rootfs: none"
+        return 0
+    fi
+    [ -n "$openssl" ] \
+        || reject_image "no openssl to parse the certificates of $IMPORTED_CAS_FOLDER/ with (Buildroot's host openssl is missing, and the host has none)"
+    echo "imported CAs in the rootfs: ${want% }"
+    echo "  every machine installed from this image trusts them; scripts/release-update.sh signs no release from it"
 }
 
 # assert_image_layout <image>: the partitions carry the names of layout.sh in
