@@ -34,11 +34,22 @@
 # Uploading is the operator's step; the private key never enters the
 # repository or CI. The tag must be the one the tree is at, the version the
 # one CITATION.cff records, and the tree clean.
+#
+# A release trusts no certificate authority of the builder's own. An image
+# built with files in Imported_CAs/ carries them under
+# /usr/share/embra/ca-certificates, and every machine that installs or updates
+# from it would trust them. Nothing is signed when the slot image carries any
+# (read with unsquashfs when one is at hand) or when the tree's Imported_CAs/
+# holds certificate files, which are not in git and so survive the checkout
+# of a tag. With an xorriso at hand the ISO must be the medium of the same
+# root filesystem, so the check of the slot image covers it.
+# --allow-imported-cas signs all the same, for a release meant for machines
+# of one's own.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TAG=""; ARCH=""; ENGINE=""; KEY=""; ROOTFS=""; ISO=""; OUT="$ROOT/output/update"; SELF_TEST=0
+TAG=""; ARCH=""; ENGINE=""; KEY=""; ROOTFS=""; ISO=""; OUT="$ROOT/output/update"; SELF_TEST=0; ALLOW_IMPORTED_CAS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --tag) TAG="${2:-}"; shift 2 ;;
@@ -48,6 +59,7 @@ while [ $# -gt 0 ]; do
         --rootfs) ROOTFS="${2:-}"; shift 2 ;;
         --iso) ISO="${2:-}"; shift 2 ;;
         --out) OUT="${2:-}"; shift 2 ;;
+        --allow-imported-cas) ALLOW_IMPORTED_CAS=1; shift ;;
         --self-test) SELF_TEST=1; shift ;;
         *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -109,7 +121,7 @@ if [ "$SELF_TEST" -eq 1 ]; then
 fi
 
 [ -n "$TAG" ] && [ -n "$ARCH" ] && [ -n "$ENGINE" ] && [ -n "$KEY" ] || {
-    echo "Usage: $0 --tag <vX.Y.Z-phaseN> --arch <x86_64|aarch64> --engine <fjall|rocksdb> --key <private.pem> [--rootfs <squashfs>] [--iso <embraos.iso>] [--out <dir>]" >&2
+    echo "Usage: $0 --tag <vX.Y.Z-phaseN> --arch <x86_64|aarch64> --engine <fjall|rocksdb> --key <private.pem> [--rootfs <squashfs>] [--iso <embraos.iso>] [--out <dir>] [--allow-imported-cas]" >&2
     exit 2
 }
 case "$ARCH" in x86_64|aarch64) ;; *) echo "ERROR: --arch must be x86_64 or aarch64" >&2; exit 2 ;; esac
@@ -150,6 +162,48 @@ else
     echo "WARNING: unsquashfs is not installed; the slot image is not inspected" >&2
 fi
 
+# No certificate authority of the builder's own in a release (the header says
+# why). The slot image's own listing decides, and the tree's folder is asked
+# as well, since the next build of this tree bakes what it holds. An image
+# that cannot be read is not signed either: without an unsquashfs nothing
+# here could tell, and a guard that passes what it cannot see is none.
+# shellcheck source=scripts/lib/imported-cas.sh
+source "$ROOT/scripts/lib/imported-cas.sh"
+IMAGE_CAS=""; IMAGE_UNREAD=0
+if command -v unsquashfs >/dev/null 2>&1; then
+    # A listing of a path the image lacks is its parents and exit 0, so the
+    # files are the lines under the directory, and no line is no file.
+    IMAGE_CAS="$( (unsquashfs -ls "$ROOTFS" "$IMPORTED_CAS_ROOTFS_DIR" 2>/dev/null || true) \
+        | sed -n "s|^squashfs-root/$IMPORTED_CAS_ROOTFS_DIR/||p" | tr '\n' ' ')"
+else
+    IMAGE_UNREAD=1
+fi
+TREE_CAS="$(imported_cas_list "$ROOT" | tr '\n' ' ')"
+if [ -n "$IMAGE_CAS" ] || [ -n "$TREE_CAS" ] || [ "$IMAGE_UNREAD" -eq 1 ]; then
+    if [ -n "$IMAGE_CAS" ]; then
+        echo "$ROOTFS carries imported certificate authorities under /$IMPORTED_CAS_ROOTFS_DIR: ${IMAGE_CAS% }" >&2
+    fi
+    if [ -n "$TREE_CAS" ]; then
+        echo "$IMPORTED_CAS_FOLDER/ of this tree holds certificate files: ${TREE_CAS% }" >&2
+    fi
+    if [ "$IMAGE_UNREAD" -eq 1 ]; then
+        echo "$ROOTFS cannot be read for imported certificate authorities: no unsquashfs (Ubuntu: apt-get install squashfs-tools; macOS: brew install squashfs)" >&2
+    fi
+    if [ "$ALLOW_IMPORTED_CAS" -eq 1 ]; then
+        echo "NOTE: --allow-imported-cas: signing all the same. Every machine that installs or updates from this release trusts whatever authorities the image carries." >&2
+    else
+        echo "ERROR: nothing is signed. A release trusts no certificate authority of the builder's own: every machine that installs or updates from it would trust them." >&2
+        if [ -n "$IMAGE_CAS" ] || [ -n "$TREE_CAS" ]; then
+            echo "       Move the files out of $IMPORTED_CAS_FOLDER/ and rebuild." >&2
+        fi
+        if [ "$IMAGE_UNREAD" -eq 1 ]; then
+            echo "       Install unsquashfs, so that the slot image can be read." >&2
+        fi
+        echo "       --allow-imported-cas signs all the same, for a release meant for machines of your own." >&2
+        exit 1
+    fi
+fi
+
 mkdir -p "$OUT"
 FILE="embraos-${TAG}-${ARCH}-${ENGINE}.rootfs.squashfs"
 MANIFEST="$OUT/embraos-${ARCH}-${ENGINE}.manifest.json"
@@ -187,6 +241,13 @@ if [ -n "$XORRISO" ]; then
     for pair in "ARCH=$ARCH" "ENGINE=$ENGINE" "VERSION=$VERSION"; do
         echo "$ISO_MANIFEST" | grep -qx "$pair" || { echo "ERROR: $ISO says $(echo "$ISO_MANIFEST" | grep "^${pair%%=*}="), not $pair" >&2; exit 1; }
     done
+    # The medium of the same build: its root filesystem is the slot image
+    # signed above, so what was checked of that image holds for the ISO too
+    # (the imported certificate authorities among it).
+    echo "$ISO_MANIFEST" | grep -qx "ROOTFS_SHA256=$SHA" || {
+        echo "ERROR: $ISO was built around another root filesystem ($(echo "$ISO_MANIFEST" | grep '^ROOTFS_SHA256=')) than $ROOTFS (sha256 $SHA): a release's installer medium is the one of the same build" >&2
+        exit 1
+    }
 else
     echo "WARNING: no xorriso; the ISO's embedded manifest is not inspected" >&2
 fi
