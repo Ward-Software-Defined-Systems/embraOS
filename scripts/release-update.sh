@@ -148,15 +148,24 @@ fi
 [ -n "$ROOTFS" ] && [ -f "$ROOTFS" ] || { echo "ERROR: no rootfs.squashfs (build the image, or --rootfs <path>)" >&2; exit 1; }
 
 # The slot image names its own arch and engine; with unsquashfs present they
-# are checked against the flags, and the slot's /boot is checked whole.
+# are checked against the flags, and the slot's /boot is checked whole: the
+# five files GRUB reads from a slot (boot_slot and the slot's version line,
+# buildroot/board/embraos/grub.cfg.in), the kernel under the name of the
+# architecture. A slot that lacks one does not boot, and the machine that
+# took the update falls back after its trial.
 if command -v unsquashfs >/dev/null 2>&1; then
     REL="$(unsquashfs -cat "$ROOTFS" etc/embraos-release 2>/dev/null || true)"
     [ -n "$REL" ] || { echo "ERROR: $ROOTFS carries no /etc/embraos-release" >&2; exit 1; }
     for pair in "ARCH=$ARCH" "ENGINE=$ENGINE" "VERSION=$VERSION"; do
         echo "$REL" | grep -qx "$pair" || { echo "ERROR: $ROOTFS says $(echo "$REL" | grep "^${pair%%=*}=" ), not $pair" >&2; exit 1; }
     done
-    for f in boot/initramfs.cpio.gz boot/embraos-slot.cfg; do
-        unsquashfs -ls "$ROOTFS" "$f" >/dev/null 2>&1 || { echo "ERROR: $ROOTFS lacks /$f" >&2; exit 1; }
+    case "$ARCH" in x86_64) KERNEL_IMAGE="bzImage" ;; aarch64) KERNEL_IMAGE="Image" ;; esac
+    # A file is there when the listing has its own line. unsquashfs lists the
+    # parents of a path the image lacks and exits 0, so its exit status says
+    # nothing: this loop read it until 2026-11-11 and could not fail.
+    BOOT_LISTING="$(unsquashfs -ls "$ROOTFS" boot 2>/dev/null || true)"
+    for f in "boot/$KERNEL_IMAGE" boot/initramfs.cpio.gz boot/firmware.cpio.gz boot/ucode.cpio boot/embraos-slot.cfg; do
+        printf '%s\n' "$BOOT_LISTING" | grep -Fx "squashfs-root/$f" >/dev/null || { echo "ERROR: $ROOTFS lacks /$f" >&2; exit 1; }
     done
 else
     echo "WARNING: unsquashfs is not installed; the slot image is not inspected" >&2
