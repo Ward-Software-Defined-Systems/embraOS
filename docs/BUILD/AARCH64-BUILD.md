@@ -419,15 +419,19 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
 - **Step 5 — copy outputs.** `embraos.img`, `Image` (the direct boot path) and
   `rootfs.squashfs` (the slot image an OS update ships) → `output/images/` (copied
   out of the volume onto the host tree), then the same disk converted for the other
-  hypervisors with `qemu-img`: `embraos.vmdk` (Parallels, Fusion, VirtualBox),
-  `embraos.vhdx` (Hyper-V generation 2, Secure Boot off) and `embraos.ova` (VMware
+  hypervisors with `qemu-img`, a folder each under `output/images/`:
+  `vmware/embraos.vmdk` (a disk for Fusion and VirtualBox), `hyper-v/embraos.vhdx`
+  (Hyper-V generation 2, Secure Boot off) and `vmware/embraos.ova` (VMware
   Fusion on Apple Silicon; hardware version 20, guest type "Other 6.x or later Linux
   (64-bit)", the disk on an NVMe controller, a VMXNET3 adapter and a USB 3
   controller for the keyboard and the pointer: the kernel builds VMware's
   paravirtual SCSI driver for x86 alone, so the aarch64 descriptor does not
   declare the controller the x86_64 one does). Each is checked against the raw
   image's size; the aarch64 ones are **TBD** until booted on a hypervisor of that
-  architecture. Beside them `embraos.iso`, the installer medium for aarch64
+  architecture. No `parallels/` folder is written here: the machine Parallels
+  Desktop imports ([QUICK-START.md](QUICK-START.md)) is an x86_64 one, and
+  Parallels on Apple Silicon is **TBD**. Beside the raw image `embraos.iso`, the
+  installer medium for aarch64
   (`write_installer_iso`: xorriso and GRUB's arm64 modules, both built by
   Buildroot inside the Docker pass), validated on Apple Silicon under QEMU and
   under VMware Fusion (2026-11-11; [Boot](#3-boot)).

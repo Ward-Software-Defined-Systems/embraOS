@@ -48,6 +48,15 @@
 > `0db28a8` expands it in a form that shell accepts. Verified by William on the
 > Intel Mac on 2026-11-11: `./scripts/run-qemu.sh` works there.
 >
+> **2026-11-11 — Parallels Desktop on the Intel Mac.** Parallels Desktop 26.5
+> takes the build two ways, both run on this Mac on 2026-11-11
+> ([QUICK-START.md](QUICK-START.md), the Parallels note): the machine in
+> `output/images/parallels/` (`embraos.vmx` with its VMDK) converts and boots to
+> the web console, its display console at 1920x1080, and `embraos.iso` installs
+> on a machine set to UEFI with Secure Boot off. William ran the install and the
+> import through Parallels' window. The pointer and a click on the display
+> console there are **TBD**.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
 > named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
 > Docker runtime's macOS-side file-provider fd pool (`Too many open files` —
