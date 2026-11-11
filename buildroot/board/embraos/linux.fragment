@@ -183,3 +183,12 @@ CONFIG_FONTS=y
 CONFIG_FONT_8x8=y
 CONFIG_FONT_8x16=y
 CONFIG_FONT_TER16x32=y
+# The installer medium (embraos.iso) on both architectures: embra-init mounts
+# it as ISO 9660 whether it is a DVD or a USB stick, and a virtual DVD drive
+# is a SCSI CD-ROM to the kernel (sr: behind AHCI, USB mass storage and
+# virtio-scsi alike). The x86_64 base config builds both in and the arm64
+# one neither, so without these lines an aarch64 medium boots its kernel
+# and embra-init never finds it. The medium's names are Rock Ridge, which
+# the driver prefers; Joliet is not needed.
+CONFIG_ISO9660_FS=y
+CONFIG_BLK_DEV_SR=y

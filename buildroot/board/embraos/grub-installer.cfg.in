@@ -1,3 +1,7 @@
+@@ A line that starts with @@ is this template's own comment and is not
+@@ rendered. @LOADER@ is the name of GRUB's file on an installed disk of the
+@@ architecture (BOOTX64.EFI, BOOTAA64.EFI): the "Boot the installed disk"
+@@ entry chainloads it.
 # The installer medium's menu, rendered into the ISO's /boot/grub/grub.cfg by
 # write_installer_iso (scripts/lib/image-common.sh): @KERNEL_IMAGE@ is the
 # kernel's name, @SERIAL_CONSOLE@ the serial line, @VERSION@ the release. The
@@ -29,7 +33,7 @@ menuentry "Install embraOS @VERSION@ (display only)" --id install_display {
 }
 menuentry "Boot the installed disk" --id disk {
     search --no-floppy --label ESP --set=root
-    chainloader ($root)/EFI/BOOT/BOOTX64.EFI
+    chainloader ($root)/EFI/BOOT/@LOADER@
     boot
 }
 menuentry "Firmware setup" --id fwsetup {

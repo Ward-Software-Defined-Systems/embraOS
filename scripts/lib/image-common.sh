@@ -783,11 +783,14 @@ file_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
 sha256_of() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1; }
 
 # write_installer_iso <buildroot dir> <images dir> <arch> <engine>: the
-# installer medium beside the VM images, x86_64 only (there is no aarch64
-# bare metal to install on). A UEFI-bootable hybrid ISO: a virtual DVD boots
-# it through El Torito, a USB stick written with dd through the GPT entry
-# xorriso appends (the EFI System Partition, the same FAT image), both
-# proven under OVMF. It carries this build's kernel, the repository's
+# installer medium beside the VM images, for the architecture of the build
+# (x86_64 or aarch64: GRUB's platform, the loader's name and the serial
+# console follow it, the rest is the same). A UEFI-bootable hybrid ISO: a
+# virtual DVD boots it through El Torito, a USB stick written with dd through
+# the GPT entry xorriso appends (the EFI System Partition, the same FAT
+# image), both proven under OVMF on x86_64. On aarch64 the medium is the way
+# onto the hypervisors of that architecture. It carries this build's kernel,
+# the repository's
 # initramfs (the same embra-init as the slot), rootfs.squashfs, the disk's
 # ESP tree (what the installer copies onto the target's ESP) and
 # /embraos/install.manifest (install.v1: the release, the rootfs's size and
@@ -801,14 +804,23 @@ sha256_of() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1
 # workstation. The ISO is staged and moved whole; a failed check leaves none.
 write_installer_iso() {
     local br="$1" out="$2" arch="$3" engine="$4"
-    if [ "$arch" != "x86_64" ]; then
-        echo "installer ISO: none for $arch (no bare metal of that architecture to install on)"
-        return 0
-    fi
+    # What follows the architecture: GRUB's platform (the directory Buildroot
+    # built its modules in and grub-mkimage's format), the loader's name on
+    # the removable-media path, and the serial console post_image.sh gives
+    # the disk's own menu.
+    local grub_platform loader serial
+    case "$arch" in
+        x86_64)  grub_platform="x86_64-efi"; loader="BOOTX64.EFI";  serial="ttyS0" ;;
+        aarch64) grub_platform="arm64-efi";  loader="BOOTAA64.EFI"; serial="ttyAMA0" ;;
+        *) echo "ERROR: installer ISO: no loader for the architecture '$arch' (x86_64 or aarch64)" >&2; return 1 ;;
+    esac
     local host="$br/output/host" images="$br/output/images" triple="${arch}-unknown-linux-musl"
     local xorriso="$host/bin/xorriso" mkimage="$host/bin/grub-mkimage" lint="$host/bin/grub-script-check"
     local mcopy="$host/bin/mcopy" mmd="$host/bin/mmd" mkfsfat
-    mkfsfat="$(ls "$host/sbin/mkfs.fat" "$host/sbin/mkdosfs" 2>/dev/null | head -n1)"
+    # `|| true`: under the callers' `set -e -o pipefail` a listing that finds
+    # nothing would end the build here, before the message below names what
+    # is missing.
+    mkfsfat="$(ls "$host/sbin/mkfs.fat" "$host/sbin/mkdosfs" 2>/dev/null | head -n1 || true)"
     local t
     for t in "$xorriso" "$mkimage" "$lint" "$mcopy" "$mmd" "${mkfsfat:-$host/sbin/mkfs.fat}"; do
         [ -x "$t" ] || { echo "ERROR: installer ISO: $t is missing (BR2_PACKAGE_HOST_XORRISO, _GRUB2, _MTOOLS, _DOSFSTOOLS)" >&2; return 1; }
@@ -819,11 +831,11 @@ write_installer_iso() {
     done
     [ -n "$kernel" ] || { echo "ERROR: installer ISO: no kernel image in $images" >&2; return 1; }
     local grub_core
-    grub_core="$(ls -d "$br"/output/build/grub2-*/build-x86_64-efi/grub-core 2>/dev/null | head -n1)"
-    [ -d "$grub_core" ] || { echo "ERROR: installer ISO: GRUB's x86_64-efi modules are not built under $br/output/build" >&2; return 1; }
+    grub_core="$(ls -d "$br"/output/build/grub2-*/build-"$grub_platform"/grub-core 2>/dev/null | head -n1 || true)"
+    [ -d "$grub_core" ] || { echo "ERROR: installer ISO: GRUB's $grub_platform modules are not built under $br/output/build" >&2; return 1; }
     local modules
-    modules="$(sed -n 's/^BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="\(.*\)"$/\1/p' buildroot/configs/embraos_x86_64_defconfig)"
-    [ -n "$modules" ] || { echo "ERROR: installer ISO: no BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI in the x86_64 defconfig" >&2; return 1; }
+    modules="$(sed -n 's/^BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="\(.*\)"$/\1/p' "buildroot/configs/embraos_${arch}_defconfig")"
+    [ -n "$modules" ] || { echo "ERROR: installer ISO: no BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI in the $arch defconfig" >&2; return 1; }
     local release="target/$triple/release/embraos-release"
     [ -f "$release" ] || { echo "ERROR: installer ISO: $release is missing" >&2; return 1; }
     [ -f initramfs.cpio.gz ] || { echo "ERROR: installer ISO: initramfs.cpio.gz is missing (scripts/create_initramfs.sh)" >&2; return 1; }
@@ -845,7 +857,10 @@ write_installer_iso() {
     # The menu.
     local version
     version="$(sed -n 's/^VERSION=//p' "$release" | head -n1)"
-    sed -e "s|@KERNEL_IMAGE@|$kernel|g" -e "s|@SERIAL_CONSOLE@|ttyS0|g" -e "s|@VERSION@|$version|g" \
+    # The template's own comments (lines that start with @@) are not rendered.
+    sed -e '/^@@/d' \
+        -e "s|@KERNEL_IMAGE@|$kernel|g" -e "s|@SERIAL_CONSOLE@|$serial|g" -e "s|@VERSION@|$version|g" \
+        -e "s|@LOADER@|$loader|g" \
         buildroot/board/embraos/grub-installer.cfg.in > "$tree/boot/grub/grub.cfg"
     if grep -q '@[A-Z_]*@' "$tree/boot/grub/grub.cfg"; then
         echo "ERROR: installer ISO: an unrendered placeholder in grub.cfg: $(grep -o '@[A-Z_]*@' "$tree/boot/grub/grub.cfg" | sort -u | tr '\n' ' ')" >&2
@@ -858,10 +873,10 @@ write_installer_iso() {
     printf 'search --no-floppy --file /embraos/install.manifest --set=root\nset prefix=($root)/boot/grub\n' > "$stage/early.cfg"
     "$lint" "$stage/early.cfg" || { rm -rf "$stage"; return 1; }
     # shellcheck disable=SC2086
-    "$mkimage" -d "$grub_core" -O x86_64-efi -p /boot/grub -c "$stage/early.cfg" -o "$stage/efi/EFI/BOOT/BOOTX64.EFI" \
+    "$mkimage" -d "$grub_core" -O "$grub_platform" -p /boot/grub -c "$stage/early.cfg" -o "$stage/efi/EFI/BOOT/$loader" \
         $modules iso9660 part_msdos search_fs_file chain \
         || { echo "ERROR: installer ISO: grub-mkimage failed" >&2; rm -rf "$stage"; return 1; }
-    cp "$stage/efi/EFI/BOOT/BOOTX64.EFI" "$tree/EFI/BOOT/BOOTX64.EFI"
+    cp "$stage/efi/EFI/BOOT/$loader" "$tree/EFI/BOOT/$loader"
 
     # The manifest and the sums.
     local sq_size sq_sha
@@ -882,14 +897,14 @@ write_installer_iso() {
 
     # The El Torito EFI image: FAT, the loader alone, at least 8 MiB.
     local efi_bytes efi_mib
-    efi_bytes="$(stat -c %s "$stage/efi/EFI/BOOT/BOOTX64.EFI")"
+    efi_bytes="$(stat -c %s "$stage/efi/EFI/BOOT/$loader")"
     [ "$efi_bytes" -lt $((4 * 1024 * 1024)) ] || { echo "ERROR: installer ISO: the loader is $efi_bytes bytes; look at its module list" >&2; rm -rf "$stage"; return 1; }
     efi_mib=$(( (efi_bytes + 1024 * 1024 + 1024 * 1024 - 1) / (1024 * 1024) ))
     [ "$efi_mib" -ge 8 ] || efi_mib=8
     dd if=/dev/zero of="$stage/efiboot.img" bs=1M count="$efi_mib" status=none
     "$mkfsfat" -n EMBRAISO "$stage/efiboot.img" > /dev/null
     "$mmd" -i "$stage/efiboot.img" ::EFI ::EFI/BOOT
-    "$mcopy" -i "$stage/efiboot.img" "$stage/efi/EFI/BOOT/BOOTX64.EFI" ::EFI/BOOT/
+    "$mcopy" -i "$stage/efiboot.img" "$stage/efi/EFI/BOOT/$loader" ::EFI/BOOT/
 
     # The ISO: ISO 9660 level 3 (a file over 4 GiB would be allowed), Rock
     # Ridge and Joliet, the EFI image as the El Torito boot image and as GPT

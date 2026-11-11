@@ -49,7 +49,7 @@ pub fn run_phases(steps: &mut dyn Steps, disk: &str, op: &mut Operator) -> Resul
     steps.format_ext4(&state, "STATE").map_err(|e| format!("state: {e}"))?;
     op.line(&format!("data: ext4, label DATA ({data})"));
     steps.format_ext4(&data, "DATA").map_err(|e| format!("data: {e}"))?;
-    op.line(&format!("boot files: EFI/BOOT/bootx64.efi, grub.cfg, grubenv (slot A active) → {esp}"));
+    op.line(&format!("boot files: GRUB's loader, grub.cfg, grubenv (slot A active) in EFI/BOOT → {esp}"));
     steps.boot_files(&esp).map_err(|e| format!("boot files: {e}"))?;
     let summary = steps.verify(disk, &rootfs_a, &esp).map_err(|e| format!("verify: {e}"))?;
     op.line(&format!("verify: {summary}"));
@@ -274,7 +274,8 @@ impl Steps for Real {
         run(&mke2fs, &["-q".into(), "-F".into(), "-t".into(), "ext4".into(), "-I".into(), "256".into(), "-E".into(), "root_owner=0:0".into(), "-L".into(), label.into(), part.to_string()])
     }
 
-    /// The disk's ESP tree from the medium (bootx64.efi and grub.cfg), and
+    /// The disk's ESP tree from the medium (GRUB's loader under the
+    /// architecture's name, bootx64.efi or bootaa64.efi, and grub.cfg), and
     /// a fresh grubenv: slot A active, as post_image.sh writes it.
     fn boot_files(&mut self, part: &str) -> Result<(), String> {
         let mnt = Path::new("/run/embra/esp-install");

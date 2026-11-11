@@ -58,7 +58,7 @@ BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_E2FSPROGS=y
 # xorriso writes the installer medium (embraos.iso: El Torito for a DVD,
 # an appended GPT partition for a USB stick); the loader inside it is a
-# second grub-mkimage of the modules below. x86_64 only: no aarch64 bare metal.
+# second grub-mkimage of the modules below.
 BR2_PACKAGE_HOST_XORRISO=y
 
 # The kernel lands in the rootfs at /boot: each OS slot carries its own kernel

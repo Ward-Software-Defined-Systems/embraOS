@@ -60,6 +60,10 @@ BR2_PACKAGE_HOST_GENIMAGE=y
 BR2_PACKAGE_HOST_MTOOLS=y
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_E2FSPROGS=y
+# xorriso writes the installer medium (embraos.iso: El Torito for a DVD,
+# an appended GPT partition for a USB stick); the loader inside it is a
+# second grub-mkimage of the modules below.
+BR2_PACKAGE_HOST_XORRISO=y
 
 # The kernel lands in the rootfs at /boot: each OS slot carries its own kernel
 # and initramfs, and GRUB loads them from the slot's squashfs.
@@ -100,9 +104,9 @@ BR2_PACKAGE_OPENSSH_CLIENT=y
 # BR2_PACKAGE_OPENSSH_SERVER is not set
 
 # The installer's tools (embra-update install): the same three packages as
-# the x86_64 image, so an aarch64 disk can be partitioned and formatted the
-# same way (no aarch64 installer medium is written: no bare metal of that
-# architecture to install on). sgdisk needs the C++ toolchain below.
+# the x86_64 image, so an aarch64 disk is partitioned and formatted the same
+# way from this architecture's installer medium. sgdisk needs the C++
+# toolchain below.
 BR2_PACKAGE_GPTFDISK=y
 # BR2_PACKAGE_GPTFDISK_GDISK is not set
 BR2_PACKAGE_GPTFDISK_SGDISK=y
