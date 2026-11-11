@@ -59,6 +59,14 @@
 > the boot log the window shows the web console at 800x600, which takes the
 > keyboard, the pointer and a click.
 >
+> **2026-11-11 — the installer medium on Apple Silicon.** The aarch64 build writes
+> `embraos.iso` from `9e42bd1` on. The operator's runs of 2026-11-11: the medium
+> works under QEMU and under VMware Fusion, where an ISO is a VM's DVD drive; the
+> QEMU commands are under [Boot](#3-boot). Under QEMU the stick route
+> (`EMBRA_ISO_AS=usb`) and the `EMBRA_DISK_IF` buses are **TBD** until run, and so
+> are the VM images of this architecture (`embraos.ova`, `embraos.vmdk`,
+> `embraos.vhdx`) on a hypervisor.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
 > exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
@@ -176,7 +184,7 @@ EMBRA_ISO_AS=usb EMBRA_DISK_IF=nvme ...            # the medium as a USB stick, 
 EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that bus without the medium (*.qcow2 is opened as qcow2)
 ```
 
-> **Installing from the ISO (TBD until booted on this architecture).** The build
+> **Installing from the ISO (validated on Apple Silicon under QEMU and under VMware Fusion, 2026-11-11).** The build
 > writes `output/images/embraos.iso`, the installer medium of
 > [QUICK-START.md](QUICK-START.md) for aarch64: GRUB's arm64 loader at
 > `EFI/BOOT/BOOTAA64.EFI`, the same menu and the same installer, a DVD through El
@@ -193,8 +201,10 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 > back: leave QEMU with `Ctrl-A X` and start the disk alone. A hypervisor takes
 > the ISO as a new VM's DVD drive, with a blank disk beside it. A release carries
 > the medium as `embraos-<tag>-aarch64-<engine>.iso` with its checksum line and
-> signature ([UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)). Under
-> QEMU and on every hypervisor of this architecture the medium is **TBD** until run.
+> signature ([UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)).
+> Validated on Apple Silicon on 2026-11-11 under QEMU and under VMware Fusion. The
+> stick route and the `EMBRA_DISK_IF` buses under QEMU, and every other hypervisor
+> of this architecture, are **TBD** until run.
 
 > **Display window and a bridged network (validated on Apple Silicon: the window 2026-11-10, the bridged network 2026-11-06).**
 > `run-qemu-aarch64.sh` has no display switch (the x86_64 launcher's `EMBRA_VNC=1`
@@ -416,7 +426,8 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
   image's size; the aarch64 ones are **TBD** until booted on a hypervisor of that
   architecture. Beside them `embraos.iso`, the installer medium for aarch64
   (`write_installer_iso`: xorriso and GRUB's arm64 modules, both built by
-  Buildroot inside the Docker pass), **TBD** until booted as well.
+  Buildroot inside the Docker pass), validated on Apple Silicon under QEMU and
+  under VMware Fusion (2026-11-11; [Boot](#3-boot)).
 
 **Isolated cross-compilation validation (optional).** To validate Rust cross-compilation
 before wiring in the full pipeline, set the env vars the build script sets automatically
@@ -563,7 +574,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
 | Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi and on Hyper-V) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page at 800x600, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
 | Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps 1383 modules nothing loads, 71 MB uncompressed under `/lib/modules` (the 2026-11-09 build) |
-| Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors (validated under QEMU, on ESXi and on Hyper-V) | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)); **TBD** until booted |
+| Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors (validated under QEMU, on ESXi and on Hyper-V) | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)); validated on Apple Silicon under QEMU and under VMware Fusion (2026-11-11) |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
 | Pre-wave-6 tree | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
 

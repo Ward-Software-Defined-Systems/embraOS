@@ -40,6 +40,14 @@
 > framebuffer holds, and embrad found no 1920x1080 in that list; from `1ba8df5` it
 > asks the kernel to detect the displays again before it gives up on a mode.
 >
+> **2026-11-11 — the launcher under macOS's bash.** macOS runs
+> `scripts/run-qemu.sh` with its own `/bin/bash`, 3.2, and that shell stops at an
+> empty array under `set -u`. The launcher of `3bfd40f` through `79821a4` expands
+> one on every launch without `EMBRA_ISO` (`MEDIA_ARGS[@]: unbound variable`,
+> before QEMU starts; reproduced with bash 3.2.57 on the Linux build host);
+> `0db28a8` expands it in a form that shell accepts. Verified by William on the
+> Intel Mac on 2026-11-11: `./scripts/run-qemu.sh` works there.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
 > named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
 > Docker runtime's macOS-side file-provider fd pool (`Too many open files` —
