@@ -1,16 +1,27 @@
 @@ embraOS VMX template. write_vm_images (scripts/lib/image-common.sh) renders
-@@ it for x86_64 into parallels/, beside a copy of the VMDK: a line that starts
-@@ with @@ goes into no file and the @NAME@-style placeholders take their
-@@ values. The settings are the machine Parallels Desktop 26.5.0 converted and
-@@ booted as written (Intel Mac, 2026-11-11): after a change to one of them
-@@ that import is to be run again.
-@@   guestOS      VMware's legacy "Other Linux (64-bit)". Parallels' converter
-@@                reads it as its own "Other Linux", a machine with virtio
-@@                network and display adapters, where the display console gets
-@@                its 1920x1080. The newer generic types (other3xlinux-64 to
-@@                other6xlinux-64, the OVF's) it does not know: they convert
-@@                as "Other", with Parallels' own display adapter and the
-@@                firmware's 1024x768.
+@@ it into parallels/, beside a copy of the VMDK: a line that starts with @@
+@@ goes into no file, one that starts with @x86_64@ or @aarch64@ into that
+@@ architecture's file alone, and the @NAME@-style placeholders take their
+@@ values. The x86_64 settings are the machine Parallels Desktop 26.5.0
+@@ converted and booted as written (Intel Mac, 2026-11-11): after a change to
+@@ one of them that import is to be run again. The aarch64 file is the same
+@@ machine under an Arm guest type, and no Arm machine has been converted.
+@@   guestOS      x86_64: VMware's legacy "Other Linux (64-bit)". Parallels'
+@@                converter reads it as its own "Other Linux", a machine with
+@@                virtio network and display adapters, where the display
+@@                console gets its 1920x1080. The newer generic types
+@@                (other3xlinux-64 to other6xlinux-64, the OVF's) it does not
+@@                know: they convert as "Other", with Parallels' own display
+@@                adapter and the firmware's 1024x768.
+@@                aarch64: VMware's "Linux 6.x Arm 64-bit", spelt as its
+@@                tools spell an Arm guest, the family's name behind arm-
+@@                (open-vm-tools: guest_os_tables.h, guest_os.h,
+@@                hostinfoPosix.c). Which type Parallels reads as Linux on
+@@                Apple silicon, and whether it converts a VMware machine
+@@                there at all, is not known: its list of what those Macs do
+@@                not support (KB 128914, reviewed 2026-07-07) names the
+@@                import of VMware machines. It names NVMe disks too, so the
+@@                disk stays on SATA here as on x86_64.
 @@   displayName  the machine's name and its bundle's. Spelt embraOS, because
 @@                Parallels refuses a later rename that differs from the
 @@                machine's name in the case of its letters alone.
@@ -22,13 +33,17 @@
 # none from a bare VMDK. From the folder that holds this file and the disk:
 #   prl_convert @NAME@.vmx --dst="$HOME/Parallels" --reg=n --allow-no-os --no-reconfig
 #   prlctl register "$HOME/Parallels/embraOS.pvm"
+@aarch64@# Not run on Apple silicon yet. Parallels lists the import of VMware machines
+@aarch64@# among what it does not support on those Macs (KB 128914); the installer
+@aarch64@# medium, embraos.iso, is the other way in.
 # Rendered by write_vm_images (scripts/lib/image-common.sh) from embraos.vmx.in.
 .encoding = "UTF-8"
 config.version = "8"
 virtualHW.version = "@HW_VERSION@"
 displayName = "embraOS"
 annotation = "embraOS @VERSION@ (@ARCH@, @ENGINE@), build @BUILD_ID@"
-guestOS = "otherlinux-64"
+@x86_64@guestOS = "otherlinux-64"
+@aarch64@guestOS = "arm-other6xlinux-64"
 firmware = "efi"
 uefi.secureBoot.enabled = "FALSE"
 numvcpus = "@CPUS@"

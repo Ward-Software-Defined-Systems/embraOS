@@ -660,17 +660,18 @@ assert_image_layout() {
 #               embraos.vmdk (monolithicSparse: a disk for Fusion, Workstation
 #               and VirtualBox).
 #   hyper-v/    embraos.vhdx (dynamic: generation 2 with Secure Boot off).
-#   parallels/  embraos.vmx beside a copy of embraos.vmdk, on x86_64 alone.
-#               Parallels Desktop runs no machine from a bare VMDK and opens
-#               no OVA; a VMware machine it converts whole, so it is given the
-#               machine around the disk, rendered from embraos.vmx.in beside
-#               this file (its header has the reason for each setting, the
-#               rendered file the two commands). The guest type the template
-#               names is an x86 one and no aarch64 machine has been converted,
-#               so an aarch64 build writes no such folder.
-# The OVF descriptor is rendered for the architecture: a template line that
-# starts with @x86_64@ or @aarch64@ goes into that architecture's descriptor
-# alone, one that starts with @@ is the template's own comment. x86_64
+#   parallels/  embraos.vmx beside a copy of embraos.vmdk. Parallels Desktop
+#               runs no machine from a bare VMDK and opens no OVA; a VMware
+#               machine it converts whole, so it is given the machine around
+#               the disk, rendered from embraos.vmx.in beside this file (its
+#               header has the reason for each setting, the rendered file the
+#               two commands). The x86_64 file is the machine Parallels
+#               converted on an Intel Mac; the aarch64 one names VMware's Arm
+#               guest type and has not been converted (the template says what
+#               stands against it on Apple silicon).
+# The OVF descriptor and the VMX are rendered for the architecture: a template
+# line that starts with @x86_64@ or @aarch64@ goes into that architecture's file
+# alone, one that starts with @@ is the template's own comment. In the OVF x86_64
 # declares VMware's paravirtual SCSI controller; the kernel builds that driver
 # for x86 alone, so aarch64 declares an NVMe controller in its place, and a
 # USB 3 controller for the keyboard and the pointer. The zero regions, the
@@ -680,10 +681,10 @@ assert_image_layout() {
 # size, a VMDK's capacity must be whole 64 KiB grains (VMware's sparse-extent
 # format asks for it; a whole-MiB image gives it) and its embedded descriptor
 # must name the file it is in; the VMX must name the VMDK that stands beside
-# it; the OVA's member order and manifest are checked after packing. A failure
-# removes the staged file and stops the build. What an earlier build left
-# where this one does not write goes first: the three files beside the raw
-# image, from before the folders, and a Parallels pair.
+# it and one guest type; the OVA's member order and manifest are checked after
+# packing. A failure removes the staged file and stops the build. What an
+# earlier build left goes first: the three files beside the raw image, from
+# before the folders, and the Parallels pair, which is written again.
 write_vm_images() {
     local raw="$1" out="$2" arch="$3" engine="$4"
     local name="embraos" template vmx_template version build_id raw_size other_arch
@@ -709,10 +710,10 @@ write_vm_images() {
     build_id="$(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
     raw_size="$(file_size "$raw")"
     mkdir -p "$vmware" "$hyperv"
-    # What an earlier build left where this one does not write: the three
-    # files beside the raw image, from before the folders, and a Parallels
-    # pair (the other architecture's build writes none, and one from a build
-    # that stopped half way names a disk that is gone).
+    # What an earlier build left: the three files beside the raw image, from
+    # before the folders, and the Parallels pair, which is written again
+    # further down, so a build that stops before that leaves no pair of
+    # another build, or of the other architecture, behind.
     local earlier
     for earlier in "$out/${name}.vmdk" "$out/${name}.vhdx" "$out/${name}.ova"; do
         if [ -f "$earlier" ]; then
@@ -779,40 +780,41 @@ write_vm_images() {
     # The machine Parallels imports: embraos.vmx beside a copy of the VMDK,
     # staged as a pair and moved across with the disk first, so the VMX never
     # stands without the disk it names.
-    local pair=""
-    if [ "$arch" = "x86_64" ]; then
-        local pair_stage="$out/.parallels-stage" vmx="${name}.vmx" vmx_disk
+    local pair_stage="$out/.parallels-stage" vmx="${name}.vmx" vmx_disk
+    rm -rf "$pair_stage"
+    mkdir -p "$pair_stage" "$parallels"
+    cp "$vmware/${name}.vmdk" "$pair_stage/${name}.vmdk"
+    # The template's own comments and the other architecture's lines go first,
+    # then this architecture's tag, then the values.
+    sed -e '/^@@/d' -e "/^@${other_arch}@/d" -e "s|^@${arch}@||" \
+        -e "s|@DISK_FILE@|${name}.vmdk|g" -e "s|@NAME@|$name|g" \
+        -e "s|@VERSION@|$version|g" -e "s|@BUILD_ID@|$build_id|g" \
+        -e "s|@ARCH@|$arch|g" -e "s|@ENGINE@|$engine|g" \
+        -e "s|@CPUS@|$cpus|g" -e "s|@MEMORY_MB@|$memory_mb|g" -e "s|@HW_VERSION@|$hw_version|g" \
+        "$vmx_template" > "$pair_stage/$vmx"
+    grep -q '@[A-Za-z0-9_]*@' "$pair_stage/$vmx" && {
+        echo "ERROR: a VMX placeholder, architecture tag or template comment was not rendered" >&2
         rm -rf "$pair_stage"
-        mkdir -p "$pair_stage" "$parallels"
-        cp "$vmware/${name}.vmdk" "$pair_stage/${name}.vmdk"
-        # The template's own comments go first, then the values.
-        sed -e '/^@@/d' \
-            -e "s|@DISK_FILE@|${name}.vmdk|g" -e "s|@NAME@|$name|g" \
-            -e "s|@VERSION@|$version|g" -e "s|@BUILD_ID@|$build_id|g" \
-            -e "s|@ARCH@|$arch|g" -e "s|@ENGINE@|$engine|g" \
-            -e "s|@CPUS@|$cpus|g" -e "s|@MEMORY_MB@|$memory_mb|g" -e "s|@HW_VERSION@|$hw_version|g" \
-            "$vmx_template" > "$pair_stage/$vmx"
-        grep -q '@[A-Za-z0-9_]*@' "$pair_stage/$vmx" && {
-            echo "ERROR: a VMX placeholder or template comment was not rendered" >&2
-            rm -rf "$pair_stage"
-            exit 1
-        }
-        # The same mistake as a VMDK that names another extent: a machine
-        # whose disk line names a file that is not beside it converts to nothing.
-        vmx_disk="$(sed -n 's/^sata0:0\.fileName = "\(.*\)"$/\1/p' "$pair_stage/$vmx")"
-        { [ "$vmx_disk" = "${name}.vmdk" ] && [ -f "$pair_stage/$vmx_disk" ]; } || {
-            echo "ERROR: $vmx names its disk '${vmx_disk:-?}', not the ${name}.vmdk beside it" >&2
-            rm -rf "$pair_stage"
-            exit 1
-        }
-        mv "$pair_stage/${name}.vmdk" "$parallels/${name}.vmdk"
-        mv "$pair_stage/$vmx" "$parallels/$vmx"
+        exit 1
+    }
+    # One guest type, this architecture's: a file with none, or with both,
+    # is a template whose tags went wrong.
+    [ "$(grep -c '^guestOS = ' "$pair_stage/$vmx")" = 1 ] || {
+        echo "ERROR: $vmx does not name exactly one guest type for $arch" >&2
         rm -rf "$pair_stage"
-        pair=", parallels/$vmx with a copy of ${name}.vmdk"
-    else
-        rmdir "$parallels" 2>/dev/null || true
-        echo "Parallels: no machine for $arch (embraos.vmx.in describes an x86_64 one)"
-    fi
+        exit 1
+    }
+    # The same mistake as a VMDK that names another extent: a machine whose
+    # disk line names a file that is not beside it converts to nothing.
+    vmx_disk="$(sed -n 's/^sata0:0\.fileName = "\(.*\)"$/\1/p' "$pair_stage/$vmx")"
+    { [ "$vmx_disk" = "${name}.vmdk" ] && [ -f "$pair_stage/$vmx_disk" ]; } || {
+        echo "ERROR: $vmx names its disk '${vmx_disk:-?}', not the ${name}.vmdk beside it" >&2
+        rm -rf "$pair_stage"
+        exit 1
+    }
+    mv "$pair_stage/${name}.vmdk" "$parallels/${name}.vmdk"
+    mv "$pair_stage/$vmx" "$parallels/$vmx"
+    rm -rf "$pair_stage"
 
     local stage="$out/.ova-stage" disk="${name}-disk1.vmdk" ovf="${name}.ovf" mf="${name}.mf" disk_size
     rm -rf "$stage" "$vmware/${name}.ova" "$vmware/${name}.ova.partial"
@@ -846,7 +848,7 @@ write_vm_images() {
     }
     mv "$vmware/${name}.ova.partial" "$vmware/${name}.ova"
     rm -rf "$stage"
-    echo "VM images under $out: vmware/${name}.ova ($(( $(file_size "$vmware/${name}.ova") / 1048576 )) MiB) and vmware/${name}.vmdk ($(( $(file_size "$vmware/${name}.vmdk") / 1048576 )) MiB), hyper-v/${name}.vhdx ($(( $(file_size "$hyperv/${name}.vhdx") / 1048576 )) MiB)$pair (virtual size $raw_size bytes)"
+    echo "VM images under $out: vmware/${name}.ova ($(( $(file_size "$vmware/${name}.ova") / 1048576 )) MiB) and vmware/${name}.vmdk ($(( $(file_size "$vmware/${name}.vmdk") / 1048576 )) MiB), hyper-v/${name}.vhdx ($(( $(file_size "$hyperv/${name}.vhdx") / 1048576 )) MiB), parallels/$vmx with a copy of ${name}.vmdk (virtual size $raw_size bytes)"
 }
 
 # GNU and BSD spellings of two small things the conversion needs.

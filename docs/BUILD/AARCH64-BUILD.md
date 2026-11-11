@@ -428,10 +428,15 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
   paravirtual SCSI driver for x86 alone, so the aarch64 descriptor does not
   declare the controller the x86_64 one does). Each is checked against the raw
   image's size; the aarch64 ones are **TBD** until booted on a hypervisor of that
-  architecture. No `parallels/` folder is written here: the machine Parallels
-  Desktop imports ([QUICK-START.md](QUICK-START.md)) is an x86_64 one, and
-  Parallels on Apple Silicon is **TBD**. Beside the raw image `embraos.iso`, the
-  installer medium for aarch64
+  architecture. `parallels/` holds `embraos.vmx` beside a copy of the VMDK: the
+  machine Parallels Desktop imports on an Intel Mac
+  ([QUICK-START.md](QUICK-START.md)), written here with VMware's Arm guest type
+  (`arm-other6xlinux-64`) and the disk on SATA. It is **TBD**: no import of it
+  has been run, and Parallels' list of what Apple silicon Macs do not support
+  ([KB 128914](https://kb.parallels.com/en/128914), reviewed 2026-07-07) names
+  the import of VMware machines and NVMe disks, so the import may be refused
+  there and the installer medium may be the one way in. Beside the raw image
+  `embraos.iso`, the installer medium for aarch64
   (`write_installer_iso`: xorriso and GRUB's arm64 modules, both built by
   Buildroot inside the Docker pass), validated on Apple Silicon under QEMU and
   under VMware Fusion (2026-11-11; [Boot](#3-boot)).

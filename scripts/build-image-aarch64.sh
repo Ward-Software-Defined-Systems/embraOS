@@ -464,9 +464,10 @@ cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/
 cp "$BUILDROOT_DIR/output/images/${KERNEL_NAME}" output/images/
 cp "$BUILDROOT_DIR/output/images/rootfs.squashfs" output/images/
 # The same disk for the other hypervisors, a folder each under output/images:
-# vmware/ (embraos.ova, embraos.vmdk) and hyper-v/ (embraos.vhdx); the
-# parallels/ machine is written for x86_64 alone (write_vm_images,
-# scripts/lib/image-common.sh).
+# vmware/ (embraos.ova, embraos.vmdk), hyper-v/ (embraos.vhdx) and parallels/
+# (embraos.vmx with its VMDK, under VMware's Arm guest type and not imported
+# anywhere yet); the raw image and the installer medium stay beside them
+# (write_vm_images, scripts/lib/image-common.sh).
 IMAGE_ENGINE="${STORAGE_ENGINE:-$(sed -n 's/^ENGINE=//p' "target/${RUST_TARGET}/release/embraos-release")}"
 write_vm_images output/images/embraos.img output/images aarch64 "$IMAGE_ENGINE"
 # The installer medium of this architecture, embraos.iso beside the raw image:
