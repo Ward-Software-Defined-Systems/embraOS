@@ -10,13 +10,14 @@
 //! caller reports it. The database client follows no redirect at all: a
 //! loopback API that redirects is a fault.
 //!
-//! Every client built here also trusts the operator's CA drop-ins beside
-//! the compiled-in webpki roots ([`operator_roots`]:
-//! `/embra/state/ca-certificates/`, or `EMBRA_CA_DIR` alone when set, read
-//! once per process), so a host behind the operator's own certificate
-//! authority — a self-hosted GitLab, the provider gateway over HTTPS —
-//! verifies. The database client is built apart: loopback, plain HTTP, no
-//! roots.
+//! Every client built here also trusts the certificate authorities the
+//! image was built with and the operator's CA drop-ins beside the
+//! compiled-in webpki roots ([`operator_roots`]:
+//! `/usr/share/embra/ca-certificates/` and `/embra/state/ca-certificates/`,
+//! or `EMBRA_CA_DIR` alone when set, read once per process), so a host
+//! behind the operator's own certificate authority — a self-hosted GitLab,
+//! the provider gateway over HTTPS — verifies. The database client is built
+//! apart: loopback, plain HTTP, no roots.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -60,34 +61,52 @@ pub(crate) const READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// --ca-dir`. Kept in sync with `crates/embrad/src/ca_bundle.rs`, which
 /// merges the same files into the bundle git reads.
 pub(crate) const OPERATOR_CA_DIR: &str = "/embra/state/ca-certificates";
-/// Replaces [`OPERATOR_CA_DIR`] when set and non-empty (development).
+/// The certificate authorities the image was built with: the `*.pem` and
+/// `*.crt` files of `Imported_CAs/` at build time, baked read-only into the
+/// root filesystem (`scripts/lib/imported-cas.sh`), the same on every
+/// machine of the build. A machine installed from the ISO, a hypervisor's
+/// disk or bare metal has no step that fills STATE, so a CA it needs
+/// travels in the image. Kept in sync with the build's
+/// `IMPORTED_CAS_ROOTFS_DIR` and embrad's `CA_IMAGE_DIR`; guard
+/// `the_image_s_ca_directory_is_the_one_the_build_bakes_and_embrad_merges`.
+pub(crate) const IMAGE_CA_DIR: &str = "/usr/share/embra/ca-certificates";
+/// Replaces [`IMAGE_CA_DIR`] and [`OPERATOR_CA_DIR`] when set and non-empty
+/// (development).
 pub(crate) const OPERATOR_CA_DIR_ENV: &str = "EMBRA_CA_DIR";
 
-/// The drop-in directory in force: the environment's, else the STATE one.
-fn operator_ca_dir() -> PathBuf {
-    std::env::var(OPERATOR_CA_DIR_ENV)
-        .ok()
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(OPERATOR_CA_DIR))
+/// The directories in force, in reading order: the environment's alone
+/// when it names one, else the image's and then the STATE one.
+fn ca_dirs(dev_override: Option<String>) -> Vec<PathBuf> {
+    match dev_override.filter(|d| !d.is_empty()) {
+        Some(dir) => vec![PathBuf::from(dir)],
+        None => vec![PathBuf::from(IMAGE_CA_DIR), PathBuf::from(OPERATOR_CA_DIR)],
+    }
 }
 
-/// The operator's CA drop-ins, read once per process at the first client
-/// built, and shared by every client of the brain and by the Guardian
-/// transport. The directory is seeded while the OS is stopped, so a read at
-/// every client build would see the same files; a seeded certificate takes
-/// effect at the next boot.
+/// The certificate authorities of the image and the operator's CA
+/// drop-ins, read once per process at the first client built, and shared by
+/// every client of the brain and by the Guardian transport. The image's
+/// directory is read-only and STATE's is seeded while the OS is stopped, so
+/// a read at every client build would see the same files; a seeded
+/// certificate takes effect at the next boot.
 pub(crate) fn operator_roots() -> &'static [reqwest::Certificate] {
     static ROOTS: OnceLock<Vec<reqwest::Certificate>> = OnceLock::new();
     ROOTS.get_or_init(|| {
-        let dir = operator_ca_dir();
-        let roots = operator_roots_in(&dir);
-        if !roots.is_empty() {
-            tracing::info!(
-                "operator CA drop-ins: {} certificate(s) from {}",
-                roots.len(),
-                dir.display()
-            );
+        let mut roots = Vec::new();
+        for dir in ca_dirs(std::env::var(OPERATOR_CA_DIR_ENV).ok()) {
+            let found = operator_roots_in(&dir);
+            if !found.is_empty() {
+                // The operator's line reads as it always has; the image's
+                // has a line of its own, so the journal says which trust
+                // came with the build.
+                let whose = if dir == Path::new(IMAGE_CA_DIR) {
+                    "image CA certificates"
+                } else {
+                    "operator CA drop-ins"
+                };
+                tracing::info!("{whose}: {} certificate(s) from {}", found.len(), dir.display());
+            }
+            roots.extend(found);
         }
         roots
     })
@@ -347,6 +366,74 @@ mod tests {
         assert!(!cause.contains("https://"), "the causes, not reqwest's URL line: {cause}");
 
         assert_eq!(server.await.unwrap(), 1, "one connection served, one handshake refused");
+    }
+
+    /// The image's directory and then STATE's, and the development override
+    /// alone when it names one. A build's certificate and the operator's are
+    /// both roots: an installed machine with nothing on STATE trusts the
+    /// image's, and an image built with none trusts the operator's.
+    #[test]
+    fn the_image_s_directory_is_read_before_state_s_and_the_override_replaces_both() {
+        let both = vec![PathBuf::from(IMAGE_CA_DIR), PathBuf::from(OPERATOR_CA_DIR)];
+        assert_eq!(ca_dirs(None), both);
+        assert_eq!(ca_dirs(Some(String::new())), both, "an empty override is no override");
+        assert_eq!(ca_dirs(Some("/tmp/dev-ca".into())), vec![PathBuf::from("/tmp/dev-ca")]);
+
+        let (image_ca, _, _) = mint_ca_and_leaf();
+        let (state_ca, _, _) = mint_ca_and_leaf();
+        let image = fresh_dir("image");
+        let state = fresh_dir("state");
+        std::fs::write(image.join("build.pem"), &image_ca).unwrap();
+        std::fs::write(state.join("operator.crt"), &state_ca).unwrap();
+        let absent = image.join("absent");
+        let count = |dirs: &[&Path]| dirs.iter().map(|d| operator_roots_in(d).len()).sum::<usize>();
+        assert_eq!(count(&[&image, &state]), 2, "the image's and the operator's");
+        assert_eq!(count(&[&image, &absent]), 1, "nothing on STATE: the image's alone");
+        assert_eq!(count(&[&absent, &state]), 1, "an image built with none: the operator's alone");
+        std::fs::remove_dir_all(&image).ok();
+        std::fs::remove_dir_all(&state).ok();
+    }
+
+    /// One directory in three places: the build bakes it
+    /// (`scripts/lib/imported-cas.sh`), embrad merges it into the bundle git
+    /// and the updater read (`crates/embrad/src/ca_bundle.rs`), and the
+    /// clients built here trust it. A drift would leave a baked certificate
+    /// that one of them never reads; the same holds for STATE's directory
+    /// and for the size above which embrad skips a file, which the build
+    /// refuses to bake.
+    #[test]
+    fn the_image_s_ca_directory_is_the_one_the_build_bakes_and_embrad_merges() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lib = std::fs::read_to_string(root.join("scripts/lib/imported-cas.sh")).unwrap();
+        let shell_value = |name: &str| -> String {
+            lib.lines()
+                .find_map(|l| l.strip_prefix(&format!("{name}=")))
+                .unwrap_or_else(|| panic!("{name} is not assigned in imported-cas.sh"))
+                .trim_matches('"')
+                .to_string()
+        };
+        assert_eq!(format!("/{}", shell_value("IMPORTED_CAS_ROOTFS_DIR")), IMAGE_CA_DIR);
+
+        let embrad = std::fs::read_to_string(root.join("crates/embrad/src/ca_bundle.rs")).unwrap();
+        assert!(
+            embrad.contains(&format!("const CA_IMAGE_DIR: &str = \"{IMAGE_CA_DIR}\";")),
+            "embrad merges another image directory than {IMAGE_CA_DIR}"
+        );
+        assert!(
+            embrad.contains(&format!("const CA_DROPIN_DIR: &str = \"{OPERATOR_CA_DIR}\";")),
+            "embrad merges another STATE directory than {OPERATOR_CA_DIR}"
+        );
+        assert!(
+            embrad.contains("const MAX_CA_FILE_SIZE: u64 = 256 * 1024;"),
+            "embrad's per-file cap moved: the build's IMPORTED_CAS_MAX_BYTES follows it"
+        );
+        assert_eq!(shell_value("IMPORTED_CAS_MAX_BYTES"), (256 * 1024).to_string());
+
+        let hook = std::fs::read_to_string(root.join("buildroot/board/embraos/post_build.sh")).unwrap();
+        assert!(
+            hook.contains("imported_cas_install \"${REPO_ROOT}\" \"${TARGET_DIR}\""),
+            "post_build.sh no longer bakes Imported_CAs/ into the target"
+        );
     }
 
     #[tokio::test]

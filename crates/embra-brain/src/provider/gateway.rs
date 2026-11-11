@@ -27,10 +27,12 @@ pub(crate) const GATEWAY_HEADER: &str = "x-local-ai-gateway";
 /// The whole of the identification request: connect, TLS and the answer.
 const IDENTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// What a refused certificate means here, and what fixes it.
+/// What a refused certificate means here, and what fixes it: the STATE
+/// drop-in on a raw image, or the build's own folder for a machine that
+/// `seed-state.sh` does not reach (an ISO install, a hypervisor's disk).
 const CA_HINT: &str = " The listener's certificate is not trusted: put the gateway's CA certificate \
-     (local-ai-gateway tls ca-cert) in /embra/state/ca-certificates/ with seed-state.sh --ca-dir \
-     and boot again.";
+     (local-ai-gateway tls ca-cert) in /embra/state/ca-certificates/ with seed-state.sh --ca-dir, \
+     or in Imported_CAs/ before the image is built, and boot again.";
 
 /// What an answer that is not HTTP to a plain `http://` request means: a
 /// TLS listener answers a plaintext request with an alert, which hyper
