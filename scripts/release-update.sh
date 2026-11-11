@@ -12,11 +12,12 @@
 #                                                     sha256, when it was built, the notes URL
 #   embraos-<arch>-<engine>.manifest.json.sig        a raw Ed25519 signature over the manifest
 #                                                     bytes, base64, made with the operator's key
-#   embraos-<tag>-x86_64-<engine>.iso                 the installer medium of the same build
-#                                                     (x86_64 only; William, 2026-11-08: a release
-#                                                     asset), with
-#   embraos-<tag>-x86_64-<engine>.iso.sha256           its sha256sum line and
-#   embraos-<tag>-x86_64-<engine>.iso.sha256.sig       the same Ed25519 signature over that line:
+#   embraos-<tag>-<arch>-<engine>.iso                 the installer medium of the same build
+#                                                     (a release asset on both architectures:
+#                                                     William, 2026-11-08 for x86_64 and
+#                                                     2026-11-11 for aarch64), with
+#   embraos-<tag>-<arch>-<engine>.iso.sha256           its sha256sum line and
+#   embraos-<tag>-<arch>-<engine>.iso.sha256.sig       the same Ed25519 signature over that line:
 #                                                     `sha256sum -c` the first, verify the second
 #                                                     against scripts/update-signing.pub; the OS
 #                                                     never downloads the ISO (it is for a fresh
@@ -27,7 +28,8 @@
 # latest, verifies the signature against scripts/update-signing.pub (baked into
 # the rootfs), and only then downloads the squashfs the manifest names. Every
 # release uploads all four manifests (two architectures, two engines), or an
-# instance of the missing pair sees "no manifest at this source".
+# instance of the missing pair sees "no manifest at this source"; the four
+# installer media go up beside them.
 #
 # Uploading is the operator's step; the private key never enters the
 # repository or CI. The tag must be the one the tree is at, the version the
@@ -163,51 +165,48 @@ verify scripts/update-signing.pub "$MANIFEST" "$MANIFEST.sig" || {
     echo "ERROR: the signature does not verify against scripts/update-signing.pub — is the key's public half in it?" >&2
     exit 1
 }
-# The installer ISO of the same build, x86_64 only: copied under the
-# release's name, its sha256sum line signed with the same key. Its embedded
-# manifest is checked against the flags when an xorriso is at hand (the
-# host's, or Buildroot's under buildroot-src/output/host/bin).
-ISO_UPLOADS=""
-if [ "$ARCH" = x86_64 ]; then
-    if [ -z "$ISO" ]; then
-        for c in output/images/embraos.iso; do
-            [ -f "$c" ] && { ISO="$c"; break; }
-        done
-    fi
-    [ -n "$ISO" ] && [ -f "$ISO" ] || { echo "ERROR: no embraos.iso (build the image, or --iso <path>): the installer medium is a release asset" >&2; exit 1; }
-    XORRISO="$(command -v xorriso || ls buildroot-src/output/host/bin/xorriso 2>/dev/null | head -n1 || true)"
-    if [ -n "$XORRISO" ]; then
-        ISO_TMP="$(mktemp -d)"
-        "$XORRISO" -osirrox on -indev "$ISO" -extract /embraos/install.manifest "$ISO_TMP/manifest" >/dev/null 2>&1 || true
-        ISO_MANIFEST="$(cat "$ISO_TMP/manifest" 2>/dev/null || true)"
-        rm -rf "$ISO_TMP"
-        [ -n "$ISO_MANIFEST" ] || { echo "ERROR: $ISO carries no /embraos/install.manifest" >&2; exit 1; }
-        for pair in "ARCH=$ARCH" "ENGINE=$ENGINE" "VERSION=$VERSION"; do
-            echo "$ISO_MANIFEST" | grep -qx "$pair" || { echo "ERROR: $ISO says $(echo "$ISO_MANIFEST" | grep "^${pair%%=*}="), not $pair" >&2; exit 1; }
-        done
-    else
-        echo "WARNING: no xorriso; the ISO's embedded manifest is not inspected" >&2
-    fi
-    ISO_FILE="embraos-${TAG}-${ARCH}-${ENGINE}.iso"
-    cp "$ISO" "$OUT/$ISO_FILE"
-    (cd "$OUT" && sha256_line "$ISO_FILE" > "$ISO_FILE.sha256")
-    sign "$KEY" "$OUT/$ISO_FILE.sha256" > "$OUT/$ISO_FILE.sha256.sig"
-    verify scripts/update-signing.pub "$OUT/$ISO_FILE.sha256" "$OUT/$ISO_FILE.sha256.sig" || {
-        echo "ERROR: the ISO's checksum signature does not verify against scripts/update-signing.pub" >&2
-        exit 1
-    }
-    ISO_SIZE="$(stat -c %s "$OUT/$ISO_FILE" 2>/dev/null || stat -f %z "$OUT/$ISO_FILE")"
-    ISO_UPLOADS=" \"$OUT/$ISO_FILE\" \"$OUT/$ISO_FILE.sha256\" \"$OUT/$ISO_FILE.sha256.sig\""
+# The installer ISO of the same build, on either architecture: copied under
+# the release's name, its sha256sum line signed with the same key. Its
+# embedded manifest is checked against the flags when an xorriso is at hand:
+# the host's, or Buildroot's under buildroot-src/output/host/bin (on a Mac
+# the Buildroot tree is inside the Docker volume, so there it is Homebrew's
+# xorriso or the warning below).
+if [ -z "$ISO" ]; then
+    for c in output/images/embraos.iso; do
+        [ -f "$c" ] && { ISO="$c"; break; }
+    done
 fi
+[ -n "$ISO" ] && [ -f "$ISO" ] || { echo "ERROR: no embraos.iso (build the image, or --iso <path>): the installer medium is a release asset" >&2; exit 1; }
+XORRISO="$(command -v xorriso || ls buildroot-src/output/host/bin/xorriso 2>/dev/null | head -n1 || true)"
+if [ -n "$XORRISO" ]; then
+    ISO_TMP="$(mktemp -d)"
+    "$XORRISO" -osirrox on -indev "$ISO" -extract /embraos/install.manifest "$ISO_TMP/manifest" >/dev/null 2>&1 || true
+    ISO_MANIFEST="$(cat "$ISO_TMP/manifest" 2>/dev/null || true)"
+    rm -rf "$ISO_TMP"
+    [ -n "$ISO_MANIFEST" ] || { echo "ERROR: $ISO carries no /embraos/install.manifest" >&2; exit 1; }
+    for pair in "ARCH=$ARCH" "ENGINE=$ENGINE" "VERSION=$VERSION"; do
+        echo "$ISO_MANIFEST" | grep -qx "$pair" || { echo "ERROR: $ISO says $(echo "$ISO_MANIFEST" | grep "^${pair%%=*}="), not $pair" >&2; exit 1; }
+    done
+else
+    echo "WARNING: no xorriso; the ISO's embedded manifest is not inspected" >&2
+fi
+ISO_FILE="embraos-${TAG}-${ARCH}-${ENGINE}.iso"
+cp "$ISO" "$OUT/$ISO_FILE"
+(cd "$OUT" && sha256_line "$ISO_FILE" > "$ISO_FILE.sha256")
+sign "$KEY" "$OUT/$ISO_FILE.sha256" > "$OUT/$ISO_FILE.sha256.sig"
+verify scripts/update-signing.pub "$OUT/$ISO_FILE.sha256" "$OUT/$ISO_FILE.sha256.sig" || {
+    echo "ERROR: the ISO's checksum signature does not verify against scripts/update-signing.pub" >&2
+    exit 1
+}
+ISO_SIZE="$(stat -c %s "$OUT/$ISO_FILE" 2>/dev/null || stat -f %z "$OUT/$ISO_FILE")"
+ISO_UPLOADS=" \"$OUT/$ISO_FILE\" \"$OUT/$ISO_FILE.sha256\" \"$OUT/$ISO_FILE.sha256.sig\""
 
 echo "written to $OUT:"
 echo "  $FILE  ($SIZE bytes, sha256 $SHA)"
 echo "  $(basename "$MANIFEST")  (schema $SCHEMA, kernel $KERNEL, build $BUILD_ID)"
 echo "  $(basename "$MANIFEST").sig"
-if [ -n "$ISO_UPLOADS" ]; then
-    echo "  $ISO_FILE  ($ISO_SIZE bytes; the installer medium)"
-    echo "  $ISO_FILE.sha256  and  $ISO_FILE.sha256.sig  (the checksum line and its signature)"
-fi
+echo "  $ISO_FILE  ($ISO_SIZE bytes; the installer medium)"
+echo "  $ISO_FILE.sha256  and  $ISO_FILE.sha256.sig  (the checksum line and its signature)"
 echo ""
 echo "Upload to the release (the operator's step):"
 echo "  gh release upload $TAG \"$OUT/$FILE\" \"$MANIFEST\" \"$MANIFEST.sig\"$ISO_UPLOADS --clobber"

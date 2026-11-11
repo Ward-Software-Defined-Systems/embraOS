@@ -191,8 +191,10 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 > (`EMBRA_DISK_IF=nvme` or `scsi`, with the medium and without it). The medium
 > stays first in the boot order, so after the installer's reboot its menu is
 > back: leave QEMU with `Ctrl-A X` and start the disk alone. A hypervisor takes
-> the ISO as a new VM's DVD drive, with a blank disk beside it. Under QEMU and on
-> every hypervisor of this architecture the medium is **TBD** until run.
+> the ISO as a new VM's DVD drive, with a blank disk beside it. A release carries
+> the medium as `embraos-<tag>-aarch64-<engine>.iso` with its checksum line and
+> signature ([UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)). Under
+> QEMU and on every hypervisor of this architecture the medium is **TBD** until run.
 
 > **Display window and a bridged network (validated on Apple Silicon: the window 2026-11-10, the bridged network 2026-11-06).**
 > `run-qemu-aarch64.sh` has no display switch (the x86_64 launcher's `EMBRA_VNC=1`
