@@ -258,9 +258,9 @@ script refuses. `./scripts/seed-state.sh --help` lists every flag. Beyond `--ca-
 marker must match the image's `--storage-engine`), `--soul-hash <hash>` writes STATE's
 `soul.sha256`, `--update-key <pem>` copies an Ed25519 public key to STATE's
 `update-signing.pub`, a release signing key of your own trusted beside the image's
-([UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md); `seed-state-mac.sh` does
-not take this flag), and `EMBRAOS_ROOT` re-anchors the default image paths when the script
-runs from another directory.
+([UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md); `seed-state-mac.sh` takes
+the flag as well, and its run on a Mac is **TBD**), and `EMBRAOS_ROOT` re-anchors the default
+image paths when the script runs from another directory.
 
 At the next boot, embrad merges the drop-ins with the stock CA bundle (public hosts like github.com keep working) and exports `GIT_SSL_CAINFO`/`SSL_CERT_FILE` for every service, so `git_clone`/`git_push`/`git_pull` trust the server. embrad's line on the serial console names each accepted cert file (`Operator CA trust: merged N cert(s) from M file(s) […]`); it is printed before embrad's log file exists, so `system_logs` does not show it. In a session, the brain's own count is in `system_logs` (`operator CA drop-ins: N certificate(s)`). Scope: the git/OpenSSL path through embrad's bundle, and the brain's HTTP clients as listed above. For private repos, set a per-host token with `/git-token <host> <token>` after boot; the same token authenticates the `gl_*` issue/merge-request tools.
 

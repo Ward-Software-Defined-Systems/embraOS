@@ -693,7 +693,9 @@ images — it is a macOS-host tool, not an ARM tool.
 
 #### Usage
 
-The options of `seed-state.sh` except `--update-key`, and `--dry-run` of its own:
+The options of `seed-state.sh`, and `--dry-run` of its own (`--update-key <pem>`, the
+release signing key of your own, is bound into the container as one read-only file; its
+run on a Mac is **TBD**):
 
 ```bash
 ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem

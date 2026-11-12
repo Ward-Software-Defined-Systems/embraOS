@@ -6,9 +6,9 @@
 # nor ext4, so this is the only way to seed an image from the Mac.
 #
 # Same interface as seed-state.sh — host paths given to the image and to
-# --phase0-data / --import-dir / --seed-dir / --ca-dir are translated to
-# container paths automatically (bind-mounted read-only if they live outside
-# the project root).
+# --phase0-data / --import-dir / --seed-dir / --ca-dir / --update-key are
+# translated to container paths automatically (bind-mounted read-only if
+# they live outside the project root).
 #
 # Usage:
 #   ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
@@ -54,6 +54,8 @@ Options:
   --import-dir <dir>      Copy *.graph.json into STATE/imported-intelligence/
   --seed-dir <dir>        Copy *.knowledge.json into STATE/seed-knowledge/
   --ca-dir <dir>          Copy *.pem / *.crt into STATE/ca-certificates/
+  --update-key <pem>      Copy an Ed25519 public key (SubjectPublicKeyInfo PEM) to STATE/update-signing.pub:
+                          the operator's own release signing key, trusted beside the image's
   --wipe <targets>        Reformat before seeding: state | data | state,data | all
   --yes                   Skip the wipe confirmation (for non-interactive use)
   --dry-run               Print the docker command and exit (no Docker needed)
@@ -83,6 +85,7 @@ SOUL_HASH=""
 IMPORT_DIR=""
 SEED_DIR=""
 CA_DIR=""
+UPDATE_KEY=""
 DRY_RUN=0
 WIPE=""
 ASSUME_YES=0
@@ -97,6 +100,7 @@ while [ $# -gt 0 ]; do
         --import-dir)  need $# --import-dir;  IMPORT_DIR="$2";  shift 2 ;;
         --seed-dir)    need $# --seed-dir;    SEED_DIR="$2";    shift 2 ;;
         --ca-dir)      need $# --ca-dir;      CA_DIR="$2";      shift 2 ;;
+        --update-key)  need $# --update-key;  UPDATE_KEY="$2";  shift 2 ;;
         --wipe)        need $# --wipe;        WIPE="$2";        shift 2 ;;
         --yes|-y)      ASSUME_YES=1; shift ;;
         --dry-run)     DRY_RUN=1; shift ;;
@@ -138,6 +142,11 @@ INNER_SCRIPT="${EMBRAOS_ROOT}/scripts/seed-state.sh"
 [ -f "$INNER_SCRIPT" ] || die "not found: $INNER_SCRIPT"
 if [ -n "$WIPE" ] && ! grep -q -- '--wipe)' "$INNER_SCRIPT" 2>/dev/null; then
     die "scripts/seed-state.sh on this host has no --wipe support.
+  Copy the current scripts/seed-state.sh to this host and retry —
+  both files must come from the same revision."
+fi
+if [ -n "$UPDATE_KEY" ] && ! grep -q -- '--update-key)' "$INNER_SCRIPT" 2>/dev/null; then
+    die "scripts/seed-state.sh on this host has no --update-key support.
   Copy the current scripts/seed-state.sh to this host and retry —
   both files must come from the same revision."
 fi
@@ -256,6 +265,29 @@ add_dir() {   # add_dir <flag> <hostpath> <mountname>
    →  ${cpath}${note}"
 }
 
+# One file, read-only: the path inside the repository when it lives there,
+# else the file itself bound at a fixed container path.
+add_file() {   # add_file <flag> <hostpath> <mountname>
+    local flag="$1" hp="$2" name="$3" abs cpath note
+    [ -n "$hp" ] || return 0
+    [ -f "$hp" ] || die "$flag: not a file: $hp"
+    abs=$(abspath_file "$hp")
+    no_colon "$abs"
+    note=""
+    if under_root "$abs"; then
+        cpath="/work/${abs#"$EMBRAOS_ROOT"/}"
+    else
+        cpath="/mnt/$name"
+        DOCKER_ARGS+=(-v "${abs}:${cpath}:ro")
+        note="   (read-only bind mount)"
+    fi
+    SEED_ARGS+=("$flag" "$cpath")
+    MAP="${MAP}
+  ${flag}
+      ${abs}
+   →  ${cpath}${note}"
+}
+
 # Image: read-write. Bind its directory and keep the basename.
 IMG_ABS=$(abspath_file "$IMAGE")
 no_colon "$IMG_ABS"
@@ -277,6 +309,13 @@ add_dir --phase0-data "$PHASE0_DATA" phase0
 add_dir --import-dir  "$IMPORT_DIR"  import
 add_dir --seed-dir    "$SEED_DIR"    seed
 add_dir --ca-dir      "$CA_DIR"      ca
+# The release signing key: one PEM file. Checked here as the inner script
+# checks it, so a wrong file is named by its host path and no container
+# starts for it.
+if [ -n "$UPDATE_KEY" ] && [ -f "$UPDATE_KEY" ] && ! grep -q 'BEGIN PUBLIC KEY' "$UPDATE_KEY"; then
+    die "--update-key: not a PEM public key: $UPDATE_KEY"
+fi
+add_file --update-key "$UPDATE_KEY" update-key.pem
 
 # A literal, not a path — no translation.
 if [ -n "$SOUL_HASH" ]; then
