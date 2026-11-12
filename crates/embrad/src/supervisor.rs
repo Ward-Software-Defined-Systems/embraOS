@@ -559,6 +559,12 @@ impl Supervisor {
                         };
                         let _ = writeln!(b, "    \x1b[2membraOS {} ({}, {}){slot}\x1b[0m", release.version, release.build_id, release.engine);
                     }
+                    // A clock that is still the image's build time: every
+                    // certificate date is checked against it, and this is
+                    // where the operator learns why they are refused.
+                    for line in crate::clock::banner_lines(embra_boot::ClockStatus::read().as_ref()) {
+                        let _ = writeln!(b, "    \x1b[1;33m{line}\x1b[0m");
+                    }
                     let _ = writeln!(b);
                     // Both consoles: the serial line and the display.
                     crate::console::emit_bytes(b.as_bytes());

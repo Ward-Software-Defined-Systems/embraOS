@@ -71,6 +71,13 @@ impl Release {
     pub fn read_from(path: &Path) -> Result<Release, ReleaseError> {
         Release::parse(&std::fs::read_to_string(path)?)
     }
+
+    /// When the image was built, in seconds after the epoch: the earliest
+    /// the clock can truthfully read while this release runs (embrad's
+    /// floor, `clock.rs`). `None` when `BUILT` is not an RFC 3339 time.
+    pub fn built_unix(&self) -> Option<i64> {
+        crate::clock::parse_rfc3339(&self.built)
+    }
 }
 
 impl fmt::Display for Release {
@@ -92,9 +99,12 @@ mod tests {
         assert_eq!(r.arch, "x86_64");
         assert_eq!(r.engine, "fjall");
         assert_eq!(r.built, "2026-11-05T10:12:00Z");
+        assert_eq!(r.built_unix(), Some(1_793_873_520));
         assert_eq!(r.to_string(), "0.24.0-phase2 (2cb4d14abc-dirty, x86_64, fjall, built 2026-11-05T10:12:00Z)");
         let err = Release::parse("VERSION=1\nBUILD_ID=x\nARCH=aarch64\nBUILT=now\n").unwrap_err();
         assert!(matches!(err, ReleaseError::MissingKey("ENGINE")));
+        let undated = Release::parse("VERSION=1\nBUILD_ID=x\nARCH=aarch64\nENGINE=fjall\nBUILT=now\n").unwrap();
+        assert_eq!(undated.built_unix(), None, "a stamp that is no time gives no floor");
         assert!(err.to_string().contains("ENGINE"));
         assert!(matches!(Release::read_from(Path::new("/nonexistent/embraos-release")), Err(ReleaseError::Io(_))));
     }

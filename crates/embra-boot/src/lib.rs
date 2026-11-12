@@ -4,10 +4,13 @@
 //! the release stamp a slot ships with, the boot console a message for the
 //! operator goes to (the serial line and the display both) and a prompt reads
 //! from, the network lease embrad records and the console URLs that follow
-//! from it, and what an installer needs: the layout, the medium, the disks. No runtime
+//! from it, what embrad made of the clock at boot (and the date arithmetic that
+//! reads the release stamp's build time), and what an installer needs: the
+//! layout, the medium, the disks. No runtime
 //! and no dependency but `libc`: embra-init runs it from the initramfs,
 //! before anything else exists.
 
+pub mod clock;
 pub mod cmdline;
 pub mod console;
 pub mod disks;
@@ -24,7 +27,8 @@ pub mod vt;
 pub mod state;
 pub mod status;
 
-pub use cmdline::{BootMode, Cmdline, CmdlineError, KioskMode};
+pub use clock::ClockStatus;
+pub use cmdline::{BootMode, Cmdline, CmdlineError, KioskMode, TimeServer};
 pub use grubenv::{GrubEnv, GrubEnvError};
 pub use release::{Release, ReleaseError};
 pub use slot::Slot;

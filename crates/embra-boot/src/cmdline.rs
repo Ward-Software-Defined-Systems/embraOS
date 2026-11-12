@@ -59,6 +59,63 @@ impl KioskMode {
 }
 /// The installation medium, instead of the scan (`embra.media=/dev/sr0`).
 pub const MEDIA_KEY: &str = "embra.media";
+/// The time server embrad asks at boot (`embra.ntp=<host>[:<port>]`), or
+/// `embra.ntp=off` for none.
+pub const TIME_SERVER_KEY: &str = "embra.ntp";
+
+/// What `embra.ntp=` asks of the time fetch at boot (`embrad/src/clock.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeServer<'a> {
+    /// No knob on the line: embrad's own default server.
+    Default,
+    /// `embra.ntp=off`: no time server is asked.
+    Off,
+    /// `embra.ntp=<host>` or `<host>:<port>`: a name, an IPv4 address, or an
+    /// IPv6 address (in brackets when a port follows).
+    Named { host: &'a str, port: u16 },
+}
+
+impl<'a> TimeServer<'a> {
+    /// NTP's port, used when the knob names none.
+    pub const NTP_PORT: u16 = 123;
+
+    /// `off`, or a host with an optional port. A host is letters, digits,
+    /// dots and dashes, or an IPv6 address; anything else is no value, so a
+    /// garbled knob changes nothing.
+    pub fn parse(value: &'a str) -> Option<Self> {
+        if value == "off" {
+            return Some(TimeServer::Off);
+        }
+        let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+            let (host, tail) = rest.split_once(']')?;
+            if !host.contains(':') {
+                return None;
+            }
+            match tail {
+                "" => (host, None),
+                tail => (host, Some(tail.strip_prefix(':')?)),
+            }
+        } else if value.matches(':').count() == 1 {
+            let (host, port) = value.split_once(':')?;
+            (host, Some(port))
+        } else {
+            (value, None)
+        };
+        let port = match port {
+            None => Self::NTP_PORT,
+            Some(p) if !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()) => p.parse::<u16>().ok().filter(|p| *p != 0)?,
+            Some(_) => return None,
+        };
+        let named = if host.contains(':') {
+            host.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        } else {
+            host.len() <= 253
+                && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                && host.starts_with(|c: char| c.is_ascii_alphanumeric())
+        };
+        (named && !host.is_empty()).then_some(TimeServer::Named { host, port })
+    }
+}
 /// The installer's target disk, unattended (`embra.install=vda`).
 pub const INSTALL_KEY: &str = "embra.install";
 
@@ -260,6 +317,12 @@ impl Cmdline {
         self.values(MEDIA_KEY).filter(|v| !v.is_empty()).last()
     }
 
+    /// `embra.ntp=<host>[:<port>]|off`, the time server embrad asks at boot;
+    /// the last value that is one of the forms, embrad's default without one.
+    pub fn time_server(&self) -> TimeServer<'_> {
+        self.values(TIME_SERVER_KEY).filter_map(TimeServer::parse).last().unwrap_or(TimeServer::Default)
+    }
+
     /// `embra.install=<disk>`, the installer's target, unattended: a bare
     /// device name (`vda`, `sda`, `nvme0n1`); anything else is ignored.
     pub fn install_disk(&self) -> Option<&str> {
@@ -395,5 +458,31 @@ mod install_tests {
         assert_eq!(Cmdline::parse("embra.install=/dev/sda").install_disk(), None, "a bare name only");
         assert_eq!(Cmdline::parse("embra.install=sd;rm").install_disk(), None);
         assert_eq!(Cmdline::parse("quiet").media(), None);
+    }
+}
+
+#[cfg(test)]
+mod time_server_tests {
+    use super::*;
+
+    #[test]
+    fn the_time_server_knob_names_a_host_a_port_or_off_and_the_last_well_formed_one_wins() {
+        let check = |line: &str, want: TimeServer<'_>| assert_eq!(Cmdline::parse(line).time_server(), want, "{line}");
+        check("console=ttyS0 quiet", TimeServer::Default);
+        check("embra.ntp=off", TimeServer::Off);
+        check("embra.ntp=ntp.example.org", TimeServer::Named { host: "ntp.example.org", port: 123 });
+        check("embra.ntp=10.0.2.2:12300", TimeServer::Named { host: "10.0.2.2", port: 12300 });
+        check("embra.ntp=2606:4700:f1::1", TimeServer::Named { host: "2606:4700:f1::1", port: 123 });
+        check("embra.ntp=[2606:4700:f1::1]:1123", TimeServer::Named { host: "2606:4700:f1::1", port: 1123 });
+        check("embra.ntp=[::1]", TimeServer::Named { host: "::1", port: 123 });
+        // the last one wins
+        check("embra.ntp=off embra.ntp=time.example.org", TimeServer::Named { host: "time.example.org", port: 123 });
+        check("embra.ntp=time.example.org embra.ntp=off", TimeServer::Off);
+        // a value that is none of the forms is skipped: the one before it stands
+        check("embra.ntp=off embra.ntp=bad_host", TimeServer::Off);
+        for bad in ["", "a b", "host:", "host:0", "host:99999", "host:12x", ":123", "-host", ".host", "ho$t", "[host]:123", "[::1]123", "[::1", "host/path", "http://host"] {
+            assert_eq!(TimeServer::parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(TimeServer::NTP_PORT, 123);
     }
 }

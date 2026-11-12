@@ -1,12 +1,14 @@
 //! embrad — PID 1 init for embraOS.
 //!
 //! Boot sequence:
-//! 1. Install the panic hook (PID 1 only)
-//! 2. Mount pseudo-filesystems
+//! 1. Install the panic hook (PID 1 only); a clock earlier than the image's
+//!    build time is set to it (PID 1 only, `clock.rs`)
+//! 2. Mount pseudo-filesystems, bring the network up
 //! 3. Verify partition mounts
 //! 4. Scrub the environment the kernel handed over (PID 1 only), read the
 //!    kernel line once, set the environment every service inherits (one
-//!    thread, no runtime yet)
+//!    thread, no runtime yet); then the time from a time server (PID 1
+//!    only), before anything dates a file or a certificate
 //! 5. A maintenance mode (`embra.mode=`) runs its job and reboots; a job a
 //!    session scheduled (`/embra/state/next-boot`) runs first; otherwise
 //!    start services in dependency order
@@ -25,6 +27,7 @@
 
 mod boot;
 mod ca_bundle;
+mod clock;
 mod console;
 mod modes;
 mod mount;
@@ -47,6 +50,15 @@ fn main() -> Result<()> {
         install_panic_hook();
     }
 
+    // Step 1.5: the clock's floor, before anything is dated. The kernel
+    // took the time from the hardware clock; one that reads earlier than
+    // this image was built is certainly wrong (a board whose clock battery
+    // ran down) and is set to the build time. PID 1 only: in development
+    // the host's clock is not embrad's to set.
+    let release = Release::read().ok();
+    let built = release.as_ref().and_then(Release::built_unix);
+    let floored_from = if pid == 1 { clock::apply_floor(&clock::ThisMachine, built) } else { None };
+
     // The mounts and the environment come before the runtime: one thread
     // runs here, which is what makes the `set_var` calls in
     // `supervisor::prepare_environment` sound (#29). A failure is a halt
@@ -66,7 +78,22 @@ fn main() -> Result<()> {
             BootMode::Normal
         }
     };
-    boot::write_status(&cmdline, mode, &boot::Confirmed::Pending, None, Release::read().ok().as_ref());
+    boot::write_status(&cmdline, mode, &boot::Confirmed::Pending, None, release.as_ref());
+
+    // Step 4.5: the time from a time server, now that the network is up
+    // and before anything depends on it: a maintenance job's download, a
+    // snapshot's name, the database, the certificate authority trustd makes
+    // on a first boot. One request, a bounded wait, never fatal; the
+    // outcome is the record the banner and the brain read. The environment
+    // is set by now, so the thread the lookup runs on meets no `set_var`.
+    if pid == 1 {
+        let carrier = std::fs::read_to_string("/sys/class/net/eth0/carrier").ok();
+        let missing = clock::network_missing(std::path::Path::new(net_lease::LEASE_PATH).exists(), carrier.as_deref());
+        let status = clock::sync_at_boot(&clock::ThisMachine, cmdline.time_server(), floored_from, built, missing);
+        if let Err(e) = status.write() {
+            warn!("the clock's record could not be written to {}: {e}", embra_boot::clock::STATUS_PATH);
+        }
+    }
 
     // Step 5: a menu entry's job, or what a session scheduled for this boot
     // (the marker, taken before it is acted on), before any service and

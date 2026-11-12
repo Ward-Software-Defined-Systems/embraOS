@@ -25,6 +25,9 @@
 #   EMBRA_DISK_IF=virtio|nvme|scsi  the disk's bus, with the medium or without: virtio-blk (default),
 #                                   NVMe or virtio-scsi
 # An image named *.qcow2 is opened as qcow2 (a disk the installer wrote).
+# The clock's knob, which reaches the kernel line:
+#   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks at
+#                                   boot (time.cloudflare.com without it); off asks none
 #
 # macOS runs this file with its own /bin/bash, 3.2: an array that may be empty
 # is expanded as ${A[@]+"${A[@]}"}, because that shell takes "${A[@]}" of an
@@ -103,6 +106,10 @@ fi
 if [ -n "${EMBRA_GRAPHICS:-}" ]; then
     KNOBS="$KNOBS embra.graphics=${EMBRA_GRAPHICS}"
     echo "  Serial graphics: ${EMBRA_GRAPHICS} (EMBRA_GRAPHICS)"
+fi
+if [ -n "${EMBRA_NTP:-}" ]; then
+    KNOBS="$KNOBS embra.ntp=${EMBRA_NTP}"
+    echo "  Time server: ${EMBRA_NTP} (EMBRA_NTP)"
 fi
 # The two switches take 1 and nothing else; another value (a stray comma:
 # EMBRA_TUI="1,") would be ignored in silence.
