@@ -20,7 +20,7 @@ GRUB boots the active slot by default and shows its menu for three seconds: each
 
 ## Backups
 
-A backup is a snapshot of STATE and DATA: a `tar.gz` under `/embra/data/backups/<timestamp>_<label>/` with a `backup.json` record beside it (the label, who took it, the release, the database engine, the counts, the sizes, the archive's SHA-256, what was left out). It holds STATE whole but the halt reason and the next-boot marker, DATA's database directory whole, and DATA's workspace but the Guardian's build tree (its built artifacts are kept) and cargo home. Links stay links; special files are skipped and named in the record.
+A backup is a snapshot of STATE and DATA: a `tar.gz` under `/embra/data/backups/<timestamp>_<label>/` with a `backup.json` record beside it (the label, who took it, the release, the database engine, the counts, the sizes, the archive's SHA-256, what was left out). It holds STATE whole but the halt reason, the next-boot marker and the machine's saved clock (`last-known-time`, which a restore leaves in place: it belongs to the machine, not to the snapshot), DATA's database directory whole, and DATA's workspace but the Guardian's build tree (its built artifacts are kept) and cargo home. Links stay links; special files are skipped and named in the record.
 
 A snapshot runs only while the database is stopped, so a copy of its files is consistent: before the services start. Two ways to ask for one:
 
