@@ -224,7 +224,7 @@ def slab(y, h, title, color, lines, order_note=None):
 slab(712, 82, "embrad · PID 1 · init and service supervisor", SLAB, [
     "starts the services in order ① → ⑥ · soul gate: VerifySoul through trustd — a mismatch halts the boot, a missing soul is a first run (Learning Mode) · 5 s reconciliation loop",
     "any exit is restarted, 1 s · 2ⁿ up to 30 s, ten in a burst halts the service · bind-mounts /embra/workspace · mints the web token and prints the boot URL · operator CA drop-ins",
-    "a trial boot (embra.trial=1) snapshots STATE and DATA before any service and is confirmed on the ESP once every service is healthy · embra.mode=update|backup|restore runs embra-update",
+    "a trial boot (embra.trial=1) snapshots STATE and DATA before any service and is confirmed on the ESP once every service is healthy · embra.mode=update|backup|restore|install runs embra-update",
     "eth0: a DHCP lease through udhcpc (the lease script applies it, the client renews it), the static 10.0.2.15/24 via 10.0.2.2 after 10 s without one · /etc/resolv.conf → /embra/ephemeral",
 ])
 slab(818, 58, "Linux kernel 6.18 LTS · Buildroot 2026.02.1 · initramfs /init = embra-init", KERNEL, [
@@ -234,12 +234,12 @@ slab(818, 58, "Linux kernel 6.18 LTS · Buildroot 2026.02.1 · initramfs /init =
 slab(900, 70, "UEFI firmware · GRUB 2.12 on the EFI System Partition · the A/B state in grubenv", KERNEL, [
     "OVMF | AAVMF → EFI/BOOT/BOOTX64.EFI | BOOTAA64.EFI, every module builtin · grub.cfg: the menu — slot A, slot B, Diagnostics, Update, Backup and restore, Reboot, Halt, Firmware setup",
     "grubenv: slot_active · slot_try · tries_left 3-2-1-0 · a status per slot — a staged slot boots with embra.trial=1 while tries last, failed at zero; embrad confirms, embra-update stages or rolls back",
-    "the slot's kernel and initramfs loaded from its SquashFS (squash4 + xzio) · the host's EMBRA_* knobs arrive as one SMBIOS type 11 string the menu appends to the kernel line",
+    "the slot's kernel and initrds (microcode, firmware, initramfs) loaded from its SquashFS (squash4 + xzio) · the host's EMBRA_* knobs arrive as one SMBIOS type 11 string the menu appends to the kernel line",
 ])
 slab(994, 84, "QEMU · the host", QEMU, [
     "qemu-system-x86_64 -accel kvm (Linux) · qemu-system-aarch64 -accel hvf (Apple Silicon) · -m 4G · -smp N · OVMF on pflash (EMBRA_BOOT=uefi, default) | -kernel + -initrd (direct) · -nographic -serial mon:stdio",
     "-nic user: hostfwd 3345 → every host interface (the web console) · 50000 and 8443 → the host's loopback only (gRPC, REST) · QEMU's DHCP leases 10.0.2.15 · every other port answers inside the guest only",
-    "embraos.img · GPT aligned to 1 MiB: esp vfat 64 MiB (GRUB, grub.cfg, grubenv) · rootfs_a | rootfs_b 1 GiB each, one xz SquashFS with its kernel and initramfs · state ext4 256 MiB · data ext4 4 GiB",
+    "embraos.img · GPT aligned to 1 MiB: esp vfat 64 MiB (GRUB, grub.cfg, grubenv) · rootfs_a | rootfs_b 2 GiB each, one xz SquashFS with its kernel and initrds · state ext4 256 MiB · data ext4 4 GiB",
 ])
 # embrad → trustd (the soul gate)
 arrow([(660, 712), (660, 659)], "VerifySoul at boot", (668, 690), label_dy=0)
