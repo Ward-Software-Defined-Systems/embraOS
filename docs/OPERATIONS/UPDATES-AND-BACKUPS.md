@@ -1,6 +1,6 @@
 # Updates and backups
 
-How embraOS keeps itself whole across an OS update and how an operator takes a backup from inside the OS. The host-side script `scripts/embraos-backup.sh` stays the path for carrying STATE and DATA across an image rebuild on the build host ([BUILD/QUICK-START.md](../BUILD/QUICK-START.md)); everything below runs on the machine itself, and a backup taken there leaves the machine through the web console.
+How embraOS keeps itself whole across an OS update and how an operator takes a backup from inside the OS. The host-side script `scripts/embraos-backup.sh` stays the path for carrying STATE and DATA across an image rebuild on the build host ([BUILD/QUICK-START.md](../BUILD/QUICK-START.md)); everything below runs on the machine itself, and a backup taken there leaves the machine through the web console and comes back through it.
 
 ## The disk and the two OS slots
 
@@ -27,13 +27,37 @@ A snapshot runs only while the database is stopped, so a copy of its files is co
 - **From a session:** `/backup create [label]` schedules it for the next boot and `/reboot now` boots; embrad takes the snapshot before WardSONDB starts and the boot continues into the session. `/backup status` shows what is scheduled.
 - **From the boot menu:** Backup and restore → Back up STATE and DATA. embrad takes the snapshot, its progress on both consoles (the serial line and the display), and reboots to the menu.
 
-The free-space rule: DATA must have the snapshot's size plus 256 MiB free, or the snapshot is refused with both figures. `/backup list` shows every backup, newest first, each complete one with its download route (`web: /api/backups/<name>`): the web console streams the archive to the browser behind the console's token, with no size cap. `/backup delete <name>` removes one. The automatic snapshots an update takes (labels `pre-v<version>`) rotate: the newest two stay; a snapshot with any other label is never removed on its own.
+The free-space rule: DATA must have the snapshot's size plus 256 MiB free, or the snapshot is refused with both figures. `/backup list` shows every backup, newest first, each complete one with its download route (`web: /api/backups/<name>`): the web console streams the archive to the browser behind the console's token, with no size cap. `/backup delete <name>` removes one. The automatic snapshots an update takes (labels `pre-v<version>`) rotate: the newest two stay; a snapshot with any other label is never removed on its own, and neither is an uploaded backup, whatever its label.
 
 The archives are outside the workspace and the model's tools are refused them (`file_read` and the rest answer that the backups carry the operator's STATE). The host script's backup of DATA leaves `backups/` out: each is a copy of STATE and DATA already.
 
+### Uploading a backup
+
+A download is the archive alone, `<name>.tar.gz`; its record stays on the machine. The way back is the web console: `PUT /api/backups/<name>` takes the archive as the request's body, behind the console's token, and pipes it to `embra-update import <name>` as it arrives. The limits of the console's other uploads do not apply (an attachment is 12 MiB at most). DATA's room does: the archive has to fit beside the same 256 MiB reserve, or the upload is refused with both figures and none of it is written, and the updater ends an upload that takes DATA under the reserve on the way. One upload runs at a time.
+
+The archive is checked while it is written:
+
+- It is one gzip stream that holds one tar archive, read to its end with its checksum.
+- Every member is a directory, a regular file or a link.
+- Every path is under `state/`, `data/wardsondb/` or `data/workspace/`, named once, in a directory the archive named before it.
+- None is a STATE entry a snapshot leaves out (the halt reason, the next-boot marker, the saved clock, `lost+found`).
+
+A snapshot the OS took passes. A file that is no backup, a damaged one, one cut short and a name that is taken are refused with the reason, the member named where one is at fault, and nothing of the upload is kept. What passes gets its record made again from the archive: the SHA-256, the counts and the sizes, the database engine from the archive's own marker, the stamp and the label from a name of a snapshot's shape. It is listed as `uploaded`, and the release that took it is not known. An uploaded backup is the operator's: the rotation never removes it, and it never passes for the snapshot an update takes before a release's first run.
+
+The check is against a wrong file and a damaged one. What an archive holds is restored as it is, so whoever uploads a backup is trusted with the machine, as whoever restores one is.
+
+Two ways to upload:
+
+- **From a browser on another machine:** the sidebar's `/backup` form, action `upload`, then the file. The name is the file's without `.tar.gz` and without the ` (1)` a browser adds to a second download, or the one typed in the form. A card on the page shows the progress and then the machine's answer. Nothing is typed into the console, so the upload works on a machine that is still in its first-boot wizard. The display console has no file picker and says so.
+- **From a command line:** `curl -T <name>.tar.gz 'https://<host>:3345/api/backups/<name>?token=<token>'`, with `--cacert` and the machine's CA certificate, or with `-k`: the console's certificate is from the machine's own CA. The answer is JSON, 201 with the record or the refusal with its reason. A refusal that does not depend on the archive (the name, the room, another upload running) is answered at once to a client that waits for the go-ahead, as `curl` does for a file over 1 MiB, and after the body has been read and dropped to one that is already sending: an answer written into a connection that still carries the upload is lost when it closes. `GET /api/backups/<name>/upload-check?bytes=<size>` says beforehand what an upload of that size under that name would be told; the browser's form asks it first.
+
+A machine that is installed again starts with empty STATE and DATA. Download the backup before the install, upload it after the first boot, and restore it from the boot menu: the first-boot wizard takes no slash command.
+
+Validated under QEMU on 2026-11-12 from a command line, with two scratch machines of one build. The first took a backup of itself in a maintenance boot (`embra.mode=backup`) and served it: 127 files, 125 KiB. That download and an archive of 4.30 GiB made from it were uploaded with `curl` to the second, a fresh install on which nothing had been set up, on a disk DATA had grown on. Each record matched its archive (the hash, the counts, the engine), and the large one downloaded again was the file that was sent. After a power cut the restore job (`embra.mode=restore`) listed both as `uploaded` and restored the large one; the second machine then carried the first one's CA and the uploaded files byte for byte. Refused, each with its reason and nothing kept: a `tar.gz` that is no backup, a backup cut short, a text file, an archive with a next-boot marker, a name that is taken, a name no backup can have, an upload without the token and one from another origin. `upload-check` refused a size DATA has no room for, and a second upload while one ran. An upload cut off by its client left nothing. The form in a browser and an upload on bare metal: **TBD**.
+
 ## Restoring
 
-A restore replaces STATE and DATA's database and workspace with a snapshot and keeps the other backups. It runs before the services start, like a snapshot:
+A restore replaces STATE and DATA's database and workspace with a snapshot and keeps the other backups; an uploaded backup restores like one taken on the machine. It runs before the services start, like a snapshot:
 
 - **From a session:** `/backup restore <name>` answers with the confirmation to type, `restore <name>`; anything else, a slash command included, cancels. Confirmed, the next boot restores and reboots: `/reboot now` when ready.
 - **From the boot menu:** Backup and restore → Restore STATE and DATA. A numbered list on both consoles, the number asked twice and answered on whichever console the operator types on (the first line typed wins and is echoed on the other), anything else reboots without restoring.
