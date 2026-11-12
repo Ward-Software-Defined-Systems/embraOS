@@ -15,7 +15,7 @@
       "id": "seed_git_ca_error",
       "kind": "semantic",
       "category": "observation",
-      "content": "A git tool failing with 'SSL certificate problem: unable to get local issuer certificate' against a self-hosted server means that server's CA is not in the trust bundle of this boot. What the boot had can be read: file_read lists /embra/state/ca-certificates/ and /usr/share/embra/ca-certificates/, and the brain's log counts what it loaded ('operator CA drop-ins: N certificate(s)', 'image CA certificates: N certificate(s)', a line for each directory that held any; system_logs with the filter 'certificate(s) from'). embrad's own line, 'Operator CA trust: merged …', names each accepted file, but it is printed before embrad's log file exists: it is on the serial line and the display at boot, and system_logs does not show it. The fix is the operator's, and which one depends on the machine: on a raw disk image, scripts/seed-state.sh --ca-dir with the machine stopped; on a machine installed from the ISO or run from a converted disk, an image built with the certificate in Imported_CAs/. A reboot follows either way.",
+      "content": "A git tool failing with 'SSL certificate problem: unable to get local issuer certificate' against a self-hosted server means that server's CA is not in the trust bundle of this boot. What the boot had can be read: file_read lists /embra/state/ca-certificates/ and /usr/share/embra/ca-certificates/, and the brain's log counts what it loaded ('operator CA drop-ins: N certificate(s)', 'image CA certificates: N certificate(s)', a line for each directory that held any; system_logs with the filter 'certificate(s) from'). embrad's own line, 'Operator CA trust: merged …', names each accepted file, but it is printed before embrad's log file exists: it is on the serial line and the display at boot, and system_logs does not show it. The fix is the operator's, and which one depends on the machine: on a raw disk image, scripts/seed-state.sh --ca-dir with the machine stopped; on a machine installed from the ISO or run from a converted disk, an image built with the certificate in Imported_CAs/. A reboot follows either way. A certificate refused on its dates (git says the certificate 'is not yet valid' or 'has expired') is another fault, and it is about the clock, not the CA: system_status has a clock block.",
       "tags": ["git", "tls", "error", "diagnostics"]
     },
     {
@@ -115,6 +115,7 @@
     { "src": "seed_git_gl_tools", "dst": "seed_git_token", "relation": "depends_on", "weight": 0.9 },
     { "src": "seed_git_gl_tools", "dst": "seed_git_private_ca", "relation": "depends_on", "weight": 0.8 },
     { "src": "seed_git_ca_error", "dst": "seed_git_private_ca", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_git_ca_error", "dst": "seed_core_clock", "relation": "related_to", "weight": 0.6 },
     { "src": "seed_git_trust_paths", "dst": "seed_git_private_ca", "relation": "refines", "weight": 0.8 },
     { "src": "seed_git_gh_vs_gl", "dst": "seed_git_gl_tools", "relation": "related_to", "weight": 0.8 },
     { "src": "seed_git_diagnose", "dst": "seed_git_ca_error", "relation": "depends_on", "weight": 0.7 },

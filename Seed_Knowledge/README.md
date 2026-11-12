@@ -3,7 +3,7 @@
 Curated packs of knowledge-graph nodes and edges that the brain loads into
 the **live** knowledge collections (`memory.semantic` / `memory.procedural`
 + `memory.edges`) on every boot. Four packs ship committed: `embraos-core` is
-the OS knowing itself (boot chain, services, storage model, the two OS
+the OS knowing itself (boot chain, the clock at boot, services, storage model, the two OS
 slots with updates, backups and installation, trust/soul mechanics, the
 constraint surface, a layered answer-questions-about-yourself procedure and
 one for taking the operator through an update — stable architecture only,

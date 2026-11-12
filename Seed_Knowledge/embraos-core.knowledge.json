@@ -23,7 +23,7 @@
       "id": "seed_core_boot_chain",
       "kind": "semantic",
       "category": "fact",
-      "content": "Boot chain: UEFI firmware → GRUB on the EFI System Partition (its menu shows for a few seconds: the OS slots, Diagnostics, Update, Backup and restore) → the active slot's kernel → embra-init (finds the slot's root filesystem, STATE and DATA by their partition names and mounts them) → embrad as PID 1. embrad brings up networking (a DHCP lease, with a static fallback) and starts services in dependency order: wardsondb (database, port 8090) → embra-trustd (soul verification + PKI, port 50001) → embra-apid (API gateway, gRPC 50000 / REST 8443) → embra-brain (the AI runtime, port 50002) → the operator UI (embra-web HTTPS console on 3345, or the serial embra-console), and after it the display console on a machine that has a display. Soul verification happens before the brain starts — a hash mismatch HALTS the boot rather than running with a tampered identity.",
+      "content": "Boot chain: UEFI firmware → GRUB on the EFI System Partition (its menu shows for a few seconds: the OS slots, Diagnostics, Update, Backup and restore) → the active slot's kernel → embra-init (finds the slot's root filesystem, STATE and DATA by their partition names and mounts them) → embrad as PID 1. embrad sets a clock that reads earlier than the image's build time to that time, brings up networking (a DHCP lease, with a static fallback), asks a time server for the time, and starts services in dependency order: wardsondb (database, port 8090) → embra-trustd (soul verification + PKI, port 50001) → embra-apid (API gateway, gRPC 50000 / REST 8443) → embra-brain (the AI runtime, port 50002) → the operator UI (embra-web HTTPS console on 3345, or the serial embra-console), and after it the display console on a machine that has a display. Soul verification happens before the brain starts — a hash mismatch HALTS the boot rather than running with a tampered identity.",
       "tags": ["boot", "services", "embrad"]
     },
     {
@@ -112,8 +112,16 @@
       "id": "seed_core_observability",
       "kind": "semantic",
       "category": "fact",
-      "content": "Self-diagnostics surfaces: system_status reports health, uptime, soul state, and WardSONDB counters including memory-collection parity; system_logs tails any service's log from /embra/ephemeral (embra-brain, embrad, wardsondb, embra-trustd, embra-apid, embra-web, embra-console) with substring filtering. Logs reset at boot and on service restart. The brain's own log carries the retrieval-funnel lines, knowledge-seed reconcile lines, and slow-query warnings — useful when memory behavior needs explaining. embrad's own log starts when the console comes up: what it printed earlier in the boot (the mounts, the merge of the CA certificates) is on the serial line and the display, and system_logs does not show it.",
+      "content": "Self-diagnostics surfaces: system_status reports health, uptime, soul state, what the boot made of the clock, and WardSONDB counters including memory-collection parity; system_logs tails any service's log from /embra/ephemeral (embra-brain, embrad, wardsondb, embra-trustd, embra-apid, embra-web, embra-console) with substring filtering. Logs reset at boot and on service restart. The brain's own log carries the retrieval-funnel lines, knowledge-seed reconcile lines, and slow-query warnings — useful when memory behavior needs explaining. embrad's own log starts when the console comes up: what it printed earlier in the boot (the mounts, the merge of the CA certificates) is on the serial line and the display, and system_logs does not show it.",
       "tags": ["diagnostics", "logs", "status"]
+    },
+    { "_comment": "── the clock ────────────────────────────────────────────" },
+    {
+      "id": "seed_core_clock",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The clock: the kernel takes the time from the machine's hardware clock, read as UTC, and embrad corrects it at boot, before any service starts and before the trust service dates a certificate. A clock that reads earlier than the image's build time is set to the build time: a board whose clock battery ran down wakes at its firmware's default date, years in the past. Then, with the network up, embrad asks a time server once (embra.ntp=<host> on the kernel line names another server, embra.ntp=off asks none); an answer sets the clock, and the hardware clock too when that was a second or more off. Nothing corrects the clock while the OS runs. system_status has a clock block: synchronized says a time server set the clock this boot, and the summary names it; build_time_guess says the clock is still the image's build time, which is behind the real time, and then every timestamp written this boot is behind too. A TLS failure that says a certificate is 'not valid yet' or 'expired' is about dates and says nothing about a CA: read the clock block before anything else. A wrong clock is the operator's to fix: the date in the machine's firmware setup, in UTC, or a boot on a network where a time server answers.",
+      "tags": ["clock", "time", "boot", "tls"]
     },
     { "_comment": "── the project ──────────────────────────────────────────" },
     {
@@ -247,6 +255,8 @@
     { "src": "seed_core_host_side_file_ops", "dst": "seed_core_no_shell", "relation": "refines", "weight": 0.6 },
     { "src": "seed_core_operator_actions", "dst": "seed_core_no_shell", "relation": "refines", "weight": 0.7 },
     { "src": "seed_core_observability", "dst": "seed_core_services", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_clock", "dst": "seed_core_boot_chain", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_clock", "dst": "seed_core_observability", "relation": "related_to", "weight": 0.6 },
     { "src": "seed_core_source_map", "dst": "seed_core_repo", "relation": "refines", "weight": 0.8 },
     { "src": "seed_core_docs_map", "dst": "seed_core_repo", "relation": "refines", "weight": 0.7 },
     { "src": "seed_core_phases", "dst": "seed_core_docs_map", "relation": "related_to", "weight": 0.6 },
