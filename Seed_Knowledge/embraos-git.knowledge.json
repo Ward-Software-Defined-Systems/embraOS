@@ -8,21 +8,21 @@
       "id": "seed_git_private_ca",
       "kind": "semantic",
       "category": "fact",
-      "content": "Operator root CA certificates (*.pem / *.crt files) placed in /embra/state/ca-certificates/ are merged with the stock public CA bundle at boot and exported to every service via GIT_SSL_CAINFO and SSL_CERT_FILE — so git_clone, git_push, and git_pull trust self-hosted git servers behind a private CA (for example an mkcert development CA) while github.com and other public hosts keep working. Changes take effect at the NEXT BOOT: the environment is snapshotted when services start, so a newly dropped CA file does nothing until the operator reboots.",
+      "content": "A private root CA becomes trusted from two places, both read at boot: certificate files (*.pem / *.crt) the image was built with, under /usr/share/embra/ca-certificates/ (the builder's Imported_CAs/ folder; read-only, and gone again with an image built without them), and the operator's drop-ins in /embra/state/ca-certificates/. embrad merges both with the stock public CA bundle and exports the result to every service via GIT_SSL_CAINFO and SSL_CERT_FILE — so git_clone, git_push, and git_pull trust self-hosted git servers behind a private CA (for example an mkcert development CA) while github.com and other public hosts keep working — and the brain's own HTTP clients add the same files as trust anchors. A certificate file takes effect at the NEXT BOOT, and nothing in a running system adds one: it is seeded while the machine is stopped, or built into the image.",
       "tags": ["git", "tls", "ca", "selfhosted", "boot"]
     },
     {
       "id": "seed_git_ca_error",
       "kind": "semantic",
       "category": "observation",
-      "content": "A git tool failing with 'SSL certificate problem: unable to get local issuer certificate' against a self-hosted server means that server's CA is not in the trust bundle — either no certificate was dropped into /embra/state/ca-certificates/, or it landed after the last boot. The fix is operator-side: seed the CA file (scripts/seed-state.sh --ca-dir against the image, or copy into STATE) and reboot. The boot log line 'Operator CA trust: merged …' (read via system_logs with service=embrad) names each accepted certificate file; its absence means no operator CA is active.",
+      "content": "A git tool failing with 'SSL certificate problem: unable to get local issuer certificate' against a self-hosted server means that server's CA is not in the trust bundle of this boot. What the boot had can be read: file_read lists /embra/state/ca-certificates/ and /usr/share/embra/ca-certificates/, and the brain's log counts what it loaded ('operator CA drop-ins: N certificate(s)', 'image CA certificates: N certificate(s)', a line for each directory that held any; system_logs with the filter 'certificate(s) from'). embrad's own line, 'Operator CA trust: merged …', names each accepted file, but it is printed before embrad's log file exists: it is on the serial line and the display at boot, and system_logs does not show it. The fix is the operator's, and which one depends on the machine: on a raw disk image, scripts/seed-state.sh --ca-dir with the machine stopped; on a machine installed from the ISO or run from a converted disk, an image built with the certificate in Imported_CAs/. A reboot follows either way.",
       "tags": ["git", "tls", "error", "diagnostics"]
     },
     {
       "id": "seed_git_trust_paths",
       "kind": "semantic",
       "category": "fact",
-      "content": "embraOS has two separate TLS trust paths. The git binary and other OpenSSL child processes honor the boot-merged CA bundle (GIT_SSL_CAINFO / SSL_CERT_FILE), so they trust operator CAs. The Rust-side HTTP clients — the LLM providers, guardian http_get, and the gh_* GitHub tools — use compiled-in public roots and do NOT trust operator CAs; the gl_* GitLab client is the one deliberate exception (it adds the same CA drop-ins itself). A private-CA URL that works in git_clone can therefore still fail in guardian http_get — that is by design, not a bug.",
+      "content": "embraOS has two TLS trust paths, and both honor the CA certificates of the operator and of the image. The git binary and other OpenSSL child processes read the boot-merged CA bundle (GIT_SSL_CAINFO / SSL_CERT_FILE). The brain's own HTTP clients carry compiled-in public roots and add the same certificate files as trust anchors: the LLM providers (which matters when they go through an HTTPS gateway with a CA of its own), the gl_* GitLab and gh_* GitHub tools, and the Guardian transport behind http_get and http_request. One client keeps the public roots alone: web_search's, which talks to Brave's API. A private-CA URL that works in git_clone therefore verifies in a Guardian http_request too (a private address additionally has to be on the operator's egress allowlist); when one path fails and the other does not, the cause is not the CA.",
       "tags": ["tls", "ca", "architecture"]
     },
     { "_comment": "── auth: per-host tokens ────────────────────────────────" },
@@ -53,7 +53,7 @@
       "id": "seed_git_dns",
       "kind": "semantic",
       "category": "observation",
-      "content": "Under QEMU, hostname resolution goes through real DNS via the SLIRP gateway — entries in the host machine's /etc/hosts are invisible inside embraOS. A self-hosted server's hostname must resolve from inside the VM; otherwise the operator needs an IP-address URL, which only verifies if the server certificate carries an IP subject-alternative-name.",
+      "content": "embraOS resolves names through the resolvers its DHCP lease names; under QEMU's user network that is the SLIRP gateway, which forwards to the host's real DNS. Entries in another machine's /etc/hosts are invisible inside embraOS. A self-hosted server's hostname must resolve from inside the OS; otherwise the operator needs an IP-address URL, which only verifies if the server certificate carries an IP subject-alternative-name.",
       "tags": ["qemu", "dns", "network"]
     },
     { "_comment": "── procedures ───────────────────────────────────────────" },
@@ -63,7 +63,7 @@
       "title": "Work with a self-hosted GitLab repository",
       "description": "End-to-end flow from trust to merge request against a self-hosted GitLab instance.",
       "steps": [
-        "Confirm the server's CA is trusted: the operator must have seeded /embra/state/ca-certificates/ before the last boot — check system_logs (service=embrad) for the 'Operator CA trust: merged' line.",
+        "Confirm the server's CA is trusted: its certificate must have been in /embra/state/ca-certificates/ or in the image's /usr/share/embra/ca-certificates/ at the last boot — file_read lists both directories, and system_logs (filter 'certificate(s) from') shows how many the brain loaded.",
         "Confirm auth: /git-token should list the host; if not, ask the operator for a personal access token with the 'api' scope and store it with /git-token <host> <token>.",
         "git_clone https://<host>/<group>/<repo>.git into the workspace.",
         "Branch, edit, commit, and git_push with the normal git tools — the stored token authenticates automatically.",
@@ -82,10 +82,10 @@
       "description": "Separate TLS, auth, and DNS causes before involving the operator — each has a distinct signature and a different fix.",
       "steps": [
         "Read the exact error: 'unable to get local issuer certificate' is TLS trust; HTTP 401/403 is the token; 'Could not resolve host' is DNS.",
-        "TLS: check system_logs (service=embrad) for the 'Operator CA trust: merged' line — absent or missing the server's CA file means the drop-in never reached STATE before the last boot; the fix (seed + reboot) is an operator action.",
+        "TLS: file_read lists /embra/state/ca-certificates/ and /usr/share/embra/ca-certificates/, and system_logs (filter 'certificate(s) from') shows what the brain loaded at this boot — a server whose CA file is in neither directory is not trusted. Putting it there is an operator action (seed-state.sh --ca-dir on a raw disk image with the machine stopped, or an image built with the file in Imported_CAs/), and a reboot follows.",
         "Auth: /git-token to list configured hosts; if the host is missing or the token expired, ask the operator to re-store it (gl_* tools additionally need the 'api' scope).",
-        "DNS: the hostname must resolve inside the VM — the host machine's /etc/hosts does not apply; an IP URL works only when the certificate has an IP subject-alternative-name.",
-        "Report the identified cause to the operator — CA seeding and reboots cannot be done from inside a session."
+        "DNS: the hostname must resolve inside the OS — another machine's /etc/hosts does not apply; an IP URL works only when the certificate has an IP subject-alternative-name.",
+        "Report the identified cause to the operator — a CA cannot be added from inside a session, and a reboot is the operator's /reboot now."
       ],
       "outcomes": {
         "success": "The failing layer is identified and either fixed in-session (token) or reported precisely (CA seed, reboot, DNS).",

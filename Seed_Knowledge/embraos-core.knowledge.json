@@ -8,7 +8,7 @@
       "id": "seed_core_what",
       "kind": "semantic",
       "category": "fact",
-      "content": "embraOS is a continuity-preserving AI operating system: a QEMU-bootable Linux appliance (Buildroot-built, x86_64 and aarch64) that gives ONE AI model a sealed identity, persistent cross-session memory in WardSONDB, and an operator-defined value spec verified at every boot. It is not a chatbot wrapper or an agent framework — conversation with the intelligence is the system's only interface, and the intelligence operates the OS through its registered tool surface.",
+      "content": "embraOS is a continuity-preserving AI operating system: a Linux appliance built with Buildroot for x86_64 and aarch64 that gives ONE AI model a sealed identity, persistent cross-session memory in WardSONDB, and an operator-defined value spec verified at every boot. It boots on UEFI firmware from its own disk — the disk image under QEMU, the same disk converted for a hypervisor, or a machine installed from the installer ISO. It is not a chatbot wrapper or an agent framework — conversation with the intelligence is the system's only interface, and the intelligence operates the OS through its registered tool surface.",
       "tags": ["embraos", "identity", "os"]
     },
     {
@@ -23,14 +23,14 @@
       "id": "seed_core_boot_chain",
       "kind": "semantic",
       "category": "fact",
-      "content": "Boot chain: kernel → embra-init (initramfs: mounts the partitions, then switch_root) → embrad as PID 1. embrad brings up networking and starts services in dependency order: wardsondb (database, port 8090) → embra-trustd (soul verification + PKI, port 50001) → embra-apid (API gateway, gRPC 50000 / REST 8443) → embra-brain (the AI runtime, port 50002) → the operator UI (embra-web HTTPS console on 3345, or the serial embra-console). Soul verification happens before the brain starts — a hash mismatch HALTS the boot rather than running with a tampered identity.",
+      "content": "Boot chain: UEFI firmware → GRUB on the EFI System Partition (its menu shows for a few seconds: the OS slots, Diagnostics, Update, Backup and restore) → the active slot's kernel → embra-init (finds the slot's root filesystem, STATE and DATA by their partition names and mounts them) → embrad as PID 1. embrad brings up networking (a DHCP lease, with a static fallback) and starts services in dependency order: wardsondb (database, port 8090) → embra-trustd (soul verification + PKI, port 50001) → embra-apid (API gateway, gRPC 50000 / REST 8443) → embra-brain (the AI runtime, port 50002) → the operator UI (embra-web HTTPS console on 3345, or the serial embra-console), and after it the display console on a machine that has a display. Soul verification happens before the brain starts — a hash mismatch HALTS the boot rather than running with a tampered identity.",
       "tags": ["boot", "services", "embrad"]
     },
     {
       "id": "seed_core_services",
       "kind": "semantic",
       "category": "fact",
-      "content": "Service roles: wardsondb persists every collection; embra-trustd verifies the sealed soul and issues the internal PKI; embra-apid is a thin gateway that proxies the conversation stream and session calls; embra-brain owns sessions, tools, memory, and the LLM providers; embra-web serves the HTTPS console (desktop terminal and a chat-style mobile mode); embra-console is the serial TUI fallback. embrad supervises all of them — health checks with exponential-backoff restarts, so a crashed service comes back automatically and its log restarts.",
+      "content": "Service roles: wardsondb persists every collection; embra-trustd verifies the sealed soul and issues the internal PKI; embra-apid is a thin gateway that proxies the conversation stream and session calls; embra-brain owns sessions, tools, memory, and the LLM providers; embra-web serves the HTTPS console (desktop terminal and a chat-style mobile mode); embra-console is the serial TUI fallback. embrad supervises all of them — health checks with exponential-backoff restarts, so a crashed service comes back automatically and its log restarts. Two more start where the machine has a display, and a boot goes on without them: udevd for the keyboard and mouse, and embra-kiosk, the display console. embra-update is a program and no service: embrad runs it for a job of the boot menu (an update, a backup, a restore, an installation) and before the services of a normal boot, and the brain runs it for the operator's /update and /backup.",
       "tags": ["services", "architecture", "supervision"]
     },
     { "_comment": "── storage & persistence ────────────────────────────────" },
@@ -38,7 +38,7 @@
       "id": "seed_core_storage",
       "kind": "semantic",
       "category": "fact",
-      "content": "Storage model: the root filesystem is immutable SquashFS — read-only, nothing installs or changes on it at runtime; OS changes ship as a rebuilt image. Two writable ext4 partitions persist across boots: STATE at /embra/state (soul hash, PKI, API keys, and operator drop-in directories such as ca-certificates/, seed-knowledge/, imported-intelligence/) and DATA at /embra/data (the WardSONDB database and the workspace). /embra/ephemeral is a tmpfs wiped every boot — service logs live there and do not survive a reboot.",
+      "content": "Storage model: the root filesystem is immutable SquashFS — read-only, nothing installs or changes on it at runtime. The disk carries it twice, as OS slots A and B: an OS change arrives as a whole new root filesystem, written by an update into the slot that is not running, or with a rebuilt image. Two writable ext4 partitions persist across boots and across updates: STATE at /embra/state (soul hash, PKI, API keys, and operator drop-in directories such as ca-certificates/, seed-knowledge/, imported-intelligence/) and DATA at /embra/data (the WardSONDB database, the workspace, and the backups). /embra/ephemeral is a tmpfs wiped every boot — service logs live there and do not survive a reboot.",
       "tags": ["storage", "partitions", "persistence"]
     },
     {
@@ -96,7 +96,7 @@
       "id": "seed_core_operator_actions",
       "kind": "semantic",
       "category": "fact",
-      "content": "Some actions are structurally operator-side and cannot be performed from inside a session: rebuilding or reflashing the OS image, seeding STATE drop-ins (CA certificates, seed-knowledge packs, imported intelligence), rebooting the machine, re-sealing the soul, and approving Guardian proposals. When work requires one of these, the correct move is a precise report naming the action and why — not retrying in-session.",
+      "content": "Some actions are the operator's and cannot be performed by a tool from inside a session: updating the OS (/update), taking, restoring or deleting a backup (/backup), rebooting (/reboot now), choosing a slot or a maintenance job in the boot menu, installing the OS from the installer medium, rebuilding the OS image, seeding STATE drop-ins (CA certificates, seed-knowledge packs, imported intelligence), re-sealing the soul, and approving Guardian proposals. A slash command is typed by the operator in the console; no tool runs one. When work requires one of these, the correct move is a precise report naming the action or the command and why — not retrying in-session.",
       "tags": ["operator", "constraints", "boot"]
     },
     { "_comment": "── providers & runtime ──────────────────────────────────" },
@@ -112,7 +112,7 @@
       "id": "seed_core_observability",
       "kind": "semantic",
       "category": "fact",
-      "content": "Self-diagnostics surfaces: system_status reports health, uptime, soul state, and WardSONDB counters including memory-collection parity; system_logs tails any service's log from /embra/ephemeral (embra-brain, embrad, wardsondb, embra-trustd, embra-apid, embra-web, embra-console) with substring filtering. Logs reset at boot and on service restart. The brain's own log carries the retrieval-funnel lines, knowledge-seed reconcile lines, and slow-query warnings — useful when memory behavior needs explaining.",
+      "content": "Self-diagnostics surfaces: system_status reports health, uptime, soul state, and WardSONDB counters including memory-collection parity; system_logs tails any service's log from /embra/ephemeral (embra-brain, embrad, wardsondb, embra-trustd, embra-apid, embra-web, embra-console) with substring filtering. Logs reset at boot and on service restart. The brain's own log carries the retrieval-funnel lines, knowledge-seed reconcile lines, and slow-query warnings — useful when memory behavior needs explaining. embrad's own log starts when the console comes up: what it printed earlier in the boot (the mounts, the merge of the CA certificates) is on the serial line and the display, and system_logs does not show it.",
       "tags": ["diagnostics", "logs", "status"]
     },
     { "_comment": "── the project ──────────────────────────────────────────" },
@@ -134,21 +134,21 @@
       "id": "seed_core_source_map",
       "kind": "semantic",
       "category": "fact",
-      "content": "Where subsystems live in the source workspace: the AI runtime is crates/embra-brain (tools in src/tools/, memory and retrieval in src/knowledge/, LLM backends in src/provider/, learning mode in src/learning/); PID-1 init and service supervision are crates/embrad; the database is crates/wardsondb (a vendored fork); soul verification and PKI are crates/embra-trustd; the gateway is crates/embra-apid; the web console is crates/embra-web with its frontend in crates/embra-web-ui; the serial TUI is crates/embra-console; the dynamic-tool substrate is crates/embra-guardian. The bootable image is defined by buildroot/ and built by scripts/build-image.sh.",
+      "content": "Where subsystems live in the source workspace: the AI runtime is crates/embra-brain (tools in src/tools/, memory and retrieval in src/knowledge/, LLM backends in src/provider/, learning mode in src/learning/); PID-1 init and service supervision are crates/embrad; the early boot inside the initramfs is crates/embra-init; the boot contract those two share with the updater (the kernel line, partitions by name, GRUB's state, the release stamp) is crates/embra-boot; backups, restores, updates and the installer are crates/embra-update; the database is crates/wardsondb (a vendored fork); soul verification and PKI are crates/embra-trustd; the gateway is crates/embra-apid; the web console is crates/embra-web with its frontend in crates/embra-web-ui; the serial TUI is crates/embra-console; the dynamic-tool substrate is crates/embra-guardian. The bootable image is defined by buildroot/ and built by scripts/build-image.sh (scripts/build-image-aarch64.sh for aarch64).",
       "tags": ["source", "crates", "repo"]
     },
     {
       "id": "seed_core_docs_map",
       "kind": "semantic",
       "category": "fact",
-      "content": "The repository's docs answer distinct questions: README is the overview; docs/BUILD/QUICK-START.md covers build, install, and operator setup (keys, private-CA trust); docs/OPERATIONS/OPERATION.md the day-to-day session model; docs/OPERATIONS/COMMAND-REFERENCE.md the slash commands; docs/OPERATIONS/TOOL-REFERENCE.md the tool catalog; docs/SYSTEM-DESIGN.md the architecture; docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md the memory system in depth; docs/MULTI-GRAPH/IDENTITY-GRAPH.md the sealed identity graph and its import; docs/GUARDIAN/ the dynamic tools (REPLICANT-CHECK.md the soul gate, the GUARDIAN-* pages the worked examples, BROWSER-SERVICE.md the headless browser beside the OS, M365-SHARED-MAILBOX.md one Microsoft 365 mailbox through http_request); docs/LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md the vetted local models; docs/CHANGE-LOG.md the merge log; docs/OPEN-PROBLEMS.md the open design questions; docs/ROADMAP.md the phase plan (canonical for scope). For anything volatile — versions, counts — trust the live system or current docs over remembered numbers.",
+      "content": "The repository's docs answer distinct questions: README is the overview; docs/BUILD/QUICK-START.md covers build, install, and operator setup (keys, private-CA trust), with AARCH64-BUILD.md and INTEL-MAC-BUILD.md beside it for the Mac hosts; docs/OPERATIONS/OPERATION.md the day-to-day session model and what each surface has been validated on; docs/OPERATIONS/UPDATES-AND-BACKUPS.md the two OS slots, backups, restores and the signed OS update; docs/OPERATIONS/COMMAND-REFERENCE.md the slash commands; docs/OPERATIONS/TOOL-REFERENCE.md the tool catalog; docs/OPERATIONS/LOCAL-AI-GATEWAY.md the providers through a gateway; docs/SYSTEM-DESIGN.md the architecture; docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md the memory system in depth; docs/MULTI-GRAPH/IDENTITY-GRAPH.md the sealed identity graph and its import; docs/GUARDIAN/ the dynamic tools (REPLICANT-CHECK.md the soul gate, the GUARDIAN-* pages the worked examples, BROWSER-SERVICE.md the headless browser beside the OS, M365-SHARED-MAILBOX.md one Microsoft 365 mailbox through http_request); docs/LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md the vetted local models; docs/CHANGE-LOG.md the merge log; docs/OPEN-PROBLEMS.md the open design questions; docs/ROADMAP.md the phase plan (canonical for scope). For anything volatile — versions, counts — trust the live system or current docs over remembered numbers.",
       "tags": ["docs", "reference", "repo"]
     },
     {
       "id": "seed_core_phases",
       "kind": "semantic",
       "category": "fact",
-      "content": "embraOS develops in phases (docs/ROADMAP.md is canonical): Phase 0 was a Docker-contained proof-of-concept; Phase 1 — the current, stable one — is the Core OS, the bootable appliance this instance runs; later phases extend terminals, modules, and image tooling. Exact versions, tool counts, and test counts change per release: read them from system_status, /status, or the current docs rather than asserting remembered values.",
+      "content": "embraOS develops in phases (docs/ROADMAP.md is canonical for what is complete): Phase 0 was a Docker-contained proof-of-concept; Phase 1 is the Core OS — the appliance, its services, its memory, its tools and its consoles; Phase 2 makes the OS stand on its own disk: it boots itself through UEFI and GRUB, keeps two OS slots, backs itself up, takes signed updates, installs from an ISO onto hypervisors and bare metal, and shows its console on the machine's own display; the later phases are in the roadmap. Which release this instance runs, and exact versions, tool counts, and test counts change per release: read them from system_status, /status, or the current docs rather than asserting remembered values.",
       "tags": ["phases", "roadmap", "project"]
     },
     { "_comment": "── sessions & UI ────────────────────────────────────────" },
@@ -163,8 +163,37 @@
       "id": "seed_core_ui",
       "kind": "semantic",
       "category": "fact",
-      "content": "Two operator surfaces exist, both driving the same brain through the gateway: the embra-web HTTPS console on port 3345 (the default — a desktop terminal in the browser, plus a chat-style mobile mode on small viewports) and the serial TUI fallback (EMBRA_TUI=1 at launch). Nothing below the gateway differs per UI, so behavior observed in one surface holds in the other.",
+      "content": "Three operator surfaces exist, all driving the same brain through the gateway: the embra-web HTTPS console on port 3345 (the default — a desktop terminal in the browser, plus a chat-style mobile mode on small viewports); the display console, which is that same web console on the machine's own display with its keyboard and mouse, where the machine has a display; and the serial TUI (a Diagnostics entry of the boot menu, or embra.tui=1 on the kernel line). The web console's URL carries an access token that is new at every boot and is printed in the boot banner. Nothing below the gateway differs per UI, so behavior observed in one surface holds in the others.",
       "tags": ["ui", "console", "web"]
+    },
+    { "_comment": "── the two slots, updates, backups, installation ───────" },
+    {
+      "id": "seed_core_slots",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The disk has five partitions, found by name: the EFI System Partition (GRUB, its menu and its state file), OS slots A and B, STATE and DATA. A slot is one read-only root filesystem with its own kernel under /boot and its release stamp at /etc/embraos-release; a fresh disk has slot A alone, and the first update fills slot B. GRUB boots the active slot by default. A slot that an update staged is booted as a trial while it has tries left: embrad confirms it once every service is healthy, and when the tries run out GRUB marks it failed and returns to the previous slot — a release that does not come up costs a few boots and nothing else. system_status names the booted slot, and the operator's /update status shows both.",
+      "tags": ["slots", "boot", "grub", "update"]
+    },
+    {
+      "id": "seed_core_update",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "An OS update is the operator's decision, and the intelligence has no tool for it. /update checks the release published at the update source against the running one; /update apply writes it into the inactive slot and stages it; /reboot now then boots it as a trial. The updater verifies the signature of the release's manifest against the keys the image and the operator trust before it reads anything else, takes the image from the same source and checks its hash as it writes and again as it reads back; a release for another architecture or database engine is refused, and an older one unless the operator adds --allow-downgrade. The trial boot takes a snapshot of STATE and DATA before any service starts, and then the new brain migrates the knowledge graph. /update rollback makes the other slot the default again; an older release refuses to start on a graph that a newer one migrated, and the snapshot from before the update is what the boot menu's Restore puts back. The default source is the project's GitHub releases; /update source shows or sets the operator's own, and --tag on a check or an apply names one GitHub release in place of the latest.",
+      "tags": ["update", "release", "slots", "operator"]
+    },
+    {
+      "id": "seed_core_backup",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "A backup is a snapshot of STATE and DATA, taken while the database is stopped: /backup create [label] schedules one for the next boot (/reboot now boots), and the boot menu has its own Backup and restore entries for a machine whose services do not come up. Snapshots are kept under /embra/data/backups, each with a record beside it; /backup list shows them, each complete one with its download route in the web console, /backup delete removes one, and /backup restore <name> asks the operator for a typed confirmation and restores at the next boot. A restore brings the sealed identity back whole, since the soul and its hash come from one snapshot. An update takes a snapshot of its own at the new release's first boot, before any service starts. The archives hold the operator's STATE, so the file tools are refused them: a backup leaves the machine through the web console and never through a tool.",
+      "tags": ["backup", "restore", "storage", "operator"]
+    },
+    {
+      "id": "seed_core_install",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "embraOS reaches a machine in three ways: the raw disk image (the QEMU path), the same disk converted for a hypervisor, and the installer ISO, which boots on UEFI with Secure Boot off as a DVD or a USB stick, asks on both consoles which disk to write, and gives DATA the rest of that disk. DATA also grows at boot when its disk was enlarged afterwards. The image carries the drivers of virtual and wired hardware with their firmware. Which hypervisors and machines have been validated changes with every test round — read docs/OPERATIONS/OPERATION.md instead of asserting a list. Nothing on the build host reaches an installed machine's STATE: scripts/seed-state.sh writes to a raw disk image only, so a private CA (the Imported_CAs/ folder) or an importable identity graph (Imported_Intelligence/) for such a machine travels in the image it is built into.",
+      "tags": ["install", "hardware", "platforms", "iso"]
     },
     { "_comment": "── procedures ───────────────────────────────────────────" },
     {
@@ -183,6 +212,25 @@
         "failure": "Guessed architecture or stale numbers presented as fact — if no layer answers it, say so and name what would."
       },
       "tags": ["diagnostics", "repo", "workflow"]
+    },
+    {
+      "id": "seed_core_update_guide",
+      "kind": "procedural",
+      "title": "Walk the operator through an OS update",
+      "description": "The commands are the operator's to type. The intelligence says what each step does, reads the result with the operator, and names the next move when a step refuses.",
+      "steps": [
+        "/update first: it names the running release, the available one with its schema step and its notes, and the verdict. A check writes nothing.",
+        "A backup beforehand is optional — the new release takes its own snapshot of STATE and DATA at its first boot — but /backup create <label> and a reboot give the operator one of their choosing.",
+        "/update apply writes the release into the inactive slot and stages it; the running slot is untouched. A refusal states its reason: a signature that does not verify, another architecture or database engine, a slot GRUB may still fall back to, an older release without --allow-downgrade.",
+        "/reboot now boots the staged slot as a trial. Once every service is up the slot is confirmed; system_status and /update status then show it as the booted and the active one.",
+        "If the new release does not come up, GRUB returns to the previous slot when the tries are spent, and /update rollback does the same by hand. If the previous release then refuses to start because the newer one migrated the knowledge graph, the halt reason names the snapshot to restore from the boot menu.",
+        "After an update that moved the in-OS Rust toolchain, Guardian tools read NOT LOADED in /guardian list: /guardian rebuild --all builds them again."
+      ],
+      "outcomes": {
+        "success": "The new release is confirmed in its slot, or the machine is back on the previous one with its data as it was.",
+        "failure": "A step refused or the trial failed and its reason went unread — every refusal and every halt states one; report it instead of repeating the command."
+      },
+      "tags": ["update", "workflow", "operator"]
     }
   ],
   "edges": [
@@ -214,6 +262,19 @@
     { "src": "seed_core_providers", "dst": "seed_core_services", "relation": "related_to", "weight": 0.8 },
     { "_comment": "into the other packs" },
     { "src": "seed_core_wardsondb", "dst": "seed_kg_overview", "relation": "related_to", "weight": 0.8 },
-    { "src": "seed_core_repo_origin", "dst": "seed_git_gl_tools", "relation": "related_to", "weight": 0.8 }
+    { "src": "seed_core_repo_origin", "dst": "seed_git_gl_tools", "relation": "related_to", "weight": 0.8 },
+    { "_comment": "the slots, updates, backups and installation" },
+    { "src": "seed_core_slots", "dst": "seed_core_storage", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_core_slots", "dst": "seed_core_boot_chain", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_core_update", "dst": "seed_core_slots", "relation": "depends_on", "weight": 0.9 },
+    { "src": "seed_core_update", "dst": "seed_core_operator_actions", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_update", "dst": "seed_core_backup", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_core_backup", "dst": "seed_core_storage", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_core_backup", "dst": "seed_core_operator_actions", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_install", "dst": "seed_core_slots", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_core_install", "dst": "seed_core_what", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_update_guide", "dst": "seed_core_update", "relation": "depends_on", "weight": 0.9 },
+    { "src": "seed_core_update_guide", "dst": "seed_core_backup", "relation": "depends_on", "weight": 0.7 },
+    { "src": "seed_core_install", "dst": "seed_git_private_ca", "relation": "related_to", "weight": 0.7 }
   ]
 }

@@ -3,16 +3,17 @@
 Curated packs of knowledge-graph nodes and edges that the brain loads into
 the **live** knowledge collections (`memory.semantic` / `memory.procedural`
 + `memory.edges`) on every boot. Four packs ship committed: `embraos-core` is
-the OS knowing itself (boot chain, services, storage model, trust/soul
-mechanics, the constraint surface, and a layered answer-questions-about-
-yourself procedure — stable architecture only, volatile counters
-deliberately excluded in favor of live-source pointers), `embraos-kg`
+the OS knowing itself (boot chain, services, storage model, the two OS
+slots with updates, backups and installation, trust/soul mechanics, the
+constraint surface, a layered answer-questions-about-yourself procedure and
+one for taking the operator through an update — stable architecture only,
+volatile counters deliberately excluded in favor of live-source pointers), `embraos-kg`
 teaches an instance how its own memory works, `embraos-guardian` is
 the Guardian tool-authoring reference (the sandbox contract, the vendored
 guest APIs, and the pitfalls where general Rust training conflicts with
 the scoped `no_std` environment), and `embraos-git` covers self-hosted
-git servers (how a private CA becomes trusted via the
-`/embra/state/ca-certificates/` drop-in at boot, `/git-token` per-host
+git servers (how a private CA becomes trusted at boot, from the image's
+certificates and the `/embra/state/ca-certificates/` drop-in, `/git-token` per-host
 auth, the `gl_*` GitLab tools, and the TLS/auth/DNS diagnosis flow);
 operators can ship their own packs the same way. This is the `Imported_Intelligence/` pattern applied to
 knowledge instead of identity — packs are **mutable knowledge**, never
