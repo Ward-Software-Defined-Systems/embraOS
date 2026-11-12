@@ -181,6 +181,7 @@ EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # serial TUI on this terminal: fu
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSONDB log lines
 EMBRA_LOG_LEVEL=info,kg::traversal=debug ./scripts/run-qemu-aarch64.sh   # the brain's log filter (read back with system_logs)
 EMBRA_TUI=1 EMBRA_GRAPHICS=sixel ./scripts/run-qemu-aarch64.sh   # the serial TUI's image protocol: halfblocks | sixel | kitty | iterm2 | auto | off
+EMBRA_NTP=off ./scripts/run-qemu-aarch64.sh    # the time server the OS asks at boot: none, or EMBRA_NTP=<host>[:<port>] (QUICK-START.md, The clock)
 # EMBRA_FW_CODE=<code.fd> EMBRA_FW_VARS=<vars.fd> name another firmware pair than the host's edk2
 EMBRA_BOOT=direct ./scripts/run-qemu-aarch64.sh    # kernel + initramfs from the host: no firmware, no GRUB menu
 EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu-aarch64.sh   # QEMU's DHCP leases this address: the banner's second URL

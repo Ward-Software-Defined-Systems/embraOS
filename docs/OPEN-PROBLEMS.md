@@ -68,6 +68,14 @@ Opened 2026-11-05, with DHCP. embraOS now takes a lease on `eth0` and, when the 
 
 Options, none taken: add the leased address as a subject alternative name at every start (the certificate is minted per start already, but the CA's name constraints would have to admit it, and a Root CA generated before keeps its constraints until `/embra/state/pki/` is removed); a stable name instead of an address — mDNS (`embraos.local`), which the roadmap defers — with the name in the constraint set; or leave the warning, as the operator already accepts the private CA. The decision belongs with the templates wave, where the first bridged instances appear.
 
+## The clock: one unauthenticated answer per boot
+
+embrad sets the clock at boot: a hardware clock that reads earlier than the image's build time is set to it, and a time server is asked once, by SNTP, before any service starts (`crates/embrad/src/clock.rs`; [QUICK-START.md](BUILD/QUICK-START.md), The clock). Three things are open.
+
+- **The answer is not authenticated.** embrad ties an answer to its request with a random value the server returns, which stops a forger off the path, and refuses a time earlier than the image's build time. A host on the path can still forge a later time. NTS (RFC 8915) would authenticate the answer; it is not implemented.
+- **The source.** The default is one name, `time.cloudflare.com` (`DEFAULT_TIME_SERVER`). The NTP Pool's zone names are not used: its rules for vendors forbid them as the default of a distributed system without a vendor zone, and embraOS has none; with one, the default becomes that zone. The DHCP lease's NTP option is not read.
+- **The clock is not kept.** One exchange per boot. A machine that stays up drifts with its hardware clock, and a boot without an answer is not asked again until the next. An installed machine has no stored setting for the server: `embra.ntp=` is typed in GRUB's editor at each boot, as every kernel-line knob is.
+
 ## An interactive console on the display
 
 Opened 2026-11-07, with the boot messages on both consoles (`cb5865c`, after the ESXi run that showed a blank screen where embra-init had halted). The display is a boot console now: GRUB's menu, the boot log, the banner with the console URL and the reason a boot stopped all appear on it, so a hypervisor or a bare-metal machine without a serial port shows what happened. Input does not come back the same way. `/dev/console` is the serial line, the last `console=` on the kernel line, and that is where the serial TUI (`embra.tui=1`) draws and reads, and where the updater's prompts in the Update, Backup and Restore menu entries wait for an answer: on a display-only machine the Restore entry shows its list and cannot be answered, and the serial TUI is unreachable. The web console is the primary interface and needs neither console, so this concerns the fallback and the maintenance boots.
