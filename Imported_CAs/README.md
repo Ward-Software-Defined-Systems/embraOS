@@ -22,11 +22,11 @@ Nothing in this folder but this README is in git (`.gitignore`): every push of t
 ## What the OS does
 
 - embrad merges the image's certificates and those of `/embra/state/ca-certificates/` with the stock bundle at every boot and exports `SSL_CERT_FILE` and `GIT_SSL_CAINFO` to every service (`crates/embrad/src/ca_bundle.rs`).
-- Every HTTP client of the brain trusts both directories beside the compiled-in roots (`crates/embra-brain/src/net.rs`): the providers through an HTTPS gateway, the GitLab tools, the Guardian transport of `http_request`.
+- The brain's HTTP clients trust both directories beside the compiled-in roots (`crates/embra-brain/src/net.rs`): the providers through an HTTPS gateway, the GitLab and GitHub tools, the Guardian transport of `http_get` and `http_request`. One client does not: `web_search`'s, which reaches `api.search.brave.com` on the compiled-in roots alone.
 
 ## What to know
 
 - The trust follows the image. A machine updated to an image built without a file no longer trusts that CA. A CA that has to outlive updates belongs in STATE's `ca-certificates/`, which `seed-state.sh --ca-dir` fills on a raw image; an installed machine has no step for that yet.
-- Every machine installed from the build trusts these CAs for every outbound TLS connection. Bake only CAs you operate.
+- Every machine installed from the build trusts these CAs on the connections named above, for any host name. Bake only CAs you operate.
 - `scripts/release-update.sh` signs no release from an image that carries imported CAs, nor from a tree whose folder holds certificate files. `--allow-imported-cas` overrides both.
 - To remove a CA, take its file out of the folder and rebuild.

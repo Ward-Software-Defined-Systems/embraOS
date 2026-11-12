@@ -161,7 +161,8 @@ cd ~/projects/embraOS
 # aarch64 defconfig (BR2_aarch64=y) drives the .mk paths + kernel name.
 ./scripts/build-image-aarch64.sh --storage-engine rocksdb
 
-# Step 3.5 (in-OS Rust toolchain) + Step 4 (Buildroot) in Docker (linux/arm64).
+# Steps 3.5 and 3.6 (the in-OS Rust toolchain, the embedding model) and Step 4
+# (Buildroot) in Docker (linux/arm64).
 # The Buildroot tree lives in the named volume embraos-br-aarch64 — the Docker
 # VM's native filesystem. Building it on the bind mount instead exhausts the
 # macOS file provider's fd pool ("Too many open files") — see Troubleshooting.
@@ -178,6 +179,9 @@ docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
 ./scripts/run-qemu-aarch64.sh                  # web console (default) — the URL printed at boot (https://localhost:3345/embraOS?token=…)
 EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # serial TUI on this terminal: functional, preferred for debugging
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSONDB log lines
+EMBRA_LOG_LEVEL=info,kg::traversal=debug ./scripts/run-qemu-aarch64.sh   # the brain's log filter (read back with system_logs)
+EMBRA_TUI=1 EMBRA_GRAPHICS=sixel ./scripts/run-qemu-aarch64.sh   # the serial TUI's image protocol: halfblocks | sixel | kitty | iterm2 | auto | off
+# EMBRA_FW_CODE=<code.fd> EMBRA_FW_VARS=<vars.fd> name another firmware pair than the host's edk2
 EMBRA_BOOT=direct ./scripts/run-qemu-aarch64.sh    # kernel + initramfs from the host: no firmware, no GRUB menu
 EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu-aarch64.sh   # QEMU's DHCP leases this address: the banner's second URL
 EMBRA_ISO=output/images/embraos.iso ./scripts/run-qemu-aarch64.sh disk.qcow2   # boot the installer onto a blank qemu-img disk
@@ -211,7 +215,8 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 
 > **Display window and a bridged network (validated on Apple Silicon: the window 2026-11-10, the bridged network 2026-11-06).**
 > `run-qemu-aarch64.sh` has no display switch (the x86_64 launcher's `EMBRA_VNC=1`
-> has no aarch64 counterpart yet). To see the console on a window — the boot log
+> has no aarch64 counterpart yet) and passes none of the display console's knobs
+> (`EMBRA_KIOSK`, `EMBRA_KBD`, `EMBRA_KIOSK_MODE`). To see the console on a window — the boot log
 > and then the display console, the web console with keyboard and mouse — run QEMU
 > by hand with a virtio-gpu device and a USB keyboard and tablet on xHCI (the
 > `virt` machine has no keyboard or pointer of its own):
@@ -266,12 +271,11 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > switching later requires wiping DATA. `--buildroot-only` ignores the flag (Rust is
 > not rebuilt there). Back up before switching.
 
-> **Buildroot version:** Defaults to `2026.02.1` (LTS, Ubuntu 26.04 era). Override with
-> `BUILDROOT_VERSION=2024.02 ./scripts/build-image-aarch64.sh ...`. The **first** build
-> after this guide's update switches `buildroot-src` from `2024.02` → `2026.02.1` and
-> **wipes `buildroot-src/output/`** (one long full rebuild). The switch is refused if
-> you have local changes in `buildroot-src` — commit/stash them or pin
-> `BUILDROOT_VERSION` to the current checkout.
+> **Buildroot version:** `2026.02.1` (LTS), and the tree builds on that release alone
+> ([QUICK-START.md](QUICK-START.md), Buildroot version). A `buildroot-src` checked out
+> at another release is switched to it by the script, which **wipes
+> `buildroot-src/output/`** (one long full rebuild). The switch is refused if you have
+> local changes in `buildroot-src`: commit or stash them.
 
 > **Build memory / parallel jobs (`JOBS`):** the Docker pass runs Buildroot at `nproc`
 > jobs per package. Two phases want memory. The GCC + musl toolchain bootstrap dies in
@@ -279,8 +283,8 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > compile is the heaviest phase of the build: measured on the x86_64 build of the same
 > WebKit 2.50.5 (GCC 14.3.0, `-O2 -g0`), a WebCore unified-source bundle compiles in a
 > 3 GiB process, the heaviest in 5 GiB, and the link of libWPEWebKit takes 1.1 GiB.
-> Buildroot runs WebKit's ninja at `nproc+1` jobs, 17 on a 16-core Mac, so plan about
-> 3.5 GiB of VM memory per job: 60 GiB at 17 jobs, 16 GiB at 4; a 64 GiB VM completed
+> The script runs WebKit's ninja at `JOBS`, every core by default, so plan about
+> 3.5 GiB of VM memory per job: 56 GiB at 16 jobs, 16 GiB at 4; a 64 GiB VM completed
 > the build at 17 jobs in about 45 minutes (2026-11-09). Give the VM the memory
 > (OrbStack: `orb config set memory_mib 61440 && orb restart`; Docker Desktop:
 > Settings, Resources) or cap the jobs with `JOBS`, passed into the container with
@@ -306,7 +310,9 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > **deferred to the Docker pass** (macOS lacks `sha256sum`/`xz`); `vendor/rust-toolchain`
 > rides the `-v "$PWD":/work` bind mount. First build needs network for this. The
 > toolchain is the largest item in the image: about 285 MiB of the root filesystem, as
-> compressed in the SquashFS. Override the pin with `RUST_TOOLCHAIN_VERSION=...`. An
+> compressed in the SquashFS. The pin moves with its hash lines in
+> `scripts/rust-toolchain.sha256` ([QUICK-START.md](QUICK-START.md));
+> `RUST_TOOLCHAIN_VERSION` alone stops the build at the download check. An
 > image with a different pin leaves existing Guardian tools unloaded until the operator
 > runs `/guardian rebuild --all`.
 
@@ -398,8 +404,8 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
   Trunk so `embra-web` can embed `dist/` via `rust-embed`. wasm32 output is
   host-arch-agnostic — identical on x86_64 and aarch64 hosts. Aborts if `trunk` is
   missing. Runs only when not `--buildroot-only`.
-- **Step 1 — Rust binaries (aarch64 musl static).** `cargo build --release --target
-  aarch64-unknown-linux-musl`. ~30 minutes, mostly compilation. Builds all 12
+- **Step 1 — Rust binaries (aarch64 musl static).** `cargo build --release --locked
+  --target aarch64-unknown-linux-musl`. ~30 minutes, mostly compilation. Builds all 14
   workspace members including `wardsondb` (vendored at `crates/wardsondb` — no
   sibling repo; the former Step 2 is gone).
 - **Step 3 — initramfs.** `create_initramfs.sh` (RUST_TARGET-aware) packs `embra-init`
@@ -408,10 +414,14 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
 - **Step 3.5 — in-OS Rust toolchain.** See [In-OS Rust toolchain](#in-os-rust-toolchain-embra-guardian-v1)
   below. Unconditional w.r.t. `--buildroot-only`; **skipped on macOS** and run in the
   Docker/Linux pass.
+- **Step 3.6 — embedding model.** Stages `BAAI/bge-small-en-v1.5` into
+  `vendor/embedding-model`, verified against its pinned hashes (the Embedding model
+  note above). **Skipped on macOS** like Step 3.5 and run in the Docker/Linux pass.
 - **Step 4 — Buildroot.** Linux-only. Clones Buildroot (into an existing-but-empty
   `buildroot-src` too — the named-volume mountpoint case), ensures it is at
   `$BUILDROOT_VERSION` (default `2026.02.1`) via the safe-switch, dircleans the embraOS
-  + upstream packages, configures `embraos_aarch64_defconfig`, and builds the kernel
+  + upstream packages, configures `embraos_aarch64_defconfig`, stages the pinned kernel
+  tarball (Step 4a, verified against `scripts/linux-kernel.sha256`), and builds the kernel
   (`Image`, installed into the rootfs at `/boot`) + GRUB (`BOOTAA64.EFI`) + SquashFS
   rootfs + `embraos.img`. On macOS the Docker pass mounts the
   named volume `embraos-br-aarch64` at `buildroot-src`, keeping the tree and all build
@@ -474,9 +484,11 @@ export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="--sysroot=${MUSL_SYS
 export EMBRA_STORAGE_ENGINE=rocksdb   # or fjall
 
 cd embraOS
+# embra-web embeds the frontend at compile time: build it first (Step 0.5).
+(cd crates/embra-web-ui && trunk build --release --locked)
 # Builds every workspace member, including the vendored wardsondb —
 # target/aarch64-unknown-linux-musl/release/wardsondb lands here directly.
-cargo build --release --target aarch64-unknown-linux-musl --workspace
+cargo build --release --locked --target aarch64-unknown-linux-musl --workspace
 ```
 
 > **bindgen-based crates:** the in-tree `wardsondb` crate pulls in `zstd-sys` (and
@@ -515,7 +527,8 @@ runs them in a `wasmtime` sandbox. Step 3.5 stages that toolchain.
   and every package `.mk` (`embrad`, `embra-web`, `wardsondb`, …) uses
   `target/$(EMBRAOS_RUST_TARGET)/release` in its `_SITE`. `embra-rust-toolchain.mk` is
   arch-agnostic (it copies `vendor/rust-toolchain`, no target triple). The kernel
-  filename is resolved by `post_image.sh` from `genimage.cfg.in`. Selecting the arch is
+  filename is resolved by `post_image.sh` from the build's output (`Image` or `bzImage`
+  in `BINARIES_DIR`). Selecting the arch is
   entirely the defconfig's job (`embraos_aarch64_defconfig` sets `BR2_aarch64=y`).
 
 ### What Changed from x86_64
@@ -539,7 +552,7 @@ both arches, so there is **no per-arch sed** and nothing to revert.
 |---|---|
 | `scripts/create_initramfs.sh` | Respects `RUST_TARGET` env var; defaults to `x86_64-unknown-linux-musl` when unset |
 | `buildroot/external.mk` | Defines `EMBRAOS_RUST_TARGET = $(if $(BR2_aarch64),aarch64-…,x86_64-…)` |
-| `buildroot/package/*/*.mk` (7) | `_SITE` now uses `target/$(EMBRAOS_RUST_TARGET)/release` — arch-neutral |
+| `buildroot/package/*/*.mk` (8) | `_SITE` now uses `target/$(EMBRAOS_RUST_TARGET)/release` — arch-neutral |
 | `buildroot/board/embraos/post_image.sh` | Detects the kernel (`Image`/`bzImage`) in `BINARIES_DIR`, stages the ESP (GRUB's loader, `grub.cfg` rendered from `grub.cfg.in` with the kernel name and `console=ttyAMA0`, `grubenv`), renders `genimage.cfg.in` from `layout.sh`, runs genimage and checks the layout |
 | `buildroot/board/embraos/genimage.cfg` → `…/genimage.cfg.in` | Static config replaced by a template: the sizes from `layout.sh` (resolved per build); the kernel lives inside each slot's SquashFS, so the template names no kernel |
 
@@ -562,6 +575,9 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Architecture | `BR2_x86_64=y` | `BR2_aarch64=y` |
 | Kernel config method | `BR2_LINUX_KERNEL_USE_DEFCONFIG=y` | `BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y` |
 | Kernel defconfig name | `BR2_LINUX_KERNEL_DEFCONFIG="x86_64"` | *(not needed — arch default is implicit)* |
+| Kernel fragments (`BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES`) | `linux.fragment` and `linux-x86_64.fragment` | `linux.fragment` |
+| GRUB target | `BR2_TARGET_GRUB2_X86_64_EFI=y` | `BR2_TARGET_GRUB2_ARM64_EFI=y` |
+| Microcode | `BR2_PACKAGE_INTEL_MICROCODE=y`, its files kept off the rootfs (`# BR2_PACKAGE_INTEL_MICROCODE_INSTALL_TARGET is not set`) for `/boot/ucode.cpio` | *(none)* |
 
 > **Why `USE_ARCH_DEFAULT_CONFIG`?** Buildroot's `USE_DEFCONFIG` appends `_defconfig` to
 > the value you provide. ARM64's generic kernel config is named `defconfig`, so
@@ -577,16 +593,16 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Firmware (UEFI path) | OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd`, the `ovmf` package) or QEMU's `edk2-x86_64-code.fd` | `edk2-aarch64-code.fd` (Homebrew's qemu) or AAVMF (`qemu-efi-aarch64`) — validated on Apple Silicon 2026-11-06 |
 | Loader | `EFI/BOOT/BOOTX64.EFI` | `EFI/BOOT/BOOTAA64.EFI` |
 | Acceleration on macOS | `-accel hvf` (`run-qemu.sh` passes it on every Mac; an x86_64 guest runs under HVF on an Intel Mac only) | `-accel hvf` (native — near-native speed) |
-| CPU | QEMU's default (`run-qemu.sh` passes no `-cpu`) | `-cpu host` under HVF, `-cpu max` otherwise |
+| CPU | QEMU's default (`run-qemu.sh` passes no `-cpu`) | `-cpu host` under HVF and under KVM, `-cpu max` under TCG |
 | Kernel image | `bzImage` | `Image` |
 | Consoles | `console=tty0 console=ttyS0` | `console=tty0 console=ttyAMA0` (the serial line, last, owns `/dev/console`; embra-init's and embrad's boot messages go to it and to the display both; both consoles rendered into `grub.cfg` by `post_image.sh`, the serial one alone passed by the direct path) |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
-| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi and on Hyper-V) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page at 800x600, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
+| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi, on Hyper-V and, but for the pointer and a click, on Parallels Desktop) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page at 800x600, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
 | Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; no modules | `linux.fragment` alone, read back the same way; the arm64 base configuration keeps 1383 modules nothing loads, 71 MB uncompressed under `/lib/modules` (the 2026-11-09 build) |
-| Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors (validated under QEMU, on ESXi and on Hyper-V) | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)); validated on Apple Silicon under QEMU and under VMware Fusion (2026-11-11) |
+| Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors (validated under QEMU, on ESXi, on Hyper-V and on Parallels Desktop) | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)); validated on Apple Silicon under QEMU and under VMware Fusion (2026-11-11) |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
 | Pre-wave-6 tree | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
 
@@ -609,7 +625,7 @@ Same interface as the original — all commands work identically:
 ```bash
 ./scripts/embraos-backup-mac.sh backup --label pre-rebuild
 ./scripts/embraos-backup-mac.sh restore
-./scripts/embraos-backup-mac.sh restore 2026-04-15_1430
+./scripts/embraos-backup-mac.sh restore 2026-04-15_143000_pre-rebuild   # a name from `list`
 ./scripts/embraos-backup-mac.sh list
 ./scripts/embraos-backup-mac.sh verify
 ./scripts/embraos-backup-mac.sh --image ~/images/embraos.img verify   # a specific image
@@ -677,7 +693,7 @@ images — it is a macOS-host tool, not an ARM tool.
 
 #### Usage
 
-Same options as `seed-state.sh`:
+The options of `seed-state.sh` except `--update-key`, and `--dry-run` of its own:
 
 ```bash
 ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
@@ -725,7 +741,8 @@ docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
 
 # 3. Boot
 ./scripts/run-qemu-aarch64.sh
-# Confirm in-session: system_logs service=embrad   → names each accepted cert file
+# Confirm: embrad's "Operator CA trust: merged …" line on the serial console names each accepted
+# cert file; in a session, system_logs shows the brain's "operator CA drop-ins: N certificate(s)"
 ```
 
 ### Troubleshooting — Step 0.5 / Step 3.5
@@ -756,7 +773,7 @@ by design). The Docker `ubuntu:24.04` pass needs these.
 the Quick Start command; `sha256sum` ships in `coreutils` in the base image). On a bare
 ARM64 Linux host: `apt-get install -y xz-utils curl coreutils`.
 
-#### `sha256 verification failed for rust-1.98.1-aarch64-unknown-linux-musl.tar.xz`
+#### `ERROR: rust-1.98.1-aarch64-unknown-linux-musl.tar.xz does not match its pin`
 
 **Cause:** Truncated/corrupt download, or a stale partial stage.
 
@@ -786,15 +803,13 @@ a missing line means the version moved without its pin. `KERNEL_MIRROR` override
 
 #### `ERROR: buildroot-src has local changes; refusing to switch to 2026.02.1`
 
-**Cause:** The first build after this guide's update switches Buildroot
-`2024.02` → `2026.02.1`, and the safe-switch refuses to discard local changes in
-`buildroot-src`.
+**Cause:** `buildroot-src` is checked out at another release than `2026.02.1` (2024.02
+on a tree from before the pin moved), and the safe-switch refuses to discard local
+changes in it.
 
-**Fix:** Commit/stash the changes, or pin to the current checkout:
-
-```bash
-export BUILDROOT_VERSION=2024.02   # stay on the old pin
-```
+**Fix:** Commit or stash the changes and run the build again. Staying on the old
+release is not a way out: the tree builds on `2026.02.1` alone
+([QUICK-START.md](QUICK-START.md), Buildroot version).
 
 Note: the version switch wipes `buildroot-src/output/`, so the first `2026.02.1` build
 is one long full rebuild.
@@ -982,8 +997,8 @@ make: *** [package/pkg-generic.mk:273: /work/buildroot-src/output/build/wpewebki
 
 **Cause:** the VM's OOM killer, not the compiler. A WebCore unified-source bundle
 compiles in a 3 GiB process and the heaviest in 5 GiB (measured on the x86_64 build of
-the same WebKit; the link takes 1.1 GiB), and Buildroot runs WebKit's ninja at
-`nproc+1` jobs, 17 on a 16-core Mac: more than most VMs hold. Buildroot passes a
+the same WebKit; the link takes 1.1 GiB), and the script runs WebKit's ninja at
+`JOBS`, every core by default, 16 on a 16-core Mac: more than most VMs hold. Buildroot passes a
 cmake package's ninja `-j$(PARALLEL_JOBS)`, which `BR2_JLEVEL=0` sets to `nproc+1`
 whatever the top-level `-j` says, and ninja 1.13 ignores make 4.3's pipe-style
 jobserver (`Ignoring jobserver: Pipe-based protocol is not supported`), so `JOBS`
@@ -991,7 +1006,7 @@ reaches this phase only as `BR2_JLEVEL`, which the script passes since 2026-11-0
 older checkout ran it at `nproc+1` whatever `JOBS` said.
 
 **Fix:** give the VM about 3.5 GiB per job (`orb config set memory_mib 61440 && orb
-restart` for 17 jobs on OrbStack; Docker Desktop: Settings, Resources) or cap the jobs
+restart` covers 16 jobs on OrbStack; Docker Desktop: Settings, Resources) or cap the jobs
 (`-e JOBS=4` in a 16 GiB VM), then rerun the same command. The build resumes inside
 WebKit: ninja skips the finished objects, and nothing needs a dirclean.
 
@@ -1045,7 +1060,8 @@ configure: error: you should not run configure as root
 becomes the invalid `defconfig_defconfig`.
 
 **Fix:** `embraos_aarch64_defconfig` uses `BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y`
-instead — confirm the copied defconfig has this and not `USE_DEFCONFIG`.
+instead — confirm `buildroot/configs/embraos_aarch64_defconfig` has this and not
+`USE_DEFCONFIG`.
 
 #### `ERROR: …/target/<triple>/release does not exist`
 
@@ -1054,6 +1070,8 @@ selected arch. With the parameterization this is **not** a missing-sed problem �
 `EMBRAOS_RUST_TARGET` already resolves the path from `$(BR2_aarch64)`. It means the
 cargo cross-build for that arch didn't run or left the dir empty: Steps 0.5–3 were
 skipped, the wrong defconfig was used, or `target/<triple>/release/` has no binaries.
+A `--buildroot-only` run with no full build before it stops earlier, at
+`ERROR: --buildroot-only needs the release stamp of a full build`; the fix is the same.
 
 **Fix:** Run the macOS side first (`./scripts/build-image-aarch64.sh
 --storage-engine <engine>`) so `target/aarch64-unknown-linux-musl/release/` is
@@ -1061,13 +1079,14 @@ populated, then the Docker `--buildroot-only` pass. Confirm `EMBRAOS_RUST_TARGET
 present in `buildroot/external.mk` and the defconfig is `embraos_aarch64_defconfig`
 (`BR2_aarch64=y`).
 
-#### `stat(Image)` / `stat(bzImage)` failed, or `no kernel image found` (genimage)
+#### `ERROR: no kernel image (Image or bzImage) found`
 
 **Symptom:** `post_image.sh` aborts with `ERROR: no kernel image (Image or bzImage)
-found in …`, or genimage reports `stat(<kernel>) failed`.
+found in …`.
 
 **Cause:** No kernel in `BINARIES_DIR`. `post_image.sh` auto-detects `Image` (aarch64)
-vs `bzImage` (x86_64) and renders `genimage.cfg.in`, so this means the **kernel build
+vs `bzImage` (x86_64) for GRUB's configuration; the kernel itself rides inside each
+slot's SquashFS, and `genimage.cfg.in` names none. So this means the **kernel build
 itself** didn't produce an image — not a config edit you need to make.
 
 **Fix:** Re-run Buildroot and inspect the log for the kernel build failure. No

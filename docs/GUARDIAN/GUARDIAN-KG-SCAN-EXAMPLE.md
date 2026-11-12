@@ -49,9 +49,14 @@ Matchers inspect direct adjacency only; there is no transitive traversal.
 ## Producing a dump — `knowledge_dump`
 
 `kg_scan` reads the JSONL format the built-in `knowledge_dump` tool
-writes to `/embra/workspace/KG_DUMPS/kg-dump-<utc>.jsonl`:
+writes under `/embra/workspace/KG_DUMPS/`. By default a dump is written in
+parts, `kg-dump-<utc>-partNNNN.jsonl` of at most 2 MiB each, nodes before
+edges. `"part_bytes": 0` writes one file, `kg-dump-<utc>.jsonl`, and that is
+the form to scan: the matchers need the nodes and the edges together.
+The format:
 
-- **Line 1** is a `{"type":"meta",...}` header (dump provenance).
+- **Line 1** is a `{"type":"meta",...}` header (dump provenance; every
+  part of a set starts with it).
   `kg_scan` keys on `type` and skips unknown record types.
 - **Node lines** — `{"type":"node","_id":"…","collection":"memory.semantic","data":{…}}`.
   The matchers read only `type`/`_id`/`collection`; slim dumps
@@ -67,7 +72,8 @@ Scan the **slim profile**, not a full dump (limits below):
 knowledge_dump {
   "collections": ["semantic", "procedural", "edges"],
   "edge_types": ["enables", "contradicts", "refines", "depends_on"],
-  "include_payload": false
+  "include_payload": false,
+  "part_bytes": 0
 }
 ```
 
@@ -130,8 +136,12 @@ near-simultaneous pairs are skipped, never misreported.
   matchers that are O(nodes × edges) and worse. Scan slim,
   edge-type-filtered dumps; keep bridged data near 1 MiB.
 - **Bridge cap:** `data_file` refuses files over 2 MiB with a pointer to
-  the slim profile. A full production dump (all collections, full
-  payloads) is a backup/export artifact, not a scan input.
+  the slim profile, so a one-file dump (`part_bytes: 0`) over 2 MiB is
+  refused. A dump in parts passes the cap part by part, and one part of
+  several is not the graph: it holds nodes without their edges or edges
+  without their nodes, and a scan of it reports no error. A full
+  production dump (all collections, full payloads) is a backup/export
+  artifact, not a scan input.
 - **Retention:** dumps accumulate in `/embra/workspace/KG_DUMPS/` with no
   rotation — the intelligence removes stale ones with `file_delete`.
 
@@ -509,8 +519,7 @@ fn run(input: &str) -> String {
 
 ```text
 /guardian-define
-<paste the module above>
-.                                  ← serial terminator (web: just Enter)
+<paste the module above>           ← then Enter, on serial as on the web
 /guardian status kg_scan           ← repeat until: ready
 # then in plain language, e.g.:
 #   "run knowledge_dump with the slim scan profile, then use the kg_scan

@@ -1,8 +1,11 @@
 # A browser service beside the OS
 
-embraOS ships no browser. Buildroot has no Chromium for musl, a browser on
-the live OS would run untrusted JavaScript the egress guard never sees, and
-the VM has 4 GB. The browser runs as a service on your network instead, and
+embraOS gives the intelligence no browser. The browser engine in the image
+(WPE WebKit under cog) is the display console: the web console on the
+machine's own display ([SYSTEM-DESIGN.md](../SYSTEM-DESIGN.md)). Buildroot
+has no Chromium for musl, a browser for the open web on the live OS would run
+untrusted JavaScript the egress guard never sees, and the VM has 4 GB. The
+browser runs as a service on your network instead, and
 Embra reaches it with the shipped `http_request`
 ([GUARDIAN-HTTP-REQUEST-EXAMPLE.md](./GUARDIAN-HTTP-REQUEST-EXAMPLE.md)):
 rendered pages as text, screenshots and PDFs into the workspace with
@@ -68,11 +71,14 @@ Two ways, one `tls` line in `caddy/Caddyfile`:
   OS changes.
 - **Caddy's internal CA** (`tls internal`, the default). Caddy signs a
   certificate for `BROWSER_HOST` with a root it keeps in the `caddy_data`
-  volume. Copy the root into the OS, with the VM stopped:
+  volume. Copy the root into the OS, with the VM stopped (in
+  `docs/GUARDIAN/BROWSER-SERVICE`, where the compose runs; git ignores
+  `*.crt`):
 
   ```text
+  mkdir -p ca
   docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > ca/browser-root.crt
-  ./scripts/seed-state.sh --ca-dir ca
+  ../../../scripts/seed-state.sh --ca-dir ca
   ```
 
   `skip_install_trust` in the Caddyfile keeps Caddy out of the Docker

@@ -50,12 +50,12 @@
 >
 > **2026-11-11 — Parallels Desktop on the Intel Mac.** Parallels Desktop 26.5
 > takes the build two ways, both run on this Mac on 2026-11-11
-> ([QUICK-START.md](QUICK-START.md), the Parallels note): the machine in
-> `output/images/parallels/` (`embraos.vmx` with its VMDK) converts and boots to
-> the web console, its display console at 1920x1080, and `embraos.iso` installs
-> on a machine set to UEFI with Secure Boot off. William ran the install and the
-> import through Parallels' window. The pointer and a click on the display
-> console there are **TBD**.
+> ([QUICK-START.md](QUICK-START.md), the Parallels note): `embraos.vmx` with its
+> VMDK converts and boots to the web console, its display console at 1920x1080,
+> and `embraos.iso` installs on a machine set to UEFI with Secure Boot off.
+> William ran the install and the import through Parallels' window. The pair as
+> the build writes it now, in `output/images/parallels/`, the pointer and a
+> click on the display console there are **TBD**.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
 > named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
@@ -199,9 +199,9 @@ mkdir -p ~/projects && cd ~/projects
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 cd ~/projects/embraOS
 
-# Steps 0.5–3.5 on macOS: Trunk/WASM → Rust cross-compile → initramfs → in-OS
-# Rust toolchain stage. Exits at the Step 4 guard printing the Docker command —
-# that's expected on macOS.
+# Steps 0.5–3.6 on macOS: Trunk/WASM → Rust cross-compile → initramfs → the in-OS
+# Rust toolchain and the embedding model staged. Exits at the Step 4 guard printing
+# the Docker command — that's expected on macOS.
 ./scripts/build-image.sh --storage-engine rocksdb     # or: fjall
 
 # Step 4 (Buildroot) in Docker (linux/amd64 by default on Intel Mac). The
@@ -223,6 +223,11 @@ EMBRA_TUI=1 ./scripts/run-qemu.sh      # serial TUI on this terminal: functional
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu.sh   # opt-in per-request WardSONDB log lines
 EMBRA_BOOT=direct ./scripts/run-qemu.sh    # kernel + initramfs from the host: no firmware, no GRUB menu
 ```
+
+The launcher is the one of [QUICK-START.md](QUICK-START.md), whose run section lists its
+other `EMBRA_*` knobs: the log filter, the serial image protocol, the installer medium and
+its buses, the DHCP start address, the firmware pair and the display switches (the note
+below says what `EMBRA_VNC=1` meets on a Mac).
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM
 provider + credentials, timezone), then Learning Mode forms and seals the soul.
@@ -284,12 +289,11 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > `.engine` marker — switching later requires wiping DATA. `--buildroot-only`
 > ignores the flag (Rust is not rebuilt there). Back up before switching.
 
-> **Buildroot version:** Defaults to `2026.02.1` (LTS, Ubuntu 26.04 era).
-> Override with `BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...`. The
-> first build after switching versions wipes `buildroot-src/output/` (one long
-> full rebuild). The switch is refused if you have local changes in
-> `buildroot-src` — commit/stash them or pin `BUILDROOT_VERSION` to the current
-> checkout.
+> **Buildroot version:** `2026.02.1` (LTS), and the tree builds on that release
+> alone ([QUICK-START.md](QUICK-START.md), Buildroot version). A `buildroot-src`
+> checked out at another release is switched to it by the script, which wipes
+> `buildroot-src/output/` (one long full rebuild). The switch is refused if you
+> have local changes in `buildroot-src`: commit or stash them.
 
 > **Build memory / parallel jobs (`JOBS`):** the Docker pass runs Buildroot at
 > `nproc` jobs per package. Buildroot is RAM-hungry — on a memory-limited host
@@ -302,7 +306,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > heaviest phase of the build, dies with `Killed signal terminated program
 > cc1plus`: a WebCore unified-source bundle compiles in a 3 GiB process, the
 > heaviest in 5 GiB (measured on this build's WebKit 2.50.5, GCC 14.3.0; the
-> link takes 1.1 GiB), and Buildroot runs it at `nproc+1` jobs, so plan about
+> link takes 1.1 GiB), and the script runs it at `JOBS`, every core by default, so plan about
 > 3.5 GiB of VM memory per job (a 4 GB VM no longer completes the image at any
 > job count). All have the same fix — give the VM the memory or cap
 > parallelism with `JOBS` (passed into the container with `-e`; the script
@@ -338,7 +342,9 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > network for this. The toolchain is the largest item in the image: about
 > 320 MiB of a root filesystem of about 813 MiB, as compressed in the SquashFS (the firmware for bare metal is about 270 MiB of that and the display console's stack about 90 MiB)
 > (measured on the x86_64 Linux build, 2026-11-08).
-> Override the pin with `RUST_TOOLCHAIN_VERSION=...`. An image with a different
+> The pin moves with its hash lines in `scripts/rust-toolchain.sha256`
+> ([QUICK-START.md](QUICK-START.md)); `RUST_TOOLCHAIN_VERSION` alone stops the
+> build at the download check. An image with a different
 > pin leaves existing Guardian tools unloaded until the operator runs
 > `/guardian rebuild --all`.
 
@@ -410,7 +416,7 @@ banner at the top of this file.
    healthy; `curl http://localhost:8443/status` → `ok:true` with the `services` map.
 4. **Conversation session** — tool dispatch, memory writes to WardSONDB, session
    persistence; `/status` shows WardSONDB connected with populated collections.
-5. **Guardian (embra-guardian-v1):** define a small dynamic tool via `/guardian`
+5. **Guardian (embra-guardian-v1):** define a small dynamic tool via `/guardian-define`
    and invoke it — exercises the in-OS `/opt/rust` toolchain on the x86_64
    guest (Step 3.5 baked correctly).
 6. **Serial-TUI path:** relaunch with `EMBRA_TUI=1 ./scripts/run-qemu.sh`.

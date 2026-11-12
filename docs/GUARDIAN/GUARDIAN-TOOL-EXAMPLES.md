@@ -364,8 +364,7 @@ fn run(input: &str) -> String {
 
 ```text
 /guardian-define
-<paste Example 2 (sum)>
-.                                  ← serial terminator (web: just Enter)
+<paste Example 2 (sum)>            ← then Enter, on serial as on the web
 /guardian status sum               ← repeat until: ready
 # then just ask the intelligence in plain language, e.g.:
 #   "use the sum guardian tool to add 2 and 40"   → it answers 42

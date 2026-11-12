@@ -36,7 +36,8 @@ the record under the name and does one of these:
 
 - **absent** → installs it, unless `/guardian delete web_search` was run
   (the decline is recorded in `/embra/state/guardian_declined`, one name
-  per line; remove the line, or define the tool again, to have it back);
+  per line; define the tool again to have it back, or remove the line with
+  STATE mounted on a host, since nothing in the OS edits the file);
 - **shipped and unedited** → updates it when a new image carries a newer
   module, and rebuilds it after a failed build or an in-OS toolchain
   change (the `NOT LOADED` case no longer needs `/guardian rebuild` for

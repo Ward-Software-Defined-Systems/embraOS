@@ -2,7 +2,7 @@
 
 [WSDS Local AI Gateway](https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway) is a monitoring, inspection and data-loss-prevention reverse proxy for LLM traffic: a separate WSDS project that runs beside embraOS, never inside it. Its unified listener takes the standard Anthropic, Gemini and OpenAI-compatible paths and forwards each request, byte for byte and with the key the client sent, to the provider the path names. embraOS routes every provider request through it with one command, `/local-ai-gateway`, and back with another.
 
-**Status.** Under evaluation (2026-10-25). The operator is evaluating the gateway as the companion of embraOS and for vendoring into this workspace, the way WardSONDB was vendored at `crates/wardsondb`. The unified listener, the cloud backends and HTTPS are on the gateway's `main` since 2026-10-25. Since the gateway's `d24dc9a` and `658fe29` every proxy-listener response carries `x-local-ai-gateway: <version>`, and a listener can serve HTTPS from the gateway's own certificate authority; embraOS requires the header before it stores a URL, and trusts the CA through the operator's drop-ins. The live checks of this page are listed at the end; a row marked TBD has not been run.
+**Status.** Under evaluation (2026-10-25). The operator is evaluating the gateway as the companion of embraOS and for vendoring into this workspace, the way WardSONDB was vendored at `crates/wardsondb`. The unified listener, the cloud backends and HTTPS are on the gateway's `main` since 2026-10-25. Since the gateway's `d24dc9a` and `658fe29` every proxy-listener response carries `x-local-ai-gateway: <version>`, and a listener can serve HTTPS from the gateway's own certificate authority; embraOS requires the header before it stores a URL, and trusts the CA through the operator's drop-ins or the image's own (`Imported_CAs/` at build time). The live checks of this page are listed at the end; a row marked TBD has not been run.
 
 ## What the gateway does with a request
 
@@ -50,7 +50,7 @@ Direct, whatever `/local-ai-gateway` says: the Guardian tools (`web_search`, `ht
 
 ## Caveats
 
-- **The provider key reaches the gateway host in clear over `http://`.** The brain says so when `/local-ai-gateway` stores an `http://` URL. Over `https://` the key is covered on the way: the gateway's own CA among the operator's drop-ins (above), or a publicly trusted certificate on a reverse proxy in front of the gateway, which needs no drop-in. A listener whose certificate the brain does not trust is refused at `/local-ai-gateway <url>`, before anything is saved.
+- **The provider key reaches the gateway host in clear over `http://`.** The brain says so when `/local-ai-gateway` stores an `http://` URL. Over `https://` the key is covered on the way: the gateway's own CA among the operator's drop-ins or the image's (above), or a publicly trusted certificate on a reverse proxy in front of the gateway, which needs no drop-in. A listener whose certificate the brain does not trust is refused at `/local-ai-gateway <url>`, before anything is saved.
 - **Bodies are stored on the gateway host.** Redacted of what the DLP rules match, kept 7 days, in an unencrypted database. Treat the gateway's data directory as you treat embraOS's DATA.
 - **A block is a failed turn.** The turn ends with the 403 and the rule's name; nothing was sent to the provider. A memory or a tool description that matches a rule blocks every turn until the finding is allowlisted on the gateway (`[[dlp.allowlist]]`) or the text changes. A block is never mistaken for a stale Gemini cache: the stale-cache retry fires only on a body that names a cached content. A blocked `cachedContents` creation makes the turn go uncached, and the stream request then names the rule.
 - **A toggle is a new probe target.** The probe announces a standing failure once more after a toggle, says nothing on a healthy flip, and reads Ollama's context window again at its next run.
@@ -79,4 +79,4 @@ Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4
 
 Checked from the build host on 2026-10-25, through the brain's own `identify` with the exported CA as `EMBRA_CA_DIR`: `https://axiom-app.ops.wsds:4000` identified itself as WSDS Local AI Gateway 0.1.0; without the CA the refusal read `invalid peer certificate: UnknownIssuer` and named the drop-in directory; `http://axiom-app.ops.wsds:4000` read `invalid HTTP version parsed` and named `https://`. With curl and the same CA, `GET /v1/models` and a 404 both carried `x-local-ai-gateway: 0.1.0`.
 
-*Last updated: 2026-10-25.*
+*Last updated: 2026-11-11.*

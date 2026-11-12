@@ -31,7 +31,8 @@ is host-side documentation and is not baked.
 | Dev override | `EMBRA_SEED_DIR` env | when set, the **only** directory scanned |
 
 `scripts/seed-state.sh --seed-dir /path/to/packs` copies packs into STATE
-before first boot. Seed your own packs there, not a copy of `Seed_Knowledge/`:
+before first boot, on a raw disk image; a machine installed from the ISO or
+run from a converted disk has no step for that yet. Seed your own packs there, not a copy of `Seed_Knowledge/`:
 the OS's packs are in the image, and a copy in STATE would be ignored at boot
 (it would otherwise pin the pack to the day it was copied, through every
 later image and every restored backup). Files must end in `.knowledge.json` and stay under

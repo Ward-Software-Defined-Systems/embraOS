@@ -101,9 +101,11 @@ After Phase 1 (the operator profile) completes, embraOS scans:
 
 1. `EMBRA_IMPORT_DIR` (env; dev-mode override — when set, the only dir),
 2. else `/embra/state/imported-intelligence/` (operator-provisioned via
-   `seed-state.sh --import-dir`) ∪ `/usr/share/embra/imported-intelligence/`
-   (baked from the repo's `Imported_Intelligence/` at image build) — STATE
-   wins filename collisions.
+   `seed-state.sh --import-dir`, which writes to a raw disk image) ∪
+   `/usr/share/embra/imported-intelligence/` (baked from the repo's
+   `Imported_Intelligence/` at image build: the route for a machine installed
+   from the ISO or run from a converted disk) — STATE wins filename
+   collisions.
 
 Valid `.graph.json` candidates appear in a selector ("Build identity
 conversationally" is the default); invalid files are reported with every
@@ -136,7 +138,10 @@ node links to it.
 Do a **dry-run on a copy of DATA first**. The QEMU port forwards do not
 include WardSONDB and the OS has no shell, so the edits happen offline
 from the host, using the workspace's own `wardsondb` binary against the
-loop-mounted partition.
+loop-mounted partition. The steps are written for a raw disk image
+(`embraos.img`) on the build host. A machine installed from the ISO and a
+disk converted for a hypervisor have no image file to loop-mount; the
+ceremony there is TBD.
 
 1. **Back up** (`scripts/embraos-backup.sh` or a raw image copy).
 2. Stop the instance.
@@ -152,8 +157,10 @@ loop-mounted partition.
    fourth on a Phase 1 image). On macOS, do this inside a privileged container —
    `./scripts/seed-state-mac.sh` shows the pattern.
 4. Run the vendored server against it:
-   `cargo run -p wardsondb -- --data-dir <mount>/wardsondb --port 8099 --storage-engine <fjall|rocksdb>`
-   — `--storage-engine` is REQUIRED (no default) and must match the
+   `cargo run -p wardsondb -- --data-dir <mount>/wardsondb --bind 127.0.0.1 --port 8099 --storage-engine <fjall|rocksdb>`
+   — `--bind 127.0.0.1` keeps the copy off the network (the server's default
+   is every interface, and this run has no key);
+   `--storage-engine` is REQUIRED (no default) and must match the
    engine the instance was built with; the data dir's `.engine` marker
    locks it and the server errors on a mismatch, so a wrong pick fails
    loudly rather than corrupting anything. No `--api-key` → no auth

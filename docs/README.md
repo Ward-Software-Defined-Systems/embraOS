@@ -31,7 +31,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 
 ## The two graphs — `MULTI-GRAPH/`
 
-- [MULTI-GRAPH/KNOWLEDGE-GRAPH.md](MULTI-GRAPH/KNOWLEDGE-GRAPH.md) — Cross-session memory graph: auto-derived edges, density rationale, promotion at creation, link candidates, auto-enrichment, retrieval ranking, the in-OS semantic-similarity layer, the 12 `knowledge_*` tools.
+- [MULTI-GRAPH/KNOWLEDGE-GRAPH.md](MULTI-GRAPH/KNOWLEDGE-GRAPH.md) — Cross-session memory graph: auto-derived edges, density rationale, promotion at creation, link candidates, auto-enrichment, retrieval ranking, the in-OS semantic-similarity layer, the 13 `knowledge_*` tools.
 - [MULTI-GRAPH/IDENTITY-GRAPH.md](MULTI-GRAPH/IDENTITY-GRAPH.md) — The KG-native identity: sealed IDENTITY+SOUL graph, projection + boot reconcile, prompt rendering, the Learning-Mode import, and the re-seal migration ceremony. Authoring contract: [`Imported_Intelligence/README.md`](../Imported_Intelligence/README.md).
 
 ## Guardian — `GUARDIAN/`

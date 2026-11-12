@@ -15,8 +15,8 @@ projection, rendering, the migration ceremony) is documented in
 
 | Location | Purpose |
 |---|---|
-| `/embra/state/imported-intelligence/` | Operator-provisioned (`scripts/seed-state.sh --import-dir <path>` before first boot). Wins filename collisions. |
-| `/usr/share/embra/imported-intelligence/` | Read-only, baked into the OS image from this folder at build time. |
+| `/embra/state/imported-intelligence/` | Operator-provisioned (`scripts/seed-state.sh --import-dir <path>` before first boot, on a raw disk image). Wins filename collisions. |
+| `/usr/share/embra/imported-intelligence/` | Read-only, baked into the OS image from this folder at build time. The route for a machine installed from the ISO or run from a converted disk, which `seed-state.sh` does not reach. |
 | `EMBRA_IMPORT_DIR` (env) | Dev-mode override — when set, it is the only directory scanned. |
 
 Only files ending in `.graph.json` are scanned. This README is never baked
