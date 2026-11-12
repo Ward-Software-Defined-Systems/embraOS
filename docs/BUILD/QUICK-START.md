@@ -14,7 +14,7 @@ Build a QEMU-bootable embraOS disk image from source and boot it. The project la
 > serial TUI instead — no image rebuild needed. The serial TUI is functional but is
 > preferred for debugging; the web console is the primary interface.
 
-## Phase 1 — Build from Source (QEMU Bootable Image)
+## Build from Source
 
 The build writes a self-booting x86_64 disk image for QEMU, the same disk converted for VMware, Hyper-V and Parallels, and the installer ISO: an immutable SquashFS rootfs in two slots, service supervision, and soul verification at boot.
 
