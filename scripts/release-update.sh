@@ -213,21 +213,18 @@ if [ -n "$IMAGE_CAS" ] || [ -n "$TREE_CAS" ] || [ "$IMAGE_UNREAD" -eq 1 ]; then
     fi
 fi
 
-mkdir -p "$OUT"
+# From here on nothing is written until every check has passed: the slot
+# image's hash, the installer medium of the same build, and the key. A run
+# that is refused leaves nothing in $OUT. Until 2026-11-11 the manifest was
+# written and signed before the ISO was looked at, so a run refused at the
+# ISO left a signed pair that read as ready to upload.
 FILE="embraos-${TAG}-${ARCH}-${ENGINE}.rootfs.squashfs"
-MANIFEST="$OUT/embraos-${ARCH}-${ENGINE}.manifest.json"
-cp "$ROOTFS" "$OUT/$FILE"
-SIZE="$(stat -c %s "$OUT/$FILE" 2>/dev/null || stat -f %z "$OUT/$FILE")"
-SHA="$( (sha256sum "$OUT/$FILE" 2>/dev/null || shasum -a 256 "$OUT/$FILE") | cut -d' ' -f1)"
-BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-REPO_URL="https://github.com/Ward-Software-Defined-Systems/embraOS"
-printf '{"format":"update.v1","version":"%s","tag":"%s","build_id":"%s","arch":"%s","engine":"%s","schema_version":%s,"kernel":"%s","rootfs":{"file":"%s","url":"%s/releases/download/%s/%s","size":%s,"sha256":"%s"},"built":"%s","notes_url":"%s/releases/tag/%s"}\n' \
-    "$VERSION" "$TAG" "$BUILD_ID" "$ARCH" "$ENGINE" "$SCHEMA" "$KERNEL" "$FILE" "$REPO_URL" "$TAG" "$FILE" "$SIZE" "$SHA" "$BUILT" "$REPO_URL" "$TAG" > "$MANIFEST"
-sign "$KEY" "$MANIFEST" > "$MANIFEST.sig"
-verify scripts/update-signing.pub "$MANIFEST" "$MANIFEST.sig" || {
-    echo "ERROR: the signature does not verify against scripts/update-signing.pub — is the key's public half in it?" >&2
-    exit 1
-}
+MANIFEST_NAME="embraos-${ARCH}-${ENGINE}.manifest.json"
+ISO_FILE="embraos-${TAG}-${ARCH}-${ENGINE}.iso"
+SIZE="$(stat -c %s "$ROOTFS" 2>/dev/null || stat -f %z "$ROOTFS")"
+SHA="$( (sha256sum "$ROOTFS" 2>/dev/null || shasum -a 256 "$ROOTFS") | cut -d' ' -f1)"
+[ -n "$SIZE" ] && [ "${#SHA}" -eq 64 ] || { echo "ERROR: $ROOTFS could not be measured (size '$SIZE', sha256 '$SHA')" >&2; exit 1; }
+
 # The installer ISO of the same build, on either architecture: copied under
 # the release's name, its sha256sum line signed with the same key. Its
 # embedded manifest is checked against the flags when an xorriso is at hand:
@@ -251,8 +248,8 @@ if [ -n "$XORRISO" ]; then
         echo "$ISO_MANIFEST" | grep -qx "$pair" || { echo "ERROR: $ISO says $(echo "$ISO_MANIFEST" | grep "^${pair%%=*}="), not $pair" >&2; exit 1; }
     done
     # The medium of the same build: its root filesystem is the slot image
-    # signed above, so what was checked of that image holds for the ISO too
-    # (the imported certificate authorities among it).
+    # this run signs, so what was checked of that image holds for the ISO
+    # too (the imported certificate authorities among it).
     echo "$ISO_MANIFEST" | grep -qx "ROOTFS_SHA256=$SHA" || {
         echo "ERROR: $ISO was built around another root filesystem ($(echo "$ISO_MANIFEST" | grep '^ROOTFS_SHA256=')) than $ROOTFS (sha256 $SHA): a release's installer medium is the one of the same build" >&2
         exit 1
@@ -260,15 +257,52 @@ if [ -n "$XORRISO" ]; then
 else
     echo "WARNING: no xorriso; the ISO's embedded manifest is not inspected" >&2
 fi
-ISO_FILE="embraos-${TAG}-${ARCH}-${ENGINE}.iso"
-cp "$ISO" "$OUT/$ISO_FILE"
-(cd "$OUT" && sha256_line "$ISO_FILE" > "$ISO_FILE.sha256")
-sign "$KEY" "$OUT/$ISO_FILE.sha256" > "$OUT/$ISO_FILE.sha256.sig"
-verify scripts/update-signing.pub "$OUT/$ISO_FILE.sha256" "$OUT/$ISO_FILE.sha256.sig" || {
+
+# The key: its public half is in scripts/update-signing.pub, or the OS
+# verifies nothing this run would sign. A probe is signed and checked before
+# the release's own files are made.
+PROBE="$(mktemp -d)"
+printf 'embraOS release key probe\n' > "$PROBE/probe"
+if ! sign "$KEY" "$PROBE/probe" > "$PROBE/probe.sig" 2>/dev/null || ! verify scripts/update-signing.pub "$PROBE/probe" "$PROBE/probe.sig"; then
+    rm -rf "$PROBE"
+    echo "ERROR: $KEY does not sign what scripts/update-signing.pub verifies — is the key's public half in it? Nothing is written." >&2
+    exit 1
+fi
+rm -rf "$PROBE"
+
+# The six files are made in a staging directory inside $OUT and moved out of
+# it together once each is made and verified, so a run that fails here (a
+# full disk, a source that changed under the copy) leaves none of them.
+mkdir -p "$OUT"
+STAGE="$(mktemp -d "$OUT/.release-stage.XXXXXX")"
+trap 'if [ -n "${STAGE:-}" ] && [ -d "$STAGE" ]; then rm -rf "$STAGE"; fi' EXIT
+MANIFEST="$STAGE/$MANIFEST_NAME"
+cp "$ROOTFS" "$STAGE/$FILE"
+COPY_SHA="$( (sha256sum "$STAGE/$FILE" 2>/dev/null || shasum -a 256 "$STAGE/$FILE") | cut -d' ' -f1)"
+[ "$COPY_SHA" = "$SHA" ] || { echo "ERROR: the copy of $ROOTFS is not the image that was checked (sha256 $COPY_SHA, checked $SHA): it changed during the run" >&2; exit 1; }
+BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+REPO_URL="https://github.com/Ward-Software-Defined-Systems/embraOS"
+printf '{"format":"update.v1","version":"%s","tag":"%s","build_id":"%s","arch":"%s","engine":"%s","schema_version":%s,"kernel":"%s","rootfs":{"file":"%s","url":"%s/releases/download/%s/%s","size":%s,"sha256":"%s"},"built":"%s","notes_url":"%s/releases/tag/%s"}\n' \
+    "$VERSION" "$TAG" "$BUILD_ID" "$ARCH" "$ENGINE" "$SCHEMA" "$KERNEL" "$FILE" "$REPO_URL" "$TAG" "$FILE" "$SIZE" "$SHA" "$BUILT" "$REPO_URL" "$TAG" > "$MANIFEST"
+sign "$KEY" "$MANIFEST" > "$MANIFEST.sig"
+verify scripts/update-signing.pub "$MANIFEST" "$MANIFEST.sig" || {
+    echo "ERROR: the signature does not verify against scripts/update-signing.pub — is the key's public half in it?" >&2
+    exit 1
+}
+cp "$ISO" "$STAGE/$ISO_FILE"
+(cd "$STAGE" && sha256_line "$ISO_FILE" > "$ISO_FILE.sha256")
+sign "$KEY" "$STAGE/$ISO_FILE.sha256" > "$STAGE/$ISO_FILE.sha256.sig"
+verify scripts/update-signing.pub "$STAGE/$ISO_FILE.sha256" "$STAGE/$ISO_FILE.sha256.sig" || {
     echo "ERROR: the ISO's checksum signature does not verify against scripts/update-signing.pub" >&2
     exit 1
 }
-ISO_SIZE="$(stat -c %s "$OUT/$ISO_FILE" 2>/dev/null || stat -f %z "$OUT/$ISO_FILE")"
+ISO_SIZE="$(stat -c %s "$STAGE/$ISO_FILE" 2>/dev/null || stat -f %z "$STAGE/$ISO_FILE")"
+for f in "$FILE" "$MANIFEST_NAME" "$MANIFEST_NAME.sig" "$ISO_FILE" "$ISO_FILE.sha256" "$ISO_FILE.sha256.sig"; do
+    mv -f "$STAGE/$f" "$OUT/$f"
+done
+rmdir "$STAGE"
+STAGE=""
+MANIFEST="$OUT/$MANIFEST_NAME"
 ISO_UPLOADS=" \"$OUT/$ISO_FILE\" \"$OUT/$ISO_FILE.sha256\" \"$OUT/$ISO_FILE.sha256.sig\""
 
 echo "written to $OUT:"
