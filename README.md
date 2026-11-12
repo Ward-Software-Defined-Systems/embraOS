@@ -29,10 +29,11 @@
 > installed from the ISO. Validated so far: QEMU on x86_64 Linux, on an Intel Mac and on
 > Apple Silicon; VMware ESXi 8.0 U2 (the OVA and the ISO); Microsoft Hyper-V generation 2
 > (the VHDX and the ISO); VMware Fusion on Apple Silicon (the ISO); Parallels Desktop 26.5
-> on an Intel Mac (the machine it imports and the ISO). Bare metal has not been run yet:
-> the drivers of wired hardware with their firmware and the CPU microcode are in the
-> image. These are the platforms of `main`; the latest release, `v0.23.0-phase1`, is a
-> QEMU image. What each surface has been validated on, and what is still TBD, is in
+> on an Intel Mac (the machine it imports and the ISO); and bare metal on one machine so
+> far, a YouYeeToo X1 single-board computer installed from the ISO. The drivers of wired
+> hardware with their firmware and the CPU microcode are in the image. These are the
+> platforms of `main`; the latest release, `v0.23.0-phase1`, is a QEMU image. What each
+> surface has been validated on, and what is still TBD, is in
 > [docs/OPERATIONS/OPERATION.md](docs/OPERATIONS/OPERATION.md).
 
 Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors and bare metal (the A/B slots with rollback, the signed update, the hypervisor and bare-metal drivers with their firmware, the display console and the installer ISO landed in Phase 2's waves; LUKS and mTLS follow); a governed module system with an `embractl` management CLI; a custom kernel; and a sovereign-intelligence tier — the embraOS-QNM-Core model option and Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
