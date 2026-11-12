@@ -99,6 +99,8 @@ async fn main() -> anyhow::Result<()> {
         tools: ToolFeed::spawn(cfg.apid_addr.clone()),
         token,
         backups_root: Arc::from(std::path::Path::new(backups::BACKUPS_ROOT)),
+        updater: Arc::from(std::path::Path::new(backups::UPDATER)),
+        backup_upload: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     server::serve(&cfg, state, server_config).await

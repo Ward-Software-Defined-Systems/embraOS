@@ -37,6 +37,13 @@ pub struct AppState {
     /// Where the OS keeps its backups (`backups.rs`): `/embra/data/backups`
     /// in the OS, a temporary directory in a test.
     pub backups_root: Arc<std::path::Path>,
+    /// The OS's updater, which an uploaded backup is handed to
+    /// (`backups.rs`): `/usr/bin/embra-update` in the OS, a stand-in in a
+    /// test.
+    pub updater: Arc<std::path::Path>,
+    /// Held by the one backup upload that runs: a second one is told so,
+    /// and two never take DATA's room between them.
+    pub backup_upload: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -55,6 +62,8 @@ impl AppState {
             tools: ToolFeed::new(),
             token: Arc::from("0123456789abcdef0123456789abcdef"),
             backups_root: Arc::from(std::env::temp_dir().as_path()),
+            updater: Arc::from(std::path::Path::new("/nonexistent/embra-update")),
+            backup_upload: Arc::new(tokio::sync::Mutex::new(())),
         };
         (state, input_rx)
     }

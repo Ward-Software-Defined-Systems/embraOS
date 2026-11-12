@@ -153,8 +153,15 @@ pub async fn serve(
         .route("/api/files/{*path}", get(api_file_get))
         // A backup the OS took, streamed from DATA (`/backup list` names
         // the route; the archive carries STATE's secrets and never enters
-        // the workspace).
-        .route("/api/backups/{name}", get(crate::backups::api_backup_get))
+        // the workspace), and the way back: the archive streamed to the
+        // updater's `import`, whatever its size. The handler takes the body
+        // as it arrives, so axum's default limit on a buffered body does not
+        // apply; DATA's room does (`backups::upload_refusal`).
+        .route(
+            "/api/backups/{name}",
+            get(crate::backups::api_backup_get).put(crate::backups::api_backup_put),
+        )
+        .route("/api/backups/{name}/upload-check", get(crate::backups::api_backup_upload_check))
         // The console's URLs with the token, for the display console's
         // menu: answered to this machine's own browser alone.
         .route("/api/console-url", get(api_console_url))
