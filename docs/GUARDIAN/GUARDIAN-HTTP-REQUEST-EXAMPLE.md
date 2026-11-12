@@ -25,8 +25,10 @@ lives on the host:
    `/guardian egress allow <host>` (a name with its subdomains, or an IP
    literal); loopback, link-local, multicast and reserved addresses never.
 2. **The operator's secrets, host-side** — `/guardian secret <host> <header>
-   <value>` stores a credential; the host adds it to a hop whose host matches
-   and to no other, so a redirect to another host never carries it. A tool
+   <value>` stores a credential; the host adds it to a hop whose host and port
+   match and to no other, so a redirect to another host never carries it. A
+   host stored without a port is port 443, and a service on another port of
+   the same host takes a secret of its own, stored as `<host>:<port>`. A tool
    may not set `Authorization`, `Proxy-Authorization` or `Cookie` itself, and
    a stored token never enters a tool's input, the turn trace or the session
    history. A header a tool sets itself is sent as given; the record of the

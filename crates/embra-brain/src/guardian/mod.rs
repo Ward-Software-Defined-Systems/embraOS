@@ -510,6 +510,19 @@ fn parse_secret_args(rest: &str) -> Result<SecretOp, String> {
     Ok(SecretOp::Set { host, header, value: value.to_string() })
 }
 
+/// The reply to a stored secret: where the request guard will add it. A
+/// host stored without a port is port 443 and no other
+/// (`embra_guardian::caps::secret_place`), and the reply says so, since a
+/// service on another port of the same host needs a secret of its own.
+fn secret_stored_reply(host: &str, header: &str) -> String {
+    let (name, port) = embra_guardian::caps::secret_place(host);
+    format!(
+        "guardian: secret stored for {host}: header '{header}' (value not shown). The host \
+         adds it to every http_request to {name} on port {port}, and to no other port of it \
+         (/guardian secret {name}:<port> … stores one for another); a tool never sees it."
+    )
+}
+
 /// `/guardian secret …`. Values are never echoed: replies name hosts and
 /// header names only.
 async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
@@ -526,8 +539,9 @@ async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
         SecretOp::List => {
             if secrets.is_empty() {
                 return "guardian: no secrets stored. /guardian secret <host> <header> <value> \
-                        adds one; the host injects it into every http_request to that host, \
-                        and the model never sees it."
+                        adds one; the host injects it into every http_request to that host \
+                        on its port (443, or the one in <host>:<port>), and the model never \
+                        sees it."
                     .to_string();
             }
             let rows: Vec<String> = secrets
@@ -563,10 +577,7 @@ async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
         }
         SecretOp::Set { host, header, value } => {
             secrets.entry(host.clone()).or_default().insert(header.clone(), value);
-            format!(
-                "guardian: secret stored for {host}: header '{header}' (value not shown). The host \
-                 adds it to every http_request to {host}; a tool never sees it."
-            )
+            secret_stored_reply(&host, &header)
         }
     };
     cfg.guardian_secrets = if secrets.is_empty() { None } else { Some(secrets) };
@@ -2075,6 +2086,19 @@ mod secret_and_egress_tests {
         let flat = secrets_from(&cfg);
         assert_eq!(flat.len(), 1);
         assert_eq!((flat[0].host.as_str(), flat[0].name.as_str(), flat[0].value.as_str()), ("gitlab.ops.wsds", "authorization", "Bearer t"));
+    }
+
+    /// Where a secret goes is said where it is stored: a host without a port
+    /// is port 443 and no other, and a secret for another port of the same
+    /// host is a secret of its own.
+    #[test]
+    fn the_stored_reply_names_the_host_and_the_port() {
+        let bare = secret_stored_reply("gitlab.example.com", "private-token");
+        assert!(bare.contains("stored for gitlab.example.com: header 'private-token'"), "{bare}");
+        assert!(bare.contains("to gitlab.example.com on port 443, and to no other port"), "{bare}");
+        let ported = secret_stored_reply("gitlab.example.com:8443", "private-token");
+        assert!(ported.contains("stored for gitlab.example.com:8443: header"), "{ported}");
+        assert!(ported.contains("to gitlab.example.com on port 8443, and to no other port"), "{ported}");
     }
 
     #[test]

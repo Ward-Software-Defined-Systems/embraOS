@@ -147,7 +147,8 @@ pub trait FileSink: Send + Sync {
 /// guest never sees it; a redirect to another host never carries it.
 #[derive(Clone, Debug)]
 pub struct SecretHeader {
-    /// Lowercase host, with the port when the operator gave one.
+    /// Lowercase host, with the port when the operator gave one. Without
+    /// one it is the default port, and no other ([`secret_place`]).
     pub host: String,
     /// Lowercase header name.
     pub name: String,
@@ -740,21 +741,42 @@ fn guest_headers(headers: &[(String, String)]) -> serde_json::Map<String, serde_
     out
 }
 
-/// The host a secret is stored for, as the URL names it: lowercase, with
-/// the port when the URL carries one.
-fn secret_hosts_of(parsed: &url::Url) -> [String; 2] {
-    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
-    let with_port = match parsed.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.clone(),
-    };
-    [host, with_port]
+/// The port of a secret stored without one: the guard takes `https` alone
+/// (`check_url`).
+const SECRET_DEFAULT_PORT: u16 = 443;
+
+/// The host and the port a stored secret is for. The operator stores
+/// `host` or `host:port`; a host without a port is the default port, so
+/// `host` and `host:443` name one place and `host:8443` another. An IPv6
+/// literal carries its brackets, as a URL's host does
+/// (`[2001:db8::1]:8443`). Text after the last colon that is no port is
+/// part of the host, and no URL has such a host.
+pub fn secret_place(stored: &str) -> (&str, u16) {
+    if !stored.ends_with(']')
+        && let Some((host, port)) = stored.rsplit_once(':')
+        && !host.is_empty()
+        && (!host.contains(':') || host.ends_with(']'))
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return (host, port);
+    }
+    (stored, SECRET_DEFAULT_PORT)
+}
+
+/// Whether a stored secret is for this hop: the same host on the same
+/// port, and nothing wider. A secret stored for a host reaches no other
+/// port of it: another port is another service, which the operator did not
+/// name.
+fn secret_is_for(stored: &str, hop: &url::Url) -> bool {
+    let (host, port) = secret_place(stored);
+    hop.host_str().is_some_and(|h| h.eq_ignore_ascii_case(host))
+        && hop.port_or_known_default().unwrap_or(SECRET_DEFAULT_PORT) == port
 }
 
 /// The request guard. Returns the JSON string handed back to the guest
 /// (always well-formed JSON — success or a structured error). Every hop
-/// goes through `check_url`; the operator's secrets whose host is the
-/// hop's host ride that hop and no other, over any header of the same
+/// goes through `check_url`; the operator's secrets stored for the hop's
+/// host and port ride that hop and no other, over any header of the same
 /// name; a GET or HEAD follows up to [`MAX_REDIRECTS`] redirects within
 /// the budget, the other methods get the 3xx back with its target under
 /// `redirect`. The envelope never carries a request header. With
@@ -807,9 +829,8 @@ pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
             Some(r) if !r.is_zero() => r,
             _ => return err_json(&format!("fetch budget of {budget:?} spent")),
         };
-        let hosts = secret_hosts_of(&parsed);
         let mut headers = req.headers.clone();
-        for secret in caps.secrets.iter().filter(|s| hosts.contains(&s.host)) {
+        for secret in caps.secrets.iter().filter(|s| secret_is_for(&s.host, &parsed)) {
             headers.retain(|(n, _)| n != &secret.name);
             headers.push((secret.name.clone(), secret.value.clone()));
         }
@@ -1869,11 +1890,58 @@ mod request_tests {
         let _ = guarded_http_request(&caps, r#"{"url":"https://1.1.1.1/x"}"#);
         let seen = rec.seen();
         assert_eq!(header(&seen[2], "x-api-key"), Some("k"));
+        assert_eq!(header(&seen[2], "authorization"), None, "a secret stored without a port is for 443 alone");
         assert_eq!(header(&seen[3], "x-api-key"), None);
         assert_eq!(header(&seen[3], "authorization"), Some("Bearer t"));
         // The envelope never echoes a request header.
         let text = guarded_http_request(&caps, r#"{"url":"https://1.1.1.1/x"}"#);
         assert!(!text.contains("Bearer"), "{text}");
+    }
+
+    #[test]
+    fn a_stored_secret_names_a_host_and_a_port() {
+        assert_eq!(secret_place("gitlab.example.com"), ("gitlab.example.com", 443));
+        assert_eq!(secret_place("gitlab.example.com:443"), ("gitlab.example.com", 443));
+        assert_eq!(secret_place("gitlab.example.com:8443"), ("gitlab.example.com", 8443));
+        assert_eq!(secret_place("10.0.0.5:4000"), ("10.0.0.5", 4000));
+        assert_eq!(secret_place("[2001:db8::1]"), ("[2001:db8::1]", 443));
+        assert_eq!(secret_place("[2001:db8::1]:8443"), ("[2001:db8::1]", 8443));
+        // No port after the last colon: the text stays the host, and no URL
+        // has such a host.
+        assert_eq!(secret_place("gitlab.example.com:https"), ("gitlab.example.com:https", 443));
+        assert_eq!(secret_place("gitlab.example.com:99999"), ("gitlab.example.com:99999", 443));
+        assert_eq!(secret_place("2001:db8::1"), ("2001:db8::1", 443));
+        assert_eq!(secret_place("host:"), ("host:", 443));
+        assert_eq!(secret_place(":8443"), (":8443", 443));
+    }
+
+    /// The claim the examples page and the seed pack make: "matches exactly,
+    /// port included". A secret stored for a host used to ride every port of
+    /// it.
+    #[test]
+    fn a_secret_is_for_its_port_and_no_other() {
+        let url = |s: &str| url::Url::parse(s).unwrap();
+        // Stored without a port: the default port, however the URL spells it.
+        assert!(secret_is_for("gitlab.example.com", &url("https://gitlab.example.com/api")));
+        assert!(secret_is_for("gitlab.example.com", &url("https://gitlab.example.com:443/api")));
+        assert!(secret_is_for("gitlab.example.com", &url("https://GitLab.Example.com/api")));
+        assert!(
+            !secret_is_for("gitlab.example.com", &url("https://gitlab.example.com:8443/api")),
+            "another port is another service"
+        );
+        // Stored with the default port: the same place.
+        assert!(secret_is_for("gitlab.example.com:443", &url("https://gitlab.example.com/api")));
+        // Stored with a port: that port alone.
+        assert!(secret_is_for("gitlab.example.com:8443", &url("https://gitlab.example.com:8443/api")));
+        assert!(!secret_is_for("gitlab.example.com:8443", &url("https://gitlab.example.com/api")));
+        assert!(!secret_is_for("gitlab.example.com:8443", &url("https://gitlab.example.com:9443/api")));
+        // Never a shorter or a longer name.
+        assert!(!secret_is_for("example.com", &url("https://gitlab.example.com/")));
+        assert!(!secret_is_for("gitlab.example.com", &url("https://example.com/")));
+        // An IPv6 literal, with a port and without.
+        assert!(secret_is_for("[2001:db8::1]", &url("https://[2001:db8::1]/")));
+        assert!(secret_is_for("[2001:db8::1]:8443", &url("https://[2001:db8::1]:8443/")));
+        assert!(!secret_is_for("[2001:db8::1]", &url("https://[2001:db8::1]:8443/")));
     }
 
     #[test]

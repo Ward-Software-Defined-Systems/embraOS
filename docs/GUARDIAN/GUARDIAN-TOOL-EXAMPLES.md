@@ -189,7 +189,8 @@ host::http_request(request_json: &str) -> String
 //   {"ok":false,"error":"…"}
 // The host runs http_get's egress policy on every hop and adds the
 // operator's secrets (/guardian secret <host> <header> <value>) to a hop
-// whose host matches exactly, port included, and to no other; the
+// whose host matches exactly, port included (a host stored without a
+// port is port 443), and to no other; the
 // envelope never echoes a request header, so a token never reaches the
 // guest. Needs no key. The shipped http_request wraps it
 // (GUARDIAN-HTTP-REQUEST-EXAMPLE.md).

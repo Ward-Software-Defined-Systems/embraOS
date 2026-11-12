@@ -262,7 +262,7 @@ const SPECS: &[Spec] = &[
         note: "Removes manifest, overlay, project, and artifact.", join: " ", guided: false,
         fields: &[t("Tool name", "web_search", true)] },
     Spec { cmd: "/guardian secret", title: "Per-host API secret",
-        note: "A header the host adds to every http_request to that host; a tool never sees it. Host blank = list; header 'remove' = forget the host's secrets.",
+        note: "A header the host adds to every http_request to that host on its port (443, or the one in host:port) and to no other port; a tool never sees it. Host blank = list; header 'remove' = forget the host's secrets.",
         join: " ", guided: false,
         fields: &[t("Host", "api.example.com (blank = list)", false),
             t("Header", "Authorization | X-API-Key | remove", false),
