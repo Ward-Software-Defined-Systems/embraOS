@@ -2,6 +2,8 @@
 
 Every slash command available in an embraOS session, grouped as in the web console's sidebar (the chat-mobile picker and the console `/help` use the same groups). See also [Keyboard Shortcuts](OPERATION.md#keyboard-shortcuts).
 
+Before a session exists (the first-boot configuration wizard, Learning Mode and the identity import's dialogue) two commands are answered, `/backup` and `/reboot`: a machine that was installed again is restored from there. Any other command gets one line, `Not run: <command>. Commands are answered once setup is complete …`, and the four the console answers itself (`/help`, `/ml`, `/media`, `/show-tools`) work as always. A command is typed at a question that takes text, or in Learning Mode: while a list of choices is on the screen, Enter sends the highlighted choice.
+
 ## Session
 
 | Command | Description |
