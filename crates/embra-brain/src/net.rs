@@ -237,6 +237,105 @@ pub(crate) fn error_chain(e: &reqwest::Error) -> String {
     }
 }
 
+/// A certificate refused on its dates, as rustls reports it: "certificate
+/// not valid yet: verification time N (UNIX), but certificate is not valid
+/// before M (…)" and "certificate expired: verification time N (UNIX), but
+/// certificate is not valid after M (…)", or the bare `NotValidYet` and
+/// `Expired`. `at` is the clock the check ran against and `bound` the
+/// certificate's first or last second, when the text carries them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DateRefusal {
+    NotYet { at: Option<i64>, bound: Option<i64> },
+    Expired { at: Option<i64>, bound: Option<i64> },
+}
+
+/// Reads a request error's cause (`error_chain`) for a date refusal. The
+/// date check comes before the issuer check, so this is the whole reason:
+/// such a cause says nothing about whether the certificate's CA is trusted.
+pub(crate) fn date_refusal(cause: &str) -> Option<DateRefusal> {
+    let lower = cause.to_ascii_lowercase();
+    let number_after = |marker: &str| -> Option<i64> {
+        let rest = &lower[lower.find(marker)? + marker.len()..];
+        let digits = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
+        digits.parse().ok()
+    };
+    // rustls prints a variant without its times by name; a longer name that
+    // starts the same (`ExpiredRevocationList`) is another error.
+    let bare = |name: &str| lower.match_indices(name).any(|(i, m)| !lower[i + m.len()..].starts_with(|c: char| c.is_ascii_alphanumeric()));
+    let at = number_after("verification time ");
+    if lower.contains("certificate not valid yet") || bare("certificate: notvalidyet") {
+        Some(DateRefusal::NotYet { at, bound: number_after("not valid before ") })
+    } else if lower.contains("certificate expired") || bare("certificate: expired") {
+        Some(DateRefusal::Expired { at, bound: number_after("not valid after ") })
+    } else {
+        None
+    }
+}
+
+/// What a date refusal means on this machine and what fixes it, for the
+/// line an operator reads; `None` for any other cause. It reads what embrad
+/// made of the clock at boot (`/run/embra/clock-status`).
+pub(crate) fn certificate_date_hint(cause: &str) -> Option<String> {
+    let refusal = date_refusal(cause)?;
+    Some(date_hint(refusal, embra_boot::ClockStatus::read().as_ref(), chrono::Utc::now().timestamp()))
+}
+
+/// The hint itself. Which clock is wrong depends on what is known of this
+/// machine's: a time server set it (the certificate's dates are the
+/// fault), it is the image's build time (certainly behind: a certificate
+/// that begins later may well be in date, one that ended earlier has
+/// expired), or nothing confirmed it (either).
+pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockStatus>, now: i64) -> String {
+    use embra_boot::clock::{format_utc, Sync};
+    const FIX: &str = "Set the date in the firmware setup (in UTC), or boot on a network where a time server answers (embra.ntp=<host> names one).";
+    let (at, bound) = match refusal {
+        DateRefusal::NotYet { at, bound } | DateRefusal::Expired { at, bound } => (format_utc(at.unwrap_or(now)), bound.map(format_utc)),
+    };
+    let set_from = clock.and_then(|c| match &c.sync {
+        Sync::Synchronized { server, .. } => Some(server.as_str()),
+        _ => None,
+    });
+    let guess = clock.is_some_and(|c| c.is_a_guess());
+    // Why nothing confirmed the clock, as a sentence of its own.
+    let unconfirmed = match clock {
+        Some(c) => {
+            let asked = match &c.sync {
+                Sync::Failed { server, reason } => format!("no time came from {server} ({reason})"),
+                Sync::Off => "embra.ntp=off asks no time server".to_string(),
+                Sync::Synchronized { .. } => String::new(),
+            };
+            match c.floored_from {
+                Some(was) => format!(" The hardware clock read {} at boot, earlier than this image was built, and {asked}.", format_utc(was)),
+                None => format!(" At boot {asked}."),
+            }
+        }
+        None => String::new(),
+    };
+    match (refusal, set_from) {
+        (DateRefusal::NotYet { .. }, Some(server)) => {
+            let begins = bound.map(|b| format!("begins {b}, after this machine's clock ({at})")).unwrap_or_else(|| format!("is not valid yet by this machine's clock ({at})"));
+            format!(" The certificate {begins}, and that clock was set from {server} at boot: the certificate is dated in the future. Check the clock of the machine that issued it.")
+        }
+        (DateRefusal::NotYet { .. }, None) => {
+            let begins = bound.map(|b| format!(" and the certificate begins {b}")).unwrap_or_default();
+            let verdict = if guess { "the clock is known to be behind, so the refusal says nothing against the certificate" } else { "either the clock is behind or the certificate is dated in the future, and nothing confirmed the clock" };
+            format!(" This machine's clock reads {at}{begins}: {verdict}.{unconfirmed} {FIX}")
+        }
+        (DateRefusal::Expired { .. }, Some(server)) => {
+            let ended = bound.map(|b| format!("ended {b}, before this machine's clock ({at})")).unwrap_or_else(|| format!("has ended by this machine's clock ({at})"));
+            format!(" The certificate {ended}, and that clock was set from {server} at boot: the certificate has expired, and the listener needs a new one.")
+        }
+        (DateRefusal::Expired { .. }, None) if guess => {
+            let ended = bound.map(|b| format!("ended {b}")).unwrap_or_else(|| "has ended".to_string());
+            format!(" The certificate {ended}, and this machine's clock ({at}) is behind if anything: the certificate has expired, and the listener needs a new one.{unconfirmed}")
+        }
+        (DateRefusal::Expired { .. }, None) => {
+            let ended = bound.map(|b| format!(" and the certificate ended {b}")).unwrap_or_default();
+            format!(" This machine's clock reads {at}{ended}: either the certificate has expired or the clock is ahead, and nothing confirmed the clock.{unconfirmed} {FIX}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +364,12 @@ mod tests {
     /// operator drops in), the leaf's DER and its PKCS#8 key (what a server
     /// presents).
     fn mint_ca_and_leaf() -> (String, rustls::pki_types::CertificateDer<'static>, Vec<u8>) {
+        mint_ca_and_leaf_dated(None)
+    }
+
+    /// The same, the leaf valid from the first of January of one year to
+    /// the first of January of another when `years` names them.
+    fn mint_ca_and_leaf_dated(years: Option<(i32, i32)>) -> (String, rustls::pki_types::CertificateDer<'static>, Vec<u8>) {
         let ca_key = KeyPair::generate().unwrap();
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -276,6 +381,10 @@ mod tests {
         let leaf_key = KeyPair::generate().unwrap();
         let mut leaf_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        if let Some((from, to)) = years {
+            leaf_params.not_before = rcgen::date_time_ymd(from, 1, 1);
+            leaf_params.not_after = rcgen::date_time_ymd(to, 1, 1);
+        }
         let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
         (ca.pem(), leaf.der().clone(), leaf_key.serialize_der())
     }
@@ -366,6 +475,143 @@ mod tests {
         assert!(!cause.contains("https://"), "the causes, not reqwest's URL line: {cause}");
 
         assert_eq!(server.await.unwrap(), 1, "one connection served, one handshake refused");
+    }
+
+    /// A TLS listener on the loopback presenting `leaf`, for `connections`
+    /// handshakes, each of which the client ends.
+    async fn refused_tls_listener(leaf: rustls::pki_types::CertificateDer<'static>, key: Vec<u8>, connections: usize) -> std::net::SocketAddr {
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf], PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)))
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..connections {
+                let Ok((tcp, _)) = listener.accept().await else { return };
+                let _ = acceptor.accept(tcp).await;
+            }
+        });
+        addr
+    }
+
+    /// The words are rustls's own: the errors are built here and printed by
+    /// it, so a release that rewords them fails this test and not an
+    /// operator's hint. The first is the line of the bare-metal run of
+    /// 2026-11-11 (a board that woke in 2018, a certificate from 2026-11-04).
+    #[test]
+    fn a_date_refusal_is_read_from_rustls_own_words() {
+        use rustls::pki_types::UnixTime;
+        use rustls::{CertificateError, Error};
+        let at = |secs: u64| UnixTime::since_unix_epoch(std::time::Duration::from_secs(secs));
+        let chain = |e: CertificateError| format!("client error (Connect): {}", Error::InvalidCertificate(e));
+
+        let not_yet = chain(CertificateError::NotValidYetContext { time: at(1_514_765_221), not_before: at(1_793_750_400) });
+        assert_eq!(
+            not_yet,
+            "client error (Connect): invalid peer certificate: certificate not valid yet: verification time 1514765221 (UNIX), but certificate is not valid before 1793750400 (278985179 seconds in future)"
+        );
+        assert_eq!(date_refusal(&not_yet), Some(DateRefusal::NotYet { at: Some(1_514_765_221), bound: Some(1_793_750_400) }));
+        let expired = chain(CertificateError::ExpiredContext { time: at(1_793_750_400), not_after: at(1_514_765_221) });
+        assert_eq!(date_refusal(&expired), Some(DateRefusal::Expired { at: Some(1_793_750_400), bound: Some(1_514_765_221) }));
+        // Without the times rustls prints the variant's name.
+        assert_eq!(date_refusal(&chain(CertificateError::NotValidYet)), Some(DateRefusal::NotYet { at: None, bound: None }));
+        assert_eq!(date_refusal(&chain(CertificateError::Expired)), Some(DateRefusal::Expired { at: None, bound: None }));
+        // Everything else is some other refusal: the issuer, the name, a revocation list's own date.
+        for other in [
+            CertificateError::UnknownIssuer,
+            CertificateError::BadSignature,
+            CertificateError::NotValidForName,
+            CertificateError::ExpiredRevocationList,
+            CertificateError::ExpiredRevocationListContext { time: at(1_793_750_400), next_update: at(1_514_765_221) },
+        ] {
+            let cause = chain(other);
+            assert_eq!(date_refusal(&cause), None, "{cause}");
+            assert_eq!(certificate_date_hint(&cause), None, "{cause}");
+        }
+        assert_eq!(date_refusal("error sending request: connection refused"), None);
+    }
+
+    fn clock(floored_from: Option<i64>, sync: embra_boot::clock::Sync) -> embra_boot::ClockStatus {
+        embra_boot::ClockStatus { floored_from, built: Some(1_794_452_322), sync, rtc: embra_boot::clock::Rtc::Unchanged }
+    }
+
+    /// Which clock is wrong depends on what is known of this machine's.
+    #[test]
+    fn the_date_hint_names_the_clock_or_the_certificate_by_what_the_boot_made_of_the_clock() {
+        use embra_boot::clock::Sync;
+        const FIX: &str = " Set the date in the firmware setup (in UTC), or boot on a network where a time server answers (embra.ntp=<host> names one).";
+        let not_yet = DateRefusal::NotYet { at: Some(1_794_452_922), bound: Some(1_794_500_000) };
+        let expired = DateRefusal::Expired { at: Some(1_794_452_922), bound: Some(1_514_765_221) };
+        let synced = clock(None, Sync::Synchronized { server: "time.cloudflare.com".into(), address: "162.159.200.1:123".into(), offset: 0.01, stratum: 3 });
+        let no_answer = Sync::Failed { server: "time.cloudflare.com".into(), reason: "no answer within 5 s".into() };
+        let guess = clock(Some(1_514_764_803), no_answer.clone());
+        let unconfirmed = clock(None, no_answer);
+        let off = clock(None, Sync::Off);
+
+        // The bare-metal case: the board woke in 2018, the clock is the build time, the certificate is newer than the build.
+        assert_eq!(
+            date_hint(not_yet, Some(&guess), 0),
+            format!(" This machine's clock reads 2026-11-12 03:08:42 UTC and the certificate begins 2026-11-12 16:13:20 UTC: the clock is known to be behind, so the refusal says nothing against the certificate. The hardware clock read 2018-01-01 00:00:03 UTC at boot, earlier than this image was built, and no time came from time.cloudflare.com (no answer within 5 s).{FIX}")
+        );
+        // A time server set the clock: the certificate's own dates are the fault, and no clock advice follows.
+        assert_eq!(
+            date_hint(not_yet, Some(&synced), 0),
+            " The certificate begins 2026-11-12 16:13:20 UTC, after this machine's clock (2026-11-12 03:08:42 UTC), and that clock was set from time.cloudflare.com at boot: the certificate is dated in the future. Check the clock of the machine that issued it."
+        );
+        assert_eq!(
+            date_hint(expired, Some(&synced), 0),
+            " The certificate ended 2018-01-01 00:07:01 UTC, before this machine's clock (2026-11-12 03:08:42 UTC), and that clock was set from time.cloudflare.com at boot: the certificate has expired, and the listener needs a new one."
+        );
+        // A clock that can only be behind does not excuse a certificate that has ended.
+        let h = date_hint(expired, Some(&guess), 0);
+        assert!(h.starts_with(" The certificate ended 2018-01-01 00:07:01 UTC, and this machine's clock (2026-11-12 03:08:42 UTC) is behind if anything: the certificate has expired"), "{h}");
+        assert!(!h.contains("firmware setup"), "{h}");
+        // Nothing confirmed the clock and nothing called it into question: either.
+        let h = date_hint(not_yet, Some(&unconfirmed), 0);
+        assert!(h.contains(": either the clock is behind or the certificate is dated in the future, and nothing confirmed the clock. At boot no time came from time.cloudflare.com (no answer within 5 s)."), "{h}");
+        assert!(h.ends_with(FIX), "{h}");
+        let h = date_hint(expired, Some(&off), 0);
+        assert!(h.contains(": either the certificate has expired or the clock is ahead, and nothing confirmed the clock. At boot embra.ntp=off asks no time server."), "{h}");
+        // No record (a development host): the same verdict without a reason, and the clock read now when rustls gave no time.
+        assert_eq!(
+            date_hint(DateRefusal::NotYet { at: None, bound: None }, None, 1_794_452_922),
+            format!(" This machine's clock reads 2026-11-12 03:08:42 UTC: either the clock is behind or the certificate is dated in the future, and nothing confirmed the clock.{FIX}")
+        );
+        for hint in [date_hint(not_yet, Some(&guess), 0), date_hint(expired, Some(&unconfirmed), 0), date_hint(not_yet, None, 0)] {
+            assert!(!hint.contains("ca-certificates") && !hint.contains("Imported_CAs"), "a date refusal says nothing about the CA: {hint}");
+        }
+    }
+
+    /// End to end: a listener whose certificate begins in 2090 is refused on
+    /// its date, by a client that does not trust its CA either — the date
+    /// check comes first — and the gateway's identification names the clock,
+    /// never the CA directory. An expired one likewise.
+    #[tokio::test]
+    async fn a_listener_refused_on_its_certificates_dates_is_told_about_the_clock_and_not_the_ca() {
+        let (_, leaf, key) = mint_ca_and_leaf_dated(Some((2090, 2091)));
+        let addr = refused_tls_listener(leaf, key, 1).await;
+        let err = crate::provider::gateway::identify(&format!("https://{addr}")).await.unwrap_err();
+        assert!(err.contains("certificate not valid yet: verification time "), "{err}");
+        assert!(err.contains(" and the certificate begins 2090-01-01 00:00:00 UTC") || err.contains("The certificate begins 2090-01-01 00:00:00 UTC"), "{err}");
+        assert!(!err.contains("ca-certificates") && !err.contains("not trusted"), "{err}");
+
+        let (_, leaf, key) = mint_ca_and_leaf_dated(Some((2001, 2002)));
+        let addr = refused_tls_listener(leaf, key, 1).await;
+        let err = crate::provider::gateway::identify(&format!("https://{addr}")).await.unwrap_err();
+        assert!(err.contains("certificate expired: verification time "), "{err}");
+        assert!(err.contains("ended 2002-01-01 00:00:00 UTC"), "{err}");
+        assert!(!err.contains("ca-certificates") && !err.contains("not trusted"), "{err}");
+
+        // A certificate in date under a CA nobody dropped in: the CA directory, as before.
+        let (_, leaf, key) = mint_ca_and_leaf();
+        let addr = refused_tls_listener(leaf, key, 1).await;
+        let err = crate::provider::gateway::identify(&format!("https://{addr}")).await.unwrap_err();
+        assert!(err.contains("/embra/state/ca-certificates/") && err.contains("is not trusted"), "{err}");
+        assert!(!err.contains("firmware setup"), "{err}");
     }
 
     /// The image's directory and then STATE's, and the development override

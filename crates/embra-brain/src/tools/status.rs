@@ -199,12 +199,41 @@ pub fn slot_report() -> Option<SlotReport> {
     embra_boot::BootStatus::read().map(SlotReport::from)
 }
 
+/// The clock as embrad left it at boot (`/run/embra/clock-status`;
+/// `embra_boot::ClockStatus`): whether a time server set it, whether it is
+/// the image's build time for want of anything better (a hardware clock
+/// that read earlier than the build, and no answer), and the sentence that
+/// says which. Absent on a development host.
+#[derive(Debug, Serialize)]
+pub struct ClockReport {
+    pub synchronized: bool,
+    /// The clock is known to be behind: every certificate date check runs
+    /// against it, and every timestamp written this boot carries it.
+    pub build_time_guess: bool,
+    pub summary: String,
+}
+
+impl From<embra_boot::ClockStatus> for ClockReport {
+    fn from(c: embra_boot::ClockStatus) -> Self {
+        ClockReport { synchronized: c.synchronized(), build_time_guess: c.is_a_guess(), summary: c.summary() }
+    }
+}
+
+/// The clock report of this boot, `None` without embrad's record.
+pub fn clock_report() -> Option<ClockReport> {
+    embra_boot::ClockStatus::read().map(ClockReport::from)
+}
+
 #[derive(Debug, Serialize)]
 pub struct SystemStatus {
     pub version: String,
     /// The A/B slots (`slot_report`); omitted on a boot without a slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot: Option<SlotReport>,
+    /// What the boot made of the clock (`clock_report`); omitted without
+    /// embrad's record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock: Option<ClockReport>,
     /// The running kernel's release (`uname -r`, from
     /// `/proc/sys/kernel/osrelease`); null when it could not be read.
     pub kernel: Option<String>,
@@ -295,6 +324,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         slot: slot_report(),
+        clock: clock_report(),
         kernel: kernel_release(),
         uptime_seconds: process_uptime_secs(),
         memory_usage_mb: get_memory_usage_mb(),
@@ -830,6 +860,7 @@ mod native_args_tests {
         let s = SystemStatus {
             version: "test".into(),
             slot: None,
+            clock: None,
             kernel: Some("6.18.60".into()),
             uptime_seconds: 0,
             memory_usage_mb: None,
@@ -978,6 +1009,7 @@ mod slot_report_tests {
         let s = SystemStatus {
             version: "test".into(),
             slot: None,
+            clock: None,
             kernel: None,
             uptime_seconds: 0,
             memory_usage_mb: None,
@@ -990,6 +1022,13 @@ mod slot_report_tests {
         };
         let json = serde_json::to_value(&s).unwrap();
         assert!(json.get("slot").is_none(), "no slot key without a boot status");
+        assert!(json.get("clock").is_none(), "no clock key without embrad's record");
+        let clock = ClockReport::from(embra_boot::ClockStatus::parse("floored_from=1514764803\nbuilt=1794452322\nsync=failed\nserver=time.cloudflare.com\nreason=no answer within 5 s\nrtc=unchanged\n").unwrap());
+        assert!(clock.build_time_guess && !clock.synchronized);
+        assert!(clock.summary.starts_with("not confirmed: no time from time.cloudflare.com at boot (no answer within 5 s); the hardware clock read 2018-01-01 00:00:03 UTC"), "{}", clock.summary);
+        let clock = ClockReport::from(embra_boot::ClockStatus::parse("sync=synchronized\nserver=time.cloudflare.com\naddress=162.159.200.1:123\noffset=0.012\nstratum=3\nrtc=unchanged\n").unwrap());
+        assert!(clock.synchronized && !clock.build_time_guess);
+        assert_eq!(serde_json::to_value(&clock).unwrap()["summary"], "set from time.cloudflare.com (162.159.200.1:123) at boot, corrected by +0.012 s");
         let report = SlotReport::from(embra_boot::BootStatus::parse("slot=a\ntrial=0\nconfirmed=not-needed\nactive=a\ntry=b\ntries_left=3\nslot_b_status=pending\nbuild_id=abc\nengine=fjall\n"));
         assert_eq!(report.booted.as_deref(), Some("a"));
         assert_eq!(report.pending.as_deref(), Some("b"));

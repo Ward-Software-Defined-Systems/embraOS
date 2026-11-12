@@ -201,6 +201,25 @@ pub(crate) fn url_to_identify(cfg: &SystemConfig, action: &GatewayAction) -> Opt
     }
 }
 
+/// What follows the cause of a request that got no answer. A certificate
+/// refused on its dates gets the clock's hint (`net::certificate_date_hint`,
+/// passed in): the date check comes before the issuer check, so that cause
+/// says nothing about the CA and the drop-in would fix nothing. Any other
+/// certificate refusal names the drop-in directory; a TLS listener given as
+/// `http://` names the scheme.
+fn identify_hint(url: &str, cause: &str, date_hint: Option<String>) -> String {
+    let lower = cause.to_ascii_lowercase();
+    if let Some(hint) = date_hint {
+        hint
+    } else if lower.contains("certificate") {
+        CA_HINT.to_string()
+    } else if url.starts_with("http://") && lower.contains("invalid http version") {
+        TLS_HINT.to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// Asks the listener at `url` to identify itself: `GET {url}/v1/models`
 /// with no provider header (the gateway's own merged model list, which it
 /// does not record), and the answer's [`GATEWAY_HEADER`], which every
@@ -210,7 +229,8 @@ pub(crate) fn url_to_identify(cfg: &SystemConfig, action: &GatewayAction) -> Opt
 /// server, a gateway from before the header), is refused with the bare
 /// reason — a sentence the command wraps with [`refusal`] and the wizard
 /// shows as it is; a certificate the brain does not trust names the
-/// drop-in directory. The caller saves nothing on an `Err`.
+/// drop-in directory, and one refused on its dates names the clock. The
+/// caller saves nothing on an `Err`.
 pub(crate) async fn identify(url: &str) -> Result<String, String> {
     let target = format!("{}/v1/models", url.trim_end_matches('/'));
     let client = crate::net::builder()
@@ -219,14 +239,7 @@ pub(crate) async fn identify(url: &str) -> Result<String, String> {
         .map_err(|e| format!("http client: {e}"))?;
     let resp = client.get(&target).send().await.map_err(|e| {
         let cause = crate::net::error_chain(&e);
-        let lower = cause.to_ascii_lowercase();
-        let hint = if lower.contains("certificate") {
-            CA_HINT
-        } else if url.starts_with("http://") && lower.contains("invalid http version") {
-            TLS_HINT
-        } else {
-            ""
-        };
+        let hint = identify_hint(url, &cause, crate::net::certificate_date_hint(&cause));
         format!("nothing answered at {target}: {cause}.{hint}")
     })?;
     let version = resp
@@ -566,6 +579,22 @@ mod tests {
         c.openai_compat.ollama_endpoint = "http://mac:11434".into();
         apply(&mut c, &GatewayAction::Set("http://gw:4000".into()), None).unwrap();
         assert!(!apply(&mut c, &GatewayAction::Off, None).unwrap().contains("no direct endpoint"));
+    }
+
+    /// A certificate refused on its dates gets the clock's hint and nothing
+    /// about the CA; any other certificate refusal names the CA directory.
+    #[test]
+    fn a_date_refusal_takes_the_clock_hint_before_the_ca_directory() {
+        let dated = "client error (Connect): invalid peer certificate: certificate not valid yet: verification time 1514765221 (UNIX), but certificate is not valid before 1793750400 (278985179 seconds in future)";
+        assert_eq!(identify_hint("https://gw:4000", dated, Some(" The clock.".into())), " The clock.");
+        assert_eq!(identify_hint("https://gw:4000", "client error (Connect): invalid peer certificate: UnknownIssuer", None), CA_HINT);
+        assert_eq!(identify_hint("http://gw:4000", "client error (SendRequest): invalid HTTP version parsed", None), TLS_HINT);
+        assert_eq!(identify_hint("https://gw:4000", "client error (SendRequest): invalid HTTP version parsed", None), "", "the scheme hint is for http:// alone");
+        assert_eq!(identify_hint("http://gw:4000", "client error (Connect): tcp connect error: Connection refused (os error 111)", None), "");
+        // The hint the brain makes of the bare-metal line names no CA directory.
+        let hint = crate::net::certificate_date_hint(dated).expect("a date refusal");
+        assert!(hint.contains("2018-01-01 00:07:01 UTC") && hint.contains("2026-11-04 00:00:00 UTC"), "{hint}");
+        assert!(!identify_hint("https://gw:4000", dated, Some(hint)).contains("ca-certificates"));
     }
 
     /// A TLS listener given as `http://` answers the plaintext request with
