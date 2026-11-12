@@ -29,14 +29,16 @@ pub(super) fn soul_sealed_mode_change(config: &config::SystemConfig) -> Conversa
 /// Creates LearningState, runs each phase with Brain calls, detects [PHASE_COMPLETE],
 /// persists extracted documents, and transitions to Operational when complete.
 pub(super) async fn run_learning_loop(
-    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     incoming: &mut Streaming<ConversationRequest>,
     db: &Arc<WardsonDbClient>,
     config: &config::SystemConfig,
     api_key: &str,
     onboarding_stage: &Arc<watch::Sender<i32>>,
     stop: TurnStop<'_>,
+    commands: &SetupCommands,
 ) -> anyhow::Result<()> {
+    // The client's stream, which the door for commands answers on too.
+    let tx = commands.stream();
     let mut state = learning::LearningState::new();
 
     // Local working copy of the config: Phase 2 can rename the
@@ -127,7 +129,7 @@ pub(super) async fn run_learning_loop(
         if state.phase == learning::LearningPhase::IdentityFormation && !import_offered {
             import_offered = true;
             use crate::identity_graph::import_flow::{offer_import, ImportOutcome};
-            match offer_import(tx, incoming, &mut stage_rx, db, &config, &mut state).await? {
+            match offer_import(tx, incoming, &mut stage_rx, db, &config, &mut state, commands).await? {
                 ImportOutcome::NoCandidates | ImportOutcome::Conversational => {
                     // Fall through to the normal Phase-2 kickoff below.
                 }
@@ -383,8 +385,11 @@ pub(super) async fn run_learning_loop(
                 };
                 match next {
                     Some(Ok(req)) => {
-                        if let Some(conversation_request::RequestType::UserMessage(um)) = req.request_type {
-                            state.conversation_history.push(Message::user(&um.content));
+                        // The operator's message is the conversation's; a
+                        // command is the door's (`SetupCommands`), answered
+                        // or told to wait and never sent to the model.
+                        if let Some(content) = commands.take(req).await {
+                            state.conversation_history.push(Message::user(&content));
 
                             // Rebuild system prompt (may include newly extracted docs)
                             let system_prompt = learning::system_prompt_for_phase(&state, &config);
@@ -449,7 +454,6 @@ pub(super) async fn run_learning_loop(
                             }
                             // No phase complete — continue waiting for user input
                         }
-                        // Ignore non-UserMessage during learning
                     }
                     Some(Err(e)) => { warn!("Stream error during learning: {}", e); return Err(e.into()); }
                     None => { debug!("Client disconnected during learning"); return Ok(()); }

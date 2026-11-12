@@ -1647,21 +1647,7 @@ pub(super) async fn handle_request(
             }
             // A slash command cancels a pending backup restore as well: the
             // confirmation is a plain message, and a command is not it.
-            {
-                let cancelled = pending_backup_restore.lock().await.take();
-                if let Some(pending) = cancelled {
-                    let _ = tx
-                        .send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::System(
-                                SystemMessage {
-                                    content: format!("Restore of '{}' not scheduled (a command arrived instead of the confirmation).", pending.name),
-                                    msg_type: SystemMessageType::Info as i32,
-                                },
-                            )),
-                        }))
-                        .await;
-                }
-            }
+            super::update::cancel_pending_restore(pending_backup_restore, tx).await;
             if let Some(synthetic_prompt) = handle_slash_command(
                 &cmd.command, &cmd.args, tx, ctx, config_tz, api_key
             ).await {

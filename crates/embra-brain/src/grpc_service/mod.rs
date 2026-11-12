@@ -16,6 +16,7 @@ use learning_loop::*;
 pub(crate) use provider_setup::*;
 use slash::*;
 pub(crate) use turn::*;
+pub(crate) use update::SetupCommands;
 
 use crate::activity;
 
@@ -216,6 +217,12 @@ impl BrainService for BrainGrpcService {
                 pending_backup_restore: pending_backup_restore.clone(),
             };
 
+            // Before a session (the wizard and Learning Mode below) a
+            // command is answered or told to wait, never dropped: `/backup`
+            // and `/reboot` work from the first prompt, which is where a
+            // machine that was installed again is restored.
+            let setup_commands = SetupCommands::new(&tx, &pending_backup_restore);
+
             // Check for first-run: no config in WardSONDB
             let is_first_run = config::load_config(&db).await.is_err();
 
@@ -243,13 +250,13 @@ impl BrainService for BrainGrpcService {
                         msg = incoming.next() => {
                             match msg {
                                 Some(Ok(req)) => {
-                                    if let Some(conversation_request::RequestType::UserMessage(um)) = req.request_type {
-                                        // Forward user input to wizard
-                                        if wizard_tx.send(um.content).await.is_err() {
-                                            break; // Wizard closed its receiver
-                                        }
+                                    // The operator's message is the wizard's
+                                    // answer; a command is the door's.
+                                    if let Some(answer) = setup_commands.take(req).await
+                                        && wizard_tx.send(answer).await.is_err()
+                                    {
+                                        break; // Wizard closed its receiver
                                     }
-                                    // Ignore non-UserMessage during wizard (SlashCommand, SessionAttach)
                                 }
                                 Some(Err(e)) => { warn!("Stream error during wizard: {}", e); break; }
                                 None => { debug!("Client disconnected during wizard"); break; }
@@ -299,7 +306,7 @@ impl BrainService for BrainGrpcService {
             if !soul_sealed {
                 info!("Soul not sealed — entering Learning Mode");
                 let loaded_config = config::load_config(&db).await.unwrap_or_else(|_| config::SystemConfig::boot_fallback(api_key.clone(), config_tz.clone()));
-                match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key, &onboarding_stage, TurnStop { in_turn: &in_turn, stop_rx: &stop_rx }).await {
+                match run_learning_loop(&mut incoming, &db, &loaded_config, &api_key, &onboarding_stage, TurnStop { in_turn: &in_turn, stop_rx: &stop_rx }, &setup_commands).await {
                     Ok(()) => {
                         info!("Learning Mode complete — transitioning to Operational");
                         // Reload config in case it was updated

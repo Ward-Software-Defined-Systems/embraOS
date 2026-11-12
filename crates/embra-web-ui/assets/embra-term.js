@@ -579,7 +579,7 @@
         over("Checked and listed: " + r.files + " files, " + embraMb(r.bytes_uncompressed) + " unpacked" +
           (r.data_engine ? ", a " + r.data_engine + " database" : "") +
           ". Restore it with /backup restore " + name +
-          " in a session, or from the boot menu: Backup and restore, then Restore STATE and DATA.", true);
+          " and /reboot now, or from the boot menu: Backup and restore, then Restore STATE and DATA.", true);
       } else {
         over("Not uploaded: " + (body.error || ("the machine answered " + xhr.status)), false);
       }

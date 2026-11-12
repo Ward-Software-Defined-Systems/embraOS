@@ -139,9 +139,10 @@ const fn sel(label: &'static str, choices: &'static [&'static str], req: bool) -
 pub const ACCEPT: &str = "image/*,text/*,application/json,.md,.markdown,.txt,.csv,.json,.jsonl,.yaml,.yml,.toml";
 
 /// The `/backup` form's action that is the page's own: it opens the file
-/// picker and streams the file to `PUT /api/backups/<name>`; nothing is
-/// typed into the console (the first-boot wizard would read a typed line as
-/// an answer, and an upload has to work there).
+/// picker and streams the file to `PUT /api/backups/<name>`. Nothing is
+/// typed into the console: the upload needs neither the console nor the
+/// brain, so it works whatever stage the machine is in, the first-boot
+/// wizard and Learning Mode among them.
 const BACKUP_UPLOAD: &str = "upload";
 /// What the backup picker offers: a download of `GET /api/backups/<name>`
 /// is `<name>.tar.gz`.
@@ -932,7 +933,9 @@ pub fn App() -> impl IntoView {
                 let submit_modal = move || {
                     // The upload is the page's own action: the picker opens
                     // on this click and the file goes to the machine by
-                    // HTTP; the console is not typed into.
+                    // HTTP; the console is not typed into. The form's other
+                    // actions are typed, and the brain answers `/backup`
+                    // before a session too.
                     if SPECS[i].cmd == "/backup"
                         && vals.with(|v| v.first().map(String::as_str) == Some(BACKUP_UPLOAD))
                     {

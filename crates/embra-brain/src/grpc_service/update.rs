@@ -3,7 +3,9 @@
 //! operator's decision, typed as a command, and the tool manifest the model
 //! sees does not move.
 
-use embra_common::proto::brain::{ConversationResponse, SystemMessage, SystemMessageType, conversation_response};
+use embra_common::proto::brain::{
+    ConversationRequest, ConversationResponse, SystemMessage, SystemMessageType, conversation_request, conversation_response,
+};
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -251,7 +253,7 @@ const BACKUP_USAGE: &str = "Usage: /backup create [label] | list | restore <name
 /// console's token, and never prints the console's URL.
 pub(super) fn upload_instructions() -> String {
     format!(
-        "A backup comes back through the web console, from a browser on another machine: in the sidebar, /backup with the action upload, then the .tar.gz that was downloaded. The machine checks the archive while it arrives; a file that is not a backup of embraOS, a damaged one or one cut short is refused, and nothing of it is kept. Taken in, it is listed by /backup list as uploaded and restored like any other: /backup restore <name>, or the boot menu's Restore entry. Its name is the file's without .tar.gz, or the one typed in the form. Without a browser, the same route takes the file from the command line of another machine: curl -T <file>.tar.gz 'https://<this machine>:3345{BACKUP_ROUTE}<name>?token=<the console's token>', with --cacert <this machine's CA certificate>, or -k to accept the console's certificate unseen: it is from this machine's own CA."
+        "A backup comes back through the web console, from a browser on another machine: in the sidebar, /backup with the action upload, then the .tar.gz that was downloaded. The machine checks the archive while it arrives; a file that is not a backup of embraOS, a damaged one or one cut short is refused, and nothing of it is kept. Taken in, it is listed by /backup list as uploaded and restored like any other: /backup restore <name> and /reboot now, which are answered during setup too, or the boot menu's Restore entry. Its name is the file's without .tar.gz, or the one typed in the form. Without a browser, the same route takes the file from the command line of another machine: curl -T <file>.tar.gz 'https://<this machine>:3345{BACKUP_ROUTE}<name>?token=<the console's token>', with --cacert <this machine's CA certificate>, or -k to accept the console's certificate unseen: it is from this machine's own CA."
     )
 }
 
@@ -416,9 +418,252 @@ pub(super) async fn handle_restore_answer(
     }
 }
 
+/// A restore that waited for its confirmation and got a command instead: it
+/// is said, and no longer waits. The confirmation is a plain message, and a
+/// command is not it.
+pub(super) async fn cancel_pending_restore(
+    pending_restore: &Arc<Mutex<Option<PendingBackupRestore>>>,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+) {
+    let cancelled = pending_restore.lock().await.take();
+    if let Some(pending) = cancelled {
+        let _ = tx
+            .send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                    content: format!("Restore of '{}' not scheduled (a command arrived instead of the confirmation).", pending.name),
+                    msg_type: SystemMessageType::Info as i32,
+                })),
+            }))
+            .await;
+    }
+}
+
+// ── Commands before a session: the wizard, Learning Mode ────────────────
+
+/// What a command is to the stages that run before any session.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SetupCommand {
+    Backup,
+    Reboot,
+    /// Any other: answered once the setup is complete.
+    Later,
+}
+
+pub(super) fn setup_command(command: &str) -> SetupCommand {
+    match command.trim() {
+        "/backup" => SetupCommand::Backup,
+        "/reboot" => SetupCommand::Reboot,
+        _ => SetupCommand::Later,
+    }
+}
+
+/// The one line any other command gets before a session. It says nothing of
+/// the command but that it was not run: the word may be one no command has.
+pub(super) fn later_notice(command: &str) -> String {
+    let shown: String = command.trim().chars().take(40).collect();
+    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup and /reboot are.")
+}
+
+/// What the stages before a session do with a client's frame: the
+/// configuration wizard, Learning Mode and the identity import's dialogue.
+/// Each reads the stream itself and wants the operator's messages alone, and
+/// a command sent then used to be dropped without a word. A machine that is
+/// installed again is restored from exactly there (a backup uploaded through
+/// the web console, `/backup restore`, `/reboot now`), so `/backup` and
+/// `/reboot` are answered as in a session, the confirmation of a restore is
+/// taken, and any other command gets one line.
+#[derive(Clone)]
+pub(crate) struct SetupCommands {
+    tx: mpsc::Sender<Result<ConversationResponse, Status>>,
+    pending_restore: Arc<Mutex<Option<PendingBackupRestore>>>,
+}
+
+impl SetupCommands {
+    pub(super) fn new(tx: &mpsc::Sender<Result<ConversationResponse, Status>>, pending_restore: &Arc<Mutex<Option<PendingBackupRestore>>>) -> Self {
+        SetupCommands { tx: tx.clone(), pending_restore: Arc::clone(pending_restore) }
+    }
+
+    /// The client's stream, which the door answers on: a stage that is
+    /// handed the door speaks to the client through the same one.
+    pub(super) fn stream(&self) -> &mpsc::Sender<Result<ConversationResponse, Status>> {
+        &self.tx
+    }
+
+    /// One frame. `Some(text)` is the operator's message for the stage: an
+    /// answer to the wizard, a line of the learning conversation. `None`:
+    /// the frame was taken here, or it is one the stages never read (an
+    /// attach).
+    pub(crate) async fn take(&self, req: ConversationRequest) -> Option<String> {
+        match req.request_type {
+            Some(conversation_request::RequestType::UserMessage(um)) => {
+                // A pending `/backup restore`: this message is its answer,
+                // the exact confirmation or anything else, and never the
+                // stage's (the wizard would store it as a name, Learning
+                // Mode would send it to the model).
+                if let Some(pending) = self.pending_restore.lock().await.take() {
+                    handle_restore_answer(&pending, &um.content, &self.tx).await;
+                    return None;
+                }
+                Some(um.content)
+            }
+            Some(conversation_request::RequestType::SlashCommand(cmd)) => {
+                cancel_pending_restore(&self.pending_restore, &self.tx).await;
+                match setup_command(&cmd.command) {
+                    SetupCommand::Backup => handle_backup_command(&cmd.args, &self.tx, &self.pending_restore).await,
+                    SetupCommand::Reboot => handle_reboot_command(&cmd.args, &self.tx).await,
+                    SetupCommand::Later => {
+                        let _ = self
+                            .tx
+                            .send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                                    content: later_notice(&cmd.command),
+                                    msg_type: SystemMessageType::Info as i32,
+                                })),
+                            }))
+                            .await;
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod backup_tests {
     use super::*;
+    use embra_common::proto::brain::{SessionAttach, SlashCommand, UserMessage};
+
+    fn message(text: &str) -> ConversationRequest {
+        ConversationRequest {
+            request_type: Some(conversation_request::RequestType::UserMessage(UserMessage {
+                content: text.to_string(),
+                timestamp: None,
+                attachment_ids: Vec::new(),
+                file_paths: Vec::new(),
+            })),
+        }
+    }
+
+    fn command(command: &str, args: &str) -> ConversationRequest {
+        ConversationRequest {
+            request_type: Some(conversation_request::RequestType::SlashCommand(SlashCommand { command: command.to_string(), args: args.to_string() })),
+        }
+    }
+
+    /// The system lines a stream was sent, in order.
+    fn said(rx: &mut mpsc::Receiver<Result<ConversationResponse, Status>>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(Ok(frame)) = rx.try_recv() {
+            if let Some(conversation_response::ResponseType::System(m)) = frame.response_type {
+                out.push(m.content);
+            }
+        }
+        out
+    }
+
+    /// Before a session the operator's messages go to the stage, `/backup`
+    /// and `/reboot` are answered, and any other command gets its one line:
+    /// none is dropped without a word.
+    #[tokio::test]
+    async fn before_a_session_backup_and_reboot_are_answered_and_any_other_command_is_told_to_wait() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let pending = Arc::new(Mutex::new(None));
+        let door = SetupCommands::new(&tx, &pending);
+
+        assert_eq!(door.take(message("Embra")).await.as_deref(), Some("Embra"), "an answer is the stage's");
+        assert!(said(&mut rx).is_empty(), "and nothing is said about it");
+
+        assert_eq!(door.take(command("/backup", "help")).await, None);
+        assert_eq!(said(&mut rx), vec![BACKUP_USAGE.to_string()], "/backup is answered as in a session");
+        assert_eq!(door.take(command("/backup", "upload")).await, None);
+        assert_eq!(said(&mut rx), vec![upload_instructions()]);
+
+        // On a development host PID 1 is not embrad: the answer is the
+        // command's own refusal, which proves the command ran.
+        assert_eq!(door.take(command("/reboot", "")).await, None);
+        let reboot = said(&mut rx);
+        assert_eq!(reboot.len(), 1);
+        assert!(reboot[0].contains("PID 1 is not embrad") || reboot[0].contains("Reboot embraOS?"), "{reboot:?}");
+
+        for other in ["/status", "/sessions", "/provider", "/frobnicate"] {
+            assert_eq!(door.take(command(other, "now")).await, None);
+            let line = said(&mut rx);
+            assert_eq!(line, vec![later_notice(other)], "{other}");
+            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup and /reboot are"), "{line:?}");
+        }
+
+        // A frame the stages never read is still not theirs, and says nothing.
+        let attach = ConversationRequest { request_type: Some(conversation_request::RequestType::SessionAttach(SessionAttach::default())) };
+        assert_eq!(door.take(attach).await, None);
+        assert_eq!(door.take(ConversationRequest { request_type: None }).await, None);
+        assert!(said(&mut rx).is_empty());
+    }
+
+    /// A restore asked for before a session waits for its confirmation
+    /// there: the next message is its answer and never the stage's, and a
+    /// command in its place cancels it, as in a session.
+    #[tokio::test]
+    async fn before_a_session_the_next_message_answers_a_pending_restore_and_a_command_cancels_it() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let pending = Arc::new(Mutex::new(None));
+        let door = SetupCommands::new(&tx, &pending);
+
+        *pending.lock().await = Some(PendingBackupRestore { name: "2026-11-12_101200_manual".into() });
+        assert_eq!(door.take(message("Embra")).await, None, "the wizard never gets it as an answer");
+        assert_eq!(said(&mut rx), vec!["Restore of \"2026-11-12_101200_manual\" not scheduled.".to_string()]);
+        assert!(pending.lock().await.is_none());
+        assert_eq!(door.take(message("Embra")).await.as_deref(), Some("Embra"), "the next message is the stage's again");
+
+        *pending.lock().await = Some(PendingBackupRestore { name: "2026-11-12_101200_manual".into() });
+        assert_eq!(door.take(command("/status", "")).await, None);
+        assert_eq!(
+            said(&mut rx),
+            vec![
+                "Restore of '2026-11-12_101200_manual' not scheduled (a command arrived instead of the confirmation).".to_string(),
+                later_notice("/status"),
+            ]
+        );
+        assert!(pending.lock().await.is_none());
+
+        assert_eq!(setup_command("/backup"), SetupCommand::Backup);
+        assert_eq!(setup_command(" /reboot "), SetupCommand::Reboot);
+        assert_eq!(setup_command("/backups"), SetupCommand::Later);
+        assert_eq!(setup_command(""), SetupCommand::Later);
+        assert!(later_notice(&"/x".repeat(100)).len() < 220, "a long word is cut");
+    }
+
+    /// The three stages before a session read the stream themselves. Each
+    /// hands every frame to `SetupCommands::take`, so a stage added later
+    /// that reads the stream its own way, and drops commands again, fails
+    /// here.
+    #[test]
+    fn every_stage_before_a_session_takes_its_frames_through_the_one_door() {
+        let stages = [
+            ("grpc_service/mod.rs (the configuration wizard)", include_str!("mod.rs")),
+            ("grpc_service/learning_loop.rs (Learning Mode)", include_str!("learning_loop.rs")),
+            ("identity_graph/import_flow.rs (the import dialogue)", include_str!("../identity_graph/import_flow.rs")),
+        ];
+        for (stage, source) in stages {
+            assert!(source.contains(".take(req).await"), "{stage} no longer takes its frames through SetupCommands");
+            assert!(!source.contains("Ignore non-UserMessage"), "{stage} drops a frame without a word");
+        }
+        // The stream is read in these three files and in the session's loop, and nowhere else.
+        let readers: Vec<&str> = [
+            ("mod.rs", include_str!("mod.rs")),
+            ("learning_loop.rs", include_str!("learning_loop.rs")),
+            ("turn.rs", include_str!("turn.rs")),
+            ("attach.rs", include_str!("attach.rs")),
+            ("slash.rs", include_str!("slash.rs")),
+            ("provider_setup.rs", include_str!("provider_setup.rs")),
+        ]
+        .iter()
+        .filter(|(_, source)| source.contains("incoming.next()"))
+        .map(|(name, _)| *name)
+        .collect();
+        assert_eq!(readers, ["mod.rs", "learning_loop.rs"], "a new reader of the client's stream: it takes its frames through SetupCommands before a session");
+    }
 
     #[test]
     fn a_restore_is_scheduled_only_by_its_exact_confirmation() {

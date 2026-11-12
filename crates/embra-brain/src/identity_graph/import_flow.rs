@@ -194,11 +194,13 @@ enum Wait {
 
 /// Wait for the next operator line, mirroring the learning loop's
 /// select-against-the-onboarding-stage pattern (another stream sealing
-/// the soul must unblock us). Non-UserMessage frames are ignored.
+/// the soul must unblock us). A command is answered or told to wait by
+/// `SetupCommands`, as in the learning loop, and is never the line.
 async fn wait_for_user_line(
     incoming: &mut Streaming<ConversationRequest>,
     stage_rx: &mut watch::Receiver<i32>,
     db: &WardsonDbClient,
+    commands: &crate::grpc_service::SetupCommands,
 ) -> anyhow::Result<Wait> {
     loop {
         let next = tokio::select! {
@@ -212,12 +214,9 @@ async fn wait_for_user_line(
         };
         match next {
             Some(Ok(req)) => {
-                if let Some(conversation_request::RequestType::UserMessage(um)) =
-                    req.request_type
-                {
-                    return Ok(Wait::Line(um.content));
+                if let Some(line) = commands.take(req).await {
+                    return Ok(Wait::Line(line));
                 }
-                // Ignore non-UserMessage during the dialogue.
             }
             Some(Err(e)) => {
                 warn!("Stream error during import dialogue: {e}");
@@ -286,6 +285,7 @@ pub async fn offer_import(
     db: &WardsonDbClient,
     config: &SystemConfig,
     state: &mut LearningState,
+    commands: &crate::grpc_service::SetupCommands,
 ) -> anyhow::Result<ImportOutcome> {
     let (candidates, issues) = scan_import_dirs();
     if !issues.is_empty() {
@@ -317,7 +317,7 @@ pub async fn offer_import(
         )
         .await;
 
-        let reply = match wait_for_user_line(incoming, stage_rx, db).await? {
+        let reply = match wait_for_user_line(incoming, stage_rx, db, commands).await? {
             Wait::Line(l) => l,
             Wait::Sealed => return Ok(ImportOutcome::SealedByOtherStream),
             Wait::Disconnected => return Ok(ImportOutcome::Disconnected),
@@ -351,7 +351,7 @@ pub async fn offer_import(
         )
         .await;
 
-        let confirm = match wait_for_user_line(incoming, stage_rx, db).await? {
+        let confirm = match wait_for_user_line(incoming, stage_rx, db, commands).await? {
             Wait::Line(l) => l,
             Wait::Sealed => return Ok(ImportOutcome::SealedByOtherStream),
             Wait::Disconnected => return Ok(ImportOutcome::Disconnected),
