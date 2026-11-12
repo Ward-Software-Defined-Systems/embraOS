@@ -201,21 +201,23 @@ pub fn slot_report() -> Option<SlotReport> {
 
 /// The clock as embrad left it at boot (`/run/embra/clock-status`;
 /// `embra_boot::ClockStatus`): whether a time server set it, whether it is
-/// the image's build time for want of anything better (a hardware clock
-/// that read earlier than the build, and no answer), and the sentence that
-/// says which. Absent on a development host.
+/// known to be behind (the hardware clock had lost its time and no server
+/// answered, so the clock resumed from the last time this machine saved,
+/// or from the image's build time), and the sentence that says which.
+/// Absent on a development host.
 #[derive(Debug, Serialize)]
 pub struct ClockReport {
     pub synchronized: bool,
-    /// The clock is known to be behind: every certificate date check runs
-    /// against it, and every timestamp written this boot carries it.
-    pub build_time_guess: bool,
+    /// The clock is known to be behind the real time: every certificate
+    /// date check runs against it, and every timestamp written this boot
+    /// carries it.
+    pub behind: bool,
     pub summary: String,
 }
 
 impl From<embra_boot::ClockStatus> for ClockReport {
     fn from(c: embra_boot::ClockStatus) -> Self {
-        ClockReport { synchronized: c.synchronized(), build_time_guess: c.is_a_guess(), summary: c.summary() }
+        ClockReport { synchronized: c.synchronized(), behind: c.is_a_guess(), summary: c.summary() }
     }
 }
 
@@ -1024,11 +1026,18 @@ mod slot_report_tests {
         assert!(json.get("slot").is_none(), "no slot key without a boot status");
         assert!(json.get("clock").is_none(), "no clock key without embrad's record");
         let clock = ClockReport::from(embra_boot::ClockStatus::parse("floored_from=1514764803\nbuilt=1794452322\nsync=failed\nserver=time.cloudflare.com\nreason=no answer within 5 s\nrtc=unchanged\n").unwrap());
-        assert!(clock.build_time_guess && !clock.synchronized);
+        assert!(clock.behind && !clock.synchronized);
         assert!(clock.summary.starts_with("not confirmed: no time from time.cloudflare.com at boot (no answer within 5 s); the hardware clock read 2018-01-01 00:00:03 UTC"), "{}", clock.summary);
         let clock = ClockReport::from(embra_boot::ClockStatus::parse("sync=synchronized\nserver=time.cloudflare.com\naddress=162.159.200.1:123\noffset=0.012\nstratum=3\nrtc=unchanged\n").unwrap());
-        assert!(clock.synchronized && !clock.build_time_guess);
+        assert!(clock.synchronized && !clock.behind);
         assert_eq!(serde_json::to_value(&clock).unwrap()["summary"], "set from time.cloudflare.com (162.159.200.1:123) at boot, corrected by +0.012 s");
+        // A board whose clock battery is dead, booted without a network: the clock resumed from the saved time.
+        let clock = ClockReport::from(embra_boot::ClockStatus::parse("floored_from=1514764803\nbuilt=1794452322\nresumed_from=1794500000\nsync=failed\nserver=time.cloudflare.com\nreason=the network interface has no link\nrtc=unchanged\n").unwrap());
+        let json = serde_json::to_value(&clock).unwrap();
+        assert_eq!(json["behind"], true);
+        assert_eq!(json["synchronized"], false);
+        assert!(json["summary"].as_str().unwrap().ends_with("so the clock resumed from the last time this machine saved, 2026-11-12 16:13:20 UTC, and counts from there"), "{json}");
+        assert!(json.get("build_time_guess").is_none());
         let report = SlotReport::from(embra_boot::BootStatus::parse("slot=a\ntrial=0\nconfirmed=not-needed\nactive=a\ntry=b\ntries_left=3\nslot_b_status=pending\nbuild_id=abc\nengine=fjall\n"));
         assert_eq!(report.booted.as_deref(), Some("a"));
         assert_eq!(report.pending.as_deref(), Some("b"));

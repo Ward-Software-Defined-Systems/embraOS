@@ -282,9 +282,10 @@ pub(crate) fn certificate_date_hint(cause: &str) -> Option<String> {
 
 /// The hint itself. Which clock is wrong depends on what is known of this
 /// machine's: a time server set it (the certificate's dates are the
-/// fault), it is the image's build time (certainly behind: a certificate
-/// that begins later may well be in date, one that ended earlier has
-/// expired), or nothing confirmed it (either).
+/// fault), it is a floor — the last time this machine saved, or the
+/// image's build time — and so certainly behind (a certificate that begins
+/// later may well be in date, one that ended earlier has expired), or
+/// nothing confirmed it (either).
 pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockStatus>, now: i64) -> String {
     use embra_boot::clock::{format_utc, Sync};
     const FIX: &str = "Set the date in the firmware setup (in UTC), or boot on a network where a time server answers (embra.ntp=<host> names one).";
@@ -304,9 +305,14 @@ pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockSt
                 Sync::Off => "embra.ntp=off asks no time server".to_string(),
                 Sync::Synchronized { .. } => String::new(),
             };
-            match c.floored_from {
-                Some(was) => format!(" The hardware clock read {} at boot, earlier than this image was built, and {asked}.", format_utc(was)),
-                None => format!(" At boot {asked}."),
+            match (c.floored_from, c.resumed_from) {
+                (Some(was), Some(saved)) => format!(
+                    " The hardware clock read {} at boot, earlier than this image was built, the clock resumed from the last time this machine saved ({}), and {asked}.",
+                    format_utc(was),
+                    format_utc(saved)
+                ),
+                (Some(was), None) => format!(" The hardware clock read {} at boot, earlier than this image was built, and {asked}.", format_utc(was)),
+                (None, _) => format!(" At boot {asked}."),
             }
         }
         None => String::new(),
@@ -556,6 +562,12 @@ mod tests {
         assert_eq!(
             date_hint(not_yet, Some(&guess), 0),
             format!(" This machine's clock reads 2026-11-12 03:08:42 UTC and the certificate begins 2026-11-12 16:13:20 UTC: the clock is known to be behind, so the refusal says nothing against the certificate. The hardware clock read 2018-01-01 00:00:03 UTC at boot, earlier than this image was built, and no time came from time.cloudflare.com (no answer within 5 s).{FIX}")
+        );
+        // The same board after a boot with the network and a power-off: the clock resumed from the saved time, and the hint says where it stands.
+        let resumed = embra_boot::ClockStatus { resumed_from: Some(1_794_452_900), ..guess.clone() };
+        assert_eq!(
+            date_hint(not_yet, Some(&resumed), 0),
+            format!(" This machine's clock reads 2026-11-12 03:08:42 UTC and the certificate begins 2026-11-12 16:13:20 UTC: the clock is known to be behind, so the refusal says nothing against the certificate. The hardware clock read 2018-01-01 00:00:03 UTC at boot, earlier than this image was built, the clock resumed from the last time this machine saved (2026-11-12 03:08:20 UTC), and no time came from time.cloudflare.com (no answer within 5 s).{FIX}")
         );
         // A time server set the clock: the certificate's own dates are the fault, and no clock advice follows.
         assert_eq!(
