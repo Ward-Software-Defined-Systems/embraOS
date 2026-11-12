@@ -117,10 +117,10 @@ BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
 
 # The display console (Phase 2), the block of the x86_64 defconfig: WPE WebKit
 # through cog's DRM platform, drawn in software, input through libinput over
-# eudev. The aarch64 launcher has no display or input device yet, so the
-# console on an aarch64 display is TBD until it does; the stack builds for
-# the image all the same (Docker on Apple Silicon: WebKit's link wants the
-# memory noted in docs/BUILD/AARCH64-BUILD.md).
+# eudev. The aarch64 launcher has no display switch yet; the console is
+# validated under QEMU on Apple Silicon with a display, a keyboard and a
+# tablet given by hand (docs/BUILD/AARCH64-BUILD.md, which also notes the
+# memory WebKit's compile wants in Docker).
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
 # BR2_PACKAGE_EUDEV_MODULE_LOADING is not set

@@ -319,8 +319,9 @@ assert_kernel_fragments_applied() {
     echo "kernel fragments applied: $count symbols of ${fragments// / + } are in the built configuration"
     # x86_64 loads no modules: the ten the base config built as modules are
     # built in by the fragments, so lib/modules holds the kernel's metadata
-    # and nothing else. (The arm64 base config builds about 1200 modules;
-    # that measurement waits for the Mac build.)
+    # and nothing else. (The arm64 base config keeps its modules, which
+    # nothing loads: 1383 of them, 71 MB under lib/modules, on the Apple
+    # Silicon build of 2026-11-09.)
     if [ "$arch" = "x86_64" ]; then
         local kos
         kos="$(find "$BUILDROOT_DIR/output/target/lib/modules" -name '*.ko*' 2>/dev/null | sed "s|$BUILDROOT_DIR/output/target||" | sort | tr '\n' ' ')"

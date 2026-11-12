@@ -8,7 +8,7 @@
 #   ./scripts/embraos-backup-mac.sh backup                    # Backup STATE + DATA
 #   ./scripts/embraos-backup-mac.sh backup --label pre-rebuild
 #   ./scripts/embraos-backup-mac.sh restore                   # Restore most recent
-#   ./scripts/embraos-backup-mac.sh restore 2026-04-15_1430   # Restore specific backup
+#   ./scripts/embraos-backup-mac.sh restore 2026-04-15_143000 # Restore a specific backup (a name from list)
 #   ./scripts/embraos-backup-mac.sh list                      # List backups
 #   ./scripts/embraos-backup-mac.sh verify                    # Verify disk image
 #   ./scripts/embraos-backup-mac.sh --image ~/images/embraos.img verify

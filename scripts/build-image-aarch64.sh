@@ -44,8 +44,10 @@ BUILDROOT_DEFCONFIG="embraos_aarch64_defconfig"
 KERNEL_NAME="Image"
 
 
-# Buildroot release pin. Override at runtime:
-#   BUILDROOT_VERSION=2024.02 ./scripts/build-image-aarch64.sh ...
+# Buildroot release pin. The tree builds on this release alone: the firmware
+# family check, the kernel-headers series the defconfigs name and the patches
+# under buildroot/patches/ are written for it. BUILDROOT_VERSION names another
+# checkout, for a port to a newer release.
 BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.02.1}"
 
 # macOS-compatible nproc

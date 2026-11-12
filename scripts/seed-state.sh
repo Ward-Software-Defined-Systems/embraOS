@@ -337,7 +337,8 @@ if [ -n "$PHASE0_DATA" ]; then
     SRC_DB="$PHASE0_DATA/wardsondb"
     [ -d "$SRC_DB" ] || die "--phase0-data '$PHASE0_DATA' has no wardsondb/ subdirectory"
 
-    # Pre-flight the size. DATA is a fixed 2 GiB (genimage.cfg.in) and a real
+    # Pre-flight the size. DATA has a fixed size in the image (EMBRAOS_DATA_SIZE
+    # in buildroot/board/embraos/layout.sh) and a real
     # WardSONDB directory can exceed it — fail before writing anything rather
     # than leaving a half-copied database behind. Coarse by design: du/df
     # blocks, no filesystem-overhead margin; it catches the gross case.
@@ -350,7 +351,7 @@ if [ -n "$PHASE0_DATA" ]; then
     if [ -n "$need_kb" ] && [ -n "$free_kb" ] && [ "$need_kb" -gt "$free_kb" ]; then
         die "Phase 0 WardSONDB data does not fit on DATA
   need $((need_kb / 1024)) MiB, available $((free_kb / 1024)) MiB
-  Grow DATA in buildroot/board/embraos/genimage.cfg.in and rebuild, or seed less data."
+  Grow DATA (EMBRAOS_DATA_SIZE in buildroot/board/embraos/layout.sh) and rebuild, or seed less data."
     fi
 
     if [ -n "$need_kb" ]; then

@@ -5,7 +5,7 @@
 #   ./embraos-backup.sh backup                    # Backup from current disk image
 #   ./embraos-backup.sh backup --label "pre-rebuild"  # Backup with a label
 #   ./embraos-backup.sh restore                   # Restore most recent backup into disk image
-#   ./embraos-backup.sh restore 2026-03-29_1430   # Restore a specific backup
+#   ./embraos-backup.sh restore 2026-03-29_143000 # Restore a specific backup (a name from list)
 #   ./embraos-backup.sh list                      # List available backups
 #   ./embraos-backup.sh verify                    # Verify current disk image has valid data
 #   ./embraos-backup.sh --image /path/embraos.img verify   # Target a specific image

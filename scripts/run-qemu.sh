@@ -15,21 +15,23 @@
 # edk2 images of the host (Ubuntu: the ovmf package; macOS: Homebrew's qemu).
 # The variable store is copied per run and removed on exit.
 #
-# Host-side extras (neither reaches the OS):
+# Host-side extras (none reaches the OS):
 #   EMBRA_VNC=1                 the display on a VNC server at 127.0.0.1:5900
 #       (password "embraos": macOS Screen Sharing refuses a server without
 #       one; loopback only, tunnel it with ssh -L). The serial line stays on
 #       this terminal. The UEFI path paints GRUB's menu and the boot banner
 #       there; the direct path's kernel line names only the serial console.
-#   EMBRA_KIOSK=0|1             the display console off, or on (implies EMBRA_VNC=1); the OS's default is on with a display
-#   EMBRA_KBD=<layout>          the display console's keyboard layout (us)
-#   EMBRA_KIOSK_MODE=<W>x<H>    the display console's video mode (1920x1080 where the display offers it); native = the display's own
 #   EMBRA_ISO=<embraos.iso>     boot the installer medium first; the image argument is then the
 #                               TARGET disk (a blank qemu-img disk, raw or .qcow2, the installer writes)
 #   EMBRA_ISO_AS=cdrom|usb      the medium as a virtual DVD (default) or a USB stick on xHCI (the hybrid GPT path)
 #   EMBRA_DISK_IF=virtio|ahci   the target disk's bus (virtio)
 #   EMBRA_DHCP_START=<address>  the first address QEMU's DHCP server leases
 #       (10.0.2.200 shows the banner's second URL on the leased address).
+# The display console's knobs. They reach the kernel line, and act on a VM
+# that has the display (EMBRA_VNC=1, which EMBRA_KIOSK=1 implies):
+#   EMBRA_KIOSK=0|1             embra.kiosk: the display console off, or on; the OS's default is on with a display
+#   EMBRA_KBD=<layout>          embra.kbd: the display console's keyboard layout (us)
+#   EMBRA_KIOSK_MODE=<W>x<H>    embra.kioskmode: the display console's video mode (1920x1080 where the display offers it); native = the display's own
 # An image named *.qcow2 is opened as qcow2, with the medium and without it
 # (a disk the installer wrote boots from this launcher).
 #
