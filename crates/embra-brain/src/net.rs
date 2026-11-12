@@ -536,7 +536,7 @@ mod tests {
     }
 
     fn clock(floored_from: Option<i64>, sync: embra_boot::clock::Sync) -> embra_boot::ClockStatus {
-        embra_boot::ClockStatus { floored_from, built: Some(1_794_452_322), sync, rtc: embra_boot::clock::Rtc::Unchanged }
+        embra_boot::ClockStatus { floored_from, built: Some(1_794_452_322), resumed_from: None, sync, rtc: embra_boot::clock::Rtc::Unchanged }
     }
 
     /// Which clock is wrong depends on what is known of this machine's.

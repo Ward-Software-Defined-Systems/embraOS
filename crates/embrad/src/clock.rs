@@ -10,9 +10,11 @@
 //! Two steps, both before any service:
 //!
 //! 1. The floor ([`apply_floor`], first thing in `main`). A clock earlier
-//!    than the image's build time (`BUILT` in `/etc/embraos-release`) is
-//!    certainly wrong and is set to it. It needs no network and is said on
-//!    both consoles; it makes the clock sane, not right.
+//!    than the image's build time (`BUILT` in `/etc/embraos-release`) has
+//!    certainly lost its time. It resumes from the last time this machine
+//!    saved ([`save`]: STATE's `last-known-time`), or from the build time
+//!    on a machine that never saved one. It needs no network and is said
+//!    on both consoles; it makes the clock sane, not right.
 //! 2. The fetch ([`sync_at_boot`], after the network is up and before a
 //!    maintenance job, the database and the trust service, which makes the
 //!    CA on a first boot). One SNTP exchange (RFC 4330) with
@@ -22,11 +24,23 @@
 //!    or more off, so the next boot starts right without a network.
 //!
 //! The outcome is `/run/embra/clock-status` (`embra_boot::clock`): the
-//! banner names a clock that is still the build time ([`banner_lines`]),
-//! and the brain reads the record for a certificate date error's hint.
+//! banner names a clock that step 1 moved and no time server confirmed
+//! ([`banner_lines`]), and the brain reads the record for a certificate
+//! date error's hint.
 //!
-//! The clock is set at boot and at no other time: nothing here runs while
-//! the services do, so no timestamp they write ever steps backwards.
+//! The clock is set at boot and at no other time: nothing here sets it
+//! while the services run, so no timestamp they write ever steps
+//! backwards. What does run beside them is the save ([`keep_saved`]): the
+//! clock written to STATE every [`SAVE_EVERY`] and once more at a restart,
+//! so that a board whose clock battery is dead and which boots without a
+//! network starts where it left off, behind by as long as it was off, and
+//! not at the image's build time again.
+//!
+//! The saved time is used only when the hardware clock reads earlier than
+//! the build time. A hardware clock at or after it is taken as it is,
+//! whatever was saved: the operator who sets the firmware's date is never
+//! overruled by a file, and a save made from a wrong clock heals at the
+//! next boot with a right one.
 //!
 //! PID 1 only. In development embrad never touches the host's clock: the
 //! machine is behind [`Machine`], and the tests pass a stand-in.
@@ -68,6 +82,10 @@ const RTC_WRITE_FROM_SECONDS: f64 = 1.0;
 
 /// The hardware clock, as devtmpfs names the first one.
 const RTC_DEVICE: &str = "/dev/rtc0";
+
+/// How often the clock is saved to STATE while the services run: what a
+/// power cut can cost a board that then boots without a network.
+pub const SAVE_EVERY: Duration = Duration::from_secs(60);
 
 /// A time: seconds after the epoch, and nanoseconds into the second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -200,29 +218,91 @@ fn rtc_fields(unix_secs: i64) -> RtcTime {
     }
 }
 
+/// What step 1 made of a hardware clock that had lost its time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Floored {
+    /// What the hardware clock read.
+    pub was: i64,
+    /// The saved time the clock resumed from; `None` when it was set to
+    /// the build time (nothing saved, or nothing later than the build).
+    pub resumed_from: Option<i64>,
+}
+
 /// Step 1. A clock earlier than the image's build time cannot be right: it
-/// is set to the build time, and what it read is returned. `None` when the
-/// clock is not earlier, when the release stamp gave no build time, or when
-/// the clock could not be set (said in the log).
-pub fn apply_floor(machine: &impl Machine, built: Option<i64>) -> Option<i64> {
+/// resumes from `saved`, the last time this machine saved, when that is
+/// later than the build time, and from the build time otherwise. `None`
+/// when the clock is not earlier (a saved time is not looked at then), when
+/// the release stamp gave no build time, or when the clock could not be set
+/// (said in the log).
+pub fn apply_floor(machine: &impl Machine, built: Option<i64>, saved: Option<i64>) -> Option<Floored> {
     let built = built?;
     let was = machine.now().secs;
     if was >= built {
         return None;
     }
-    match machine.set(Timestamp { secs: built, nanos: 0 }) {
+    let resumed_from = saved.filter(|s| *s > built);
+    let floor = resumed_from.unwrap_or(built);
+    match machine.set(Timestamp { secs: floor, nanos: 0 }) {
         Ok(()) => {
-            warn!(
-                "clock: the hardware clock read {}, earlier than this image was built: the clock is set to the build time, {}, until a time server answers",
-                format_utc(was),
-                format_utc(built)
-            );
-            Some(was)
+            match resumed_from {
+                Some(saved) => warn!(
+                    "clock: the hardware clock read {}, earlier than this image was built: the clock resumes from the last time this machine saved, {}, until a time server answers",
+                    format_utc(was),
+                    format_utc(saved)
+                ),
+                None => warn!(
+                    "clock: the hardware clock read {}, earlier than this image was built: the clock is set to the build time, {}, until a time server answers",
+                    format_utc(was),
+                    format_utc(built)
+                ),
+            }
+            Some(Floored { was, resumed_from })
         }
         Err(e) => {
             warn!("clock: the hardware clock read {}, earlier than this image was built ({}), and the clock could not be set: {e}", format_utc(was), format_utc(built));
             None
         }
+    }
+}
+
+/// The clock, saved for a boot that finds the hardware clock without its
+/// time. Never a clock earlier than the build time, which is no time worth
+/// resuming from. `Ok(None)` when nothing was written for that reason.
+pub fn save(machine: &impl Machine, built: Option<i64>, path: &std::path::Path) -> io::Result<Option<i64>> {
+    let now = machine.now().secs;
+    if built.is_some_and(|b| now < b) {
+        return Ok(None);
+    }
+    embra_boot::clock::write_saved_time(path, now).map(|()| Some(now))
+}
+
+/// [`save`] to STATE, as PID 1 does it: a failure is one line in the log
+/// the first time and silence after, since the next minute tries again.
+pub fn save_to_state(built: Option<i64>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static FAILED: AtomicBool = AtomicBool::new(false);
+    // One save at a time: the minute's save and the one at a restart write
+    // through the same temporary file.
+    static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = SAVING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match save(&ThisMachine, built, std::path::Path::new(embra_boot::clock::LAST_KNOWN_PATH)) {
+        Ok(_) => FAILED.store(false, Ordering::Relaxed),
+        Err(e) => {
+            if !FAILED.swap(true, Ordering::Relaxed) {
+                warn!("clock: the time could not be saved to {}: {e}", embra_boot::clock::LAST_KNOWN_PATH);
+            }
+        }
+    }
+}
+
+/// The save while the services run: every [`SAVE_EVERY`], off the
+/// runtime's own threads (the write is synced). It ends with the runtime.
+pub async fn keep_saved(built: Option<i64>) {
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + SAVE_EVERY, SAVE_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let _ = tokio::task::spawn_blocking(move || save_to_state(built)).await;
     }
 }
 
@@ -475,26 +555,32 @@ fn target(server: TimeServer<'_>) -> Option<(String, String, u16)> {
 /// hardware clock. `network_missing` is why no request can leave, when that
 /// is already known. Never an error: a boot without the time goes on, with
 /// the reason in the record this returns.
-pub fn sync_at_boot(machine: &impl Machine, server: TimeServer<'_>, floored_from: Option<i64>, built: Option<i64>, network_missing: Option<&str>) -> ClockStatus {
+pub fn sync_at_boot(machine: &impl Machine, server: TimeServer<'_>, floored: Option<Floored>, built: Option<i64>, network_missing: Option<&str>) -> ClockStatus {
     let Some((named, host, port)) = target(server) else {
         info!("clock: embra.ntp=off, no time server is asked; the clock reads {}", format_utc(machine.now().secs));
-        return ClockStatus { floored_from, built, sync: Sync::Off, rtc: Rtc::Unchanged };
+        return ClockStatus { floored_from: floored.map(|f| f.was), built, resumed_from: floored.and_then(|f| f.resumed_from), sync: Sync::Off, rtc: Rtc::Unchanged };
     };
     let fetched = match network_missing {
         Some(why) => Err(why.to_string()),
         None => fetch_within(&host, port, FETCH_WAIT),
     };
-    apply(machine, &named, fetched, floored_from, built)
+    apply(machine, &named, fetched, floored, built)
 }
 
 /// What a fetch came to, applied: the clock set from a sample that is not
 /// earlier than the image's build time, the hardware clock after it.
-fn apply(machine: &impl Machine, server: &str, fetched: Result<Sample, String>, floored_from: Option<i64>, built: Option<i64>) -> ClockStatus {
+fn apply(machine: &impl Machine, server: &str, fetched: Result<Sample, String>, floored: Option<Floored>, built: Option<i64>) -> ClockStatus {
+    let floored_from = floored.map(|f| f.was);
+    let resumed_from = floored.and_then(|f| f.resumed_from);
     let failed = |reason: String| {
         let now = machine.now().secs;
-        let guess = if floored_from.is_some() { " (the image's build time, not the real time)" } else { "" };
+        let guess = match floored {
+            Some(Floored { resumed_from: Some(_), .. }) => " (it resumed from the last time this machine saved, not the real time)",
+            Some(_) => " (the image's build time, not the real time)",
+            None => "",
+        };
         warn!("clock: no time from {server}: {reason}; the clock stays at {}{guess}", format_utc(now));
-        ClockStatus { floored_from, built, sync: Sync::Failed { server: server.to_string(), reason }, rtc: Rtc::Unchanged }
+        ClockStatus { floored_from, built, resumed_from, sync: Sync::Failed { server: server.to_string(), reason }, rtc: Rtc::Unchanged }
     };
     let sample = match fetched {
         Ok(sample) => sample,
@@ -525,26 +611,29 @@ fn apply(machine: &impl Machine, server: &str, fetched: Result<Sample, String>, 
         sample.stratum,
         sample.round_trip.as_secs_f64() * 1000.0
     );
-    ClockStatus { floored_from, built, sync: Sync::Synchronized { server: server.to_string(), address: sample.address.to_string(), offset, stratum: sample.stratum }, rtc }
+    ClockStatus { floored_from, built, resumed_from, sync: Sync::Synchronized { server: server.to_string(), address: sample.address.to_string(), offset, stratum: sample.stratum }, rtc }
 }
 
 /// The banner's lines about the clock: none on a clock a time server set
-/// or nothing called into question, two when it is the image's build time
-/// and nothing confirmed it.
+/// or nothing called into question, two when it is a floor nothing
+/// confirmed: the last time this machine saved, or the image's build time.
 pub fn banner_lines(status: Option<&ClockStatus>) -> Vec<String> {
     let Some(status) = status.filter(|s| s.is_a_guess()) else {
         return Vec::new();
     };
     let was = status.floored_from.map(format_utc).unwrap_or_default();
-    let built = status.built.map(format_utc).unwrap_or_else(|| "its build time".into());
     let why = match &status.sync {
         Sync::Failed { server, reason } => format!("no time came from {server} ({reason})"),
         Sync::Off => "embra.ntp=off asks no time server".to_string(),
         Sync::Synchronized { .. } => return Vec::new(),
     };
+    let clock = match (status.resumed_from, status.built) {
+        (Some(saved), _) => format!("The clock resumed from the last time this machine saved, {}, and is behind the real time", format_utc(saved)),
+        (None, built) => format!("The clock is this image's build time, {}, not the real time", built.map(format_utc).unwrap_or_else(|| "its build time".into())),
+    };
     vec![
-        format!("The clock is this image's build time, {built}, not the real time: the hardware clock read {was}, and {why}."),
-        "Certificates are checked against it and will be refused on their dates. Set the date in the firmware setup (in UTC), or boot on a network where a time server answers (embra.ntp=<host>).".to_string(),
+        format!("{clock}: the hardware clock read {was}, and {why}."),
+        "Certificates are checked against it, and one that begins later is refused. Set the date in the firmware setup (in UTC), or boot on a network where a time server answers (embra.ntp=<host>).".to_string(),
     ]
 }
 
@@ -600,20 +689,124 @@ mod tests {
     #[test]
     fn a_clock_earlier_than_the_images_build_time_is_set_to_it_and_no_other_clock_is_touched() {
         let behind = Fake::at(WOKE);
-        assert_eq!(apply_floor(&behind, Some(BUILT)), Some(WOKE), "what the clock read comes back");
+        assert_eq!(apply_floor(&behind, Some(BUILT), None), Some(Floored { was: WOKE, resumed_from: None }), "what the clock read comes back");
         assert_eq!(*behind.sets.borrow(), [Timestamp { secs: BUILT, nanos: 0 }]);
         assert!(behind.rtc_writes.borrow().is_empty(), "a guess never reaches the hardware clock");
 
         for later in [BUILT, BUILT + 1, REAL] {
             let fine = Fake::at(later);
-            assert_eq!(apply_floor(&fine, Some(BUILT)), None);
+            assert_eq!(apply_floor(&fine, Some(BUILT), None), None);
             assert!(fine.sets.borrow().is_empty(), "a clock at or after the build time is left alone");
         }
         let undated = Fake::at(WOKE);
-        assert_eq!(apply_floor(&undated, None), None, "no build time, no floor");
+        assert_eq!(apply_floor(&undated, None, Some(REAL)), None, "no build time, no floor");
         assert!(undated.sets.borrow().is_empty());
         let stuck = Fake { refuses_set: true, ..Fake::at(WOKE) };
-        assert_eq!(apply_floor(&stuck, Some(BUILT)), None, "a clock that could not be set was not floored");
+        assert_eq!(apply_floor(&stuck, Some(BUILT), Some(REAL)), None, "a clock that could not be set was not floored");
+    }
+
+    #[test]
+    fn a_clock_that_lost_its_time_resumes_from_the_saved_time_and_a_plausible_one_is_never_overruled() {
+        // The hardware clock woke at its firmware's default: the saved time, later than the build, is where the clock resumes.
+        let lost = Fake::at(WOKE);
+        assert_eq!(apply_floor(&lost, Some(BUILT), Some(REAL)), Some(Floored { was: WOKE, resumed_from: Some(REAL) }));
+        assert_eq!(*lost.sets.borrow(), [Timestamp { secs: REAL, nanos: 0 }]);
+        assert!(lost.rtc_writes.borrow().is_empty(), "a saved time never reaches the hardware clock either");
+
+        // A saved time from before this image was built (an update since, an old STATE) is no better than the build time.
+        for stale in [BUILT - 86_400, BUILT] {
+            let m = Fake::at(WOKE);
+            assert_eq!(apply_floor(&m, Some(BUILT), Some(stale)), Some(Floored { was: WOKE, resumed_from: None }));
+            assert_eq!(*m.sets.borrow(), [Timestamp { secs: BUILT, nanos: 0 }]);
+        }
+
+        // A hardware clock at or after the build time is taken as it is, whatever was saved: the operator
+        // who set the firmware's date is not overruled by a file, and a save made from a wrong clock heals.
+        for plausible in [BUILT, BUILT + 5, REAL - 3_600] {
+            let m = Fake::at(plausible);
+            assert_eq!(apply_floor(&m, Some(BUILT), Some(REAL + 10 * 365 * 86_400)), None, "a clock at {plausible}");
+            assert!(m.sets.borrow().is_empty());
+        }
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("embrad-clock-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_clock_is_saved_whole_and_never_one_earlier_than_the_build() {
+        let dir = scratch_dir("save");
+        let path = dir.join(embra_boot::clock::LAST_KNOWN_NAME);
+        assert_eq!(save(&Fake::at(REAL), Some(BUILT), &path).unwrap(), Some(REAL));
+        assert_eq!(embra_boot::clock::read_saved_time(&path), Some(REAL));
+        // A clock earlier than the build is no time worth resuming from: nothing is written, the earlier save stays.
+        assert_eq!(save(&Fake::at(WOKE), Some(BUILT), &path).unwrap(), None);
+        assert_eq!(embra_boot::clock::read_saved_time(&path), Some(REAL));
+        // The build time itself is saved: a board that never met a time server still moves on from it.
+        assert_eq!(save(&Fake::at(BUILT), Some(BUILT), &path).unwrap(), Some(BUILT));
+        // A later clock that is earlier than the last save replaces it: the save follows the clock, it is no maximum.
+        assert_eq!(save(&Fake::at(BUILT + 60), Some(BUILT), &path).unwrap(), Some(BUILT + 60));
+        assert_eq!(embra_boot::clock::read_saved_time(&path), Some(BUILT + 60));
+        assert_eq!(save(&Fake::at(REAL), None, &path).unwrap(), Some(REAL), "without a build time the clock is saved as it is");
+        assert!(save(&Fake::at(REAL), Some(BUILT), &dir.join("absent").join("x")).is_err(), "a STATE that cannot be written is an error for the caller to log");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(SAVE_EVERY, Duration::from_secs(60));
+    }
+
+    /// The board of 2026-11-12: its clock battery dead, so every power-up
+    /// starts at the firmware's default date.
+    #[test]
+    fn a_board_without_a_clock_battery_never_starts_before_where_it_stopped() {
+        let dir = scratch_dir("board");
+        let path = dir.join(embra_boot::clock::LAST_KNOWN_NAME);
+        let saved = || embra_boot::clock::read_saved_time(&path);
+
+        // Boot 1, with the network: nothing saved yet, the build time, then the server's time, saved.
+        let boot = Fake::at(WOKE);
+        let floored = apply_floor(&boot, Some(BUILT), saved());
+        assert_eq!(floored, Some(Floored { was: WOKE, resumed_from: None }));
+        let status = apply(&boot, "time.cloudflare.com", Ok(sample_at(REAL)), floored, Some(BUILT));
+        assert!(status.synchronized() && status.resumed_from.is_none());
+        save(&boot, Some(BUILT), &path).unwrap();
+        // Two hours up, saved along the way; then the power goes.
+        boot.now.set(Timestamp { secs: REAL + 7_200, nanos: 0 });
+        save(&boot, Some(BUILT), &path).unwrap();
+
+        // Boot 2, no network: the clock resumes where boot 1 stopped, and the record and the banner say so.
+        let boot = Fake::at(WOKE + 4);
+        let floored = apply_floor(&boot, Some(BUILT), saved());
+        assert_eq!(floored, Some(Floored { was: WOKE + 4, resumed_from: Some(REAL + 7_200) }));
+        assert_eq!(boot.now().secs, REAL + 7_200);
+        let status = sync_at_boot(&boot, TimeServer::Default, floored, Some(BUILT), Some("the network interface has no link"));
+        assert!(status.is_a_guess());
+        assert_eq!(status.resumed_from, Some(REAL + 7_200));
+        assert!(boot.rtc_writes.borrow().is_empty());
+        let lines = banner_lines(Some(&status));
+        assert_eq!(
+            lines[0],
+            format!(
+                "The clock resumed from the last time this machine saved, {}, and is behind the real time: the hardware clock read 2018-01-01 00:00:07 UTC, and no time came from time.cloudflare.com (the network interface has no link).",
+                format_utc(REAL + 7_200)
+            )
+        );
+        // An hour up without a network, saved; the power goes again.
+        boot.now.set(Timestamp { secs: REAL + 7_200 + 3_600, nanos: 0 });
+        save(&boot, Some(BUILT), &path).unwrap();
+
+        // Boot 3, still no network: an hour further on, never back at boot 2's start or at the build time.
+        let boot = Fake::at(WOKE);
+        let floored = apply_floor(&boot, Some(BUILT), saved());
+        assert_eq!(floored.and_then(|f| f.resumed_from), Some(REAL + 10_800));
+
+        // Boot 4, the network is back: the server's time, whatever was saved, and the hardware clock with it.
+        let status = apply(&boot, "time.cloudflare.com", Ok(sample_at(REAL + 90_000)), floored, Some(BUILT));
+        assert!(status.synchronized() && !status.is_a_guess());
+        assert_eq!(boot.rtc_writes.borrow().len(), 1);
+        assert!(banner_lines(Some(&status)).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -810,7 +1003,7 @@ mod tests {
     fn an_answer_sets_the_clock_and_the_hardware_clock_only_when_that_was_a_second_off() {
         // The 2018 board: floored to the build time, then the server's time.
         let board = Fake::at(BUILT + 12);
-        let status = apply(&board, "time.cloudflare.com", Ok(sample_at(REAL)), Some(WOKE), Some(BUILT));
+        let status = apply(&board, "time.cloudflare.com", Ok(sample_at(REAL)), Some(Floored { was: WOKE, resumed_from: None }), Some(BUILT));
         let set = *board.sets.borrow().last().expect("the clock was set");
         assert!(set.seconds_since(Timestamp { secs: REAL, nanos: 250_000_000 }) < 0.5 && set.secs >= REAL, "the sample's time plus what passed since: {set:?}");
         assert_eq!(*board.rtc_writes.borrow(), [set.secs], "the hardware clock gets the same time");
@@ -848,7 +1041,7 @@ mod tests {
     #[test]
     fn no_answer_an_answer_before_the_build_time_and_a_clock_that_cannot_be_set_leave_the_reason() {
         let board = Fake::at(BUILT + 12);
-        let status = apply(&board, "time.cloudflare.com", Err("the name could not be resolved: no address".into()), Some(WOKE), Some(BUILT));
+        let status = apply(&board, "time.cloudflare.com", Err("the name could not be resolved: no address".into()), Some(Floored { was: WOKE, resumed_from: None }), Some(BUILT));
         assert!(board.sets.borrow().is_empty() && board.rtc_writes.borrow().is_empty());
         assert_eq!(status.sync, Sync::Failed { server: "time.cloudflare.com".into(), reason: "the name could not be resolved: no address".into() });
         assert!(status.is_a_guess());
@@ -876,7 +1069,7 @@ mod tests {
         assert_eq!(status.sync, Sync::Off);
         assert!(m.sets.borrow().is_empty());
 
-        let status = sync_at_boot(&m, TimeServer::Default, Some(WOKE), Some(BUILT), Some("no network interface came up"));
+        let status = sync_at_boot(&m, TimeServer::Default, Some(Floored { was: WOKE, resumed_from: None }), Some(BUILT), Some("no network interface came up"));
         assert_eq!(status.sync, Sync::Failed { server: "time.cloudflare.com".into(), reason: "no network interface came up".into() });
         let status = sync_at_boot(&m, TimeServer::Named { host: "10.0.2.2", port: 12300 }, None, Some(BUILT), Some("the network interface has no link"));
         assert_eq!(status.sync, Sync::Failed { server: "10.0.2.2:12300".into(), reason: "the network interface has no link".into() }, "a port of its own is named with the host");
@@ -895,7 +1088,7 @@ mod tests {
     fn a_named_server_is_asked_and_its_answer_sets_the_clock() {
         let good = server(1, |nonce| vec![answer(nonce, REAL).to_vec()]);
         let m = Fake::at(BUILT + 3);
-        let status = sync_at_boot(&m, TimeServer::Named { host: "127.0.0.1", port: good.port() }, Some(WOKE), Some(BUILT), None);
+        let status = sync_at_boot(&m, TimeServer::Named { host: "127.0.0.1", port: good.port() }, Some(Floored { was: WOKE, resumed_from: None }), Some(BUILT), None);
         assert!(status.synchronized(), "{:?}", status.sync);
         assert_eq!(m.sets.borrow().last().map(|t| t.secs), Some(REAL));
         assert_eq!(*m.rtc_writes.borrow(), [REAL]);
@@ -905,7 +1098,7 @@ mod tests {
     #[test]
     fn the_banner_names_a_clock_that_is_the_build_time_and_nothing_else() {
         assert!(banner_lines(None).is_empty(), "a development host has no record");
-        let unconfirmed = ClockStatus { floored_from: None, built: Some(BUILT), sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: format!("no answer within {}", seconds(FETCH_WAIT)) }, rtc: Rtc::Unchanged };
+        let unconfirmed = ClockStatus { floored_from: None, built: Some(BUILT), resumed_from: None, sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: format!("no answer within {}", seconds(FETCH_WAIT)) }, rtc: Rtc::Unchanged };
         assert!(banner_lines(Some(&unconfirmed)).is_empty(), "a hardware clock nothing called into question is not a fault");
 
         let guess = ClockStatus { floored_from: Some(WOKE), ..unconfirmed.clone() };
@@ -915,7 +1108,10 @@ mod tests {
             lines[0],
             "The clock is this image's build time, 2026-11-12 02:58:42 UTC, not the real time: the hardware clock read 2018-01-01 00:00:03 UTC, and no time came from time.cloudflare.com (no answer within 5 s)."
         );
-        assert!(lines[1].contains("firmware setup (in UTC)") && lines[1].contains("embra.ntp=<host>"), "{}", lines[1]);
+        assert_eq!(
+            lines[1],
+            "Certificates are checked against it, and one that begins later is refused. Set the date in the firmware setup (in UTC), or boot on a network where a time server answers (embra.ntp=<host>)."
+        );
         let off = ClockStatus { sync: Sync::Off, ..guess };
         assert!(banner_lines(Some(&off))[0].ends_with("and embra.ntp=off asks no time server."));
     }

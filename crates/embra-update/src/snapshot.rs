@@ -4,7 +4,7 @@
 //! tests run all of it under a temporary tree.
 //!
 //! What a snapshot holds: STATE whole but a halt's reason, the next-boot
-//! marker and `lost+found`; DATA's database directory whole; DATA's
+//! marker, the saved clock and `lost+found`; DATA's database directory whole; DATA's
 //! workspace but the Guardian's build tree (its built artifacts kept: boot
 //! reconcile loads them by hash) and its cargo home. Links stay links;
 //! special files are skipped and named. Entries are `state/…` and
@@ -464,8 +464,9 @@ pub enum RestoreOutcome {
 
 /// Put a snapshot back: the record and the archive checked against each
 /// other, the engine against the running release, the space, then STATE
-/// emptied (but `lost+found`), the database and workspace directories
-/// removed, the archive unpacked under the parent, and a sync.
+/// emptied (but `lost+found` and the saved clock), the database and
+/// workspace directories removed, the archive unpacked under the parent,
+/// and a sync.
 pub fn restore(roots: &Roots, name: &str, release: Option<&Release>, out: &mut impl Write) -> Result<RestoreOutcome> {
     if !valid_name(name) {
         return Ok(RestoreOutcome::Refused(format!("restore: not a backup name: {name:?}")));
@@ -511,7 +512,7 @@ pub fn restore(roots: &Roots, name: &str, release: Option<&Release>, out: &mut i
     writeln!(out, "restore: emptying STATE and the database and workspace directories")?;
     let state = roots.state();
     for e in fs::read_dir(&state).with_context(|| format!("read {}", state.display()))?.flatten() {
-        if e.file_name() == "lost+found" {
+        if STATE_KEPT_BY_RESTORE.iter().any(|kept| e.file_name() == *kept) {
             continue;
         }
         let p = e.path();
@@ -608,6 +609,7 @@ mod tests {
         fs::write(s.join("ca-certificates/op.pem"), "PEM").unwrap();
         fs::write(s.join("halt_reason"), "old halt").unwrap();
         fs::write(s.join("next-boot"), "mode=snapshot").unwrap();
+        fs::write(s.join("last-known-time"), "time=1794500000\n").unwrap();
         fs::create_dir_all(s.join("lost+found")).unwrap();
         let d = roots.data();
         fs::create_dir_all(d.join("wardsondb/db")).unwrap();
@@ -675,7 +677,7 @@ mod tests {
         assert!(names.contains(&"data/workspace/notes.txt"));
         assert!(names.contains(&"data/workspace/.guardian/target/wasm32-unknown-unknown/release/tool.wasm"));
         assert!(names.contains(&"data/workspace/.ssh/id_ed25519"));
-        for absent in ["state/halt_reason", "state/next-boot", "state/lost+found", "data/workspace/.guardian/target/debug/junk", "data/workspace/.guardian/target/wasm32-unknown-unknown/release/tool.d", "data/workspace/.guardian/cargo-home/reg", "data/backups"] {
+        for absent in ["state/halt_reason", "state/next-boot", "state/last-known-time", "state/lost+found", "data/workspace/.guardian/target/debug/junk", "data/workspace/.guardian/target/wasm32-unknown-unknown/release/tool.d", "data/workspace/.guardian/cargo-home/reg", "data/backups"] {
             assert!(!names.contains(&absent), "{absent} must be left out");
         }
         assert!(entries.iter().any(|(n, k)| n == "data/workspace/link" && k == "-> notes.txt"));
@@ -685,6 +687,8 @@ mod tests {
         fs::write(roots.state().join("soul.sha256"), "tampered").unwrap();
         fs::remove_file(roots.data().join("workspace/notes.txt")).unwrap();
         fs::write(roots.state().join("stray"), "x").unwrap();
+        // The machine has run on since the snapshot, and its clock was saved again.
+        fs::write(roots.state().join("last-known-time"), "time=1794600000\n").unwrap();
         let mut out = Vec::new();
         assert!(matches!(restore(&roots, &record.name, Some(&release("fjall")), &mut out).unwrap(), RestoreOutcome::Restored));
         let files = tree_files(&roots.parent);
@@ -696,6 +700,11 @@ mod tests {
         assert!(!files.contains_key("state/next-boot"));
         assert!(!files.contains_key("state/stray"), "STATE was emptied first");
         assert!(files.contains_key("state/lost+found"), "lost+found stays");
+        assert_eq!(
+            files.get("state/last-known-time").map(String::as_str),
+            Some("time=1794600000\n"),
+            "the saved clock is the machine's: no snapshot holds it and a restore leaves the latest one in place"
+        );
         assert!(!files.contains_key("data/workspace/.guardian/target/debug/junk"));
         assert!(files.contains_key("data/workspace/.guardian/target/wasm32-unknown-unknown/release/tool.wasm"));
         assert!(files.contains_key(&format!("data/backups/{}", record.name)), "the backups survive a restore");
@@ -817,6 +826,9 @@ mod tests {
         }
         assert!(state_excluded(Path::new("halt_reason")));
         assert!(state_excluded(Path::new("next-boot")));
+        assert!(state_excluded(Path::new(embra_boot::clock::LAST_KNOWN_NAME)));
+        assert_eq!(embra_boot::clock::LAST_KNOWN_NAME, "last-known-time");
+        assert!(STATE_KEPT_BY_RESTORE.contains(&"lost+found") && STATE_KEPT_BY_RESTORE.contains(&"last-known-time"));
         assert!(!state_excluded(Path::new("pki/halt_reason")));
         assert!(!state_excluded(Path::new("soul.sha256")));
     }

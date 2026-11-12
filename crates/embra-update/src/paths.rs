@@ -17,8 +17,14 @@ pub const ENGINE_MARKER: &str = ".engine";
 pub const GUARDIAN_TARGET: &str = ".guardian/target";
 pub const GUARDIAN_ARTIFACTS: &str = ".guardian/target/wasm32-unknown-unknown/release";
 pub const GUARDIAN_CARGO_HOME: &str = ".guardian/cargo-home";
-/// STATE files a snapshot leaves out: a halt's reason, the next-boot marker.
-pub const STATE_EXCLUDED: &[&str] = &["halt_reason", "next-boot", "lost+found"];
+/// STATE files a snapshot leaves out: a halt's reason, the next-boot marker,
+/// and the last time the machine saved its clock, which belongs to the
+/// machine and not to what a snapshot holds.
+pub const STATE_EXCLUDED: &[&str] = &["halt_reason", "next-boot", "lost+found", embra_boot::clock::LAST_KNOWN_NAME];
+/// STATE entries a restore leaves in place while it empties the rest: the
+/// filesystem's own directory, and the saved clock (a restore must not take
+/// a board whose clock battery is dead back to the image's build time).
+pub const STATE_KEPT_BY_RESTORE: &[&str] = &["lost+found", embra_boot::clock::LAST_KNOWN_NAME];
 /// The database's loopback address; a snapshot refuses while it answers.
 pub const DB_ADDR: &str = "127.0.0.1:8090";
 /// What stays free on DATA beside a snapshot: the database's compaction and

@@ -2,7 +2,8 @@
 //!
 //! Boot sequence:
 //! 1. Install the panic hook (PID 1 only); a clock earlier than the image's
-//!    build time is set to it (PID 1 only, `clock.rs`)
+//!    build time resumes from the last time this machine saved, or from the
+//!    build time (PID 1 only, `clock.rs`)
 //! 2. Mount pseudo-filesystems, bring the network up
 //! 3. Verify partition mounts
 //! 4. Scrub the environment the kernel handed over (PID 1 only), read the
@@ -52,12 +53,18 @@ fn main() -> Result<()> {
 
     // Step 1.5: the clock's floor, before anything is dated. The kernel
     // took the time from the hardware clock; one that reads earlier than
-    // this image was built is certainly wrong (a board whose clock battery
-    // ran down) and is set to the build time. PID 1 only: in development
-    // the host's clock is not embrad's to set.
+    // this image was built has certainly lost its time (a board whose clock
+    // battery ran down) and resumes from the last time this machine saved
+    // on STATE, which embra-init has mounted, or from the build time. PID 1
+    // only: in development the host's clock is not embrad's to set.
     let release = Release::read().ok();
     let built = release.as_ref().and_then(Release::built_unix);
-    let floored_from = if pid == 1 { clock::apply_floor(&clock::ThisMachine, built) } else { None };
+    let floored = if pid == 1 {
+        let saved = embra_boot::clock::read_saved_time(std::path::Path::new(embra_boot::clock::LAST_KNOWN_PATH));
+        clock::apply_floor(&clock::ThisMachine, built, saved)
+    } else {
+        None
+    };
 
     // The mounts and the environment come before the runtime: one thread
     // runs here, which is what makes the `set_var` calls in
@@ -89,10 +96,13 @@ fn main() -> Result<()> {
     if pid == 1 {
         let carrier = std::fs::read_to_string("/sys/class/net/eth0/carrier").ok();
         let missing = clock::network_missing(std::path::Path::new(net_lease::LEASE_PATH).exists(), carrier.as_deref());
-        let status = clock::sync_at_boot(&clock::ThisMachine, cmdline.time_server(), floored_from, built, missing);
+        let status = clock::sync_at_boot(&clock::ThisMachine, cmdline.time_server(), floored, built, missing);
         if let Err(e) = status.write() {
             warn!("the clock's record could not be written to {}: {e}", embra_boot::clock::STATUS_PATH);
         }
+        // The clock as it stands now is the first save of this boot: a time
+        // server's, the hardware clock's, or the floor's.
+        clock::save_to_state(built);
     }
 
     // Step 5: a menu entry's job, or what a session scheduled for this boot
@@ -146,13 +156,16 @@ fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    match runtime.block_on(run(&cmdline, mode)) {
+    match runtime.block_on(run(&cmdline, mode, built)) {
         Ok(()) => {}
         Err(e) if pid == 1 => halt_system(&fatal_reason(&e)),
         Err(e) => return Err(e),
     }
 
     if pid == 1 {
+        // The services are stopped: the clock is saved once more, so the
+        // boot that follows a restart loses none of this one's time.
+        clock::save_to_state(built);
         // PID 1 should reboot or halt
         reboot_system();
     }
@@ -217,7 +230,7 @@ fn prepare(pid: u32) -> Result<Cmdline> {
 
 /// The services and the reconciliation loop. An `Err` is fatal: PID 1
 /// halts with it as the reason, development mode returns it.
-async fn run(cmdline: &Cmdline, mode: BootMode) -> Result<()> {
+async fn run(cmdline: &Cmdline, mode: BootMode, built: Option<i64>) -> Result<()> {
     // Step 5: Start services in dependency order
     info!("Starting services");
     let mut supervisor = supervisor::Supervisor::with_cmdline(cmdline.clone());
@@ -238,6 +251,12 @@ async fn run(cmdline: &Cmdline, mode: BootMode) -> Result<()> {
     boot::after_services_healthy(cmdline, mode);
 
     info!("All services started. Entering reconciliation loop.");
+
+    // The clock is saved to STATE while the services run, for a boot that
+    // finds the hardware clock without its time (`clock.rs`). PID 1 only.
+    if std::process::id() == 1 {
+        tokio::spawn(clock::keep_saved(built));
+    }
 
     // Step 8: Reconciliation loop (runs forever)
     // Note: embrad's stdout/stderr are already redirected to log file

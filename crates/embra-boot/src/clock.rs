@@ -9,6 +9,12 @@
 //! a certificate date error's hint and for `system_status`; embrad's banner
 //! reads it for the one line it prints when the clock is still a guess.
 //!
+//! The last known time is here as well: embrad saves the clock to STATE
+//! while the OS runs ([`LAST_KNOWN_PATH`]), and a boot whose hardware clock
+//! has lost its time resumes from it. The updater names the file, so a
+//! snapshot leaves it out and a restore leaves it in place: it belongs to
+//! the machine, not to what a snapshot holds.
+//!
 //! The date arithmetic lives here too (the release stamp's `BUILT`, the
 //! dates in an operator's line, the hardware clock's fields): std alone, as
 //! the rest of this crate.
@@ -17,6 +23,42 @@ use std::fmt;
 
 /// Where embrad records what it made of the clock.
 pub const STATUS_PATH: &str = "/run/embra/clock-status";
+
+/// The last time this machine saved its clock: the file's name on STATE.
+pub const LAST_KNOWN_NAME: &str = "last-known-time";
+/// The same file as embrad reads and writes it.
+pub const LAST_KNOWN_PATH: &str = "/embra/state/last-known-time";
+
+/// The saved time's text: `time=<seconds after the epoch>`, and the same
+/// instant in words for whoever reads STATE from outside.
+pub fn saved_time_text(secs: i64) -> String {
+    format!("time={secs}\nutc={}\n", format_utc(secs))
+}
+
+/// The seconds of a saved time; `None` for a text without a `time=` line
+/// of digits (an empty or foreign file is no time at all).
+pub fn parse_saved_time(text: &str) -> Option<i64> {
+    let value = text.lines().filter_map(|l| l.strip_prefix("time=")).next_back()?.trim();
+    (!value.is_empty() && value.len() <= 12 && value.bytes().all(|b| b.is_ascii_digit())).then(|| value.parse().ok()).flatten()
+}
+
+/// The saved time at `path`; `None` when there is none to read.
+pub fn read_saved_time(path: &std::path::Path) -> Option<i64> {
+    std::fs::read_to_string(path).ok().and_then(|t| parse_saved_time(&t))
+}
+
+/// Save a time at `path`, whole or not at all: a file beside it, synced,
+/// then renamed over it, so a power cut leaves the earlier time or this
+/// one and never half a file.
+pub fn write_saved_time(path: &std::path::Path, secs: i64) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(saved_time_text(secs).as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
+}
 
 /// A date and a time of day in UTC (the proleptic Gregorian calendar).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +270,9 @@ pub struct ClockStatus {
     pub floored_from: Option<i64>,
     /// The image's build time, when the release stamp gave one.
     pub built: Option<i64>,
+    /// The last time this machine saved, when the clock resumed from it
+    /// and not from the build time: a saved time later than the build.
+    pub resumed_from: Option<i64>,
     pub sync: Sync,
     pub rtc: Rtc,
 }
@@ -238,8 +283,9 @@ impl ClockStatus {
         matches!(self.sync, Sync::Synchronized { .. })
     }
 
-    /// The clock is the image's build time and nothing confirmed it: every
-    /// date check runs against a clock known to be behind.
+    /// The clock is a floor and nothing confirmed it: the last time this
+    /// machine saved, or the image's build time. Every date check runs
+    /// against a clock known to be behind.
     pub fn is_a_guess(&self) -> bool {
         self.floored_from.is_some() && !self.synchronized()
     }
@@ -254,6 +300,9 @@ impl ClockStatus {
         }
         if let Some(built) = self.built {
             out.push_str(&format!("built={built}\n"));
+        }
+        if let Some(saved) = self.resumed_from {
+            out.push_str(&format!("resumed_from={saved}\n"));
         }
         match &self.sync {
             Sync::Synchronized { server, address, offset, stratum } => {
@@ -289,6 +338,7 @@ impl ClockStatus {
         Some(ClockStatus {
             floored_from: field("floored_from").and_then(|v| v.parse().ok()),
             built: field("built").and_then(|v| v.parse().ok()),
+            resumed_from: field("resumed_from").and_then(|v| v.parse().ok()),
             sync,
             rtc: Rtc::parse(field("rtc").unwrap_or("")),
         })
@@ -322,14 +372,22 @@ impl ClockStatus {
             Sync::Off => "not confirmed: embra.ntp=off, no time server was asked".to_string(),
         };
         if let Some(was) = self.floored_from {
-            let built = self.built.map(format_utc).unwrap_or_else(|| "the image's build time".into());
-            if self.synchronized() {
-                out.push_str(&format!("; the hardware clock read {} at boot, earlier than the image was built", format_utc(was)));
-            } else {
-                out.push_str(&format!("; the hardware clock read {} at boot, earlier than the image was built, so the clock is the build time, {built}, and counting", format_utc(was)));
+            out.push_str(&format!("; the hardware clock read {} at boot, earlier than the image was built", format_utc(was)));
+            if !self.synchronized() {
+                out.push_str(&format!(", so {}", self.floor_in_words()));
             }
         }
         out
+    }
+
+    /// What the clock was set to when the hardware clock had lost its time,
+    /// as a clause: the saved time it resumed from, or the build time.
+    pub fn floor_in_words(&self) -> String {
+        match (self.resumed_from, self.built) {
+            (Some(saved), _) => format!("the clock resumed from the last time this machine saved, {}, and counts from there", format_utc(saved)),
+            (None, Some(built)) => format!("the clock is the build time, {}, and counting", format_utc(built)),
+            (None, None) => "the clock is the image's build time, and counting".to_string(),
+        }
     }
 }
 
@@ -404,6 +462,7 @@ mod tests {
         let synced = ClockStatus {
             floored_from: Some(1_514_764_803),
             built: Some(1_794_452_322),
+            resumed_from: None,
             sync: Sync::Synchronized { server: "time.cloudflare.com".into(), address: "162.159.200.1:123".into(), offset: 279_687_519.25, stratum: 3 },
             rtc: Rtc::Written,
         };
@@ -422,6 +481,7 @@ mod tests {
         let guess = ClockStatus {
             floored_from: Some(1_514_764_803),
             built: Some(1_794_452_322),
+            resumed_from: None,
             sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: "time.cloudflare.com could not be resolved:\nno answer".into() },
             rtc: Rtc::Unchanged,
         };
@@ -433,7 +493,7 @@ mod tests {
         assert!(back.summary().starts_with("not confirmed: no time from time.cloudflare.com at boot (time.cloudflare.com could not be resolved: no answer); the hardware clock read 2018-01-01 00:00:03 UTC"), "{}", back.summary());
         assert!(back.summary().ends_with("so the clock is the build time, 2026-11-12 02:58:42 UTC, and counting"), "{}", back.summary());
 
-        let off = ClockStatus { floored_from: None, built: None, sync: Sync::Off, rtc: Rtc::Absent };
+        let off = ClockStatus { floored_from: None, built: None, resumed_from: None, sync: Sync::Off, rtc: Rtc::Absent };
         assert_eq!(off.to_text(), "sync=off\nrtc=absent\n");
         assert_eq!(ClockStatus::parse("sync=off\nrtc=absent\n"), Some(off.clone()));
         assert!(!off.is_a_guess(), "a clock nobody checked is not known to be wrong");
@@ -444,5 +504,62 @@ mod tests {
         assert_eq!(ClockStatus::parse(""), None);
         assert_eq!(ClockStatus::parse("floored_from=1\n"), None);
         assert_eq!(ClockStatus::parse("sync=maybe\n"), None);
+    }
+
+    #[test]
+    fn a_clock_that_resumed_from_the_saved_time_says_so_and_is_still_a_guess() {
+        // The board of 2026-11-12: its clock battery dead, a boot without a network after one with it.
+        let resumed = ClockStatus {
+            floored_from: Some(1_514_764_803),
+            built: Some(1_794_452_322),
+            resumed_from: Some(1_794_500_000),
+            sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: "no network interface came up".into() },
+            rtc: Rtc::Unchanged,
+        };
+        let text = resumed.to_text();
+        assert_eq!(
+            text,
+            "floored_from=1514764803\nbuilt=1794452322\nresumed_from=1794500000\nsync=failed\nserver=time.cloudflare.com\nreason=no network interface came up\nrtc=unchanged\n"
+        );
+        assert_eq!(ClockStatus::parse(&text), Some(resumed.clone()));
+        assert!(resumed.is_a_guess(), "a saved time is behind the real time by as long as the power was off");
+        assert_eq!(resumed.floor_in_words(), "the clock resumed from the last time this machine saved, 2026-11-12 16:13:20 UTC, and counts from there");
+        assert!(
+            resumed.summary().ends_with("the hardware clock read 2018-01-01 00:00:03 UTC at boot, earlier than the image was built, so the clock resumed from the last time this machine saved, 2026-11-12 16:13:20 UTC, and counts from there"),
+            "{}",
+            resumed.summary()
+        );
+        // A record from before the field reads without it.
+        assert_eq!(ClockStatus::parse("floored_from=1\nbuilt=2\nsync=off\nrtc=absent\n").unwrap().resumed_from, None);
+        // Once a server has answered, where the clock started is history.
+        let synced = ClockStatus { sync: Sync::Synchronized { server: "s".into(), address: "a".into(), offset: 1.0, stratum: 2 }, ..resumed };
+        assert!(!synced.is_a_guess());
+        assert!(!synced.summary().contains("resumed"), "{}", synced.summary());
+    }
+
+    #[test]
+    fn a_saved_time_is_written_whole_and_read_back_and_anything_else_is_no_time() {
+        assert_eq!(saved_time_text(1_794_500_000), "time=1794500000\nutc=2026-11-12 16:13:20 UTC\n");
+        assert_eq!(parse_saved_time("time=1794500000\nutc=2026-11-12 16:13:20 UTC\n"), Some(1_794_500_000));
+        assert_eq!(parse_saved_time("time=1794500000"), Some(1_794_500_000), "the line end is not part of it");
+        for bad in ["", "\n", "time=\n", "time=soon\n", "time=-5\n", "time=17945000001794500000\n", "utc=2026-11-12 16:13:20 UTC\n", "1794500000\n", " time=1\n"] {
+            assert_eq!(parse_saved_time(bad), None, "{bad:?}");
+        }
+        let dir = std::env::temp_dir().join(format!("embra-boot-saved-time-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(LAST_KNOWN_NAME);
+        assert_eq!(read_saved_time(&path), None, "no file, no time");
+        write_saved_time(&path, 1_794_500_000).unwrap();
+        assert_eq!(read_saved_time(&path), Some(1_794_500_000));
+        write_saved_time(&path, 1_794_500_060).unwrap();
+        assert_eq!(read_saved_time(&path), Some(1_794_500_060), "a later save replaces the earlier one");
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, [LAST_KNOWN_NAME], "no temporary file is left beside it");
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(read_saved_time(&path), None, "an empty file is no time");
+        assert!(write_saved_time(&dir.join("absent").join(LAST_KNOWN_NAME), 1).is_err(), "a directory that is not there is an error, not a panic");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(LAST_KNOWN_PATH.ends_with(LAST_KNOWN_NAME) && LAST_KNOWN_PATH.starts_with("/embra/state/"));
     }
 }
