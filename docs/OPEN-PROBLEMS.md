@@ -74,7 +74,7 @@ embrad sets the clock at boot: a hardware clock that reads earlier than the imag
 
 - **The answer is not authenticated.** embrad ties an answer to its request with a random value the server returns, which stops a forger off the path, and refuses a time earlier than the image's build time. A host on the path can still forge a later time. NTS (RFC 8915) would authenticate the answer; it is not implemented.
 - **The source.** The default is one name, `time.cloudflare.com` (`DEFAULT_TIME_SERVER`). The NTP Pool's zone names are not used: its rules for vendors forbid them as the default of a distributed system without a vendor zone, and embraOS has none; with one, the default becomes that zone. The DHCP lease's NTP option is not read.
-- **The clock is not kept.** One exchange per boot. A machine that stays up drifts with its hardware clock, and a boot without an answer is not asked again until the next. An installed machine has no stored setting for the server: `embra.ntp=` is typed in GRUB's editor at each boot, as every kernel-line knob is.
+- **The clock is not kept.** One exchange per boot. A machine that stays up drifts with its hardware clock, and a boot without an answer is not asked again until the next. An installed machine has no stored setting for the server: `embra.ntp=` is typed in GRUB's editor at each boot, as every kernel-line knob is. A board whose clock battery is dead (the bare-metal machine of 2026-11-12) loses its time whenever power is removed: after that it has the right time only in a boot where the time server answers, and the image's build time otherwise, since nothing carries the last known time across a power-off.
 
 ## An interactive console on the display
 
