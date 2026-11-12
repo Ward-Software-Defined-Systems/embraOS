@@ -1000,6 +1000,23 @@ body.kiosk .mobile-toggle { display: none; }
 .kiosk-menu button:disabled { color: var(--txt-dim); opacity: .6; }
 .kiosk-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
 
+/* A backup's upload (embra-term.js `embraBackupCard`): the page's own card
+   in the lower right corner, over the terminal and under the modals, with
+   the progress and then the machine's answer. */
+.backup-card { position: fixed; right: 18px; bottom: 18px; z-index: 45; display: none;
+  flex-direction: column; gap: 8px; width: min(460px, 92vw); padding: 14px 16px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .55); font-size: var(--text-sm); color: var(--txt); }
+.backup-card.ok { border-color: var(--good); }
+.backup-card.bad { border-color: var(--bad); }
+.backup-card .bc-title { font-weight: 600; overflow-wrap: anywhere; }
+.backup-card .bc-line { color: var(--txt-dim); overflow-wrap: anywhere; }
+.backup-card .bc-bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.backup-card .bc-fill { width: 0; height: 100%; background: var(--accent); }
+.backup-card .bc-btn { align-self: flex-end; padding: 6px 16px; font: inherit;
+  font-size: var(--text-sm); color: #1a0e06; background: var(--accent); border: 0;
+  border-radius: 6px; cursor: pointer; }
+
 /* The console's URL over the page (the menu's last entry): one panel on a
    dimmed page, the URL in the terminal's face and large enough to be read
    off the display and typed on another machine. */

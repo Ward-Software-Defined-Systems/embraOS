@@ -122,7 +122,8 @@ pub(super) const UPDATER: &str = "/usr/bin/embra-update";
 /// before the services start): a snapshot or a restore. On STATE, where the
 /// tools cannot write.
 pub(super) const NEXT_BOOT_MARKER: &str = "/embra/state/next-boot";
-/// The web console's download route for a backup (`embra-web/src/backups.rs`).
+/// The web console's route for a backup (`embra-web/src/backups.rs`): a GET
+/// downloads one, a PUT uploads one.
 pub(super) const BACKUP_ROUTE: &str = "/api/backups/";
 const UPDATER_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -243,7 +244,16 @@ pub(super) fn listed_entry(line: &str) -> Option<(&str, bool)> {
     Some((name, state == Some("ok")))
 }
 
-const BACKUP_USAGE: &str = "Usage: /backup create [label] | list | restore <name> | delete <name> | status\n  A snapshot or a restore runs at the next boot, before the database starts (a copy of the live database would be inconsistent): /backup create schedules the snapshot and the boot continues into the session; /backup restore asks for its confirmation, then schedules it and the machine reboots after it. The boot menu's Backup and restore entries do the same from the console.";
+const BACKUP_USAGE: &str = "Usage: /backup create [label] | list | restore <name> | delete <name> | upload | status\n  A snapshot or a restore runs at the next boot, before the database starts (a copy of the live database would be inconsistent): /backup create schedules the snapshot and the boot continues into the session; /backup restore asks for its confirmation, then schedules it and the machine reboots after it. The boot menu's Backup and restore entries do the same from the console. /backup upload says how a backup downloaded earlier, from this machine or another, comes back through the web console.";
+
+/// What `/backup upload` answers. The upload itself is the web console's
+/// (`PUT /api/backups/<name>`): the brain holds neither the file nor the
+/// console's token, and never prints the console's URL.
+pub(super) fn upload_instructions() -> String {
+    format!(
+        "A backup comes back through the web console, from a browser on another machine: in the sidebar, /backup with the action upload, then the .tar.gz that was downloaded. The machine checks the archive while it arrives; a file that is not a backup of embraOS, a damaged one or one cut short is refused, and nothing of it is kept. Taken in, it is listed by /backup list as uploaded and restored like any other: /backup restore <name>, or the boot menu's Restore entry. Its name is the file's without .tar.gz, or the one typed in the form. Without a browser, the same route takes the file from the command line of another machine: curl -T <file>.tar.gz 'https://<this machine>:3345{BACKUP_ROUTE}<name>?token=<the console's token>', with --cacert <this machine's CA certificate>, or -k to accept the console's certificate unseen: it is from this machine's own CA."
+    )
+}
 
 pub(super) async fn handle_backup_command(
     args: &str,
@@ -287,6 +297,7 @@ pub(super) async fn handle_backup_command(
             send(text, SystemMessageType::Info).await;
         }
         "help" => send(BACKUP_USAGE.to_string(), SystemMessageType::Info).await,
+        "upload" => send(upload_instructions(), SystemMessageType::Info).await,
         "create" => {
             let label = if rest.is_empty() { "manual" } else { rest };
             if !valid_word(label, 32) {
@@ -441,6 +452,20 @@ mod backup_tests {
         assert!(valid_word("nightly", 32));
         assert!(!valid_word("../x", 80));
         assert!(!valid_word("", 80));
+    }
+
+    /// The upload is the web console's; the command says how, names the
+    /// route the console serves and nothing that only the console knows.
+    #[test]
+    fn the_upload_command_says_how_and_prints_no_address_or_token_of_its_own() {
+        let said = upload_instructions();
+        for expected in ["the action upload", "/api/backups/<name>", "/backup restore <name>", "is refused", "token=<the console's token>", "https://<this machine>:3345"] {
+            assert!(said.contains(expected), "missing {expected:?}: {said}");
+        }
+        assert!(BACKUP_USAGE.contains("| upload |") && BACKUP_USAGE.contains("/backup upload says how"));
+        // The route the console serves, as embra-web names it.
+        let web = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../embra-web/src/server.rs")).expect("embra-web's routes");
+        assert!(web.contains("\"/api/backups/{name}\"") && web.contains("put(crate::backups::api_backup_put)"), "embra-web takes a PUT on the backups route");
     }
 }
 

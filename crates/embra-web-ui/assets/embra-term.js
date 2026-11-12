@@ -479,6 +479,125 @@
     }
   };
 
+  // A backup's way back (`PUT /api/backups/<name>`, embra-web's backups.rs).
+  // The shell's /backup form picks the file and names it; this streams it to
+  // the machine and shows the progress and the answer on a card of the
+  // page's own, beside the terminal and never in it: an upload runs for
+  // minutes, the console stays usable meanwhile, and nothing is typed into
+  // it. The machine is asked first whether the name and the size pass
+  // (`…/upload-check`): over HTTP/1.1 a refusal sent while the body is still
+  // on its way may never reach the page.
+  let backupXhr = null, backupCard = null;
+  const embraMb = (n) => (n / 1048576).toFixed(n < 10485760 ? 1 : 0) + " MB";
+
+  function embraBackupCard() {
+    if (backupCard) return backupCard;
+    const el = (cls, tag) => { const e = document.createElement(tag || "div"); e.className = cls; return e; };
+    const box = el("backup-card"), title = el("bc-title"), line = el("bc-line");
+    const bar = el("bc-bar"), fill = el("bc-fill"), btn = el("bc-btn", "button");
+    btn.type = "button";
+    bar.appendChild(fill);
+    box.appendChild(title); box.appendChild(line); box.appendChild(bar); box.appendChild(btn);
+    document.body.appendChild(box);
+    let act = null;
+    btn.addEventListener("click", () => { if (act) act(); });
+    backupCard = {
+      open(name) {
+        title.textContent = "Backup upload: " + name;
+        box.classList.remove("ok", "bad");
+        bar.style.display = "block"; fill.style.width = "0%";
+        box.style.display = "flex";
+      },
+      say(text) { line.textContent = text; },
+      progress(done, total) {
+        fill.style.width = (total ? Math.floor(done * 100 / total) : 0) + "%";
+        line.textContent = "Uploading: " + embraMb(done) + " of " + embraMb(total);
+      },
+      action(label, fn) { btn.textContent = label; act = fn; },
+      end(text, ok) {
+        line.textContent = text;
+        bar.style.display = "none";
+        box.classList.add(ok ? "ok" : "bad");
+        btn.textContent = "Close";
+        act = () => { box.style.display = "none"; };
+      },
+    };
+    return backupCard;
+  }
+
+  // What the machine says of an upload of that size under that name:
+  // { ok, status, error }.
+  async function embraBackupAsk(route, bytes) {
+    try {
+      const resp = await fetch(route + "/upload-check?bytes=" + bytes, { cache: "no-store" });
+      const body = await resp.json().catch(() => ({}));
+      return { ok: resp.ok, status: resp.status, error: body.error || ("the machine answered " + resp.status) };
+    } catch (err) {
+      return { ok: false, status: 0, error: "the machine could not be asked (" + err + ")" };
+    }
+  }
+
+  window.embraBackupUploadAllowed = function () {
+    if (window.embraKiosk) {
+      if (term) term.write("\r\n\x1b[2m[embra-web] a backup is uploaded from a remote browser: its /backup form, action upload\x1b[0m\r\n");
+      return false;
+    }
+    return !backupXhr;
+  };
+
+  window.embraUploadBackup = async function (file, name) {
+    if (backupXhr || !file) return;
+    const card = embraBackupCard();
+    const route = "/api/backups/" + encodeURIComponent(name);
+    card.open(name);
+    card.action("Close", () => {});
+    card.say("Asking the machine whether " + embraMb(file.size) + " fits\u2026");
+    const first = await embraBackupAsk(route, file.size);
+    if (!first.ok) { card.end("Not uploaded: " + first.error, false); return; }
+    const xhr = new XMLHttpRequest();
+    backupXhr = xhr;
+    let sent = false;
+    // Leaving the page ends the upload: the browser asks first.
+    const leave = (e) => { e.preventDefault(); e.returnValue = ""; };
+    const over = (text, ok) => {
+      backupXhr = null;
+      window.removeEventListener("beforeunload", leave);
+      card.end(text, ok);
+    };
+    xhr.open("PUT", route);
+    xhr.responseType = "json";
+    xhr.setRequestHeader("Content-Type", "application/gzip");
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) card.progress(e.loaded, e.total); };
+    xhr.upload.onload = () => {
+      sent = true;
+      card.say("Sent " + embraMb(file.size) + "; the machine is checking the archive\u2026");
+    };
+    xhr.onload = () => {
+      const body = xhr.response || {};
+      if (xhr.status === 201 && body.record) {
+        const r = body.record;
+        over("Checked and listed: " + r.files + " files, " + embraMb(r.bytes_uncompressed) + " unpacked" +
+          (r.data_engine ? ", a " + r.data_engine + " database" : "") +
+          ". Restore it with /backup restore " + name +
+          " in a session, or from the boot menu: Backup and restore, then Restore STATE and DATA.", true);
+      } else {
+        over("Not uploaded: " + (body.error || ("the machine answered " + xhr.status)), false);
+      }
+    };
+    xhr.onerror = async () => {
+      // No answer came. The machine is asked again, so that a refusal it
+      // sent into the closing connection is not lost.
+      const now = await embraBackupAsk(route, file.size);
+      over("The connection ended before the machine's answer. " +
+        (sent ? "The file had been sent whole: /backup list shows whether it was taken in." : "Nothing was kept.") +
+        (now.ok ? "" : " Asked again, the machine says: " + now.error), false);
+    };
+    xhr.onabort = () => over("Upload cancelled. Nothing was kept.", false);
+    card.action("Cancel", () => xhr.abort());
+    window.addEventListener("beforeunload", leave);
+    xhr.send(file);
+  };
+
   window.embraTermInject = function (text) {
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: "input", data: text }));
   };

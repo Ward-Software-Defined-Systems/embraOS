@@ -30,6 +30,18 @@ extern "C" {
     /// the desktop shell needs no File/Blob plumbing in Rust).
     #[wasm_bindgen(js_name = embraUploadFiles)]
     pub fn upload_files(files: &web_sys::FileList);
+
+    /// Whether this page may pick a backup to upload: not the display
+    /// console's (it has no file picker, and says so in the terminal), and
+    /// not while an upload runs.
+    #[wasm_bindgen(js_name = embraBackupUploadAllowed)]
+    pub fn backup_upload_allowed() -> bool;
+
+    /// Stream a backup's archive to `PUT /api/backups/<name>` and show its
+    /// progress and the machine's answer on the page's card (JS owns the
+    /// request, as for the attachments).
+    #[wasm_bindgen(js_name = embraUploadBackup)]
+    pub fn upload_backup(file: &web_sys::File, name: &str);
 }
 
 /// Boot xterm + the WebSocket against `el_id`.

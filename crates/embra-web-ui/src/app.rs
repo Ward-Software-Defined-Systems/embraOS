@@ -138,6 +138,55 @@ const fn sel(label: &'static str, choices: &'static [&'static str], req: bool) -
 /// `embra-term.js` for drops and pastes and by the chat composer.
 pub const ACCEPT: &str = "image/*,text/*,application/json,.md,.markdown,.txt,.csv,.json,.jsonl,.yaml,.yml,.toml";
 
+/// The `/backup` form's action that is the page's own: it opens the file
+/// picker and streams the file to `PUT /api/backups/<name>`; nothing is
+/// typed into the console (the first-boot wizard would read a typed line as
+/// an answer, and an upload has to work there).
+const BACKUP_UPLOAD: &str = "upload";
+/// What the backup picker offers: a download of `GET /api/backups/<name>`
+/// is `<name>.tar.gz`.
+const BACKUP_ACCEPT: &str = ".gz,.tgz,application/gzip,application/x-gzip";
+
+/// The name a backup is uploaded under: the one the operator typed, or the
+/// file's own without its `.tar.gz`, without the ` (1)` a browser adds to a
+/// second download, and with every character a backup's name cannot hold
+/// (anything but letters, digits, `_`, `.` and `-`) turned into a `-`. The
+/// machine checks the name again and refuses what it does not take.
+pub fn backup_name_for(file_name: &str, typed: &str) -> String {
+    let typed = typed.trim();
+    if !typed.is_empty() {
+        return typed.to_string();
+    }
+    let lower = file_name.to_ascii_lowercase();
+    let stem_len = [".tar.gz", ".tgz", ".gz"]
+        .iter()
+        .find(|ext| lower.ends_with(**ext))
+        .map_or(file_name.len(), |ext| file_name.len() - ext.len());
+    let mut stem = file_name[..stem_len].trim();
+    // "name (1)": the copy mark of a second download.
+    if let Some((before, mark)) = stem.rsplit_once(" (")
+        && mark.strip_suffix(')').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    {
+        stem = before.trim_end();
+    }
+    let mut name = String::new();
+    for c in stem.chars() {
+        let keep = c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
+        if name.is_empty() && !c.is_ascii_alphanumeric() {
+            continue; // a name starts with a letter or a digit
+        }
+        if keep {
+            name.push(c);
+        } else if !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    let name: String = name.chars().take(80).collect();
+    let name = name.trim_end_matches('-');
+    let name = name.strip_suffix(".partial").unwrap_or(name);
+    if name.is_empty() { "upload".to_string() } else { name.to_string() }
+}
+
 const SPECS: &[Spec] = &[
     Spec { cmd: "/new", title: "New session", note: "Creates and switches to it.",
         join: " ", guided: false,
@@ -150,10 +199,10 @@ const SPECS: &[Spec] = &[
         join: " ", guided: false,
         fields: &[t("Max iterations (1–1000) / reset", "blank = show current", false)] },
     Spec { cmd: "/backup", title: "Backups of STATE and DATA",
-        note: "A snapshot or a restore runs at the next boot, before the database starts. Blank = what is scheduled and how many backups there are; create schedules a snapshot; restore asks for a typed confirmation in the console.",
+        note: "A snapshot or a restore runs at the next boot, before the database starts. Blank = what is scheduled and how many backups there are; create schedules a snapshot; restore asks for a typed confirmation in the console. upload takes a backup's .tar.gz from this browser (one downloaded from this machine or another): it is checked as it arrives, then listed and restored like any other.",
         join: " ", guided: false,
-        fields: &[sel("Action", &["(status)", "create", "list", "restore", "delete"], false),
-            t("Label (create) or name (restore, delete)", "blank = manual", false)] },
+        fields: &[sel("Action", &["(status)", "create", "list", "restore", "delete", BACKUP_UPLOAD], false),
+            t("Label (create) or name (restore, delete, upload)", "blank = manual; for an upload, the file's name", false)] },
     Spec { cmd: "/update", title: "OS update",
         note: "Blank = check the release published at the update source against this one (the manifest's signature is verified first). apply writes it into the inactive slot and stages it for the next boot; status shows both slots; rollback makes the other slot the default; source shows, sets or resets your own source. A check and an apply take --tag <v…>, one release of a GitHub releases source in place of the latest; apply takes --allow-downgrade for an older release or another build of this version.",
         join: " ", guided: false,
@@ -445,6 +494,10 @@ pub fn App() -> impl IntoView {
     let palette_open = RwSignal::new(false);
     // Hidden file input behind the 📎 topbar button (media wave).
     let attach_input = NodeRef::<leptos::html::Input>::new();
+    // Hidden file input behind the /backup form's upload action, and the
+    // name typed in the form for the file it picks (blank = the file's own).
+    let backup_input = NodeRef::<leptos::html::Input>::new();
+    let backup_as = RwSignal::new(String::new());
     let filter = RwSignal::new(String::new());
     // Parameter modal: Some(spec index) when open.
     let modal = RwSignal::new(None::<usize>);
@@ -632,6 +685,20 @@ pub fn App() -> impl IntoView {
                                 let input_el: &web_sys::HtmlInputElement = &el;
                                 if let Some(files) = input_el.files() {
                                     term::upload_files(&files);
+                                }
+                                input_el.set_value("");
+                            }
+                        } />
+                    // A backup's way back: picked through the /backup form's
+                    // upload action, streamed by embra-term.js.
+                    <input node_ref=backup_input type="file" accept=BACKUP_ACCEPT
+                        style="display:none"
+                        on:change=move |_| {
+                            if let Some(el) = backup_input.get() {
+                                let input_el: &web_sys::HtmlInputElement = &el;
+                                if let Some(file) = input_el.files().and_then(|f| f.get(0)) {
+                                    let name = backup_name_for(&file.name(), &backup_as.get_untracked());
+                                    term::upload_backup(&file, &name);
                                 }
                                 input_el.set_value("");
                             }
@@ -863,6 +930,21 @@ pub fn App() -> impl IntoView {
                 let spec = &SPECS[i];
                 // Shared submit path: Run button + Enter on any input/select.
                 let submit_modal = move || {
+                    // The upload is the page's own action: the picker opens
+                    // on this click and the file goes to the machine by
+                    // HTTP; the console is not typed into.
+                    if SPECS[i].cmd == "/backup"
+                        && vals.with(|v| v.first().map(String::as_str) == Some(BACKUP_UPLOAD))
+                    {
+                        backup_as.set(vals.with(|v| v.get(1).cloned().unwrap_or_default()));
+                        modal.set(None);
+                        if term::backup_upload_allowed()
+                            && let Some(el) = backup_input.get()
+                        {
+                            el.click();
+                        }
+                        return;
+                    }
                     let line = build(&SPECS[i], &vals.get());
                     match line {
                         Some(l) => {
@@ -1028,5 +1110,61 @@ pub fn App() -> impl IntoView {
                 }
             })}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A name the machine takes (embra-web's `valid_backup_name`, and never
+    /// an unfinished entry's).
+    fn takes(name: &str) -> bool {
+        let mut chars = name.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+            && name.len() <= 80
+            && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            && !name.ends_with(".partial")
+    }
+
+    #[test]
+    fn an_uploaded_backup_is_named_after_its_file_unless_a_name_was_typed() {
+        for (file, typed, name) in [
+            ("2026-11-12_101200_manual.tar.gz", "", "2026-11-12_101200_manual"),
+            ("2026-11-12_101200_manual (1).tar.gz", "", "2026-11-12_101200_manual"),
+            ("2026-11-12_101200_pre-v0.24.0-phase2 (12).TAR.GZ", "", "2026-11-12_101200_pre-v0.24.0-phase2"),
+            ("board.tgz", "", "board"),
+            ("board.gz", "", "board"),
+            ("My board, before the re-install.tar.gz", "", "My-board-before-the-re-install"),
+            ("  .hidden.tar.gz", "", "hidden"),
+            ("crashed.partial.tar.gz", "", "crashed"),
+            ("(1).tar.gz", "", "1"),
+            ("—.tar.gz", "", "upload"),
+            (".tar.gz", "", "upload"),
+            ("no-extension", "", "no-extension"),
+            ("2026-11-12_101200_manual.tar.gz", "  the-board  ", "the-board"),
+            ("whatever.tar.gz", "as typed/even so", "as typed/even so"),
+        ] {
+            assert_eq!(backup_name_for(file, typed), name, "{file:?} typed {typed:?}");
+            if typed.is_empty() {
+                assert!(takes(&backup_name_for(file, typed)), "{file:?} gives a name the machine refuses");
+            }
+        }
+        // 80 characters at most, and the cut never ends on the dash of a replaced character.
+        let long = backup_name_for(&format!("{} x.tar.gz", "a".repeat(79)), "");
+        assert_eq!(long, "a".repeat(79));
+        assert!(takes(&backup_name_for(&format!("{}.tar.gz", "b".repeat(200)), "")));
+    }
+
+    /// The upload is an action of the `/backup` form, and the page's own:
+    /// `build` never sees it (`submit_modal` takes it first), so no
+    /// `/backup upload …` line with a file's name is typed into the console.
+    #[test]
+    fn the_backup_form_offers_the_upload_among_its_actions() {
+        let spec = &SPECS[spec_idx("/backup").expect("the /backup form")];
+        assert!(spec.fields[0].choices.contains(&BACKUP_UPLOAD));
+        assert_eq!(spec.fields[0].choices[0], "(status)", "the form opens on the status, not on the upload");
+        assert!(spec.note.contains("upload"));
+        assert!(BACKUP_ACCEPT.split(',').any(|ext| ext == ".gz"), "a download is <name>.tar.gz");
     }
 }
