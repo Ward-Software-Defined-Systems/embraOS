@@ -24,14 +24,16 @@
 
 **Current Status:** Phase 1 — Stable, released as `v0.23.0-phase1` (2026-11-01; the code-review pit stop, `v0.16.0-phase1` through `v0.23.0-phase1`, closed on `main`). Phase 2 — In progress on branch `phase2`: the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, DHCP, the drivers of the hypervisors and of wired hardware with their firmware and microcode, the web console on the machine's display with keyboard and mouse, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
-> **⚠️ `phase2` is a testing branch and unstable.** Bare-metal and hypervisor installs
-> are being tested on it right now: the installer ISO and the display console are
-> validated under QEMU, on ESXi and on Hyper-V; the bare-metal drivers with their
-> firmware and microcode have not run on real hardware yet, the slot size changed
-> the disk layout, and a build from this branch may not boot on your hardware or
-> update cleanly from an earlier image. For a working embraOS use the latest release
-> on `main`, `v0.23.0-phase1`; what each surface has been validated on is in
-> [docs/OPERATIONS/OPERATION.md](docs/OPERATIONS/OPERATION.md).
+> **Supported platforms.** embraOS boots on UEFI firmware with Secure Boot off, on x86_64
+> and aarch64: from the disk image, from the same disk converted for a hypervisor, or
+> installed from the ISO. Validated so far: QEMU on x86_64 Linux, on an Intel Mac and on
+> Apple Silicon; VMware ESXi 8.0 U2 (the OVA and the ISO); Microsoft Hyper-V generation 2
+> (the VHDX and the ISO); VMware Fusion on Apple Silicon (the ISO); Parallels Desktop 26.5
+> on an Intel Mac (the machine it imports and the ISO). Bare metal has not been run yet:
+> the drivers of wired hardware with their firmware and the CPU microcode are in the
+> image. These are the platforms of the `phase2` branch; the latest release on `main`,
+> `v0.23.0-phase1`, is a QEMU image. What each surface has been validated on, and what
+> is still TBD, is in [docs/OPERATIONS/OPERATION.md](docs/OPERATIONS/OPERATION.md).
 
 Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors and bare metal (the A/B slots with rollback, the signed update, the hypervisor and bare-metal drivers with their firmware, the display console and the installer ISO landed in Phase 2's waves; LUKS and mTLS follow); a governed module system with an `embractl` management CLI; a custom kernel; and a sovereign-intelligence tier — the embraOS-QNM-Core model option and Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
@@ -43,7 +45,8 @@ Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors an
 > operator's own key, and `/local-ai-gateway off` restores the direct path. A URL is stored
 > only once the listener has identified itself with the gateway's `x-local-ai-gateway`
 > header, and the gateway's own certificate authority is trusted through the operator's
-> CA drop-ins (`seed-state.sh --ca-dir`), so the key travels to the gateway over HTTPS.
+> CA drop-ins (`seed-state.sh --ca-dir`, or `Imported_CAs/` at build time for a machine
+> installed from the ISO), so the key travels to the gateway over HTTPS.
 > The gateway records every request with its bodies, tokens, timing and routing for
 > inspection, prices cloud traffic at list rates, and blocks a request that carries a
 > secret before it leaves the network — embraOS reports such a block as the turn's error,
@@ -112,7 +115,7 @@ Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors an
 
 > **Memory & knowledge graph today.** ***Writing*** memories is still operator-driven,
 > by conversation: ask the intelligence to remember something, or whether anything from
-> this session is worth keeping — it has `remember` and twelve `knowledge_*` tools.
+> this session is worth keeping — it has `remember` and thirteen `knowledge_*` tools.
 > `remember` writes the memory into the knowledge graph in the same call and names the
 > nearest existing nodes, so the intelligence links what is related without being asked.
 > ***Reading*** is
@@ -199,10 +202,12 @@ The runtime services that implement those layers:
 | `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. |
 | `embra-brain` | 50002 | LLM runtime — provider abstraction, 119 tools, session manager, knowledge graph, Learning Mode. |
 | `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
+| `udevd` | — | eudev, for the display console's keyboard and mouse. Not essential: a boot goes on without it. |
+| `embra-kiosk` | — | The display console: the web console rendered on the machine's own display by cog (WPE WebKit), drawn in software. Started where the machine has a display; not essential. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
 | `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools (both authoring paths replicant-checked; intelligence proposals also operator-approved); capability-broker host imports. |
-| `embra-update` | — | The OS's backups and updates: snapshots and restores of STATE and DATA, and the signed release fetched, verified and written into the inactive slot. Run by `embrad` in the maintenance boots and by the brain for `/backup` and `/update`. |
+| `embra-update` | — | The OS's backups, updates and installs: snapshots and restores of STATE and DATA, the signed release fetched, verified and written into the inactive slot, the installer of the ISO, and DATA grown to the disk's end. Run by `embrad` in the maintenance boots, before a trial boot's services and at every normal boot, and by the brain for `/backup` and `/update`. |
 
 Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database, vendored into this workspace at `crates/wardsondb` as a deliberate in-tree fork (the upstream project continues independently). Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 119 tools work identically across every backend.
 
@@ -240,7 +245,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Updates and Backups](docs/OPERATIONS/UPDATES-AND-BACKUPS.md)** | The two OS slots and GRUB's A/B state, in-OS backups and restores, the signed OS update |
 | **[Tool Reference](docs/OPERATIONS/TOOL-REFERENCE.md)** | All 119 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the boot chain and disk layout, network exposure and trust boundaries, the four LLM providers, reasoning controls, prompt caching |
-| **[Knowledge Graph](docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md)** | The cross-session memory graph — promotion at creation, link candidates, auto-derived edges, auto-enrichment, retrieval ranking, in-OS embeddings, the twelve `knowledge_*` tools |
+| **[Knowledge Graph](docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md)** | The cross-session memory graph — promotion at creation, link candidates, auto-derived edges, auto-enrichment, retrieval ranking, in-OS embeddings, the thirteen `knowledge_*` tools |
 | **[Identity Graph](docs/MULTI-GRAPH/IDENTITY-GRAPH.md)** | The sealed IDENTITY+SOUL graph — format, the Learning-Mode import, KG projection, prompt rendering, and the re-seal migration ceremony |
 | **[Open Problems](docs/OPEN-PROBLEMS.md)** | Unresolved design questions tracked at the architecture level |
 | **[Recommended Local Models](docs/LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md)** | Vetted models and server configuration for the Ollama / LM Studio backends |
