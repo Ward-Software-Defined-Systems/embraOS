@@ -776,6 +776,7 @@ async fn define(db: &Arc<WardsonDbClient>, source: &str) -> String {
         &now,
     );
     doc.replicant = record.clone();
+    doc.shipped = carried_shipped(load_doc(db, &module.name).await.as_ref());
     if let Err(e) = upsert(db, &doc).await {
         return format!("guardian: could not persist '{}' — {e}", module.name);
     }
@@ -1500,6 +1501,18 @@ fn shipped_decision(
     }
 }
 
+/// The shipped record an operator's define carries over from the record it
+/// replaces. A tool the image ships stays known as shipped when it is
+/// defined again: with another source it is the edited one
+/// (`ShippedDecision::LeaveEdited` at boot, `shipped: yes, edited by the
+/// operator` in the status, `(shipped, edited)` in the list), with the
+/// shipped source it is the shipped tool as before. A define that started
+/// from a fresh record dropped it, and no write reached the edited state.
+/// A name that was never shipped, or one deleted first, carries nothing.
+fn carried_shipped(replaced: Option<&ToolDoc>) -> Option<ShippedRecord> {
+    replaced.and_then(|d| d.shipped.clone())
+}
+
 fn is_shipped_name(name: &str) -> bool {
     embra_guardian::shipped::SHIPPED.iter().any(|t| t.name == name)
 }
@@ -2170,6 +2183,32 @@ mod shipped_tests {
         let d = shipped_doc("mine", "old", ToolStatus::Ready);
         assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, false, true), ShippedDecision::LeaveEdited);
         assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, false, false), ShippedDecision::LeaveEdited);
+    }
+
+    /// `/guardian-define` under a shipped tool's name: the record keeps
+    /// where the tool came from, so an edit reads as one at boot, in the
+    /// status and in the list, and the shipped source pasted again is the
+    /// shipped tool.
+    #[test]
+    fn a_shipped_tool_defined_again_keeps_its_shipped_record() {
+        assert!(carried_shipped(None).is_none(), "nothing replaced");
+        assert!(carried_shipped(Some(&operator_doc("theirs"))).is_none(), "an operator's own tool");
+        let carried = carried_shipped(Some(&shipped_doc("cur", "cur", ToolStatus::Ready))).expect("the shipped record");
+        assert_eq!(carried.sha256, "cur");
+
+        let mut edited = operator_doc("mine");
+        edited.shipped = Some(carried.clone());
+        assert_eq!(shipped_decision(Some(&edited), "cur", KNOWN, false, true), ShippedDecision::LeaveEdited);
+        assert_eq!(shipped_decision(Some(&edited), "newer", KNOWN, false, true), ShippedDecision::LeaveEdited, "a later image leaves it too");
+        let status = status_human(&edited, &Availability::Callable);
+        assert!(status.contains("shipped: yes, edited by the operator"), "{status}");
+        assert!(list_row(&edited, &Availability::Callable).contains("web_search (shipped, edited)"));
+
+        let mut same = operator_doc("cur");
+        same.shipped = Some(carried);
+        assert_eq!(shipped_decision(Some(&same), "cur", KNOWN, false, true), ShippedDecision::UpToDate);
+        assert!(status_human(&same, &Availability::Callable).contains("shipped: yes, version cur"));
+        assert!(list_row(&same, &Availability::Callable).contains("web_search (shipped)"));
     }
 
     #[test]
