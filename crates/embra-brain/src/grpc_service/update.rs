@@ -498,7 +498,95 @@ pub(super) fn source_action(arg: &str) -> SourceAction {
     SourceAction::Refused(format!("not a source URL: {v} (https://…, or http:// to a private address, or reset)"))
 }
 
-const UPDATE_USAGE: &str = "Usage: /update | apply | status | rollback | source [<url>|reset]\n  /update checks the release published at the source against this one (the manifest's signature is verified first); apply writes the release into the inactive slot, verifies it and stages it for the next boot — /reboot now boots it, and GRUB falls back to this slot if it does not come up; status shows both slots; rollback makes the other slot the default again; source shows, sets or resets the operator's own source (the default is the GitHub releases of the public mirror).";
+const UPDATE_USAGE: &str = "Usage: /update [--tag <v…>] | apply [--tag <v…>] [--allow-downgrade] | status | rollback | source [<url>|reset]\n  /update checks the release published at the source against this one (the manifest's signature is verified first); apply writes the release into the inactive slot, verifies it and stages it for the next boot — /reboot now boots it, and GRUB falls back to this slot if it does not come up; --tag names one release of a GitHub releases source in place of the latest; --allow-downgrade applies a release older than this one, or another build of this version, which apply refuses without it; status shows both slots; rollback makes the other slot the default again; source shows, sets or resets the operator's own source (the default is the GitHub releases of the public mirror).";
+
+/// What `/update` and `/update apply` hand on to the updater beyond the
+/// command itself.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct UpdateOptions {
+    /// One release of a GitHub releases source, by its tag, in place of the
+    /// latest.
+    pub(super) tag: Option<String>,
+    /// Apply what the updater refuses otherwise: a release older than the
+    /// running one, or another build of the running version.
+    pub(super) allow_downgrade: bool,
+}
+
+/// A release tag as `--tag` takes it: `v`, then letters, digits, `.`, `_`
+/// and `-`, 64 characters at most. The updater checks a tag itself
+/// (`source::resolve`); this keeps anything else off its command line.
+fn valid_release_tag(tag: &str) -> bool {
+    tag.len() <= 64
+        && !tag.contains("..")
+        && tag
+            .strip_prefix('v')
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')))
+}
+
+/// The options after `/update` (a check) or `/update apply`; pure. Only
+/// the two the updater takes are accepted, each in its own form, and
+/// `--allow-downgrade` belongs to an apply alone.
+pub(super) fn update_options(rest: &str, apply: bool) -> Result<UpdateOptions, String> {
+    let mut opts = UpdateOptions::default();
+    let mut words = rest.split_whitespace();
+    while let Some(word) = words.next() {
+        match word {
+            "--tag" => {
+                let tag = words.next().ok_or("--tag needs a release tag, as in --tag v0.24.0-phase2")?;
+                if !valid_release_tag(tag) {
+                    return Err(format!("not a release tag: {tag} (v, then letters, digits, . _ -)"));
+                }
+                if opts.tag.replace(tag.to_string()).is_some() {
+                    return Err("--tag is given twice".to_string());
+                }
+            }
+            "--allow-downgrade" if apply => opts.allow_downgrade = true,
+            "--allow-downgrade" => return Err("--allow-downgrade belongs to /update apply; a check needs none".to_string()),
+            other => return Err(format!("/update does not take {other:?} here\n{UPDATE_USAGE}")),
+        }
+    }
+    Ok(opts)
+}
+
+/// The updater's arguments for a check or an apply with these options.
+pub(super) fn updater_args(apply: bool, opts: &UpdateOptions) -> Vec<String> {
+    let mut args: Vec<String> = if apply { vec!["apply".into(), "--yes".into()] } else { vec!["check".into()] };
+    if let Some(tag) = &opts.tag {
+        args.push("--tag".into());
+        args.push(tag.clone());
+    }
+    if opts.allow_downgrade {
+        args.push("--allow-downgrade".into());
+    }
+    args
+}
+
+/// The suffix that makes a source a GitHub releases one, the base the
+/// updater rewrites for a tag (`source::resolve` in embra-update).
+const GITHUB_LATEST_SUFFIX: &str = "/releases/latest/download";
+
+/// Whether `--tag` selects anything at the source in use. The updater
+/// rewrites a GitHub `releases/latest/download` base to the tag's own
+/// release and reads every other base as it is, so on the operator's own
+/// mirror a tag would be dropped without a word and the mirror's release
+/// checked or applied in its place. `source_file` is the text of
+/// `UPDATE_SOURCE_FILE`, `None` when there is none (the default source,
+/// which is GitHub's).
+pub(super) fn tag_selects_a_release(source_file: Option<&str>) -> bool {
+    match source_file.map(|t| t.trim().trim_end_matches('/')).filter(|t| !t.is_empty()) {
+        Some(base) => base.ends_with(GITHUB_LATEST_SUFFIX),
+        None => true,
+    }
+}
+
+/// `update_options`, and the tag refused where it would select nothing.
+fn options_for_this_source(rest: &str, apply: bool) -> Result<UpdateOptions, String> {
+    let opts = update_options(rest, apply)?;
+    if opts.tag.is_some() && !tag_selects_a_release(std::fs::read_to_string(UPDATE_SOURCE_FILE).ok().as_deref()) {
+        return Err("--tag names one release of a GitHub releases source, and the source set here is your own, which serves the one release it holds (/update source shows it; /update source reset returns to the default).".to_string());
+    }
+    Ok(opts)
+}
 
 pub(super) async fn handle_update_command(args: &str, tx: &mpsc::Sender<Result<ConversationResponse, Status>>) {
     let send = |content: String, kind: SystemMessageType| {
@@ -518,28 +606,52 @@ pub(super) async fn handle_update_command(args: &str, tx: &mpsc::Sender<Result<C
         Some((s, r)) => (s, r.trim()),
         None => (args.trim(), ""),
     };
+    // `/update --tag v…`: a check's options with no word before them.
+    let (sub, rest) = if sub.starts_with("--") { ("check", args.trim()) } else { (sub, rest) };
     match sub {
-        "" | "check" => match run_updater(&["check"]).await {
-            Ok(run) => {
-                let mut text = run.stdout.trim().to_string();
-                match run.code {
-                    Some(0) => {
-                        text.push_str("\nRun /update apply to stage it into the inactive slot.");
-                        send(text, SystemMessageType::Info).await;
-                    }
-                    Some(3) => send(text, SystemMessageType::Info).await,
-                    _ => {
-                        if !text.is_empty() {
-                            text.push('\n');
+        "" | "check" => {
+            let opts = match options_for_this_source(rest, false) {
+                Ok(o) => o,
+                Err(why) => {
+                    send(why, SystemMessageType::Error).await;
+                    return;
+                }
+            };
+            let argv = updater_args(false, &opts);
+            let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+            match run_updater(&argv).await {
+                Ok(run) => {
+                    let mut text = run.stdout.trim().to_string();
+                    match run.code {
+                        Some(0) => {
+                            let apply = match &opts.tag {
+                                Some(tag) => format!("/update apply --tag {tag}"),
+                                None => "/update apply".to_string(),
+                            };
+                            text.push_str(&format!("\nRun {apply} to stage it into the inactive slot."));
+                            send(text, SystemMessageType::Info).await;
                         }
-                        text.push_str(&run.reason());
-                        send(text, SystemMessageType::Error).await;
+                        Some(3) => send(text, SystemMessageType::Info).await,
+                        _ => {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(&run.reason());
+                            send(text, SystemMessageType::Error).await;
+                        }
                     }
                 }
+                Err(e) => send(format!("The update check could not run: {e}"), SystemMessageType::Error).await,
             }
-            Err(e) => send(format!("The update check could not run: {e}"), SystemMessageType::Error).await,
-        },
+        }
         "apply" => {
+            let opts = match options_for_this_source(rest, true) {
+                Ok(o) => o,
+                Err(why) => {
+                    send(why, SystemMessageType::Error).await;
+                    return;
+                }
+            };
             if UPDATE_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                 send("An update is being staged already — /update status shows it.".to_string(), SystemMessageType::Info).await;
                 return;
@@ -562,7 +674,7 @@ pub(super) async fn handle_update_command(args: &str, tx: &mpsc::Sender<Result<C
                     }
                 };
                 let mut cmd = crate::tools::subprocess(UPDATER);
-                cmd.args(["apply", "--yes"])
+                cmd.args(updater_args(true, &opts))
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
@@ -598,7 +710,7 @@ pub(super) async fn handle_update_command(args: &str, tx: &mpsc::Sender<Result<C
                 let reason = stderr_text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no reason given").trim().to_string();
                 match child.wait().await {
                     Ok(status) if status.code() == Some(0) => {
-                        forward("Staged. /reboot now boots the new release; if it does not come up, GRUB falls back to this one.".to_string(), SystemMessageType::Info).await
+                        forward("Staged. /reboot now boots the staged release; if it does not come up, GRUB falls back to this one.".to_string(), SystemMessageType::Info).await
                     }
                     Ok(status) if status.code() == Some(3) => forward(reason, SystemMessageType::Info).await,
                     Ok(_) => forward(format!("The update was not staged: {reason}"), SystemMessageType::Error).await,
@@ -655,6 +767,57 @@ mod update_tests {
         assert!(matches!(source_action("http://example.com/u"), SourceAction::Refused(m) if m.contains("private")));
         assert!(matches!(source_action("ftp://x"), SourceAction::Refused(_)));
         assert!(matches!(source_action("https://"), SourceAction::Refused(_)));
+    }
+
+    /// `--tag` and `--allow-downgrade` were on the updater's command line
+    /// and no command passed them. Nothing but the two reaches it, each in
+    /// its own form.
+    #[test]
+    fn a_check_takes_a_tag_and_an_apply_a_tag_and_the_downgrade_switch() {
+        assert_eq!(update_options("", false), Ok(UpdateOptions::default()));
+        assert_eq!(updater_args(false, &UpdateOptions::default()), ["check"]);
+        assert_eq!(updater_args(true, &UpdateOptions::default()), ["apply", "--yes"]);
+
+        let tagged = update_options("--tag v0.24.0-phase2", false).unwrap();
+        assert_eq!(tagged.tag.as_deref(), Some("v0.24.0-phase2"));
+        assert_eq!(updater_args(false, &tagged), ["check", "--tag", "v0.24.0-phase2"]);
+
+        let both = update_options("--allow-downgrade  --tag v0.23.0-phase1", true).unwrap();
+        assert_eq!(both, UpdateOptions { tag: Some("v0.23.0-phase1".into()), allow_downgrade: true });
+        assert_eq!(updater_args(true, &both), ["apply", "--yes", "--tag", "v0.23.0-phase1", "--allow-downgrade"]);
+        assert_eq!(updater_args(true, &update_options("--allow-downgrade", true).unwrap()), ["apply", "--yes", "--allow-downgrade"]);
+
+        // A check stages nothing, so the switch is refused there by name.
+        assert!(update_options("--allow-downgrade", false).unwrap_err().contains("belongs to /update apply"));
+        // A tag is one word of the tag grammar, given once.
+        assert!(update_options("--tag", false).unwrap_err().contains("needs a release tag"));
+        assert!(update_options("--tag v1 --tag v2", true).unwrap_err().contains("twice"));
+        for bad in ["0.24.0", "v", "v../x", "v1/2", "v1;reboot", "--source", "v1..2"] {
+            assert!(update_options(&format!("--tag {bad}"), true).is_err(), "{bad}");
+        }
+        assert!(!valid_release_tag(&format!("v{}", "1".repeat(64))), "64 characters at most");
+        // No other flag of the updater is reachable: not its source, not its
+        // console, not a second command.
+        for other in ["--source https://x.example", "--console", "--yes", "now", "rollback", "--tag=v1"] {
+            assert!(update_options(other, true).unwrap_err().contains("does not take"), "{other}");
+        }
+    }
+
+    /// A tag selects a release at a GitHub releases source and nowhere
+    /// else: the updater reads any other base as it is, so the command
+    /// refuses a tag there instead of checking another release than the
+    /// one named.
+    #[test]
+    fn a_tag_selects_a_release_at_a_github_source_alone() {
+        assert!(tag_selects_a_release(None), "the default source");
+        assert!(tag_selects_a_release(Some("\n")), "an empty file is the default");
+        assert!(tag_selects_a_release(Some("https://github.com/someone/embraOS/releases/latest/download\n")));
+        assert!(tag_selects_a_release(Some("https://github.com/someone/embraOS/releases/latest/download/")));
+        assert!(!tag_selects_a_release(Some("https://gitlab.ops.wsds/api/v4/projects/2/packages/generic/embraos/latest\n")));
+        assert!(!tag_selects_a_release(Some("http://10.0.0.5:8080/updates")));
+        // The suffix is the updater's own: `source::resolve` strips it for a tag.
+        let updater = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../embra-update/src/source.rs")).expect("the updater's source rule");
+        assert!(updater.contains(&format!("strip_suffix(\"{GITHUB_LATEST_SUFFIX}\")")), "the updater rewrites another base for a tag now");
     }
 
     #[test]

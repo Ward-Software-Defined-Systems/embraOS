@@ -92,7 +92,8 @@ System:
   /status                        System status
   /reboot                        Say what a reboot does; /reboot now reboots embraOS through the boot menu
   /backup                        Snapshots of STATE and DATA: create [label], list, restore <name>, delete <name>, status
-  /update                        Check the published release; apply, status, rollback, source [<url>|reset]
+  /update                        Check the published release; apply, status, rollback, source [<url>|reset];
+                                 --tag <v…> names one release, apply --allow-downgrade takes an older one
   /feedback-loop                 Trigger Phase 2 Continuity Engine self-evaluation (experimental)
 
 Keyboard:
