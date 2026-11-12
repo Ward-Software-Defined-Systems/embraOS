@@ -36,4 +36,7 @@ pub const AUTOMATIC_PREFIX: &str = "pre-";
 pub const ARCHIVE: &str = "backup.tar.gz";
 pub const RECORD: &str = "backup.json";
 pub const PARTIAL_SUFFIX: &str = ".partial";
+/// `taken_by` of a backup that came from outside (`import`): it is never
+/// rotated and never stands in for a snapshot this machine took.
+pub const UPLOADED: &str = "uploaded";
 pub const FORMAT: &str = "backup.v1";

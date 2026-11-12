@@ -7,6 +7,7 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
   restore [<name>] [--yes] [--console]                           replace STATE and DATA with a backup
   list [--names]                                                 the backups, newest first
   delete <name>                                                  remove one backup
+  import <name>                                                  check a backup's archive read from standard input and keep it as <name> (the web console's upload)
   check [--source <url>] [--tag <v…>]                            the release at the source against this one
   apply [--yes] [--console] [--allow-downgrade] [--source <url>] [--tag <v…>]   write the release into the inactive slot and stage it
   status                                                         the booted, active and pending slots and what each holds
@@ -20,6 +21,7 @@ pub enum Command {
     Restore { name: Option<String>, yes: bool, console: bool },
     List { names_only: bool },
     Delete { name: String },
+    Import { name: String },
     Check { source: Option<String>, tag: Option<String> },
     Apply { source: Option<String>, tag: Option<String>, yes: bool, console: bool, allow_downgrade: bool },
     Status,
@@ -138,6 +140,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Delete { name })
         }
+        "import" => {
+            let name = positionals.pop().ok_or_else(|| "import needs a name for the backup".to_string())?;
+            if !positionals.is_empty() || !crate::import::importable_name(&name) {
+                return Err(format!("not a name for a backup: {name:?}"));
+            }
+            Ok(Command::Import { name })
+        }
         "check" => Ok(Command::Check { source, tag }),
         "apply" => Ok(Command::Apply { source, tag, yes, console, allow_downgrade }),
         "status" => Ok(Command::Status),
@@ -186,6 +195,12 @@ mod tests {
         assert_eq!(p("restore --console"), Ok(Command::Restore { name: None, yes: false, console: true }));
         assert_eq!(p("list --names"), Ok(Command::List { names_only: true }));
         assert_eq!(p("delete 2026-11-05_101200_manual"), Ok(Command::Delete { name: "2026-11-05_101200_manual".into() }));
+        assert_eq!(p("import 2026-11-05_101200_manual"), Ok(Command::Import { name: "2026-11-05_101200_manual".into() }));
+        assert!(p("import").unwrap_err().contains("needs a name"));
+        assert!(p("import 2026-11-05_101200_manual.partial").unwrap_err().contains("not a name for a backup"));
+        assert!(p("import a b").unwrap_err().contains("not a name for a backup"));
+        assert!(p("import ../etc").unwrap_err().contains("not a name for a backup"));
+        assert!(!p("import mine").unwrap().console());
         assert_eq!(p("check --source https://m/x --tag v1.2.3"), Ok(Command::Check { source: Some("https://m/x".into()), tag: Some("v1.2.3".into()) }));
         assert_eq!(p("apply --yes --allow-downgrade"), Ok(Command::Apply { source: None, tag: None, yes: true, console: false, allow_downgrade: true }));
         assert_eq!(p("status"), Ok(Command::Status));

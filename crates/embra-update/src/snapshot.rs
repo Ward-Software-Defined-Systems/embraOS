@@ -51,11 +51,15 @@ impl Roots {
 pub struct Record {
     pub format: String,
     pub name: String,
-    /// UTC, `YYYY-MM-DD_HHMMSS`, the name's prefix.
+    /// UTC, `YYYY-MM-DD_HHMMSS`, the name's prefix; for an upload under a
+    /// name without one, when it was taken in.
     pub timestamp: String,
     pub label: String,
-    /// `manual`, `scheduled` or `pending-slot`.
+    /// `manual`, `scheduled` or `pending-slot`; `uploaded` for an archive
+    /// that came from outside (`import`).
     pub taken_by: String,
+    /// The release that took the snapshot; none for an upload, whose archive
+    /// does not say.
     pub release: Option<ReleaseRecord>,
     /// WardSONDB's engine marker, when the database directory had one.
     pub data_engine: Option<String>,
@@ -95,6 +99,12 @@ pub struct Listed {
 impl Listed {
     pub fn label(&self) -> Option<&str> {
         self.record.as_ref().map(|r| r.label.as_str())
+    }
+
+    /// The archive came from outside (`import`): whatever its label says,
+    /// it is not a snapshot this machine took.
+    pub fn uploaded(&self) -> bool {
+        self.record.as_ref().is_some_and(|r| r.taken_by == UPLOADED)
     }
 
     /// `NAME  STATE  SIZE  label  release  taken_by`, one line.
@@ -327,11 +337,11 @@ pub fn utc_stamp(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}_{h:02}{m:02}{s:02}")
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn sync_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
@@ -442,12 +452,20 @@ pub fn list(roots: &Roots) -> Vec<Listed> {
     out
 }
 
+/// Whether a complete snapshot with this label was taken here: what
+/// `snapshot --once` asks before a release's first run. An uploaded archive
+/// with the label is another machine's or another time's and does not count.
+pub fn taken_here(entries: &[Listed], label: &str) -> bool {
+    entries.iter().any(|e| e.complete && !e.uploaded() && e.label() == Some(label))
+}
+
 /// Remove the automatic snapshots beyond the newest `KEEP_AUTOMATIC`; a
-/// manual one is never removed. The names removed.
+/// manual one is never removed, and neither is an uploaded one, whatever
+/// its label. The names removed.
 pub fn rotate(roots: &Roots) -> Result<Vec<String>> {
     let automatic: Vec<Listed> = list(roots)
         .into_iter()
-        .filter(|e| e.complete && e.label().is_some_and(|l| l.starts_with(AUTOMATIC_PREFIX)))
+        .filter(|e| e.complete && !e.uploaded() && e.label().is_some_and(|l| l.starts_with(AUTOMATIC_PREFIX)))
         .collect();
     let mut removed = Vec::new();
     for e in automatic.iter().skip(KEEP_AUTOMATIC) {
@@ -585,12 +603,14 @@ pub fn tree_files(root: &Path) -> std::collections::BTreeMap<String, String> {
     out
 }
 
+/// A temporary STATE and DATA and what a machine keeps in them, for this
+/// module's tests and the import's.
 #[cfg(test)]
-mod tests {
+pub mod test_support {
     use super::*;
     use std::os::unix::fs::symlink;
 
-    fn temp_roots(tag: &str) -> Roots {
+    pub fn temp_roots(tag: &str) -> Roots {
         let parent = std::env::temp_dir().join(format!("embra-update-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&parent);
         let roots = Roots { parent: parent.clone(), backups: parent.join("data").join("backups") };
@@ -600,7 +620,7 @@ mod tests {
         roots
     }
 
-    fn populate(roots: &Roots) {
+    pub fn populate(roots: &Roots) {
         let s = roots.state();
         fs::write(s.join("soul.sha256"), "abc").unwrap();
         fs::create_dir_all(s.join("pki")).unwrap();
@@ -629,9 +649,15 @@ mod tests {
         fs::write(w.join(".ssh/id_ed25519"), "SSHKEY").unwrap();
     }
 
-    fn release(engine: &str) -> Release {
+    pub fn release(engine: &str) -> Release {
         Release::parse(&format!("VERSION=0.24.0-phase2\nBUILD_ID=abc\nARCH=x86_64\nENGINE={engine}\nBUILT=now\n")).unwrap()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
 
     #[test]
     fn a_snapshot_round_trips_under_a_temporary_root_and_keeps_links_as_links() {
@@ -722,6 +748,10 @@ mod tests {
     }
 
     fn fake_entry(roots: &Roots, name: &str, label: &str, engine: Option<&str>, partial: bool) {
+        fake_entry_by(roots, name, label, "manual", engine, partial);
+    }
+
+    fn fake_entry_by(roots: &Roots, name: &str, label: &str, taken_by: &str, engine: Option<&str>, partial: bool) {
         let dir = roots.backups.join(if partial { format!("{name}{PARTIAL_SUFFIX}") } else { name.to_string() });
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(ARCHIVE), b"not a real archive").unwrap();
@@ -731,7 +761,7 @@ mod tests {
             name: name.into(),
             timestamp: name.split('_').take(2).collect::<Vec<_>>().join("_"),
             label: label.into(),
-            taken_by: "manual".into(),
+            taken_by: taken_by.into(),
             release: None,
             data_engine: engine.map(str::to_string),
             files: 1,
@@ -777,6 +807,31 @@ mod tests {
         let names: Vec<String> = list(&roots).into_iter().map(|e| e.name).collect();
         assert_eq!(names, vec!["2026-11-03_000000_pre-v0.24.0", "2026-11-02_000000_pre-v0.23.0", "2026-10-01_000000_nightly"]);
         assert!(rotate(&roots).unwrap().is_empty());
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    /// An uploaded archive keeps the label it was taken under on another
+    /// machine or at another time. It is the operator's: the rotation never
+    /// removes it, and it never passes for the snapshot a release takes
+    /// before its first run.
+    #[test]
+    fn an_uploaded_backup_is_never_rotated_and_never_stands_in_for_a_snapshot_taken_here() {
+        let roots = temp_roots("uploaded");
+        fake_entry_by(&roots, "2026-10-01_000000_pre-v0.21.0", "pre-v0.21.0", UPLOADED, None, false);
+        fake_entry_by(&roots, "2026-10-02_000000_pre-v0.24.0", "pre-v0.24.0", UPLOADED, None, false);
+        fake_entry(&roots, "2026-11-01_000000_pre-v0.22.0", "pre-v0.22.0", None, false);
+        fake_entry(&roots, "2026-11-02_000000_pre-v0.23.0", "pre-v0.23.0", None, false);
+        let entries = list(&roots);
+        assert_eq!(entries.iter().filter(|e| e.uploaded()).count(), 2);
+        assert!(!taken_here(&entries, "pre-v0.24.0"), "the uploaded one is not this release's snapshot");
+        assert!(taken_here(&entries, "pre-v0.23.0"));
+        assert!(!taken_here(&entries, "pre-v0.20.0"));
+        assert!(rotate(&roots).unwrap().is_empty(), "two automatic ones taken here: nothing is over the count");
+        fake_entry(&roots, "2026-11-03_000000_pre-v0.24.0", "pre-v0.24.0", None, false);
+        assert!(taken_here(&list(&roots), "pre-v0.24.0"));
+        assert_eq!(rotate(&roots).unwrap(), vec!["2026-11-01_000000_pre-v0.22.0".to_string()]);
+        let names: Vec<String> = list(&roots).into_iter().map(|e| e.name).collect();
+        assert!(names.contains(&"2026-10-01_000000_pre-v0.21.0".to_string()) && names.contains(&"2026-10-02_000000_pre-v0.24.0".to_string()), "{names:?}");
         fs::remove_dir_all(&roots.parent).unwrap();
     }
 

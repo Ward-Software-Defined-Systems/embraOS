@@ -16,6 +16,7 @@ mod console;
 mod db;
 mod fetch;
 mod grow;
+mod import;
 mod install;
 mod manifest;
 mod paths;
@@ -88,7 +89,7 @@ fn run(cmd: Command, op: &mut console::Operator) -> anyhow::Result<Outcome> {
                     "refused: the database is running, so a copy of its files would be inconsistent; a snapshot runs before the services start (the boot menu's entry, or /backup create for the next boot)".into(),
                 ));
             }
-            if once && snapshot::list(&roots).iter().any(|e| e.complete && e.label() == Some(label.as_str())) {
+            if once && snapshot::taken_here(&snapshot::list(&roots), &label) {
                 return Ok(Outcome::Nothing(format!("snapshot \"{label}\" exists already; nothing to do")));
             }
             let release = embra_boot::Release::read().ok();
@@ -159,6 +160,13 @@ fn run(cmd: Command, op: &mut console::Operator) -> anyhow::Result<Outcome> {
                 Ok(Outcome::Done)
             }
             false => Ok(Outcome::Refused(format!("delete: no backup named \"{name}\""))),
+        },
+        // The archive comes on standard input (the web console's upload
+        // pipes it in) and the services run meanwhile: nothing of STATE or
+        // DATA is read, so the database is not asked about.
+        Command::Import { name } => match import::import(&roots, &name, std::io::stdin().lock(), op)? {
+            import::ImportOutcome::Imported(_) => Ok(Outcome::Done),
+            import::ImportOutcome::Refused(msg) => Ok(Outcome::Refused(msg)),
         },
         Command::Check { source, tag } => Ok(update::check_command(source.as_deref(), tag.as_deref(), op)),
         Command::Apply { source, tag, yes, console, allow_downgrade } => {
