@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/system-architecture.png" alt="embraOS system architecture — from QEMU through the firmware, GRUB and the two OS slots, the kernel and embrad to the six services and the web and serial UIs" width="100%">
+  <img src="assets/system-architecture.png" alt="embraOS system architecture — from the platforms it runs on through the firmware, GRUB and the two OS slots, the kernel and embrad to the services and the web, display and serial consoles" width="100%">
 </p>
 
 # embraOS

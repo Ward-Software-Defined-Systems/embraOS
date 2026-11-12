@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw assets/system-architecture.svg and .png: the system after the Phase 2 core wave, from QEMU and the firmware up to the UIs.
+"""Draw assets/system-architecture.svg and .png: the Phase 2 system, from the platforms and the firmware up to the consoles.
 
 The figure is plain SVG written by this script and rasterized at 2x with resvg
 (cargo install resvg), so it renders on a build host without a browser. Run
@@ -15,7 +15,7 @@ import os
 import subprocess
 
 OUT = os.path.dirname(os.path.abspath(__file__))
-W, H = 1200, 1104
+W, H = 1200, 1152
 SCALE = 2
 
 # ---------------------------------------------------------------- palette --
@@ -77,7 +77,7 @@ def arrow(points, label=None, label_at=None, dash=None, anchor="start", label_dy
             text(lx, ly + label_dy + 11.5, label2, size=9.6, fill="#bdbac4", anchor=anchor)
 
 # ------------------------------------------------------------------ canvas --
-emit(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-label="embraOS system architecture: QEMU, the UEFI firmware and GRUB with the two OS slots, the Linux kernel and embra-init, embrad as PID 1, the six supervised services, and the web and serial UIs on the host side">')
+emit(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-label="embraOS system architecture: the platforms it runs on, the UEFI firmware and GRUB with the two OS slots, the Linux kernel and embra-init, embrad as PID 1, the supervised services, and the web, display and serial consoles">')
 emit('<defs>'
      '<radialGradient id="glow" cx="50%" cy="0%" r="70%"><stop offset="0" stop-color="#2a1a10" stop-opacity="0.9"/><stop offset="1" stop-color="#0a0a0f" stop-opacity="0"/></radialGradient>'
      f'<marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="{ARROW}"/></marker>'
@@ -95,14 +95,15 @@ text(lx + 32, 32, "gRPC · REST · PTY inside the OS", size=9.4, fill=DIM)
 lx2 = 946
 emit(f'<line x1="{lx2}" y1="28" x2="{lx2+26}" y2="28" stroke="{ARROW}" stroke-width="1.3" stroke-dasharray="2 3" marker-end="url(#head)"/>')
 text(lx2 + 32, 32, "outbound HTTPS", size=9.4, fill=DIM)
-badge(1090, 28, 6, DIM)
+badge(1090, 28, 5, DIM)
 text(1104, 32, "start order", size=9.4, fill=DIM)
 
 # ------------------------------------------------------------------ UI band --
-band(40, 50, 1120, 100, "UIs · the host side")
-box(60, 78, 200, 64, "Web console · desktop", ["xterm.js over /ws/terminal", "sidebar, activity strip, Tools tab", "Leptos/WASM app at /embraOS"], UI)
-box(280, 78, 200, 64, "Web console · mobile", ["chat mode over /ws/chat", "a viewport of 768 px or less", "same URL, same token"], UI)
-box(570, 78, 240, 64, "Serial TUI", ["EMBRA_TUI=1 · no image rebuild", "the QEMU host's terminal, the serial line", "embra-web is not started"], UI)
+band(40, 50, 1120, 100, "UIs · a browser, the machine's own display, the serial line")
+box(60, 78, 190, 64, "Web console · desktop", ["xterm.js over /ws/terminal", "sidebar, activity strip, Tools tab", "Leptos/WASM app at /embraOS"], UI, size=9.8)
+box(260, 78, 180, 64, "Web console · mobile", ["chat mode over /ws/chat", "a viewport of 768 px or less", "same URL, same token"], UI, size=9.8)
+box(450, 78, 226, 64, "Display console", ["the web console on the machine's own", "display, keyboard and mouse · cog on", "WPE WebKit · ⑥ udevd  ⑦ embra-kiosk"], UI, size=9.8)
+box(686, 78, 186, 64, "Serial TUI", ["embra.tui=1 · no image rebuild", "the serial line of a VM or a board", "embra-web is not started"], UI, size=9.8)
 text(884, 90, "Any machine with the boot URL:", size=9.8, fill=DETAIL)
 text(884, 103, "https://<host>:3345/embraOS?token=…", size=9.6, fill=WEB, family=MONO)
 text(884, 116, "a new 32-hex token every boot, printed in the", size=9.8, fill=DETAIL)
@@ -118,9 +119,9 @@ box(60, 200, 420, 72, "embra-web", [
 ], WEB, order=5, port="HTTPS :3345")
 box(520, 200, 340, 72, "embra-console", [
     "conversational TUI (ratatui over crossterm)",
-    "the PTY child of embra-web, or on the serial line",
-    "reaches the brain through apid and nothing else",
-], WEB, order=6)
+    "the PTY child of embra-web, or service ⑤ in its place",
+    "on the serial line · reaches the brain through apid only",
+], WEB)
 # row B
 box(200, 308, 520, 56, "embra-apid", [
     "gateway: every brain RPC proxied · REST /health, /version, /status (the provider probe)",
@@ -176,24 +177,26 @@ box(880, 200, 280, 188, "Also in the workspace", [
     "embra-init · the initramfs /init (below)",
     "embra-boot · the boot contract: the kernel line,",
     "partitions by GPT name, grubenv, the release stamp",
-    "embra-update · snapshots and restores of STATE and",
-    "DATA · the signed release into the other slot",
+    "embra-update · backups, restores, the signed release",
+    "into the other slot, the installer, DATA's growth",
     "wardsondb · vendored fork, reached over REST,",
     "never a library dependency of a crate here",
 ], KERNEL, size=9.6, lead=11.4)
-box(880, 560, 280, 98, "Writable mounts · the rootfs is read-only", [
+box(880, 560, 280, 98, "Writable mounts", [
+    "the root filesystem is a slot's read-only SquashFS",
     "/embra/state ← STATE: soul.sha256, keys (0600), CA",
     "drop-ins, imported-intelligence/, update-source",
     "/embra/data ← DATA: WardSONDB · backups/",
     "/embra/workspace: a bind mount by embrad,",
     "the one place the tools write",
-], SLAB, size=9.6, lead=12)
+], SLAB, size=9.6, lead=11.2)
 
 # ------------------------------------------------------------------ arrows --
 # UIs → embra-web / embra-console
-arrow([(160, 142), (160, 199)], "HTTPS + WS :3345 · the boot token", (170, 174))
-arrow([(380, 142), (380, 199)], "QEMU hostfwd on every host interface", (392, 174))
-arrow([(690, 142), (690, 199)], "ttyS0 | ttyAMA0 · QEMU -serial mon:stdio", (702, 174))
+arrow([(150, 142), (150, 199)], "HTTPS + WS :3345 · the boot token", (158, 172))
+arrow([(350, 142), (350, 199)], "over the NIC", (358, 172))
+arrow([(466, 142), (466, 199)], "on 127.0.0.1 · the token in COG_URL", (474, 172))
+arrow([(780, 142), (780, 199)], "ttyS0 | ttyAMA0", (788, 172))
 # web ↔ console over the PTY
 arrow([(480, 236), (519, 236)], "PTY", (500, 230), anchor="middle")
 # web / console → apid
@@ -221,33 +224,45 @@ def slab(y, h, title, color, lines, order_note=None):
     for i, line in enumerate(lines):
         text(72, y + 35 + i * 12.6, line, size=10, fill=DETAIL)
 
-slab(712, 82, "embrad · PID 1 · init and service supervisor", SLAB, [
-    "starts the services in order ① → ⑥ · soul gate: VerifySoul through trustd — a mismatch halts the boot, a missing soul is a first run (Learning Mode) · 5 s reconciliation loop",
-    "any exit is restarted, 1 s · 2ⁿ up to 30 s, ten in a burst halts the service · bind-mounts /embra/workspace · mints the web token and prints the boot URL · operator CA drop-ins",
-    "a trial boot (embra.trial=1) snapshots STATE and DATA before any service and is confirmed on the ESP once every service is healthy · embra.mode=update|backup|restore|install runs embra-update",
+# The four slabs stack with a 24 px gap for the connector's label; a slab is
+# 35 px to its first line and 12.6 px a line after it.
+Y_EMBRAD, H_EMBRAD = 712, 95
+Y_KERNEL, H_KERNEL = Y_EMBRAD + H_EMBRAD + 24, 70
+Y_GRUB, H_GRUB = Y_KERNEL + H_KERNEL + 24, 82
+Y_HOST, H_HOST = Y_GRUB + H_GRUB + 24, 84
+assert Y_HOST + H_HOST + 37 == H, "the canvas ends 37 px under the last slab"
+
+slab(Y_EMBRAD, H_EMBRAD, "embrad · PID 1 · init and service supervisor", SLAB, [
+    "starts the services in order ① → ⑤, then ⑥ ⑦ where the machine has a display (a boot goes on without those two) · soul gate: VerifySoul through trustd — a mismatch halts the boot, a missing soul is a first run",
+    "any exit is restarted, 1 s · 2ⁿ up to 30 s, ten in a burst halts the service · 5 s reconciliation loop · bind-mounts /embra/workspace · mints the web token and prints the boot URL on the serial line and the display",
+    "before the services: the image's and STATE's CA certificates merged · DATA grown to the end of its disk · a trial boot (embra.trial=1) snapshots STATE and DATA and is confirmed once every service is healthy",
+    "embra.mode=update|backup|restore|install runs embra-update on both consoles in place of the services: the signed release into the other slot, a snapshot, a restore, the installer",
     "eth0: a DHCP lease through udhcpc (the lease script applies it, the client renews it), the static 10.0.2.15/24 via 10.0.2.2 after 10 s without one · /etc/resolv.conf → /embra/ephemeral",
 ])
-slab(818, 58, "Linux kernel 6.18 LTS · Buildroot 2026.02.1 · initramfs /init = embra-init", KERNEL, [
-    "virtio · AHCI · NVMe · virtio-scsi · pvscsi · e1000e · vmxnet3 · Hyper-V · SquashFS (xz) · ext4 · fbcon on the firmware's framebuffer · console=tty0 console=ttyS0 | ttyAMA0 · embra.slot=a|b",
+slab(Y_KERNEL, H_KERNEL, "Linux kernel 6.18 LTS · Buildroot 2026.02.1 · initramfs /init = embra-init", KERNEL, [
+    "drivers built in: virtio, AHCI, NVMe, pvscsi, vmxnet3, Hyper-V, wired NICs, SAS and RAID controllers, USB · every linux-firmware family on the rootfs · probe-time firmware and CPU microcode as initrds",
+    "SquashFS (xz) · ext4 · the firmware's framebuffer (simpledrm) or the hypervisor's display: the boot log, then the display console drawn in software · console=tty0 console=ttyS0 | ttyAMA0 · embra.slot=a|b",
     "embra-init (sync, no tokio): mounts proc, sys, dev → / from the slot's partition by GPT name (rootfs_a | rootfs_b), read-only → /embra/state from state → /embra/data from data → chroot → exec /sbin/embrad",
 ])
-slab(900, 70, "UEFI firmware · GRUB 2.12 on the EFI System Partition · the A/B state in grubenv", KERNEL, [
-    "OVMF | AAVMF → EFI/BOOT/BOOTX64.EFI | BOOTAA64.EFI, every module builtin · grub.cfg: the menu — slot A, slot B, Diagnostics, Update, Backup and restore, Reboot, Halt, Firmware setup",
+slab(Y_GRUB, H_GRUB, "UEFI firmware · GRUB 2.12 on the EFI System Partition · the A/B state in grubenv", KERNEL, [
+    "UEFI, Secure Boot off (OVMF, AAVMF, a hypervisor's, a board's) → EFI/BOOT/BOOTX64.EFI | BOOTAA64.EFI · the menu: slot A, slot B, Diagnostics, Update, Backup and restore, Reboot, Halt, Firmware setup",
     "grubenv: slot_active · slot_try · tries_left 3-2-1-0 · a status per slot — a staged slot boots with embra.trial=1 while tries last, failed at zero; embrad confirms, embra-update stages or rolls back",
-    "the slot's kernel and initrds (microcode, firmware, initramfs) loaded from its SquashFS (squash4 + xzio) · the host's EMBRA_* knobs arrive as one SMBIOS type 11 string the menu appends to the kernel line",
+    "the slot's kernel and initrds (microcode, firmware, initramfs) loaded from its SquashFS (squash4 + xzio) · a QEMU launcher's EMBRA_* knobs arrive as one SMBIOS type 11 string the menu appends to the kernel line",
+    "the installer ISO: a GRUB of its own (El Torito for a DVD, a GPT for a USB stick) boots the same kernel with embra.mode=install; embra-update install writes the five partitions, DATA to the end of the disk",
 ])
-slab(994, 84, "QEMU · the host", QEMU, [
-    "qemu-system-x86_64 -accel kvm (Linux) · qemu-system-aarch64 -accel hvf (Apple Silicon) · -m 4G · -smp N · OVMF on pflash (EMBRA_BOOT=uefi, default) | -kernel + -initrd (direct) · -nographic -serial mon:stdio",
-    "-nic user: hostfwd 3345 → every host interface (the web console) · 50000 and 8443 → the host's loopback only (gRPC, REST) · QEMU's DHCP leases 10.0.2.15 · every other port answers inside the guest only",
-    "embraos.img · GPT aligned to 1 MiB: esp vfat 64 MiB (GRUB, grub.cfg, grubenv) · rootfs_a | rootfs_b 2 GiB each, one xz SquashFS with its kernel and initrds · state ext4 256 MiB · data ext4 4 GiB",
+slab(Y_HOST, H_HOST, "Where it runs · one disk, converted or installed", QEMU, [
+    "QEMU (run-qemu.sh, run-qemu-aarch64.sh): kvm | hvf · -m 4G · the firmware on pflash (EMBRA_BOOT=uefi, default) | -kernel + -initrd (direct) · -serial mon:stdio · EMBRA_VNC=1 gives the x86_64 VM a display",
+    "-nic user: hostfwd 3345 → every host interface, 50000 and 8443 → the host's loopback · QEMU's DHCP leases 10.0.2.15 · on a bridged or a real NIC the leased address answers on 3345, 50000, 8443 and 50002",
+    "hypervisors: vmware/embraos.ova and .vmdk (ESXi, Fusion) · hyper-v/embraos.vhdx (generation 2) · parallels/embraos.vmx with its VMDK · any of them, and bare metal: embraos.iso as a DVD or a USB stick",
+    "embraos.img · GPT aligned to 1 MiB: esp vfat 64 MiB (GRUB, grub.cfg, grubenv) · rootfs_a | rootfs_b 2 GiB each, an xz SquashFS with its kernel and initrds · state ext4 256 MiB · data ext4 4 GiB, grown at boot",
 ])
 # embrad → trustd (the soul gate)
-arrow([(660, 712), (660, 659)], "VerifySoul at boot", (668, 690), label_dy=0)
+arrow([(660, Y_EMBRAD), (660, 659)], "VerifySoul at boot", (668, 690), label_dy=0)
 # slab connectors on the right
-arrow([(1120, 712), (1120, 685)], "starts ① → ⑥ · restarts any exit", (1108, 703), anchor="end", label_dy=0)
-arrow([(1120, 818), (1120, 795)], "exec /sbin/embrad after chroot", (1108, 811), anchor="end", label_dy=0)
-arrow([(1120, 900), (1120, 877)], "linux + initrd from the slot's SquashFS", (1108, 893), anchor="end", label_dy=0)
-arrow([(1120, 994), (1120, 971)], "pflash: the firmware · the virtio disk", (1108, 987), anchor="end", label_dy=0)
+arrow([(1120, Y_EMBRAD), (1120, 685)], "starts ① → ⑦ · restarts any exit", (1108, Y_EMBRAD - 9), anchor="end", label_dy=0)
+arrow([(1120, Y_KERNEL), (1120, Y_EMBRAD + H_EMBRAD + 1)], "exec /sbin/embrad after chroot", (1108, Y_KERNEL - 7), anchor="end", label_dy=0)
+arrow([(1120, Y_GRUB), (1120, Y_KERNEL + H_KERNEL + 1)], "linux + three initrds from the slot's SquashFS", (1108, Y_GRUB - 7), anchor="end", label_dy=0)
+arrow([(1120, Y_HOST), (1120, Y_GRUB + H_GRUB + 1)], "the firmware · the disk", (1108, Y_HOST - 7), anchor="end", label_dy=0)
 
 # ------------------------------------------------------------------ footer --
 text(60, H - 12, "Every port, path and flag is the one the code binds or the scripts pass · detail: docs/SYSTEM-DESIGN.md", size=9.4, fill=DIM)
