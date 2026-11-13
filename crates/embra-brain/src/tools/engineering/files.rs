@@ -41,7 +41,9 @@ const DIR_LIST_MAX: u32 = 1000;
 /// byte the read starts at and `limit` the most bytes it reads, at most
 /// `FILE_READ_MAX` whatever the caller passes (`read_window` derives both
 /// from the tool's optional fields). When the read doesn't reach EOF, a
-/// trailer tells the model how to continue with the next slice.
+/// trailer tells the model how to continue with the next slice. A file is
+/// read to its end whatever size it reports ([`read_text_window`]); a
+/// device, a pipe or a socket is refused before it is opened.
 pub async fn file_read(raw_path: &str, offset: u64, limit: usize) -> String {
     let raw_path = raw_path.trim();
     let limit = limit.min(FILE_READ_MAX);
@@ -85,42 +87,116 @@ pub async fn file_read(raw_path: &str, offset: u64, limit: usize) -> String {
         }
     }
 
-    // File branch — seek + read_exact the requested slice.
+    // File branch. A device, a pipe or a socket is refused before it is
+    // opened: a device reports no size and has content (a partition's
+    // device is the operator's STATE under another name), a pipe blocks
+    // whoever opens it, and on some devices the open is itself an action.
     let meta = match tokio::fs::metadata(&path).await {
         Ok(m) => m,
         Err(e) => return format!("Failed to stat file: {}", e),
     };
-    let size = meta.len();
-    if offset >= size && size > 0 {
-        return format!(
-            "Offset {} is at or past EOF ({} bytes)",
-            offset, size
-        );
+    if !meta.is_file() {
+        return special_file_refusal(&path, &meta.file_type());
     }
-    let window_end = (offset + limit as u64).min(size);
-    let read_bytes = (window_end - offset) as usize;
-
-    use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
     let mut f = match tokio::fs::File::open(&path).await {
         Ok(f) => f,
         Err(e) => return format!("Failed to open file: {}", e),
     };
-    if let Err(e) = f.seek(SeekFrom::Start(offset)).await {
+    // The record of the file that was opened: what is read is what was
+    // checked, whatever the name leads to by now.
+    let reported = match f.metadata().await {
+        Ok(m) if m.is_file() => m.len(),
+        Ok(m) => return special_file_refusal(&path, &m.file_type()),
+        Err(e) => return format!("Failed to stat file: {}", e),
+    };
+    read_text_window(&path, reported, &mut f, offset, limit).await
+}
+
+/// The refusal of a path that is neither a regular file nor a directory.
+fn special_file_refusal(path: &str, kind: &std::fs::FileType) -> String {
+    format!(
+        "{} is a special file ({}) — file_read reads regular files and lists directories; nothing is read",
+        path,
+        crate::tools::file_copy::special_kind(kind)
+    )
+}
+
+/// One window of an open file as `file_read` returns it: the header, the
+/// text, and the trailer that names where to go on.
+///
+/// `reported` is the size the file's record gives. It never bounds the
+/// read: a `/sys` attribute reports a page and holds a line, other kernel
+/// files report nothing and hold text, and a log grows between its stat
+/// and its read. The read runs to the end of the window or of the file,
+/// whichever comes first, and the size shown is where the read found the
+/// end. The record is used for a file that goes on past the window, when
+/// it names an end past the window; otherwise the size is not known.
+async fn read_text_window<R>(path: &str, reported: u64, f: &mut R, offset: u64, limit: usize) -> String
+where
+    R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+
+    // An offset with nothing behind it. The size is said when it agrees.
+    let past_the_end = || {
+        if reported <= offset {
+            format!("Offset {} is at or past EOF ({} bytes)", offset, reported)
+        } else {
+            format!(
+                "Offset {} is at or past EOF (the file holds less than the {} bytes it reports)",
+                offset, reported
+            )
+        }
+    };
+
+    // No file reaches an offset the kernel cannot count a read from: the
+    // seek there succeeds on some filesystems and the read is then refused
+    // as an invalid argument.
+    if offset > (i64::MAX as u64).saturating_sub(limit as u64 + 1) {
+        return past_the_end();
+    }
+    if offset > 0
+        && let Err(e) = f.seek(SeekFrom::Start(offset)).await
+    {
+        // Not a position a file of this filesystem can have.
+        if e.kind() == std::io::ErrorKind::InvalidInput {
+            return past_the_end();
+        }
         return format!("Failed to seek file: {}", e);
     }
-    let mut buf = vec![0u8; read_bytes];
-    if let Err(e) = f.read_exact(&mut buf).await {
+    // One byte more than the window says whether the file goes on past it.
+    let room = reported.saturating_sub(offset).min(limit as u64) as usize + 1;
+    let mut buf = Vec::with_capacity(room);
+    if let Err(e) = f.take(limit as u64 + 1).read_to_end(&mut buf).await {
         return format!("Failed to read file: {}", e);
     }
+    let got = buf.len();
+    let more_follows = got > limit;
+    buf.truncate(limit);
+    if got == 0 && offset > 0 {
+        return past_the_end();
+    }
+    let size = if !more_follows {
+        // The read found the end.
+        Some(offset + got as u64)
+    } else if reported > offset.saturating_add(limit as u64) {
+        Some(reported)
+    } else {
+        // The file goes on past the size it reports.
+        None
+    };
 
     // Preserve the existing binary-file detection: a null byte in the first
     // 1KB strongly suggests non-text content.
     let head = &buf[..buf.len().min(1024)];
     if head.contains(&0u8) {
-        return format!(
-            "{} is a binary file ({} bytes); for images use image_view",
-            path, size
-        );
+        return match size {
+            Some(size) => format!(
+                "{} is a binary file ({} bytes); for images use image_view",
+                path, size
+            ),
+            None => format!("{} is a binary file; for images use image_view", path),
+        };
     }
 
     // A window that ends inside a character gives the model half of it
@@ -128,7 +204,7 @@ pub async fn file_read(raw_path: &str, offset: u64, limit: usize) -> String {
     // before that character; the trailer names where it starts. A window
     // that is nothing but the cut character is left alone — shortening
     // it would read nothing.
-    if window_end < size {
+    if more_follows {
         let cut = cut_character_len(&buf);
         if cut < buf.len() {
             buf.truncate(buf.len() - cut);
@@ -151,7 +227,7 @@ pub async fn file_read(raw_path: &str, offset: u64, limit: usize) -> String {
     } else {
         String::new()
     };
-    let more = if read_end < size {
+    let more = if more_follows || decoded.raw_len < buf.len() {
         // Speak the JSON-arg vocabulary the model actually calls with (the
         // old trailer taught the legacy pipe syntax). Omitting `limit` in the
         // suggested continuation is deliberate: the default is the full
@@ -163,17 +239,24 @@ pub async fn file_read(raw_path: &str, offset: u64, limit: usize) -> String {
         } else {
             ""
         };
-        format!(
-            "\n[... {} more bytes. Continue with offset={}{} ]",
-            size - read_end,
-            read_end,
-            tip
-        )
+        match size {
+            Some(size) => format!(
+                "\n[... {} more bytes. Continue with offset={}{} ]",
+                size - read_end,
+                read_end,
+                tip
+            ),
+            None => format!("\n[... more follows. Continue with offset={}{} ]", read_end, tip),
+        }
     } else {
         String::new()
     };
+    let size = match size {
+        Some(size) => format!("{} bytes", size),
+        None => "size unknown".to_string(),
+    };
     format!(
-        "=== {} ({} bytes, showing {}..{}{}) ===\n{}{}",
+        "=== {} ({}, showing {}..{}{}) ===\n{}{}",
         path, size, offset, read_end, encoding_note, content, more
     )
 }
@@ -1218,6 +1301,224 @@ mod file_io_caps_tests {
         let full = file_read(path, 0, FILE_READ_MAX).await;
         assert!(!full.contains("[... "), "{full}");
         assert!(!full.contains("tip:"), "{full}");
+    }
+
+    /// One window of a file whose record says `reported` and whose content
+    /// is `content`, as `file_read` frames it.
+    async fn window_of(content: &[u8], reported: u64, offset: u64, limit: usize) -> String {
+        let mut f = std::io::Cursor::new(content.to_vec());
+        read_text_window("/probe", reported, &mut f, offset, limit.min(FILE_READ_MAX)).await
+    }
+
+    /// Follow the trailers of such a file from its start to its end.
+    async fn windows_of(content: &[u8], reported: u64, limit: usize) -> String {
+        let mut whole = String::new();
+        let mut offset = 0u64;
+        loop {
+            let out = window_of(content, reported, offset, limit).await;
+            let (body, next) = body_and_next(&out);
+            whole.push_str(body);
+            match next {
+                Some(n) => {
+                    assert!(n > offset, "no progress at offset {offset}: {out}");
+                    offset = n;
+                }
+                None => return whole,
+            }
+        }
+    }
+
+    /// The first read of a `/sys` attribute on a machine failed with
+    /// `early eof`: the attribute reports a page and holds a line, and the
+    /// read asked for the page. The read stops where the file does and
+    /// the size shown is the one it found.
+    #[tokio::test]
+    async fn a_file_that_reports_more_than_it_holds_is_read_to_its_end() {
+        let line = b"0x24000026\n";
+        let out = window_of(line, 4096, 0, FILE_READ_MAX).await;
+        assert_eq!(out, "=== /probe (11 bytes, showing 0..11) ===\n0x24000026\n");
+
+        // In chunks of any size the file comes back, and the last chunk
+        // says where it ended.
+        for limit in 1..=line.len() + 1 {
+            assert_eq!(windows_of(line, 4096, limit).await.as_bytes(), line, "limit {limit}");
+        }
+        let last = window_of(line, 4096, 8, 4).await;
+        assert_eq!(last, "=== /probe (11 bytes, showing 8..11) ===\n26\n");
+
+        // Past its end there is nothing, whatever the record says.
+        for offset in [11, 100, 4095] {
+            let out = window_of(line, 4096, offset, FILE_READ_MAX).await;
+            assert_eq!(
+                out,
+                format!("Offset {offset} is at or past EOF (the file holds less than the 4096 bytes it reports)")
+            );
+        }
+        assert_eq!(
+            window_of(line, 4096, 4096, FILE_READ_MAX).await,
+            "Offset 4096 is at or past EOF (4096 bytes)"
+        );
+    }
+
+    /// Other kernel files report no size and hold text. Bounded by the
+    /// record, such a file read as an empty one.
+    #[tokio::test]
+    async fn a_file_that_reports_no_size_is_read_to_its_end() {
+        let text = "cpuset cpu io memory hugetlb pids rdma misc\n";
+        let out = window_of(text.as_bytes(), 0, 0, FILE_READ_MAX).await;
+        assert_eq!(out, format!("=== /probe ({} bytes, showing 0..{}) ===\n{text}", text.len(), text.len()));
+
+        // A window that stops short of the end cannot name a size the
+        // file does not give: it says so, and where to go on.
+        let first = window_of(text.as_bytes(), 0, 0, 8).await;
+        assert_eq!(
+            first,
+            "=== /probe (size unknown, showing 0..8) ===\ncpuset c\n[... more follows. Continue with offset=8 \
+             (tip: omit limit to read up to the full per-call ceiling in one call) ]"
+        );
+        for limit in 1..=text.len() + 1 {
+            assert_eq!(windows_of(text.as_bytes(), 0, limit).await, text, "limit {limit}");
+        }
+        // The same for a file that goes on past the size it reports.
+        for reported in [1, 8, 20] {
+            for limit in 1..=text.len() + 1 {
+                assert_eq!(windows_of(text.as_bytes(), reported, limit).await, text, "reported {reported}, limit {limit}");
+            }
+        }
+        // Text of more than one byte a character, the same.
+        let wide = "caf\u{e9} \u{2014} \u{6f22}\u{5b57} \u{1f600} end.\n";
+        for limit in 4..=wide.len() + 1 {
+            assert_eq!(windows_of(wide.as_bytes(), 0, limit).await, wide, "limit {limit}");
+        }
+    }
+
+    /// A log grows between its stat and its read, and a file can be cut:
+    /// what is there at the read is what is returned.
+    #[tokio::test]
+    async fn a_file_that_changed_since_its_size_was_taken_is_read_as_it_is() {
+        let grown = window_of(b"line 1\nline 2\n", 7, 0, FILE_READ_MAX).await;
+        assert_eq!(grown, "=== /probe (14 bytes, showing 0..14) ===\nline 1\nline 2\n");
+        let cut = window_of(b"line 1\n", 14, 0, FILE_READ_MAX).await;
+        assert_eq!(cut, "=== /probe (7 bytes, showing 0..7) ===\nline 1\n");
+        let emptied = window_of(b"", 14, 0, FILE_READ_MAX).await;
+        assert_eq!(emptied, "=== /probe (0 bytes, showing 0..0) ===\n");
+    }
+
+    /// A binary file is named with the size the read found, or the size it
+    /// reports when it goes on past the window.
+    #[tokio::test]
+    async fn a_binary_file_is_reported_with_the_size_that_is_known() {
+        let data = [b'E', b'L', b'F', 0, 1, 2, 3, 4];
+        assert_eq!(
+            window_of(&data, 4096, 0, FILE_READ_MAX).await,
+            "/probe is a binary file (8 bytes); for images use image_view"
+        );
+        assert_eq!(
+            window_of(&data, 4096, 0, 4).await,
+            "/probe is a binary file (4096 bytes); for images use image_view"
+        );
+        assert_eq!(window_of(&data, 0, 0, 4).await, "/probe is a binary file; for images use image_view");
+    }
+
+    #[tokio::test]
+    async fn an_offset_at_or_past_the_end_is_said() {
+        let dir = TempDir::new("pastend");
+        let ten = dir.0.join("ten.txt");
+        std::fs::write(&ten, b"0123456789").unwrap();
+        let ten = std::fs::canonicalize(&ten).unwrap();
+        let ten = ten.to_str().unwrap();
+        // The far offsets: past what a filesystem holds (the seek is
+        // refused), where a read cannot be counted from (the read would
+        // be), and past what an offset can say.
+        for offset in [10, 11, 1 << 40, 1 << 62, i64::MAX as u64 - 1, i64::MAX as u64, u64::MAX] {
+            for limit in [1, FILE_READ_MAX] {
+                assert_eq!(
+                    file_read(ten, offset, limit).await,
+                    format!("Offset {offset} is at or past EOF (10 bytes)"),
+                    "limit {limit}"
+                );
+            }
+        }
+        assert_eq!(file_read(ten, 9, FILE_READ_MAX).await, format!("=== {ten} (10 bytes, showing 9..10) ===\n9"));
+
+        // An empty file is empty at its start, and an offset into it is
+        // past its end: the subtraction that sized the read ran below
+        // zero here.
+        let empty = dir.0.join("empty.txt");
+        std::fs::write(&empty, b"").unwrap();
+        let empty = std::fs::canonicalize(&empty).unwrap();
+        let empty = empty.to_str().unwrap();
+        assert_eq!(file_read(empty, 0, FILE_READ_MAX).await, format!("=== {empty} (0 bytes, showing 0..0) ===\n"));
+        for offset in [1, 5, u64::MAX] {
+            assert_eq!(
+                file_read(empty, offset, FILE_READ_MAX).await,
+                format!("Offset {offset} is at or past EOF (0 bytes)")
+            );
+        }
+    }
+
+    /// A device reports no size, so a read bounded by the size read
+    /// nothing from one. A read to the end would return a partition's
+    /// device, the operator's STATE under another name; and an open blocks
+    /// on a pipe and is an action on some devices. None is opened.
+    #[tokio::test]
+    async fn a_device_or_a_pipe_is_refused_before_it_is_opened() {
+        let refusal = |path: &str, kind: &str| {
+            format!("{path} is a special file ({kind}) — file_read reads regular files and lists directories; nothing is read")
+        };
+        assert_eq!(file_read("/dev/null", 0, FILE_READ_MAX).await, refusal("/dev/null", "char device"));
+
+        let dir = TempDir::new("special");
+        // A link is judged by where it leads.
+        let link = dir.0.join("link-to-null");
+        std::os::unix::fs::symlink("/dev/null", &link).unwrap();
+        assert_eq!(
+            file_read(link.to_str().unwrap(), 0, FILE_READ_MAX).await,
+            refusal("/dev/null", "char device")
+        );
+
+        let fifo = dir.0.join("pipe");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: valid NUL-terminated path; mkfifo has no other contract.
+        let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+        let fifo = std::fs::canonicalize(&fifo).unwrap();
+        let fifo = fifo.to_str().unwrap();
+        // An open of the pipe would wait for a writer that never comes.
+        let out = tokio::time::timeout(std::time::Duration::from_secs(20), file_read(fifo, 0, FILE_READ_MAX))
+            .await
+            .expect("the pipe was opened");
+        assert_eq!(out, refusal(fifo, "fifo"));
+    }
+
+    /// The real thing, where there is a `/sys`: an attribute every Linux
+    /// has, the one whose read failed on a machine, and the one that
+    /// machine's operator had asked the intelligence for.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_sys_attribute_reads_as_what_it_holds() {
+        let mut checked = 0;
+        for path in [
+            "/sys/devices/system/cpu/online",
+            "/sys/devices/system/cpu/vulnerabilities/srbds",
+            "/sys/devices/system/cpu/cpu0/microcode/version",
+        ] {
+            let Ok(want) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let reported = std::fs::metadata(path).unwrap().len();
+            let out = file_read(path, 0, FILE_READ_MAX).await;
+            assert_eq!(
+                out,
+                format!("=== {path} ({} bytes, showing 0..{}) ===\n{want}", want.len(), want.len()),
+                "the file reports {reported} bytes"
+            );
+            println!("{path} reports {reported} bytes: {out:?}");
+            checked += 1;
+        }
+        if checked == 0 {
+            eprintln!("no attribute under /sys could be read here: nothing was checked");
+        }
     }
 
     #[tokio::test]

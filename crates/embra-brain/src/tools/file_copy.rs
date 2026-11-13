@@ -227,7 +227,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-fn special_kind(ft: &std::fs::FileType) -> &'static str {
+pub(crate) fn special_kind(ft: &std::fs::FileType) -> &'static str {
     use std::os::unix::fs::FileTypeExt;
     if ft.is_fifo() {
         "fifo"
