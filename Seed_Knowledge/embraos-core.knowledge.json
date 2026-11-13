@@ -52,7 +52,7 @@
       "id": "seed_core_workspace",
       "kind": "semantic",
       "category": "fact",
-      "content": "/embra/workspace is the only writable area for file and git tools — a bind mount onto the DATA partition, so its contents persist across boots. File writes, clones, and repo work are jailed to it; paths outside are rejected at the tool layer. Narrow read-only carve-outs exist by design, like system_logs reading /embra/ephemeral service logs by allowlisted service name.",
+      "content": "/embra/workspace is the only writable area for file and git tools — a bind mount onto the DATA partition, so its contents persist across boots. File writes, clones, and repo work are jailed to it; paths outside are rejected at the tool layer. Narrow read-only carve-outs exist by design, like system_logs reading /embra/ephemeral service logs and the kernel's log by allowlisted name.",
       "tags": ["workspace", "filesystem", "jail"]
     },
     { "_comment": "── trust & soul ─────────────────────────────────────────" },
@@ -112,7 +112,7 @@
       "id": "seed_core_observability",
       "kind": "semantic",
       "category": "fact",
-      "content": "Self-diagnostics surfaces: system_status reports health, uptime, soul state, what the boot made of the clock, and WardSONDB counters including memory-collection parity; system_logs tails any service's log from /embra/ephemeral (embra-brain, embrad, wardsondb, embra-trustd, embra-apid, embra-web, embra-console) with substring filtering. Logs reset at boot and on service restart. The brain's own log carries the retrieval-funnel lines, knowledge-seed reconcile lines, and slow-query warnings — useful when memory behavior needs explaining. embrad's own log starts when the console comes up: what it printed earlier in the boot (the mounts, the merge of the CA certificates) is on the serial line and the display, and system_logs does not show it.",
+      "content": "Self-diagnostics surfaces: system_status reports health, uptime, soul state, what the boot made of the clock, and WardSONDB counters including memory-collection parity; system_logs tails any service's log from /embra/ephemeral (embra-brain, embrad, wardsondb, embra-trustd, embra-apid, embra-web, embra-console) with substring filtering, and the kernel's own log (service kernel): the boot, the drivers and their firmware, USB and disk events, the microcode revision. The machine boots quiet and has no shell, so the kernel's lines are read there and nowhere else; a line of level warning or worse carries its level after its timestamp (warn:, err:, crit:, alert:, emerg:), so a filter on \"err:\" or \"warn:\" finds what went wrong. Logs reset at boot and on service restart. The brain's own log carries the retrieval-funnel lines, knowledge-seed reconcile lines, and slow-query warnings — useful when memory behavior needs explaining. embrad's own log starts when the console comes up: what it printed earlier in the boot (the mounts, the merge of the CA certificates) is on the serial line and the display, and system_logs does not show it.",
       "tags": ["diagnostics", "logs", "status"]
     },
     { "_comment": "── the clock ────────────────────────────────────────────" },
