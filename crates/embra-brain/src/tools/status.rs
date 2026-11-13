@@ -647,14 +647,20 @@ impl SystemStatusArgs {
     }
 }
 
-// -- system_logs — read-only service-log tail (self-diagnostics) ----------
+// -- system_logs — read-only log tail (self-diagnostics) ------------------
+
+/// The kernel's own log as a source: no file, the ring buffer read through
+/// syslog(2). The installed machine boots `quiet`, so the kernel's lines
+/// (the drivers, the firmware loads, the USB and disk events, the microcode
+/// revision) are on no console, and this is where they are read.
+const KERNEL_LOG: &str = "kernel";
 
 /// The services whose logs embrad captures on the ephemeral tmpfs
 /// (`supervisor.rs` redirects every child's stdout/stderr to
 /// `/embra/ephemeral/<name>.log`; embrad's own post-UI redirect writes
-/// `embrad.log`). The tool validates against this list and NEVER takes a
-/// path, so the carve-out below cannot traverse.
-const SYSTEM_LOG_SERVICES: [&str; 7] = [
+/// `embrad.log`), and the kernel's log. The tool validates against this
+/// list and NEVER takes a path, so the carve-out below cannot traverse.
+const SYSTEM_LOG_SERVICES: [&str; 8] = [
     "embra-brain",
     "embrad",
     "wardsondb",
@@ -662,6 +668,7 @@ const SYSTEM_LOG_SERVICES: [&str; 7] = [
     "embra-apid",
     "embra-web",
     "embra-console",
+    KERNEL_LOG,
 ];
 
 /// Logs live OUTSIDE the workspace jail — a deliberate READ-ONLY carve-out
@@ -723,6 +730,106 @@ fn tail_filter_lines<'a>(
     (matching[start..].to_vec(), total)
 }
 
+/// The most of the kernel's log that one call reads. The ring buffer is
+/// 256 KiB in the x86_64 image's kernel (`CONFIG_LOG_BUF_SHIFT=18`) and
+/// grows with the CPU count; every line gains its level and its timestamp
+/// as the kernel hands it over.
+const KERNEL_LOG_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// The kernel's log as the kernel hands it over: syslog(2)'s READ_ALL, which
+/// reads the ring buffer and leaves it as it is (dmesg's own call). Each
+/// line carries its level in front: `<6>[    0.000000] Linux version …`.
+/// The flag says the read filled the buffer it was given, so that its first
+/// line may be cut and older ones are not in it.
+#[cfg(target_os = "linux")]
+fn read_kernel_log() -> std::io::Result<(String, bool)> {
+    const SYSLOG_ACTION_READ_ALL: libc::c_int = 3;
+    const SYSLOG_ACTION_SIZE_BUFFER: libc::c_int = 10;
+    // SAFETY: SIZE_BUFFER writes into no buffer; a null one with no length is its call.
+    let size = unsafe { libc::klogctl(SYSLOG_ACTION_SIZE_BUFFER, std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Twice the ring's size: what is handed over is the ring's text with a
+    // level and a timestamp before every line.
+    let cap = (size as usize).saturating_mul(2).clamp(64 * 1024, KERNEL_LOG_MAX_BYTES);
+    let mut buf = vec![0u8; cap];
+    // SAFETY: the buffer is `cap` bytes long, and the call writes no more than the length it is given.
+    let read = unsafe { libc::klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr().cast(), cap as libc::c_int) };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let read = read as usize;
+    buf.truncate(read);
+    Ok((String::from_utf8_lossy(&buf).into_owned(), read == cap))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_kernel_log() -> std::io::Result<(String, bool)> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "the kernel's log is read on Linux"))
+}
+
+/// The kernel's levels a line is marked with: warning and worse, by their
+/// number. A notice, info or debug line reads as dmesg prints it.
+const KERNEL_LEVELS: [&str; 5] = ["emerg", "alert", "crit", "err", "warn"];
+
+/// One line of the kernel's log as it is shown: the `<n>` the kernel puts in
+/// front is taken off, and a line of level warning or worse says its level
+/// after its timestamp (`[    2.104512] err: usb 1-2: …`), so that a filter
+/// finds what went wrong. A line without the prefix is kept as it is.
+fn render_kernel_line(raw: &str) -> String {
+    let Some((number, text)) = raw.strip_prefix('<').and_then(|rest| rest.split_once('>')) else {
+        return raw.to_string();
+    };
+    let Ok(priority) = number.parse::<u32>() else {
+        return raw.to_string();
+    };
+    // The low three bits are the level; above them sits the facility of a
+    // line a process wrote into the log.
+    let Some(level) = KERNEL_LEVELS.get((priority & 7) as usize) else {
+        return text.to_string();
+    };
+    match text.strip_prefix('[').and_then(|t| t.split_once("] ")) {
+        Some((stamp, message)) => format!("[{stamp}] {level}: {message}"),
+        None => format!("{level}: {text}"),
+    }
+}
+
+/// The kernel's log as the tool answers it: every line rendered, then the
+/// same filter and tail as a service's log.
+fn kernel_log_report(raw: &str, full: bool, lines: usize, filter: Option<&str>) -> String {
+    let rendered = raw.lines().map(render_kernel_line).collect::<Vec<_>>().join("\n");
+    let (selected, matching_total) = tail_filter_lines(&rendered, filter, lines, full);
+    let source = format!(
+        "{KERNEL_LOG} ({} bytes of the kernel's ring buffer{})",
+        raw.len(),
+        if full { "; the read was full, so older lines are not in it" } else { "" }
+    );
+    tail_report(&source, &selected, matching_total, filter)
+}
+
+/// The answer's head and the lines under it, for a service's log and the kernel's.
+fn tail_report(source: &str, selected: &[&str], matching_total: usize, filter: Option<&str>) -> String {
+    let mut out = format!(
+        "system_logs {}: last {} of {} matching line(s){}\n\n",
+        source,
+        selected.len(),
+        matching_total,
+        filter
+            .map(|f| format!(" for filter \"{}\"", f))
+            .unwrap_or_default()
+    );
+    if selected.is_empty() {
+        out.push_str("(no matching lines)\n");
+    } else {
+        for l in selected {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 async fn system_logs(service: Option<&str>, lines: Option<u32>, filter: Option<&str>) -> String {
     let service = match resolve_log_service(service) {
         Ok(s) => s,
@@ -730,6 +837,15 @@ async fn system_logs(service: Option<&str>, lines: Option<u32>, filter: Option<&
     };
     let lines = (lines.unwrap_or(SYSTEM_LOG_DEFAULT_LINES as u32) as usize)
         .clamp(1, SYSTEM_LOG_MAX_LINES);
+    if service == KERNEL_LOG {
+        return match tokio::task::spawn_blocking(read_kernel_log).await {
+            Ok(Ok((raw, full))) => kernel_log_report(&raw, full, lines, filter),
+            Ok(Err(e)) => format!(
+                "Error: the kernel's log could not be read: {e}. The brain reads it with its own privileges (syslog(2)); a host that keeps it for root answers this to a development run."
+            ),
+            Err(e) => format!("Error: log read task failed: {}", e),
+        };
+    }
     let path = format!("{}/{}.log", SYSTEM_LOG_DIR, service);
 
     let path_for_read = path.clone();
@@ -760,35 +876,22 @@ async fn system_logs(service: Option<&str>, lines: Option<u32>, filter: Option<&
     };
 
     let (selected, matching_total) = tail_filter_lines(&buf, filter, lines, truncated);
-    let mut out = format!(
-        "system_logs {} ({} bytes total{}): last {} of {} matching line(s){}\n\n",
+    let source = format!(
+        "{} ({} bytes total{})",
         service,
         size,
-        if truncated { ", scanning the final 512 KiB window" } else { "" },
-        selected.len(),
-        matching_total,
-        filter
-            .map(|f| format!(" for filter \"{}\"", f))
-            .unwrap_or_default()
+        if truncated { ", scanning the final 512 KiB window" } else { "" }
     );
-    if selected.is_empty() {
-        out.push_str("(no matching lines)\n");
-    } else {
-        for l in selected {
-            out.push_str(l);
-            out.push('\n');
-        }
-    }
-    out
+    tail_report(&source, &selected, matching_total, filter)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "system_logs",
-    description = "Read the tail of a service's log from the ephemeral tmpfs (/embra/ephemeral/<service>.log) — the OS's own journals, for self-diagnostics. service: embra-brain (default) | embrad | wardsondb | embra-trustd | embra-apid | embra-web | embra-console. lines: tail count, default 200, max 2000. filter: case-insensitive substring applied per line before the tail cut. The brain log carries the auto-enrichment funnel lines (candidates_*), kg::traversal saturation lines, knowledge_seed heals, and wardsondb slow-query warns. Logs reset at boot and at service restarts; on very large files only the final 512 KiB window is scanned."
+    description = "Read the tail of a service's log from the ephemeral tmpfs (/embra/ephemeral/<service>.log), or of the kernel's own log — the OS's own journals, for self-diagnostics. service: embra-brain (default) | embrad | wardsondb | embra-trustd | embra-apid | embra-web | embra-console | kernel. lines: tail count, default 200, max 2000. filter: case-insensitive substring applied per line before the tail cut. The brain log carries the auto-enrichment funnel lines (candidates_*), kg::traversal saturation lines, knowledge_seed heals, and wardsondb slow-query warns. kernel is the kernel's ring buffer as dmesg shows it (the boot, the drivers and their firmware, USB and disk events, the microcode revision), which no console shows since the machine boots quiet; a line of level warning or worse carries its level after the timestamp (warn:, err:, crit:, alert:, emerg:). Logs reset at boot and at service restarts; on very large files only the final 512 KiB window is scanned."
 )]
 pub struct SystemLogsArgs {
-    /// Service log to read. Default embra-brain.
+    /// Service log to read, or kernel for the kernel's log. Default embra-brain.
     #[serde(default)]
     pub service: Option<String>,
     /// Tail line count (default 200, clamped to [1, 2000]).
@@ -934,7 +1037,8 @@ mod native_args_tests {
 #[cfg(test)]
 mod system_logs_tests {
     use super::{
-        resolve_log_service, tail_filter_lines, SystemLogsArgs, SYSTEM_LOG_DEFAULT_LINES,
+        kernel_log_report, read_kernel_log, render_kernel_line, resolve_log_service, system_logs,
+        tail_filter_lines, SystemLogsArgs, KERNEL_LOG, SYSTEM_LOG_DEFAULT_LINES,
         SYSTEM_LOG_MAX_LINES, SYSTEM_LOG_SERVICES,
     };
 
@@ -944,9 +1048,10 @@ mod system_logs_tests {
         assert_eq!(resolve_log_service(Some("  ")).unwrap(), "embra-brain");
         assert_eq!(resolve_log_service(Some("WardsonDB")).unwrap(), "wardsondb");
         assert_eq!(resolve_log_service(Some("embrad")).unwrap(), "embrad");
-        let err = resolve_log_service(Some("kernel")).unwrap_err();
-        assert!(err.contains("unknown service 'kernel'"));
-        assert!(err.contains("embra-brain"), "error lists the allowlist: {err}");
+        assert_eq!(resolve_log_service(Some("Kernel")).unwrap(), KERNEL_LOG);
+        let err = resolve_log_service(Some("sshd")).unwrap_err();
+        assert!(err.contains("unknown service 'sshd'"));
+        assert!(err.contains("embra-brain") && err.contains("kernel"), "error lists the allowlist: {err}");
         // The allowlist is names, never paths — the read carve-out depends
         // on this staying enum-shaped.
         assert!(SYSTEM_LOG_SERVICES.iter().all(|s| !s.contains('/')));
@@ -981,6 +1086,92 @@ mod system_logs_tests {
     fn line_caps_pinned() {
         assert_eq!(SYSTEM_LOG_DEFAULT_LINES, 200);
         assert_eq!(SYSTEM_LOG_MAX_LINES, 2000);
+    }
+
+    /// The kernel hands its log over with each line's priority in front.
+    /// The tool shows a line as dmesg does, and marks the ones that say
+    /// something went wrong.
+    #[test]
+    fn a_kernel_line_loses_its_priority_and_a_warning_or_worse_says_its_level() {
+        for (raw, shown) in [
+            ("<6>[    0.000000] Linux version 6.18.60 (builder@host)", "[    0.000000] Linux version 6.18.60 (builder@host)"),
+            ("<5>[    0.000000] Kernel command line: console=tty0 quiet", "[    0.000000] Kernel command line: console=tty0 quiet"),
+            ("<6>[    0.714203] microcode: Current revision: 0x24000026", "[    0.714203] microcode: Current revision: 0x24000026"),
+            ("<7>[    1.000001] a debug line", "[    1.000001] a debug line"),
+            ("<4>[    0.412345] x86/cpu: SGX disabled by BIOS.", "[    0.412345] warn: x86/cpu: SGX disabled by BIOS."),
+            ("<3>[    2.104512] usb 1-2: device not accepting address 3, error -71", "[    2.104512] err: usb 1-2: device not accepting address 3, error -71"),
+            ("<2>[   10.000000] thermal: critical temperature reached", "[   10.000000] crit: thermal: critical temperature reached"),
+            ("<1>[   11.5] an alert", "[   11.5] alert: an alert"),
+            ("<0>[   12.000000] Kernel panic - not syncing: [x] y", "[   12.000000] emerg: Kernel panic - not syncing: [x] y"),
+            // A process's line in the log carries its facility above the level: daemon.info, user.err.
+            ("<30>[   20.000000] a daemon's line", "[   20.000000] a daemon's line"),
+            ("<11>[   21.000000] a process's error", "[   21.000000] err: a process's error"),
+            // Without a timestamp (printk.time off), and what is no line of the kernel's shape.
+            ("<3>no timestamp here", "err: no timestamp here"),
+            ("<6>plain", "plain"),
+            ("not a kernel line", "not a kernel line"),
+            ("<x>[    1.0] odd", "<x>[    1.0] odd"),
+            ("", ""),
+        ] {
+            assert_eq!(render_kernel_line(raw), shown, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn the_kernels_log_is_filtered_and_tailed_like_a_services() {
+        let raw = "<6>[    0.000000] Linux version 6.18.60\n<6>[    0.714203] microcode: Current revision: 0x24000026\n<6>[    0.714210] microcode: Updated early from: 0x24000024\n<3>[    2.104512] usb 1-2: device not accepting address 3, error -71\n<6>[    3.000000] usb-storage 1-3:1.0: USB Mass Storage device detected\n";
+        let all = kernel_log_report(raw, false, 200, None);
+        assert!(all.starts_with(&format!("system_logs kernel ({} bytes of the kernel's ring buffer): last 5 of 5 matching line(s)\n\n", raw.len())), "{all}");
+        assert!(all.ends_with("[    3.000000] usb-storage 1-3:1.0: USB Mass Storage device detected\n"));
+        let microcode = kernel_log_report(raw, false, 200, Some("MICROCODE"));
+        assert_eq!(
+            microcode.lines().skip(2).collect::<Vec<_>>(),
+            ["[    0.714203] microcode: Current revision: 0x24000026", "[    0.714210] microcode: Updated early from: 0x24000024"],
+            "{microcode}"
+        );
+        assert!(microcode.contains("last 2 of 2 matching line(s) for filter \"MICROCODE\""));
+        // What went wrong is found by its level, which the raw line carried as a number.
+        let errors = kernel_log_report(raw, false, 200, Some("] err:"));
+        assert_eq!(errors.lines().skip(2).collect::<Vec<_>>(), ["[    2.104512] err: usb 1-2: device not accepting address 3, error -71"]);
+        // The newest lines are the tail, and a full read says the old ones are not in it and drops its cut first line.
+        let tail = kernel_log_report(raw, true, 1, None);
+        assert!(tail.contains("the read was full, so older lines are not in it): last 1 of 4 matching line(s)"), "{tail}");
+        assert!(tail.ends_with("USB Mass Storage device detected\n"));
+        assert!(kernel_log_report("", false, 10, None).ends_with("(no matching lines)\n"));
+    }
+
+    /// The tool's answer for the kernel's log, printed: run by hand where
+    /// the log can be read (as root, or as the first process of a scratch
+    /// VM), `EMBRA_KERNEL_LOG_FILTER` being the filter.
+    /// `cargo test -p embra-brain the_kernels_log_can_be_printed -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "prints the kernel's log; needs the privilege to read it"]
+    async fn the_kernels_log_can_be_printed() {
+        let filter = std::env::var("EMBRA_KERNEL_LOG_FILTER").ok();
+        let answer = system_logs(Some("kernel"), Some(40), filter.as_deref()).await;
+        println!("{answer}");
+        assert!(answer.starts_with("system_logs kernel ("), "{answer}");
+        assert!(!answer.contains("\n<"), "no line is shown with its raw priority");
+    }
+
+    /// The read itself, where the host allows it: the kernel's own text,
+    /// every line with its priority in front. A host that keeps the log for
+    /// root answers an error the tool says as itself; it never panics and
+    /// never reads as an empty log.
+    #[tokio::test]
+    async fn the_kernels_log_is_read_or_the_refusal_is_said() {
+        let answer = system_logs(Some("kernel"), Some(5), None).await;
+        match read_kernel_log() {
+            Ok((raw, _)) => {
+                assert!(raw.lines().filter(|l| !l.is_empty()).all(|l| l.starts_with('<')), "each line carries its priority");
+                assert!(answer.starts_with("system_logs kernel ("), "{answer}");
+                assert!(!answer.contains("\n<"), "no line is shown with its raw priority: {answer}");
+            }
+            Err(e) => {
+                assert!(answer.starts_with("Error: the kernel's log could not be read: "), "{answer}");
+                assert!(answer.contains(&e.to_string()), "{answer}");
+            }
+        }
     }
 
     #[test]
