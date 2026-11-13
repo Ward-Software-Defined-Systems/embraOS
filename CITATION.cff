@@ -10,15 +10,16 @@ abstract: >-
   an HTTPS web console or a serial TUI. The runtime drives one of four pluggable
   LLM backends through a fixed 119-tool surface, with a knowledge-graph memory
   layer and an intelligence-proposed, soul-gated, operator-approved dynamic-tool substrate (embra-guardian). This
-  release marks Phase 1 (Core OS), QEMU-bootable on x86_64 and aarch64.
+  release marks Phase 2 (Image Factory): QEMU and hypervisors on x86_64 and aarch64,
+  bare metal on x86_64.
 type: software
 authors:
   - family-names: Ward
     given-names: William
     affiliation: "Ward Software Defined Systems LLC"
     orcid: "https://orcid.org/0009-0004-4966-6644"
-version: "0.23.0-phase1"
-date-released: 2026-11-01
+version: "0.24.0-phase2"
+date-released: 2026-11-13
 repository-code: "https://github.com/Ward-Software-Defined-Systems/embraOS"
 url: "https://wsds.io"
 identifiers:

@@ -1380,7 +1380,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "embra-apid"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1396,14 +1396,14 @@ dependencies = [
 
 [[package]]
 name = "embra-boot"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "embra-brain"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "embra-common"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "prost",
  "prost-types",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "embra-console"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "embra-guardian"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
  "embra-tools-core",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "embra-init"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "embra-boot",
  "nix 0.29.0",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "embra-tool-macro"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "embra-tools-core",
  "inventory",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "embra-tools-core"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "embra-trustd"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
  "embra-common",
@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "embra-update"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "embra-web"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "embrad"
-version = "0.23.0-phase1"
+version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
  "embra-boot",

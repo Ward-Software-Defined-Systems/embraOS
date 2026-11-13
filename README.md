@@ -22,7 +22,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable, released as `v0.23.0-phase1` (2026-11-01; the code-review pit stop, `v0.16.0-phase1` through `v0.23.0-phase1`, closed on `main`). Phase 2 — In progress, on `main` since the fast-forward of 2026-11-11 (the working branch is `phase2`): the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, DHCP, the drivers of the hypervisors and of wired hardware with their firmware and microcode, the web console on the machine's display with keyboard and mouse, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
+**Current Status:** Phase 1 — Stable, closed with `v0.23.0-phase1` (2026-11-01). Phase 2 — In progress, first released as `v0.24.0-phase2` (2026-11-13; the working branch is `phase2`): the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, DHCP, the drivers of the hypervisors and of wired hardware with their firmware and microcode, the web console on the machine's display with keyboard and mouse, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
 > **Supported platforms.** embraOS boots on UEFI firmware with Secure Boot off, on x86_64
 > and aarch64: from the disk image, from the same disk converted for a hypervisor, or
@@ -31,8 +31,9 @@
 > (the VHDX and the ISO); VMware Fusion on Apple Silicon (the ISO); Parallels Desktop 26.5
 > on an Intel Mac (the machine it imports and the ISO); and bare metal on one machine so
 > far, a YouYeeToo X1 single-board computer installed from the ISO. The drivers of wired
-> hardware with their firmware and the CPU microcode are in the image. These are the
-> platforms of `main`; the latest release, `v0.23.0-phase1`, is a QEMU image. What each
+> hardware with their firmware and the CPU microcode are in the image. The latest release,
+> `v0.24.0-phase2`, publishes the installer ISOs (x86_64 and aarch64, one per storage
+> engine); the disk image and the hypervisor conversions come from a build. What each
 > surface has been validated on, and what is still TBD, is in
 > [docs/OPERATIONS/OPERATION.md](docs/OPERATIONS/OPERATION.md).
 
