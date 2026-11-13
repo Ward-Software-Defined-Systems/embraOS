@@ -12,7 +12,10 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
   apply [--yes] [--console] [--allow-downgrade] [--source <url>] [--tag <v…>]   write the release into the inactive slot and stage it
   status                                                         the booted, active and pending slots and what each holds
   rollback                                                       make the other slot the default again
-  install --media <dir> [--disk <name>] [--yes] [--console] [--force]   write embraOS from the installation medium to a local disk
+  install --media <dir> [--disk <name>] [--yes] [--upgrade] [--allow-downgrade] [--console] [--force]
+                                                                 write embraOS from the installation medium to a local disk, or (--upgrade,
+                                                                 and the installer's own question) into the other slot of the installation
+                                                                 the disk holds, STATE and DATA kept
   grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +29,7 @@ pub enum Command {
     Apply { source: Option<String>, tag: Option<String>, yes: bool, console: bool, allow_downgrade: bool },
     Status,
     Rollback,
-    Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool },
+    Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool, upgrade: bool, allow_downgrade: bool },
     GrowData { console: bool },
 }
 
@@ -80,6 +83,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut allow_downgrade = false;
     let mut media: Option<String> = None;
     let mut disk: Option<String> = None;
+    let mut upgrade = false;
     let mut i = 0;
     while i < rest.len() {
         let a = rest[i].as_str();
@@ -100,6 +104,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--allow-downgrade" => allow_downgrade = true,
             "--media" => media = Some(value("--media")?),
             "--disk" => disk = Some(value("--disk")?),
+            "--upgrade" => upgrade = true,
             s if s.starts_with("--") => return Err(format!("unknown flag {s}")),
             s => positionals.push(s.to_string()),
         }
@@ -167,7 +172,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             if !positionals.is_empty() {
                 return Err(format!("install takes no positional: {}", positionals.join(" ")));
             }
-            Ok(Command::Install { media, disk, yes, console, force })
+            Ok(Command::Install { media, disk, yes, console, force, upgrade, allow_downgrade })
         }
         other => Err(format!("unknown command {other:?}")),
     }
@@ -207,7 +212,11 @@ mod tests {
         assert!(p("snapshot --console").unwrap().console() && p("apply --console").unwrap().console() && !p("status").unwrap().console());
         assert_eq!(
             p("install --media /run/embra/media --disk vda --yes --console"),
-            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: true, force: false })
+            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: true, force: false, upgrade: false, allow_downgrade: false })
+        );
+        assert_eq!(
+            p("install --media /run/embra/media --upgrade --disk vda --yes --allow-downgrade"),
+            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: false, force: false, upgrade: true, allow_downgrade: true })
         );
         assert!(!p("install --media /run/embra/media").unwrap().console());
         assert!(p("install").unwrap_err().contains("--media"));

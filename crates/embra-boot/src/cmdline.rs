@@ -118,6 +118,13 @@ impl<'a> TimeServer<'a> {
 }
 /// The installer's target disk, unattended (`embra.install=vda`).
 pub const INSTALL_KEY: &str = "embra.install";
+/// The installer's target disk for an upgrade in place, unattended
+/// (`embra.upgrade=vda`): the installation the disk holds keeps STATE and
+/// DATA and takes the medium's OS into the slot that is not the default.
+pub const UPGRADE_KEY: &str = "embra.upgrade";
+/// `embra.downgrade=1`: an upgrade in place may write a release older than
+/// the one installed.
+pub const DOWNGRADE_KEY: &str = "embra.downgrade";
 
 /// What embrad runs: the services, or one maintenance job from the boot
 /// menu (`embra.mode=update|backup|restore`), or the installer from the
@@ -326,10 +333,26 @@ impl Cmdline {
     /// `embra.install=<disk>`, the installer's target, unattended: a bare
     /// device name (`vda`, `sda`, `nvme0n1`); anything else is ignored.
     pub fn install_disk(&self) -> Option<&str> {
-        self.values(INSTALL_KEY)
-            .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
-            .last()
+        self.values(INSTALL_KEY).filter(|v| bare_disk_name(v)).last()
     }
+
+    /// `embra.upgrade=<disk>`, the installer's target for an upgrade in
+    /// place, unattended: a bare device name, as `embra.install` takes one;
+    /// anything else is ignored.
+    pub fn upgrade_disk(&self) -> Option<&str> {
+        self.values(UPGRADE_KEY).filter(|v| bare_disk_name(v)).last()
+    }
+
+    /// `embra.downgrade=1`: the installer's upgrade in place may write a
+    /// release older than the installed one.
+    pub fn allow_downgrade(&self) -> bool {
+        self.last(DOWNGRADE_KEY) == Some("1")
+    }
+}
+
+/// A bare device name (`vda`, `sda`, `nvme0n1`): lowercase letters and digits.
+fn bare_disk_name(v: &str) -> bool {
+    !v.is_empty() && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
 /// Whether the display console runs: under the web console, on a machine
@@ -458,6 +481,19 @@ mod install_tests {
         assert_eq!(Cmdline::parse("embra.install=/dev/sda").install_disk(), None, "a bare name only");
         assert_eq!(Cmdline::parse("embra.install=sd;rm").install_disk(), None);
         assert_eq!(Cmdline::parse("quiet").media(), None);
+    }
+
+    #[test]
+    fn the_upgrade_knob_names_a_disk_as_the_install_knob_does_and_the_downgrade_knob_is_a_switch() {
+        let c = Cmdline::parse("embra.mode=install embra.upgrade=sda embra.upgrade=nvme0n1 embra.downgrade=1");
+        assert_eq!(c.upgrade_disk(), Some("nvme0n1"), "the last wins");
+        assert_eq!(c.install_disk(), None, "an upgrade names no clean install");
+        assert!(c.allow_downgrade());
+        assert_eq!(Cmdline::parse("embra.upgrade=/dev/sda").upgrade_disk(), None, "a bare name only");
+        assert_eq!(Cmdline::parse("embra.upgrade=").upgrade_disk(), None);
+        assert!(!Cmdline::parse("embra.upgrade=vda embra.downgrade=yes").allow_downgrade(), "1 and nothing else");
+        assert!(!Cmdline::parse("embra.upgrade=vda").allow_downgrade());
+        assert_eq!(Cmdline::parse("embra.install=vda").upgrade_disk(), None);
     }
 }
 

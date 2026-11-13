@@ -99,21 +99,29 @@ pub fn compare(release: &Release, data_engine: Option<&str>, m: &Manifest) -> Ve
     if m.engine != engine {
         return Verdict::Mismatch(format!("the manifest is built for the {} engine, this machine runs {engine}", m.engine));
     }
-    match (version_triple(&m.version), version_triple(&release.version)) {
+    version_verdict(&m.version, &m.build_id, &release.version, &release.build_id)
+}
+
+/// A release (`version`, `build_id`) against the one that is installed: the
+/// `MAJOR.MINOR.PATCH` triples, then the build ids. The update and the
+/// installer's upgrade in place share it; neither architecture nor engine
+/// is looked at here.
+pub fn version_verdict(version: &str, build_id: &str, installed_version: &str, installed_build_id: &str) -> Verdict {
+    match (version_triple(version), version_triple(installed_version)) {
         (Some(theirs), Some(ours)) if theirs > ours => Verdict::Newer,
         (Some(theirs), Some(ours)) if theirs < ours => Verdict::Older,
         (Some(_), Some(_)) => {
-            if m.build_id == release.build_id {
+            if build_id == installed_build_id {
                 Verdict::SameBuild
             } else {
                 Verdict::SameVersionOtherBuild
             }
         }
         _ => {
-            if m.version == release.version && m.build_id == release.build_id {
+            if version == installed_version && build_id == installed_build_id {
                 Verdict::SameBuild
             } else {
-                Verdict::Mismatch(format!("a version that does not compare: {} against {}", m.version, release.version))
+                Verdict::Mismatch(format!("a version that does not compare: {version} against {installed_version}"))
             }
         }
     }

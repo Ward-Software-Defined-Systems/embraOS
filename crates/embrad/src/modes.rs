@@ -135,13 +135,33 @@ fn say(line: &str) {
 /// moves it there before the switch root).
 pub const INSTALL_MEDIA: &str = "/run/embra/media";
 
+/// What the kernel line asks of the installer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InstallKnobs<'a> {
+    /// `embra.install=<disk>`: a clean install of that disk, unattended.
+    pub install: Option<&'a str>,
+    /// `embra.upgrade=<disk>`: an upgrade in place of the installation that
+    /// disk holds, unattended.
+    pub upgrade: Option<&'a str>,
+    /// `embra.downgrade=1`: an upgrade in place may write an older release.
+    pub allow_downgrade: bool,
+}
+
 /// The installer's arguments: the medium, the consoles, and the target disk
-/// with `--yes` when the kernel line names one (`embra.install=<disk>`,
-/// run-qemu's unattended form); otherwise the installer asks.
-pub fn install_args(install_disk: Option<&str>) -> Vec<String> {
+/// with `--yes` when the kernel line names one; otherwise the installer
+/// asks. `embra.upgrade=<disk>` is an upgrade in place (`--upgrade`), which
+/// the installer never turns into a clean install; `embra.install=<disk>`
+/// is the clean install. A line that names both gets the upgrade, the one
+/// that erases nothing.
+pub fn install_args(knobs: InstallKnobs<'_>) -> Vec<String> {
     let mut args: Vec<String> = ["install", "--console", "--media", INSTALL_MEDIA].iter().map(|s| s.to_string()).collect();
-    if let Some(disk) = install_disk {
+    if let Some(disk) = knobs.upgrade {
+        args.extend(["--upgrade".to_string(), "--disk".to_string(), disk.to_string(), "--yes".to_string()]);
+    } else if let Some(disk) = knobs.install {
         args.extend(["--disk".to_string(), disk.to_string(), "--yes".to_string()]);
+    }
+    if knobs.allow_downgrade {
+        args.push("--allow-downgrade".to_string());
     }
     args
 }
@@ -162,9 +182,9 @@ pub fn run_grow_data() {
 
 /// A menu entry's job. Every exit path reboots (the caller reboots): the
 /// menu is where the operator returns.
-pub fn run_maintenance(mode: BootMode, install_disk: Option<&str>) {
+pub fn run_maintenance(mode: BootMode, knobs: InstallKnobs<'_>) {
     say(&format!("maintenance boot: {}", mode.name()));
-    let install = install_args(install_disk);
+    let install = install_args(knobs);
     let ran = match mode {
         BootMode::Update => run_updater(&["apply", "--console"]),
         BootMode::Backup => run_updater(&["snapshot", "--label", "manual", "--taken-by", "manual", "--console"]),
@@ -288,7 +308,23 @@ mod install_args_tests {
 
     #[test]
     fn an_install_boot_runs_the_installer_on_the_media_and_a_disk_knob_makes_it_unattended() {
-        assert_eq!(install_args(None), ["install", "--console", "--media", "/run/embra/media"]);
-        assert_eq!(install_args(Some("vda")), ["install", "--console", "--media", "/run/embra/media", "--disk", "vda", "--yes"]);
+        assert_eq!(install_args(InstallKnobs::default()), ["install", "--console", "--media", "/run/embra/media"]);
+        let clean = InstallKnobs { install: Some("vda"), ..Default::default() };
+        assert_eq!(install_args(clean), ["install", "--console", "--media", "/run/embra/media", "--disk", "vda", "--yes"]);
+    }
+
+    #[test]
+    fn an_upgrade_knob_asks_for_an_upgrade_in_place_and_wins_over_the_install_knob() {
+        let upgrade = InstallKnobs { upgrade: Some("vda"), ..Default::default() };
+        assert_eq!(install_args(upgrade), ["install", "--console", "--media", "/run/embra/media", "--upgrade", "--disk", "vda", "--yes"]);
+        let both = InstallKnobs { install: Some("sda"), upgrade: Some("vda"), allow_downgrade: true };
+        assert_eq!(
+            install_args(both),
+            ["install", "--console", "--media", "/run/embra/media", "--upgrade", "--disk", "vda", "--yes", "--allow-downgrade"],
+            "the one that erases nothing"
+        );
+        // The switch alone leaves the installer asking; it reads it at its own question.
+        let asked = InstallKnobs { allow_downgrade: true, ..Default::default() };
+        assert_eq!(install_args(asked), ["install", "--console", "--media", "/run/embra/media", "--allow-downgrade"]);
     }
 }

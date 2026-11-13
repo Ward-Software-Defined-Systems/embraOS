@@ -120,7 +120,12 @@ fn main() -> Result<()> {
             return Ok(());
         }
         modes::Decision::Maintenance(m) => {
-            modes::run_maintenance(m, cmdline.install_disk());
+            let knobs = modes::InstallKnobs {
+                install: cmdline.install_disk(),
+                upgrade: cmdline.upgrade_disk(),
+                allow_downgrade: cmdline.allow_downgrade(),
+            };
+            modes::run_maintenance(m, knobs);
             if pid == 1 {
                 reboot_system();
             }

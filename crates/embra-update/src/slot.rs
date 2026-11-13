@@ -95,33 +95,66 @@ pub fn mount_point(slot: Slot) -> PathBuf {
     PathBuf::from(format!("/run/embra/slot-{slot}"))
 }
 
+/// A slot's squashfs, mounted read-only at the slot's mount point for one
+/// read and unmounted when dropped.
+#[cfg(target_os = "linux")]
+struct MountedSlot {
+    root: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl MountedSlot {
+    /// `None` when the partition holds no filesystem (the hole slot B is at
+    /// build, or a half-written image).
+    fn mount(slot: Slot, dev: &Path) -> Result<Option<MountedSlot>, String> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let mp = mount_point(slot);
+        std::fs::create_dir_all(&mp).map_err(|e| format!("create {}: {e}", mp.display()))?;
+        let source = CString::new(dev.as_os_str().as_bytes()).map_err(|_| "a device path with a NUL byte".to_string())?;
+        let target = CString::new(mp.as_os_str().as_bytes()).map_err(|_| "a mount path with a NUL byte".to_string())?;
+        let fstype = CString::new("squashfs").expect("a literal");
+        // MS_SILENT: a partition without a filesystem is an answer here (`None`),
+        // and without the flag the kernel says "Can't find a SQUASHFS superblock"
+        // at error level, which a `quiet` console still shows: in the middle of
+        // the installer's question, and in the kernel's log at every `status`.
+        let flags = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_SILENT;
+        // SAFETY: NUL-terminated strings that outlive the call; no data pointer.
+        let rc = unsafe { libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), flags, std::ptr::null()) };
+        if rc != 0 {
+            let err = io::Error::last_os_error();
+            return match err.raw_os_error() {
+                Some(libc::EINVAL) => Ok(None),
+                _ => Err(format!("mount {} read-only: {err}", dev.display())),
+            };
+        }
+        Ok(Some(MountedSlot { root: mp }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for MountedSlot {
+    fn drop(&mut self) {
+        use std::os::unix::ffi::OsStrExt;
+        if let Ok(target) = std::ffi::CString::new(self.root.as_os_str().as_bytes()) {
+            // SAFETY: a NUL-terminated string; a failed unmount is reported by the next mount.
+            unsafe {
+                libc::umount2(target.as_ptr(), 0);
+            }
+        }
+    }
+}
+
 /// The release a slot carries, through a read-only mount of its squashfs:
 /// `None` when the partition holds no filesystem (the hole slot B is at
 /// build, or a half-written image).
 #[cfg(target_os = "linux")]
 pub fn release_of(slot: Slot, dev: &Path) -> Result<Option<Release>, String> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let mp = mount_point(slot);
-    std::fs::create_dir_all(&mp).map_err(|e| format!("create {}: {e}", mp.display()))?;
-    let source = CString::new(dev.as_os_str().as_bytes()).map_err(|_| "a device path with a NUL byte".to_string())?;
-    let target = CString::new(mp.as_os_str().as_bytes()).map_err(|_| "a mount path with a NUL byte".to_string())?;
-    let fstype = CString::new("squashfs").expect("a literal");
-    let flags = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
-    // SAFETY: NUL-terminated strings that outlive the call; no data pointer.
-    let rc = unsafe { libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), flags, std::ptr::null()) };
-    if rc != 0 {
-        let err = io::Error::last_os_error();
-        return match err.raw_os_error() {
-            Some(libc::EINVAL) => Ok(None),
-            _ => Err(format!("mount {} read-only: {err}", dev.display())),
-        };
-    }
-    let release = Release::read_from(&mp.join("etc/embraos-release"));
-    // SAFETY: a NUL-terminated string; a failed unmount is reported by the next mount.
-    unsafe {
-        libc::umount2(target.as_ptr(), 0);
-    }
+    let Some(mounted) = MountedSlot::mount(slot, dev)? else {
+        return Ok(None);
+    };
+    let release = Release::read_from(&mounted.root.join("etc/embraos-release"));
+    drop(mounted);
     match release {
         Ok(r) => Ok(Some(r)),
         Err(embra_boot::ReleaseError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -131,6 +164,22 @@ pub fn release_of(slot: Slot, dev: &Path) -> Result<Option<Release>, String> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn release_of(_slot: Slot, _dev: &Path) -> Result<Option<Release>, String> {
+    Err("a slot is read on Linux only".into())
+}
+
+/// Which of `files` (paths inside the slot, `boot/ucode.cpio`) the slot does
+/// not hold as a file, through the same read-only mount; every one of them
+/// when the partition holds no filesystem.
+#[cfg(target_os = "linux")]
+pub fn missing_files(slot: Slot, dev: &Path, files: &[String]) -> Result<Vec<String>, String> {
+    let Some(mounted) = MountedSlot::mount(slot, dev)? else {
+        return Ok(files.to_vec());
+    };
+    Ok(files.iter().filter(|f| !mounted.root.join(f).is_file()).cloned().collect())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn missing_files(_slot: Slot, _dev: &Path, _files: &[String]) -> Result<Vec<String>, String> {
     Err("a slot is read on Linux only".into())
 }
 
