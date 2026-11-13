@@ -1,0 +1,5 @@
+# Locally computed from GitHub's archive of Intel's tag microcode-20261110
+# (commit d71fe4e2f0f70a49ebbac7f2c7e915f181361974, the id the archive
+# carries). The licence is byte for byte the one of 20260210-rev1.
+sha256  989a5cd345808babee491da69ed80ae5741697bc87743a71d0ba611f3fd6afa5  intel-microcode-20261110.tar.gz
+sha256  03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12  license

@@ -1,0 +1,17 @@
+config BR2_PACKAGE_EMBRA_INTEL_MICROCODE
+	bool "embra-intel-microcode"
+	depends on BR2_x86_64
+	depends on !BR2_PACKAGE_INTEL_MICROCODE
+	help
+	  Intel's processor microcode at the release embraOS pins: the
+	  version in embra-intel-microcode.mk, the archive's sha256 in
+	  the hash file beside it. The recipe leaves the files in the
+	  images directory, where post_build.sh packs them into
+	  /boot/ucode.cpio for the kernel's early loader, and installs
+	  Intel's licence under /usr/share/licenses/intel-microcode.
+
+	  Takes the place of Buildroot's intel-microcode package, whose
+	  recipe names one release per Buildroot version; the two write
+	  the same images directory, so only one is selected.
+
+	  https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files

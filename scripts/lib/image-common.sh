@@ -48,6 +48,16 @@ LINUX_KERNEL_VERSION="${LINUX_KERNEL_VERSION:-6.18.60}"
 KERNEL_PINS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/linux-kernel.sha256"
 KERNEL_MIRROR="${KERNEL_MIRROR:-https://cdn.kernel.org/pub/linux/kernel}"
 
+# Intel's microcode bundle is pinned by its recipe: the version in
+# buildroot/package/embra-intel-microcode/embra-intel-microcode.mk and the
+# archive's sha256 in the hash file beside it, which Buildroot checks at the
+# download (a wrong hash or a missing line stops the build). Buildroot's own
+# intel-microcode recipe names one release per Buildroot version (2026.02.1:
+# 20260210-rev1), so that package is not selected. assert_boot_initrds proves
+# that the image carries the files and the licence of the bundle the recipe
+# names.
+INTEL_MICROCODE_RECIPE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/package/embra-intel-microcode/embra-intel-microcode.mk"
+
 # The embedding model (KG-02), pinned by sha256 like CI's Bootlin SDK: the
 # payload is fetched, never committed, and a changed upstream file fails
 # the build instead of silently shipping different weights. Verified
@@ -116,6 +126,17 @@ stage_kernel_tarball() {
     fi
     ( cd "$dl" && printf '%s\n' "$pin" | sha256sum -c - ) \
         || { rm -f "$dl/$tb"; echo "ERROR: ${tb} does not match its pin in $KERNEL_PINS; the file was removed" >&2; exit 1; }
+}
+
+# intel_microcode_version: the bundle version the recipe names, from its one
+# `EMBRA_INTEL_MICROCODE_VERSION = <version>` line. Nothing is printed and
+# the status is 1 when the recipe has no line of that form, or more than one.
+intel_microcode_version() {
+    local v
+    v="$(sed -n 's/^EMBRA_INTEL_MICROCODE_VERSION = \([0-9A-Za-z._-]\{1,\}\)$/\1/p' "$INTEL_MICROCODE_RECIPE" 2>/dev/null || true)"
+    [ -n "$v" ] || return 1
+    [ "$(printf '%s\n' "$v" | wc -l)" -eq 1 ] || return 1
+    printf '%s\n' "$v"
 }
 
 # clean_packages_with_changed_patches <buildroot dir> <patches dir>: Buildroot
@@ -387,8 +408,9 @@ assert_firmware_present() {
 # assert_boot_initrds <target dir> <triple>: the two initrds post_build.sh
 # wrote beside the repository's. ucode.cpio is a newc archive (070701) and,
 # on x86_64, carries the two microcode files as the concatenations the
-# kernel's early loader reads (GenuineIntel.bin from Buildroot's intel-ucode
-# directory, AuthenticAMD.bin from linux-firmware's amd-ucode); on another
+# kernel's early loader reads (GenuineIntel.bin from Intel's bundle at the
+# version the recipe pins, AuthenticAMD.bin from linux-firmware's amd-ucode,
+# and with the first the licence of that bundle on the rootfs); on another
 # architecture it is the empty archive. firmware.cpio.gz is a gzip'd newc
 # archive with every probe-time blob under lib/firmware.
 # assert_cpio_parents_precede <cpio -tv listing> <archive name>: every
@@ -406,7 +428,7 @@ assert_cpio_parents_precede() {
 }
 
 assert_boot_initrds() {
-    local tgt arch="${2%%-*}" magic tmp listing
+    local tgt arch="${2%%-*}" magic tmp listing ucode_version ucode_bundle
     # Absolute: the archives are read from inside a scratch directory below.
     tgt="$(cd "$1" && pwd)"
     magic="$(head -c 6 "$tgt/boot/ucode.cpio")"
@@ -417,15 +439,26 @@ assert_boot_initrds() {
     cpio -tv --quiet < "$tgt/boot/ucode.cpio" > "$listing" 2>/dev/null
     assert_cpio_parents_precede "$listing" "/boot/ucode.cpio"
     if [ "$arch" = "x86_64" ]; then
-        [ -s "$tmp/kernel/x86/microcode/GenuineIntel.bin" ] || reject_image "/boot/ucode.cpio lacks kernel/x86/microcode/GenuineIntel.bin (BR2_PACKAGE_INTEL_MICROCODE puts intel-ucode/ in the images directory)"
+        [ -s "$tmp/kernel/x86/microcode/GenuineIntel.bin" ] || reject_image "/boot/ucode.cpio lacks kernel/x86/microcode/GenuineIntel.bin (BR2_PACKAGE_EMBRA_INTEL_MICROCODE puts intel-ucode/ in the images directory)"
         [ -s "$tmp/kernel/x86/microcode/AuthenticAMD.bin" ] || reject_image "/boot/ucode.cpio lacks kernel/x86/microcode/AuthenticAMD.bin (linux-firmware's amd-ucode family)"
-        cat "$BUILDROOT_DIR"/output/images/intel-ucode/* | cmp -s - "$tmp/kernel/x86/microcode/GenuineIntel.bin" \
-            || reject_image "/boot/ucode.cpio's GenuineIntel.bin is not the concatenation of the images directory's intel-ucode files"
+        # Intel's files and licence are the pinned bundle's and nothing else:
+        # the comparison is with the build directory of the version the recipe
+        # names, so a bundle Buildroot never built, an images directory another
+        # bundle left behind and a licence from another one are each refused.
+        ucode_version="$(intel_microcode_version)" \
+            || reject_image "no single 'EMBRA_INTEL_MICROCODE_VERSION = <version>' line in $INTEL_MICROCODE_RECIPE: the build cannot tell which Intel microcode bundle the image is to carry"
+        ucode_bundle="$BUILDROOT_DIR/output/build/embra-intel-microcode-$ucode_version"
+        [ -f "$ucode_bundle/.stamp_images_installed" ] \
+            || reject_image "Intel's microcode bundle $ucode_version was not built ($ucode_bundle/.stamp_images_installed is missing): check that the x86_64 defconfig selects BR2_PACKAGE_EMBRA_INTEL_MICROCODE and that buildroot/Config.in sources its Config.in"
+        cat "$ucode_bundle"/intel-ucode/* | cmp -s - "$tmp/kernel/x86/microcode/GenuineIntel.bin" \
+            || reject_image "/boot/ucode.cpio's GenuineIntel.bin is not the concatenation of the intel-ucode files of Intel's bundle $ucode_version ($ucode_bundle): the images directory holds another bundle's files"
         cat "$tgt"/lib/firmware/amd-ucode/microcode_amd*.bin | cmp -s - "$tmp/kernel/x86/microcode/AuthenticAMD.bin" \
             || reject_image "/boot/ucode.cpio's AuthenticAMD.bin is not the concatenation of /lib/firmware/amd-ucode/microcode_amd*.bin"
         [ -s "$tgt/usr/share/licenses/intel-microcode/license" ] \
-            || reject_image "/usr/share/licenses/intel-microcode/license is missing from the rootfs: Intel's microcode is redistributed on the condition that its notice travels with it (post_build.sh)"
-        echo "microcode: /boot/ucode.cpio carries GenuineIntel.bin ($(stat -c %s "$tmp/kernel/x86/microcode/GenuineIntel.bin") bytes) and AuthenticAMD.bin ($(stat -c %s "$tmp/kernel/x86/microcode/AuthenticAMD.bin") bytes); Intel's licence under /usr/share/licenses/intel-microcode"
+            || reject_image "/usr/share/licenses/intel-microcode/license is missing from the rootfs: Intel's microcode is redistributed on the condition that its notice travels with it (the embra-intel-microcode recipe installs it)"
+        cmp -s "$ucode_bundle/license" "$tgt/usr/share/licenses/intel-microcode/license" \
+            || reject_image "/usr/share/licenses/intel-microcode/license is not the licence of Intel's bundle $ucode_version ($ucode_bundle/license)"
+        echo "microcode: /boot/ucode.cpio carries GenuineIntel.bin ($(stat -c %s "$tmp/kernel/x86/microcode/GenuineIntel.bin") bytes, Intel's bundle $ucode_version) and AuthenticAMD.bin ($(stat -c %s "$tmp/kernel/x86/microcode/AuthenticAMD.bin") bytes); Intel's licence under /usr/share/licenses/intel-microcode"
     else
         [ -z "$(ls -A "$tmp")" ] || reject_image "/boot/ucode.cpio is not the empty archive on $arch"
         echo "microcode: /boot/ucode.cpio is the empty archive on $arch"

@@ -130,14 +130,16 @@ BR2_PACKAGE_EMBRA_UPDATE=y
 # /lib/firmware with their licence texts; the ones the mandatory drivers
 # want at probe go into /boot/firmware.cpio.gz (post_build.sh).
 BR2_PACKAGE_EMBRA_FIRMWARE_ALL=y
-# CPU microcode (William, 2026-11-08: included now): Intel's from its own
-# package, kept out of the rootfs (BINARIES_DIR alone) and AMD's from
-# linux-firmware; post_build.sh packs both into /boot/ucode.cpio, the first
-# and uncompressed initrd GRUB loads, which the kernel's early loader reads
-# before it unpacks the rest. Intel's package is marked REDISTRIBUTE = NO by
-# Buildroot: whether a release may carry it is William's decision.
-BR2_PACKAGE_INTEL_MICROCODE=y
-# BR2_PACKAGE_INTEL_MICROCODE_INSTALL_TARGET is not set
+# CPU microcode (William, 2026-11-08: included now): Intel's from the bundle
+# this tree pins (package/embra-intel-microcode: the version in its recipe,
+# the archive's sha256 beside it; Buildroot's own intel-microcode recipe
+# names one release per Buildroot version and is not selected), kept out of
+# the rootfs (BINARIES_DIR alone), and AMD's from linux-firmware;
+# post_build.sh packs both into /boot/ucode.cpio, the first and uncompressed
+# initrd GRUB loads, which the kernel's early loader reads before it unpacks
+# the rest. Intel's bundle is marked REDISTRIBUTE = NO, as Buildroot marks
+# it: whether a release may carry it is William's decision.
+BR2_PACKAGE_EMBRA_INTEL_MICROCODE=y
 
 
 # The display console (Phase 2): the web console rendered on the machine's
