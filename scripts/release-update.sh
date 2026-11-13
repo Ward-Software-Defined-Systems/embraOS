@@ -34,6 +34,9 @@
 # Uploading is the operator's step; the private key never enters the
 # repository or CI. The tag must be the one the tree is at, the version the
 # one CITATION.cff records, and the tree clean.
+# The slot image and the installer medium must be the build of that commit:
+# the build id in the image's release stamp and in the ISO's manifest is the
+# tagged commit's, with no -dirty behind it.
 #
 # A release trusts no certificate authority of the builder's own. An image
 # built with files in Imported_CAs/ carries them under
@@ -159,6 +162,18 @@ if command -v unsquashfs >/dev/null 2>&1; then
     for pair in "ARCH=$ARCH" "ENGINE=$ENGINE" "VERSION=$VERSION"; do
         echo "$REL" | grep -qx "$pair" || { echo "ERROR: $ROOTFS says $(echo "$REL" | grep "^${pair%%=*}=" ), not $pair" >&2; exit 1; }
     done
+    # The build of the tagged commit and no other. The stamp's BUILD_ID is the
+    # commit the image was built from, with -dirty behind it when that tree had
+    # changes (write_release_file, scripts/lib/image-common.sh), and the
+    # manifest signed below names HEAD's. An image of the same version from
+    # another commit would go out under this commit's id, and a machine
+    # installed from it would read the release as another build of its own
+    # version: until 2026-11-13 nothing here compared the two.
+    IMAGE_BUILD_ID="$(echo "$REL" | sed -n 's/^BUILD_ID=//p' | head -n1)"
+    [ "$IMAGE_BUILD_ID" = "$BUILD_ID" ] || {
+        echo "ERROR: $ROOTFS is build '${IMAGE_BUILD_ID:-unnamed}' and $TAG is build $BUILD_ID: a release's slot image is built from the tagged commit, in a tree without uncommitted changes (-dirty names one that had some)" >&2
+        exit 1
+    }
     case "$ARCH" in x86_64) KERNEL_IMAGE="bzImage" ;; aarch64) KERNEL_IMAGE="Image" ;; esac
     # A file is there when the listing has its own line. unsquashfs lists the
     # parents of a path the image lacks and exits 0, so its exit status says
@@ -247,6 +262,13 @@ if [ -n "$XORRISO" ]; then
     for pair in "ARCH=$ARCH" "ENGINE=$ENGINE" "VERSION=$VERSION"; do
         echo "$ISO_MANIFEST" | grep -qx "$pair" || { echo "ERROR: $ISO says $(echo "$ISO_MANIFEST" | grep "^${pair%%=*}="), not $pair" >&2; exit 1; }
     done
+    # The medium of the tagged commit's build, as the slot image is: the ISO's
+    # manifest takes its BUILD_ID from the same release stamp.
+    ISO_BUILD_ID="$(echo "$ISO_MANIFEST" | sed -n 's/^BUILD_ID=//p' | head -n1)"
+    [ "$ISO_BUILD_ID" = "$BUILD_ID" ] || {
+        echo "ERROR: $ISO is build '${ISO_BUILD_ID:-unnamed}' and $TAG is build $BUILD_ID: a release's installer medium is built from the tagged commit, in a tree without uncommitted changes (-dirty names one that had some)" >&2
+        exit 1
+    }
     # The medium of the same build: its root filesystem is the slot image
     # this run signs, so what was checked of that image holds for the ISO
     # too (the imported certificate authorities among it).
