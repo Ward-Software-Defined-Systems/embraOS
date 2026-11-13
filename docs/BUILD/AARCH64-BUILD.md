@@ -578,7 +578,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Kernel defconfig name | `BR2_LINUX_KERNEL_DEFCONFIG="x86_64"` | *(not needed — arch default is implicit)* |
 | Kernel fragments (`BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES`) | `linux.fragment` and `linux-x86_64.fragment` | `linux.fragment` |
 | GRUB target | `BR2_TARGET_GRUB2_X86_64_EFI=y` | `BR2_TARGET_GRUB2_ARM64_EFI=y` |
-| Microcode | `BR2_PACKAGE_INTEL_MICROCODE=y`, its files kept off the rootfs (`# BR2_PACKAGE_INTEL_MICROCODE_INSTALL_TARGET is not set`) for `/boot/ucode.cpio` | *(none)* |
+| Microcode | `BR2_PACKAGE_EMBRA_INTEL_MICROCODE=y`: Intel's bundle at the version `buildroot/package/embra-intel-microcode` pins, its files kept off the rootfs for `/boot/ucode.cpio` | *(none)* |
 
 > **Why `USE_ARCH_DEFAULT_CONFIG`?** Buildroot's `USE_DEFCONFIG` appends `_defconfig` to
 > the value you provide. ARM64's generic kernel config is named `defconfig`, so
