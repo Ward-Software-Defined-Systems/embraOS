@@ -22,6 +22,12 @@ projection, rendering, the migration ceremony) is documented in
 Only files ending in `.graph.json` are scanned. This README is never baked
 into the image.
 
+Every `*.graph.json` in this folder is baked, tracked by git or not, and the
+image's release stamp (`/etc/embraos-release`) says nothing of an untracked
+file: a graph of your own that lies here goes into every image built from
+this tree. `scripts/release-update.sh` signs no release whose image carries
+a graph the tagged commit does not hold.
+
 ## File format
 
 ```json

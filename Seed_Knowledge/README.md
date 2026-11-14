@@ -21,7 +21,10 @@ sealed, and never touch `identity.graph`.
 
 This folder's `*.knowledge.json` files are baked read-only into the OS
 image (`post_build.sh` → `/usr/share/embra/seed-knowledge/`). This README
-is host-side documentation and is not baked.
+is host-side documentation and is not baked. Every `*.knowledge.json` here is
+baked, tracked by git or not: a pack of your own belongs in STATE (below),
+and `scripts/release-update.sh` signs no release whose image carries a pack
+the tagged commit does not hold.
 
 ## Where packs load from
 
