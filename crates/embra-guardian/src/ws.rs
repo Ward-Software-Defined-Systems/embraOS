@@ -161,6 +161,11 @@ pub struct WsFrame {
     /// The top-level `id` of a text frame that is a JSON object, read when
     /// the frame arrived and before any cut.
     pub top_id: Option<String>,
+    /// When the answer cut a frame the connection had kept whole: the
+    /// `max_bytes` that answers such a frame whole. The message's length
+    /// is not that figure: `max_bytes` counts JSON text, and a quote or a
+    /// line break takes two bytes of it.
+    pub needs_max_bytes: Option<usize>,
 }
 
 /// Which frames a call wants.
@@ -283,7 +288,7 @@ impl WsBuffer {
         };
         let payload = cut_to(payload, WS_KEPT_MAX, false);
         self.bytes += payload.len();
-        self.frames.push_back(WsFrame { payload, full_len, top_id });
+        self.frames.push_back(WsFrame { payload, full_len, top_id, needs_max_bytes: None });
         while self.frames.len() > self.max_frames || (self.bytes > self.max_bytes && self.frames.len() > 1) {
             if let Some(oldest) = self.frames.pop_front() {
                 self.bytes -= oldest.payload.len();
@@ -322,10 +327,9 @@ impl WsBuffer {
             let Some(at) = self.frames.iter().position(|f| f.top_id.as_deref() == Some(id)) else {
                 return (Vec::new(), Some(false));
             };
-            let Some(mut frame) = self.frames.remove(at) else { return (Vec::new(), Some(false)) };
+            let Some(frame) = self.frames.remove(at) else { return (Vec::new(), Some(false)) };
             self.bytes -= frame.payload.len();
-            frame.payload = cut_to(frame.payload, max_bytes, true);
-            return (vec![frame], Some(true));
+            return (vec![cut_for_answer(frame, max_bytes)], Some(true));
         }
         // An `until` that has not arrived answers what there is.
         let stop_at = match pick {
@@ -341,11 +345,9 @@ impl WsBuffer {
             if needs > room && !taken.is_empty() {
                 break;
             }
-            let Some(mut frame) = self.frames.pop_front() else { break };
+            let Some(frame) = self.frames.pop_front() else { break };
             self.bytes -= frame.payload.len();
-            if needs > room {
-                frame.payload = cut_to(frame.payload, room, true);
-            }
+            let frame = cut_for_answer(frame, room);
             room = room.saturating_sub(frame.payload.answered_len());
             let was_the_match = stop_at == Some(taken.len());
             taken.push(frame);
@@ -357,6 +359,19 @@ impl WsBuffer {
         let matched = matches!(pick, WsPick::Through(_)).then_some(matched);
         (taken, matched)
     }
+}
+
+/// A frame as an answer with `room` bytes of JSON text left carries it:
+/// whole when it fits, cut when it does not, and then with what a call has
+/// to ask to be answered such a frame whole, when a call can be.
+fn cut_for_answer(mut frame: WsFrame, room: usize) -> WsFrame {
+    let needs = frame.payload.answered_len();
+    if needs > room {
+        let kept_whole = frame.payload.len() == frame.full_len;
+        frame.payload = cut_to(frame.payload, room, true);
+        frame.needs_max_bytes = (kept_whole && needs <= WS_TAKE_BYTES_MAX).then_some(needs);
+    }
+    frame
 }
 
 fn carries(frame: &WsFrame, text: &str) -> bool {
@@ -608,6 +623,9 @@ fn receive(broker: &dyn WebSocketBroker, op: &Op, sent: Option<bool>) -> Result<
             };
             if frame.payload.len() < frame.full_len {
                 out["truncated"] = json!({ "bytes": frame.full_len });
+                if let Some(needs) = frame.needs_max_bytes {
+                    out["truncated"]["needs_max_bytes"] = json!(needs);
+                }
             }
             out
         })
@@ -1032,11 +1050,53 @@ mod tests {
         let frames = answer["frames"].as_array().unwrap();
         assert_eq!(frames.len(), 1, "{answer}");
         assert_eq!(frames[0]["text"].as_str().unwrap(), "é".repeat(50), "cut on a character");
-        assert_eq!(frames[0]["truncated"]["bytes"], 2000);
+        assert_eq!(frames[0]["truncated"], json!({"bytes": 2000, "needs_max_bytes": 2000}));
         assert_eq!(answer["buffered"], 1);
         let rest = ask(&caps, json!({"op": "receive", "id": id}));
         assert_eq!(rest["frames"][0]["text"], "next");
         assert!(rest["frames"][0].get("truncated").is_none());
+    }
+
+    /// The size of a cut frame is the message's; what a call has to ask to
+    /// be answered it whole is its JSON text, which a reply full of quotes
+    /// makes longer. A call that asks that much is answered the frame
+    /// whole, and one byte less cuts it.
+    #[test]
+    fn a_cut_frame_says_what_max_bytes_answers_it_whole() {
+        let fake = Arc::new(Fake::default());
+        let caps = caps_with(&fake);
+        let id = ask(&caps, json!({"op": "open", "url": "wss://1.1.1.1/"}))["id"].as_str().unwrap().to_string();
+        let reply = format!(r#"{{"id":7,"result":{{"lines":[{}]}}}}"#, vec![r#""a\nb""#; 20_000].join(","));
+        let quotes_and_backslashes = reply.bytes().filter(|b| matches!(b, b'"' | b'\\')).count();
+        let needs = reply.len() + quotes_and_backslashes;
+        assert!(reply.len() > WS_TAKE_BYTES_DEFAULT && needs < WS_TAKE_BYTES_MAX);
+        // At the default, by its id: cut, and gone from the buffer.
+        fake.arrive(&id, &reply);
+        let answer = ask(&caps, json!({"op": "receive", "id": id, "reply_id": 7}));
+        let cut = answer["frames"][0]["text"].as_str().unwrap();
+        assert!(reply.starts_with(cut) && cut.len() < reply.len(), "{} of {}", cut.len(), reply.len());
+        assert_eq!(answer["frames"][0]["truncated"], json!({"bytes": reply.len(), "needs_max_bytes": needs}));
+        assert_eq!(answer["buffered"], 0);
+        // Asked what the marker said, in arrival order and by its id.
+        for pick in [json!({}), json!({"reply_id": 7})] {
+            fake.arrive(&id, &reply);
+            let mut op = json!({"op": "receive", "id": id, "max_bytes": needs});
+            op.as_object_mut().unwrap().extend(pick.as_object().unwrap().clone());
+            let answer = ask(&caps, op);
+            assert_eq!(answer["frames"][0]["text"].as_str().unwrap(), reply);
+            assert!(answer["frames"][0].get("truncated").is_none(), "{}", answer["frames"][0]["truncated"]);
+        }
+        fake.arrive(&id, &reply);
+        let answer = ask(&caps, json!({"op": "receive", "id": id, "max_bytes": needs - 1}));
+        assert_eq!(answer["frames"][0]["truncated"]["needs_max_bytes"], needs);
+        // A frame no answer carries whole names no figure: its JSON text is
+        // over the most a call may ask, or the connection kept a part.
+        fake.arrive(&id, &"\"".repeat(WS_TAKE_BYTES_MAX / 2 + 1));
+        let answer = ask(&caps, json!({"op": "receive", "id": id, "max_bytes": WS_TAKE_BYTES_MAX}));
+        assert_eq!(answer["frames"][0]["truncated"], json!({"bytes": WS_TAKE_BYTES_MAX / 2 + 1}));
+        fake.arrive(&id, &"a".repeat(WS_KEPT_MAX + 5));
+        let answer = ask(&caps, json!({"op": "receive", "id": id}));
+        assert_eq!(answer["frames"][0]["truncated"], json!({"bytes": WS_KEPT_MAX + 5}));
     }
 
     #[test]
