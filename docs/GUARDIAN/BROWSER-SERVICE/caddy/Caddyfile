@@ -18,6 +18,11 @@
 	skip_install_trust
 	# Nothing listens on :80; the compose publishes 443 alone.
 	auto_https disable_redirects
+	# The certificate a client gets when it names no server. A client that
+	# reaches the site by an IP literal sends no server name (RFC 6066), and
+	# embraOS's clients are such clients: without this line Caddy finds no
+	# certificate for them when BROWSER_HOST is an IP literal.
+	default_sni {$BROWSER_HOST}
 }
 
 {$BROWSER_HOST} {

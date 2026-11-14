@@ -32,7 +32,7 @@ in one test process (`a_devtools_session_against_a_live_browser_service`,
 `crates/embra-brain/src/guardian/ws.rs`; its comment has the command)
 against a second instance of this compose: its own project and token,
 published on the Docker host's bridge address alone, `BROWSER_HOST` an IP
-literal with the `default_sni` line of *Start it*. Every answer, refusal
+literal (the `default_sni` line of *Start it* came out of that run). Every answer, refusal
 and figure under *A session over several calls* and in the last three
 *Limits* is from those runs, and so is the bare upgrade under *Check it
 from the host*.
@@ -89,14 +89,15 @@ docker compose up -d
 
 `BROWSER_HOST` must resolve, from inside the VM, to the Docker host's
 private address: a name in your DNS, or the IP literal itself as the site
-name. Caddy issues a certificate for an IP, and serves it only with one
-more line in the global options of `caddy/Caddyfile`, `default_sni
-{$BROWSER_HOST}`: a client that reaches a site by an IP literal sends no
-server name, and without the line Caddy finds no certificate for it
-(found 2026-11-14 with an IP literal as the site: `curl` got a TLS
-`internal error` alert, and a WebSocket `open` answered `TLS with
-<address> failed: received fatal alert: InternalError`). QEMU's
-user-mode network forwards DNS to the host's resolver.
+name. Caddy issues a certificate for an IP, and `default_sni
+{$BROWSER_HOST}` in `caddy/Caddyfile` is what serves it: a client that
+reaches a site by an IP literal sends no server name, and without that
+line Caddy finds no certificate for it (found 2026-11-14 with an IP
+literal as the site: `curl` got a TLS `internal error` alert, and a
+WebSocket `open` answered `TLS with <address> failed: received fatal
+alert: InternalError`). A Caddy started before the line was there takes
+it at its next start (`docker compose restart caddy`). QEMU's user-mode
+network forwards DNS to the host's resolver.
 
 ## The certificate
 
