@@ -46,7 +46,7 @@ pub const GUARDIAN_TEMPLATE: &str = r##"// guardian-tool: example_tool
 const GUARDIAN_NAME: &str = "example_tool";  // == marker above; ^[a-z][a-z0-9_]{2,39}$
 const GUARDIAN_DESC: &str = "What this tool does and when to call it.";  // 1..=600 chars
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#;  // valid JSON, object root, <=8 KiB
-// const GUARDIAN_CAPS: &[&str] = &["http_get"];  // optional: "http_get", "http_request" and/or "web_search"; omit for pure compute
+// const GUARDIAN_CAPS: &[&str] = &["http_get"];  // optional: "http_get", "http_request", "web_search" and/or "websocket"; omit for pure compute
 
 fn run(input: &str) -> String {
     // `input` is the JSON args matching GUARDIAN_SCHEMA. Parse defensively,

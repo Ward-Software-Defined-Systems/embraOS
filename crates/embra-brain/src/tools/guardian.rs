@@ -272,7 +272,7 @@ impl GuardianCallArgs {
 const GUARDIAN_NAME: &str = "example_tool";  // == marker above; ^[a-z][a-z0-9_]{2,39}$
 const GUARDIAN_DESC: &str = "What this tool does and when to call it.";  // 1..=600 chars
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#;  // valid JSON, object root, <=8 KiB
-// const GUARDIAN_CAPS: &[&str] = &["http_get"];  // optional: "http_get", "http_request" and/or "web_search"; omit for pure compute
+// const GUARDIAN_CAPS: &[&str] = &["http_get"];  // optional: "http_get", "http_request", "web_search" and/or "websocket"; omit for pure compute
 
 fn run(input: &str) -> String {
     // `input` is the JSON args matching GUARDIAN_SCHEMA. Parse defensively,
@@ -286,7 +286,7 @@ fn run(input: &str) -> String {
     json::stringify(&json::obj(vec![("ok", json::b(true)), ("text", json::s(text))]))
 }
 
-Helpers in run (no `use` needed): json::{parse,stringify,obj,arr,s,n,b,null}, Json::{get,idx,as_str,as_f64,as_bool,as_array}, inject::{scan,scrub} for untrusted text; with a declared cap, host::http_get(url), host::http_request(request_json) and host::web_search(query) each return a JSON envelope string. The authoring reference is docs/GUARDIAN/ in the embraOS repository (GUARDIAN-TOOL-EXAMPLES.md, GUARDIAN-KG-SCAN-EXAMPLE.md, GUARDIAN-HTTP-REQUEST-EXAMPLE.md): the runtime envelope (a 5 s deadline, a 56 MiB arena), the data/data_file input bridge, the UUIDv7 hex _id format; read it before drafting. After a successful proposal, tell the operator to review with /guardian show <name> then /guardian approve <name> (or /guardian reject <name>); it will NOT run until approved. Provide the full module as the source argument."##
+Helpers in run (no `use` needed): json::{parse,stringify,obj,arr,s,n,b,null}, Json::{get,idx,as_str,as_f64,as_bool,as_array}, inject::{scan,scrub} for untrusted text; with a declared cap, host::http_get(url), host::http_request(request_json), host::web_search(query) and host::websocket(op_json) each return a JSON envelope string; a WebSocket connection is kept by the host between calls and named by the id its open answered. The authoring reference is docs/GUARDIAN/ in the embraOS repository (GUARDIAN-TOOL-EXAMPLES.md, GUARDIAN-KG-SCAN-EXAMPLE.md, GUARDIAN-HTTP-REQUEST-EXAMPLE.md, GUARDIAN-WEBSOCKET-EXAMPLE.md): the runtime envelope (a 5 s deadline, a 56 MiB arena), the data/data_file input bridge, the UUIDv7 hex _id format; read it before drafting. After a successful proposal, tell the operator to review with /guardian show <name> then /guardian approve <name> (or /guardian reject <name>); it will NOT run until approved. Provide the full module as the source argument."##
 )]
 pub struct GuardianProposeArgs {
     /// The complete Guardian module source (marker + GUARDIAN_* consts + fn run).
