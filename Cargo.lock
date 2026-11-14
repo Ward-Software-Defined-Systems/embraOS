@@ -1439,6 +1439,7 @@ dependencies = [
  "tracing-subscriber",
  "tract-onnx",
  "uuid",
+ "webpki-roots",
  "wiremock",
 ]
 

@@ -38,6 +38,13 @@ base64 = "0.22"
 # a source is split as the trust loader splits a file. In the tree already
 # through reqwest and rustls: an edge in the lock, no package.
 rustls-pki-types = "1"
+# A TLS client of the brain's own, for the Guardian's WebSocket broker: the
+# roots every reqwest client carries (webpki-roots is the store reqwest
+# compiles in) and the operator's, on the provider reqwest uses, `ring`.
+# No default features: they name a second crypto backend. Both crates are
+# in the tree through reqwest: edges in the lock, no package.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 # Local embedding inference (KG-02). tract is pure Rust and static-links under
 # musl; ort/rust-bert bind libonnxruntime C++ and cannot. tokenizers MUST stay
 # default-features = false: the default `esaxx_fast` pulls esaxx-rs/cpp, and
@@ -51,5 +58,4 @@ wiremock = "0.6"
 # CA and a leaf minted with rcgen, served by tokio-rustls. All three are in
 # the tree already (trustd, embra-web, reqwest): edges in the lock, no package.
 rcgen = { workspace = true }
-rustls = { workspace = true }
 tokio-rustls = { version = "0.26", default-features = false }

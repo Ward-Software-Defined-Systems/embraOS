@@ -98,12 +98,46 @@ pub(crate) struct Roots {
     /// The SHA-256 of each certificate, in the order of `certs`: what the
     /// `/ca` command tells a trusted certificate by.
     pub(crate) fingerprints: Vec<Fingerprint>,
+    /// Each certificate as DER, in the order of `certs`: what a TLS client
+    /// that is not reqwest's takes ([`Roots::rustls_client_config`]).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Guardian's WebSocket broker of the commit that follows reads it")
+    )]
+    pub(crate) der: Vec<Vec<u8>>,
 }
 
 impl Roots {
     /// Whether a client built from this reading trusts the certificate.
     pub(crate) fn trusts(&self, fingerprint: &Fingerprint) -> bool {
         self.fingerprints.contains(fingerprint)
+    }
+
+    /// A TLS client configuration on this reading, for a client that speaks
+    /// TLS itself (the WebSocket broker): the compiled-in webpki roots and
+    /// the operator's, as every reqwest client of the brain trusts them,
+    /// on the `ring` provider, with no client certificate, speaking
+    /// HTTP/1.1. A certificate the store does not take is left out with a
+    /// warning; the loader took each one once already.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Guardian's WebSocket broker of the commit that follows calls it")
+    )]
+    pub(crate) fn rustls_client_config(&self) -> Result<rustls::ClientConfig, String> {
+        let mut store = rustls::RootCertStore::empty();
+        store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        for der in &self.der {
+            if let Err(e) = store.add(rustls::pki_types::CertificateDer::from(der.clone())) {
+                tracing::warn!("operator CA certificate left out of a TLS client: {e}");
+            }
+        }
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| e.to_string())?
+            .with_root_certificates(store)
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(config)
     }
 }
 
@@ -148,6 +182,7 @@ impl RootStore {
 fn read_roots(dirs: &[PathBuf], generation: u64) -> Roots {
     let mut certs = Vec::new();
     let mut fingerprints = Vec::new();
+    let mut ders = Vec::new();
     for dir in dirs {
         let found = loaded_roots_in(dir);
         if !found.is_empty() {
@@ -161,12 +196,13 @@ fn read_roots(dirs: &[PathBuf], generation: u64) -> Roots {
             };
             tracing::info!("{whose}: {} certificate(s) from {}", found.len(), dir.display());
         }
-        for (cert, fingerprint) in found {
+        for (cert, der) in found {
             certs.push(cert);
-            fingerprints.push(fingerprint);
+            fingerprints.push(Fingerprint::of(&der));
+            ders.push(der);
         }
     }
-    Roots { generation, certs, fingerprints }
+    Roots { generation, certs, fingerprints, der: ders }
 }
 
 /// The process's readings.
@@ -199,7 +235,7 @@ pub(crate) fn roots() -> Arc<Roots> {
 /// certificate), are skipped with a warning and never fail a client's
 /// build: `builder()` feeds every client of the brain, and a trust anchor
 /// that is truly missing shows as the TLS error of the request itself.
-fn loaded_roots_in(dir: &Path) -> Vec<(reqwest::Certificate, Fingerprint)> {
+fn loaded_roots_in(dir: &Path) -> Vec<(reqwest::Certificate, Vec<u8>)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -231,7 +267,7 @@ fn loaded_roots_in(dir: &Path) -> Vec<(reqwest::Certificate, Fingerprint)> {
             // `build().expect(..)` of the brain is reachable through a bad
             // drop-in.
             match crate::ca::cert::as_root(&der) {
-                Ok(cert) => roots.push((cert, Fingerprint::of(&der))),
+                Ok(cert) => roots.push((cert, der)),
                 Err(e) => tracing::warn!("operator CA certificate skipped: {}: {e}", path.display()),
             }
         }
@@ -683,6 +719,37 @@ mod tests {
         assert!(!cause.contains("https://"), "the causes, not reqwest's URL line: {cause}");
 
         assert_eq!(server.await.unwrap(), 1, "one connection served, one handshake refused");
+    }
+
+    /// A TLS client that is not reqwest's trusts what the reading holds
+    /// beside the public roots, and nothing else: a listener behind an
+    /// operator root completes the handshake with the configuration of a
+    /// reading that has the root, and is refused for its issuer with one
+    /// that does not.
+    #[tokio::test]
+    async fn a_rustls_client_on_the_roots_reaches_a_listener_behind_an_operator_root_and_refuses_without() {
+        let (ca_pem, leaf_der, leaf_key) = mint_ca_and_leaf();
+        let dir = fresh_dir("rustls");
+        let store = RootStore::new();
+        let without = store.current(|| vec![dir.clone()]);
+        std::fs::write(dir.join("gateway-ca.pem"), &ca_pem).unwrap();
+        let with = store.reload(std::slice::from_ref(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!((without.der.len(), with.der.len()), (0, 1));
+        assert_eq!(Fingerprint::of(&with.der[0]), with.fingerprints[0]);
+
+        let addr = tls_listener(leaf_der, leaf_key, 2).await;
+        let handshake = |roots: Arc<Roots>| async move {
+            let config = roots.rustls_client_config().expect("a configuration");
+            assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+            connector.connect(name, tcp).await.map(|_| ())
+        };
+        let refused = handshake(without).await.unwrap_err();
+        assert!(refused.to_string().contains("UnknownIssuer"), "{refused}");
+        handshake(with).await.expect("the handshake completes behind the operator's root");
     }
 
     /// A TLS listener on the loopback presenting `leaf`, for `connections`
