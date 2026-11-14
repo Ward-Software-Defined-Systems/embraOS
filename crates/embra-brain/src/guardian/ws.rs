@@ -387,10 +387,44 @@ async fn dial(
                 .get(tungstenite::http::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string),
-            body: response.body().clone().unwrap_or_default(),
+            body: refusal_body(response.headers(), response.body().as_deref().unwrap_or_default()),
         }),
         Err(e) => Err(failed(format!("the WebSocket handshake with {} failed: {e}", request.host))),
     }
+}
+
+/// The words of a refused handshake. The library hands over the bytes that
+/// followed the headers as they arrived, so a body sent chunked (a proxy in
+/// front of the service does that) still carries its chunk sizes: they are
+/// taken out, and what does not read as chunks is answered as it came.
+fn refusal_body(headers: &tungstenite::http::HeaderMap, raw: &[u8]) -> Vec<u8> {
+    let chunked = headers
+        .get(tungstenite::http::header::TRANSFER_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    let body = if chunked { dechunked(raw).unwrap_or_else(|| raw.to_vec()) } else { raw.to_vec() };
+    body.trim_ascii().to_vec()
+}
+
+/// The data of a chunked body, as far as it arrived: a last chunk cut
+/// short gives what there is of it.
+fn dechunked(raw: &[u8]) -> Option<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut rest = raw;
+    while !rest.is_empty() {
+        let line = rest.windows(2).position(|pair| pair == b"\r\n")?;
+        let size = std::str::from_utf8(&rest[..line]).ok()?.split(';').next()?.trim();
+        let size = usize::from_str_radix(size, 16).ok()?;
+        rest = &rest[line + 2..];
+        if size == 0 {
+            break;
+        }
+        let chunk = &rest[..size.min(rest.len())];
+        data.extend_from_slice(chunk);
+        rest = &rest[chunk.len()..];
+        rest = rest.strip_prefix(b"\r\n").unwrap_or(rest);
+    }
+    Some(data)
 }
 
 /// The task of one connection: it owns the socket until the connection
@@ -1232,6 +1266,29 @@ mod tests {
         assert_eq!((status, location), (401, None));
         assert_eq!(String::from_utf8_lossy(&body), "Bad or missing authentication.");
         assert!(registry.list_all().is_empty());
+    }
+
+    /// A refusal that came through a proxy is chunked, and the library does
+    /// not decode it: the first run against a browser service behind Caddy
+    /// answered `20\r\n\r\nBad or missing authentication.\r\n`.
+    #[test]
+    fn a_refused_handshakes_words_come_without_their_chunk_sizes() {
+        let mut chunked = tungstenite::http::HeaderMap::new();
+        chunked.insert(tungstenite::http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+        let plain = tungstenite::http::HeaderMap::new();
+        let words = "Bad or missing authentication.";
+        // As it arrived on that run: one chunk, the last one not there yet.
+        assert_eq!(refusal_body(&chunked, b"20\r\n\r\nBad or missing authentication.\r\n"), words.as_bytes());
+        assert_eq!(refusal_body(&chunked, b"20\r\n\r\nBad or missing authentication.\r\n0\r\n\r\n"), words.as_bytes());
+        // Two chunks, an extension after a size, and a chunk cut short.
+        assert_eq!(refusal_body(&chunked, b"4;x=1\r\nBad \r\n1A\r\nor missing authentication.\r\n0\r\n\r\n"), words.as_bytes());
+        assert_eq!(refusal_body(&chunked, b"1E\r\nBad or missing"), b"Bad or missing");
+        // Not chunked: as it came, without the blank lines around it.
+        assert_eq!(refusal_body(&plain, b"\r\nBad or missing authentication.\n"), words.as_bytes());
+        assert_eq!(refusal_body(&plain, b"20\r\nnot a chunk"), b"20\r\nnot a chunk");
+        // Said to be chunked and not: as it came.
+        assert_eq!(refusal_body(&chunked, b"Bad or missing authentication."), words.as_bytes());
+        assert_eq!(refusal_body(&chunked, b""), b"");
     }
 
     /// The journal's close line names who ended a connection and carries
