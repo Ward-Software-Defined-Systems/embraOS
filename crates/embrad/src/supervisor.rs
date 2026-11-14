@@ -225,6 +225,10 @@ impl Supervisor {
             name: "embra-apid".to_string(),
             binary: "/usr/bin/embra-apid".to_string(),
             args: vec![
+                // Loopback alone: the console, embra-web and the health
+                // check dial 127.0.0.1, and the stream answers without
+                // authentication. The REST port stays on every interface.
+                "--grpc-bind".to_string(), "127.0.0.1".to_string(),
                 "--grpc-port".to_string(), "50000".to_string(),
                 "--rest-port".to_string(), "8443".to_string(),
                 "--brain-addr".to_string(), "http://127.0.0.1:50002".to_string(),
@@ -272,7 +276,9 @@ impl Supervisor {
                 .unwrap_or_default()
                 .trim().to_string()
         };
+        // Loopback alone: embra-apid beside it is the brain's one client.
         let mut brain_args = vec![
+            "--bind".to_string(), "127.0.0.1".to_string(),
             "--port".to_string(), "50002".to_string(),
             "--wardsondb-url".to_string(), "http://127.0.0.1:8090".to_string(),
         ];
@@ -1815,6 +1821,36 @@ mod launch_argument_tests {
         assert_eq!(pair[1], "127.0.0.1");
         let port = args.windows(2).find(|w| w[0] == "--port").expect("--port is passed");
         assert_eq!(port[1], "50001");
+    }
+
+    /// The gateway's gRPC listens to the machine alone: the console,
+    /// embra-web and the health check dial loopback, and the conversation
+    /// stream behind it, slash commands included, carries no authentication.
+    /// Its REST port is not bound here: three read-only GETs.
+    #[test]
+    fn the_api_gateways_grpc_is_told_to_listen_on_loopback_alone() {
+        let mut supervisor = Supervisor::new();
+        supervisor.register_services();
+        let args = supervisor.service_args("embra-apid").expect("apid is registered");
+        let pair = args.windows(2).find(|w| w[0] == "--grpc-bind").expect("--grpc-bind is passed");
+        assert_eq!(pair[1], "127.0.0.1");
+        let port = args.windows(2).find(|w| w[0] == "--grpc-port").expect("--grpc-port is passed");
+        assert_eq!(port[1], "50000");
+        let brain = args.windows(2).find(|w| w[0] == "--brain-addr").expect("--brain-addr is passed");
+        assert_eq!(brain[1], "http://127.0.0.1:50002", "the gateway dials the brain on loopback");
+    }
+
+    /// The brain listens to the machine alone: embra-apid beside it is its
+    /// one client.
+    #[test]
+    fn the_brain_is_told_to_listen_on_loopback_alone() {
+        let mut supervisor = Supervisor::new();
+        supervisor.register_services();
+        let args = supervisor.service_args("embra-brain").expect("the brain is registered");
+        let pair = args.windows(2).find(|w| w[0] == "--bind").expect("--bind is passed");
+        assert_eq!(pair[1], "127.0.0.1");
+        let port = args.windows(2).find(|w| w[0] == "--port").expect("--port is passed");
+        assert_eq!(port[1], "50002");
     }
 }
 

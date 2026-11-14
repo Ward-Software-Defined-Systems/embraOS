@@ -98,6 +98,14 @@ fn log_filter_from(spec: &str) -> (tracing_subscriber::filter::Targets, String) 
 }
 
 
+/// Where the gRPC server listens. Loopback unless `--bind` names another
+/// address: the one client is embra-apid beside it (`--brain-addr
+/// http://127.0.0.1:50002`), and every RPC here, the conversation stream
+/// among them, answers without authentication.
+fn listen_addr(bind: Option<&str>, port: u16) -> String {
+    format!("{}:{}", bind.unwrap_or("127.0.0.1"), port)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
@@ -106,10 +114,11 @@ async fn main() -> anyhow::Result<()> {
     // (`embra_common::args`, #41); a flag without its value stops the brain.
     let flags = embra_common::args::Flags::parse(
         std::env::args().skip(1),
-        &["--port", "--wardsondb-url", "--api-key", "--api-provider", "--github-token"],
+        &["--bind", "--port", "--wardsondb-url", "--api-key", "--api-provider", "--github-token"],
     )
     .unwrap_or_else(|e| panic!("{e}"));
     let port: u16 = flags.value("--port").map_or(50002, |v| v.parse().expect("Invalid port"));
+    let listen = listen_addr(flags.value("--bind"), port);
     let wardsondb_url = flags.value("--wardsondb-url").unwrap_or("http://127.0.0.1:8090").to_string();
     let api_key: Option<String> = flags.value("--api-key").map(str::to_string);
     if let Some(provider) = flags.value("--api-provider") {
@@ -265,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
     // Create the gRPC service
     let service = BrainGrpcService::new(db, config_tz, api_key, proactive_rx);
 
-    let addr = format!("0.0.0.0:{}", port).parse()?;
+    let addr = listen.parse()?;
     info!("embra-brain listening on {}", addr);
 
     Server::builder()
@@ -278,6 +287,21 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod listen_tests {
+    use super::listen_addr;
+
+    /// The brain answers the machine alone unless it is started with another
+    /// address: on a bridged VM or on hardware `0.0.0.0` put every RPC on
+    /// the network, with no authentication in front of it.
+    #[test]
+    fn the_brain_listens_on_loopback_unless_told_otherwise() {
+        assert_eq!(listen_addr(None, 50002), "127.0.0.1:50002");
+        assert!(listen_addr(None, 50002).parse::<std::net::SocketAddr>().expect("a socket address").ip().is_loopback());
+        assert_eq!(listen_addr(Some("0.0.0.0"), 7), "0.0.0.0:7");
+    }
 }
 
 #[cfg(test)]

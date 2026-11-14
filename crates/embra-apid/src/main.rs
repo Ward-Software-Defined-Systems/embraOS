@@ -39,15 +39,16 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(log_filter()).with_ansi(false).log_internal_errors(false).init();
     let config = ApidConfig::from_args();
 
-    info!("embra-apid starting (gRPC={}, REST={})", config.grpc_port, config.rest_port);
+    info!("embra-apid starting (gRPC={}, REST={})", config.grpc_listen(), config.rest_port);
 
     let backends = BackendConnections::new(
         config.brain_addr.clone(),
         config.trust_addr.clone(),
     );
 
-    // gRPC server
-    let grpc_addr = format!("0.0.0.0:{}", config.grpc_port).parse()?;
+    // gRPC server: loopback unless `--grpc-bind` says otherwise
+    // (`ApidConfig::grpc_bind`).
+    let grpc_addr = config.grpc_listen().parse()?;
     let grpc_service = EmbraApiImpl::new(backends.clone());
 
     let grpc_handle = tokio::spawn(async move {
@@ -63,7 +64,9 @@ async fn main() -> anyhow::Result<()> {
             .expect("gRPC server failed");
     });
 
-    // REST server
+    // REST server: every interface. It answers three read-only GETs
+    // (`/health`, `/version`, `/status`), and the build guides check a boot
+    // from the host with them through QEMU's forward of this port.
     let rest_addr: std::net::SocketAddr = format!("0.0.0.0:{}", config.rest_port).parse()?;
     let rest_router = rest::build_router(backends.clone());
 
