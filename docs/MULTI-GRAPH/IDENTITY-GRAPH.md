@@ -125,6 +125,16 @@ time via the deterministic transformer.
 A disconnect mid-dialogue writes nothing and re-offers on the next
 learning loop.
 
+Two consoles can be in Learning Mode at once: the web console keeps a
+console of its own attached beside a chat client's, and each runs its own
+conversation. The first to complete a phase stores its document; a console
+that completes the same phase afterwards adopts the stored one and writes
+nothing over it. A console still in a phase before the seal when another
+one seals writes nothing, announces the sealed soul and follows it. A
+phase whose completion fails (the database refused the write) says so and
+stays open: the operator's next message is the next turn, and no turn is
+run without one (`grpc_service/learning_loop.rs::complete_phase`).
+
 ## Migration ceremony — re-sealing a pre-existing instance
 
 Moves a production text-soul instance onto a graph identity (e.g.
