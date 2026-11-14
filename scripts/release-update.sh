@@ -137,6 +137,10 @@ VERSION="$(sed -n 's/^version: "\(.*\)"/\1/p' CITATION.cff | head -n1)"
 [ "$TAG" = "v$VERSION" ] || { echo "ERROR: --tag $TAG is not v$VERSION (CITATION.cff)" >&2; exit 1; }
 AT_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
 [ "$AT_TAG" = "$TAG" ] || { echo "ERROR: the tree is at '${AT_TAG:-no tag}', not $TAG" >&2; exit 1; }
+# The index is refreshed before it is asked (write_release_file in
+# scripts/lib/image-common.sh says why): the plain test goes by cached stat
+# data, and after a Docker pass on a Mac it calls every tracked file changed.
+git update-index -q --refresh >/dev/null 2>&1 || true
 git diff-index --quiet HEAD -- || { echo "ERROR: the tree has uncommitted changes" >&2; exit 1; }
 SCHEMA="$(grep -oE 'CURRENT_SCHEMA_VERSION: u32 = [0-9]+' crates/embra-brain/src/migrations/mod.rs | grep -oE '[0-9]+$')"
 [ -n "$SCHEMA" ] || { echo "ERROR: CURRENT_SCHEMA_VERSION not found" >&2; exit 1; }

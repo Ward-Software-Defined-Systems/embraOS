@@ -224,12 +224,26 @@ size_to_bytes() {
 # as /etc/embraos-release and derives GRUB's slot line from it. A
 # --buildroot-only run reuses the last full build's file, so the stamp always
 # describes the binaries in the image (the baked engine has the same
-# contract). BUILD_ID is the commit, with -dirty when the tree had changes.
+# contract). BUILD_ID is the commit, with -dirty when a tracked file differs
+# from it. The index is refreshed before it is asked, as git's own scripts
+# do it (require_clean_work_tree): git diff-index goes by the stat data the
+# index caches for each file (owner, device, inode, times) and reads none, so
+# an index that another view of the tree wrote calls every file changed. A
+# Docker pass on a Mac leaves one: Buildroot asks its external tree for a
+# version on every make (support/scripts/setlocalversion), and that refreshes
+# this repository's index from inside the container, as root through the bind
+# mount. The host pass after it stamped -dirty with no file changed
+# (2026-11-13). The refresh reads the files whose stat data is off and keeps
+# as changed what differs; where it cannot write the index the test is the
+# plain one and errs towards -dirty, which a release refuses. A file git does
+# not track is not seen: what a build bakes from Imported_Intelligence/ and
+# Seed_Knowledge/ beside the commit's files is for release-update.sh to refuse.
 write_release_file() {
     local triple="$1" engine="$2" version build_id dirty="" out
     version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
     [ -n "$version" ] || { echo "ERROR: no workspace version in Cargo.toml" >&2; exit 1; }
     build_id="$(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
+    git update-index -q --refresh >/dev/null 2>&1 || true
     git diff-index --quiet HEAD -- 2>/dev/null || dirty="-dirty"
     out="target/${triple}/release/embraos-release"
     mkdir -p "$(dirname "$out")"
