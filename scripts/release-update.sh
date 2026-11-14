@@ -48,6 +48,15 @@
 # root filesystem, so the check of the slot image covers it.
 # --allow-imported-cas signs all the same, for a release meant for machines
 # of one's own.
+#
+# A release carries the intelligence graphs and the seed knowledge packs of
+# its commit and no other. A build bakes every *.graph.json of
+# Imported_Intelligence/ and every *.knowledge.json of Seed_Knowledge/ that
+# lies in its working tree, in git or not, and the release stamp says nothing
+# of a file git does not track: an image built beside a graph of the builder's
+# own carries it under the commit's build id. Nothing is signed when the slot
+# image's two directories are not the tagged commit's files, name for name and
+# byte for byte (read with unsquashfs).
 
 set -euo pipefail
 
@@ -85,6 +94,9 @@ sha256_line() {   # sha256_line <file in the current directory> → the sha256su
 }
 sha256_check() {   # sha256_check <sums file in the current directory>; 0 when every line checks
     sha256sum -c --quiet "$1" >/dev/null 2>&1 || shasum -a 256 -c --quiet "$1" >/dev/null 2>&1
+}
+sha256_stdin() {   # the sha256 of standard input, the digits alone (GNU or BSD host)
+    (sha256sum 2>/dev/null || shasum -a 256) | cut -d' ' -f1
 }
 verify() {   # verify <pub.pem> <file> <sig.b64>; 0 when one key verifies
     local pubs tmpsig rc=1
@@ -228,6 +240,79 @@ if [ -n "$IMAGE_CAS" ] || [ -n "$TREE_CAS" ] || [ "$IMAGE_UNREAD" -eq 1 ]; then
             echo "       Install unsquashfs, so that the slot image can be read." >&2
         fi
         echo "       --allow-imported-cas signs all the same, for a release meant for machines of your own." >&2
+        exit 1
+    fi
+fi
+
+# The intelligence graphs and the seed knowledge packs of the tagged commit
+# and no other (the header says why). A directory of the slot image is read as
+# its /boot is, a file being there when the listing has its line, and it is
+# compared with the commit's folder, never with the tree's: the image may come
+# from another host's tree.
+# in_lines <line> <lines>: 0 when one of the lines is that line. Matched in the
+# shell: a grep -q at the end of a pipe leaves early, and under pipefail the
+# writer's SIGPIPE would read as no match.
+in_lines() {
+    case "
+$2
+" in *"
+$1
+"*) return 0 ;; esac
+    return 1
+}
+# committed_files <folder of the repository> <suffix>: the names of the tagged
+# commit's files of that suffix in the folder, one a line, sorted. A function
+# of its own: bash 3.2, which macOS runs this script with, parses no case
+# inside a command substitution.
+committed_files() {
+    local name
+    git -c core.quotePath=false ls-tree --name-only HEAD "$1/" | while IFS= read -r name; do
+        case "$name" in
+            "$1"/*."$2") printf '%s\n' "${name##*/}" ;;
+        esac
+    done | LC_ALL=C sort
+}
+# baked_is_the_commits <directory in the image> <folder of the repository>
+# <suffix> <what a file of it is>: 0 when the directory holds the folder's
+# files of that suffix as the tagged commit has them and nothing else; a line
+# on stderr for each file that is not so.
+baked_is_the_commits() {
+    local dir="$1" folder="$2" suffix="$3" what="$4" image commit name want have faults=0
+    image="$( (unsquashfs -ls "$ROOTFS" "$dir" 2>/dev/null || true) | sed -n "s|^squashfs-root/$dir/||p" | LC_ALL=C sort)"
+    commit="$(committed_files "$folder" "$suffix")"
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        if ! in_lines "$name" "$commit"; then
+            echo "$ROOTFS carries the $what $name, which $TAG does not hold in $folder/" >&2
+            faults=$((faults + 1))
+        fi
+    done <<< "$image"
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        if ! in_lines "$name" "$image"; then
+            echo "$ROOTFS lacks the $what $name of $TAG" >&2
+            faults=$((faults + 1))
+            continue
+        fi
+        want="$(git cat-file blob "HEAD:$folder/$name" 2>/dev/null | sha256_stdin || true)"
+        have="$( (unsquashfs -cat "$ROOTFS" "$dir/$name" 2>/dev/null || true) | sha256_stdin || true)"
+        if [ "${#want}" -ne 64 ] || [ "$have" != "$want" ]; then
+            echo "$ROOTFS carries another $name than $TAG holds in $folder/ (sha256 ${have:-unread}; the commit's is ${want:-unread})" >&2
+            faults=$((faults + 1))
+        fi
+    done <<< "$commit"
+    [ "$faults" -eq 0 ]
+}
+if [ "$IMAGE_UNREAD" -eq 1 ]; then
+    # Reached under --allow-imported-cas alone: the slot image was not read.
+    echo "NOTE: the slot image's intelligence graphs and seed knowledge packs are not compared with $TAG: no unsquashfs." >&2
+else
+    BAKED_OK=1
+    baked_is_the_commits usr/share/embra/imported-intelligence Imported_Intelligence graph.json "intelligence graph" || BAKED_OK=0
+    baked_is_the_commits usr/share/embra/seed-knowledge Seed_Knowledge knowledge.json "seed knowledge pack" || BAKED_OK=0
+    if [ "$BAKED_OK" -eq 0 ]; then
+        echo "ERROR: nothing is signed. A release carries the intelligence graphs and the seed knowledge packs of its commit and no other: every machine installed or updated from it would offer the one for import and load the other into its knowledge graph." >&2
+        echo "       Move the files that are not the commit's out of Imported_Intelligence/ and Seed_Knowledge/, build again at $TAG and sign that build." >&2
         exit 1
     fi
 fi
