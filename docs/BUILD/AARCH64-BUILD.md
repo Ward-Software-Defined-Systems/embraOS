@@ -230,7 +230,7 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 >   -smbios "type=11,value=embra.cols=$(tput cols) embra.rows=$(tput lines)" \
 >   -device virtio-gpu-pci -display cocoa -serial mon:stdio \
 >   -device qemu-xhci -device usb-kbd -device usb-tablet \
->   -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
+>   -nic user,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
 > ```
 > `-device ramfb` in place of `-device virtio-gpu-pci` gives the firmware's own
 > framebuffer, which the kernel's `simpledrm` takes over: GRUB's menu, the boot log
@@ -323,7 +323,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > **skipped on macOS** and run by the Docker Buildroot pass instead. The build fails if the model is
 > missing from the rootfs rather than shipping keyword-only retrieval.
 
-> **Port forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only,
+> **Port forwarding:** QEMU forwards 8443 (REST) on the host's loopback only (the gRPC ports, 50000 and 50002, bind the machine's loopback and are not forwarded),
 > and 3345 (HTTPS — https://localhost:3345/embraOS, behind this boot's access token) on every host interface, in both UI modes;
 > other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot. apid's REST routes are `/health`,
 > `/version` and `/status` (the brain's status incl. the LLM provider probe; 503 while
@@ -598,7 +598,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Kernel image | `bzImage` | `Image` |
 | Consoles | `console=tty0 console=ttyS0` | `console=tty0 console=ttyAMA0` (the serial line, last, owns `/dev/console`; embra-init's and embrad's boot messages go to it and to the display both; both consoles rendered into `grub.cfg` by `post_image.sh`, the serial one alone passed by the direct path) |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
-| Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
+| Port forwards | 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
 | Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi, on Hyper-V and, but for the pointer and a click, on Parallels Desktop) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page at 800x600, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
