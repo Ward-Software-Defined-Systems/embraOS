@@ -14,6 +14,7 @@
 mod activity;
 mod tool_calls;
 mod brain;
+mod ca;
 mod tools;
 mod db;
 mod sessions;

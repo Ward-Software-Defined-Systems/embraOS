@@ -34,6 +34,10 @@ futures = "0.3"
 async-trait = "0.1"
 libc = "0.2"
 base64 = "0.22"
+# The PEM parser reqwest reads a certificate bundle with, for the /ca command:
+# a source is split as the trust loader splits a file. In the tree already
+# through reqwest and rustls: an edge in the lock, no package.
+rustls-pki-types = "1"
 # Local embedding inference (KG-02). tract is pure Rust and static-links under
 # musl; ort/rust-bert bind libonnxruntime C++ and cannot. tokenizers MUST stay
 # default-features = false: the default `esaxx_fast` pulls esaxx-rs/cpp, and
