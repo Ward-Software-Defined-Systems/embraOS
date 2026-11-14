@@ -136,7 +136,22 @@ const fn sel(label: &'static str, choices: &'static [&'static str], req: bool) -
 /// What the pickers offer: images, text by type, and the text extensions
 /// browsers leave untyped (`.md` comes with an empty type). Mirrored by
 /// `embra-term.js` for drops and pastes and by the chat composer.
-pub const ACCEPT: &str = "image/*,text/*,application/json,.md,.markdown,.txt,.csv,.json,.jsonl,.yaml,.yml,.toml";
+pub const ACCEPT: &str = "image/*,text/*,application/json,.md,.markdown,.txt,.csv,.json,.jsonl,.yaml,.yml,.toml,.pem,.crt";
+
+/// What an uploaded certificate file asks for: not an attachment to a
+/// message, but the `/ca import` of the file where it landed, which shows
+/// the certificate and writes nothing. `None` for any other file. The path
+/// is the one the upload answered with, shown from the workspace's root.
+/// `embra-term.js` has the same rule for a drop on the terminal
+/// (`embraCertificateCommand`).
+pub fn certificate_import_command(file_name: &str, stored_path: &str) -> Option<String> {
+    let lower = file_name.to_ascii_lowercase();
+    if !(lower.ends_with(".pem") || lower.ends_with(".crt")) || stored_path.is_empty() {
+        return None;
+    }
+    let shown = stored_path.strip_prefix("/embra/workspace/").unwrap_or(stored_path);
+    Some(format!("/ca import {shown}"))
+}
 
 /// The `/backup` form's action that is the page's own: it opens the file
 /// picker and streams the file to `PUT /api/backups/<name>`. Nothing is
@@ -1168,6 +1183,33 @@ mod tests {
     /// The upload is an action of the `/backup` form, and the page's own:
     /// `build` never sees it (`submit_modal` takes it first), so no
     /// `/backup upload …` line with a file's name is typed into the console.
+    /// An uploaded certificate is not attached to a message: the composer
+    /// and the terminal are given the command that shows it, which writes
+    /// nothing. The picker offers the two extensions.
+    #[test]
+    fn a_certificate_upload_asks_for_the_import_and_not_the_attach() {
+        for (name, path, command) in [
+            ("ca.pem", "/embra/workspace/uploads/ca.pem", Some("/ca import uploads/ca.pem")),
+            ("Local AI Gateway CA.CRT", "/embra/workspace/uploads/Local AI Gateway CA.CRT", Some("/ca import uploads/Local AI Gateway CA.CRT")),
+            ("ca.pem", "uploads/ca-2.pem", Some("/ca import uploads/ca-2.pem")),
+            ("notes.md", "/embra/workspace/uploads/notes.md", None),
+            ("pem", "/embra/workspace/uploads/pem", None),
+            ("ca.pem.txt", "/embra/workspace/uploads/ca.pem.txt", None),
+            ("ca.pem", "", None),
+        ] {
+            assert_eq!(certificate_import_command(name, path).as_deref(), command, "{name}");
+        }
+        assert!(ACCEPT.ends_with(",.pem,.crt"), "{ACCEPT}");
+        let form = &SPECS[spec_idx("/ca").expect("the /ca form")];
+        assert_eq!(form.fields[0].choices, &["(list)", "import", "remove"]);
+        assert_eq!(build(form, &["(list)".into(), String::new(), String::new()]).as_deref(), Some("/ca"));
+        assert_eq!(
+            build(form, &["import".into(), "uploads/ca.pem".into(), "sha256:AB:CD".into()]).as_deref(),
+            Some("/ca import uploads/ca.pem sha256:AB:CD")
+        );
+        assert_eq!(build(form, &["remove".into(), "gateway-ca-14312f40.pem".into(), String::new()]).as_deref(), Some("/ca remove gateway-ca-14312f40.pem"));
+    }
+
     #[test]
     fn the_backup_form_offers_the_upload_among_its_actions() {
         let spec = &SPECS[spec_idx("/backup").expect("the /backup form")];

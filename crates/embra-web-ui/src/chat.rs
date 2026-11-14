@@ -224,7 +224,7 @@ enum Uploaded {
 
 /// The text extensions browsers leave untyped; with the types in
 /// `app::ACCEPT`, what the picker, a drop or a paste may upload.
-const TEXT_EXTENSIONS: &[&str] = &[".md", ".markdown", ".txt", ".csv", ".json", ".jsonl", ".yaml", ".yml", ".toml"];
+const TEXT_EXTENSIONS: &[&str] = &[".md", ".markdown", ".txt", ".csv", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".pem", ".crt"];
 
 fn accepts_file(file: &web_sys::File) -> bool {
     let t = file.type_();
@@ -299,12 +299,16 @@ async fn upload_file(file: web_sys::File, session: String) -> Result<Uploaded, S
 /// Queue every file in `files` for upload: an image previews at once, a
 /// text file shows as a chip; the stored card lands when the upload
 /// returns. A file that is neither stays on the strip with the reason,
-/// so nothing is dropped without a word.
+/// so nothing is dropped without a word. A certificate file is not an
+/// attachment: once it is stored, its chip goes and the composer takes the
+/// `/ca import` of it, which the operator sends (it shows the certificate
+/// and writes nothing).
 fn queue_files(
     files: Option<web_sys::FileList>,
     pending: RwSignal<Vec<PendingAttachment>>,
     session_name: RwSignal<String>,
     next_local_id: RwSignal<u32>,
+    input: RwSignal<String>,
 ) {
     let Some(files) = files else { return };
     for i in 0..files.length() {
@@ -342,6 +346,13 @@ fn queue_files(
         let session = session_name.get_untracked();
         spawn_local(async move {
             let result = upload_file(file, session).await;
+            if let Ok(Uploaded::File(card)) = &result
+                && let Some(command) = crate::app::certificate_import_command(&card.name, &card.path)
+            {
+                pending.update(|p| p.retain(|a| a.local_id != local_id));
+                input.set(command);
+                return;
+            }
             pending.update(|p| {
                 if let Some(item) = p.iter_mut().find(|a| a.local_id == local_id) {
                     match result {
@@ -778,7 +789,7 @@ pub fn ChatApp() -> impl IntoView {
     let on_drop = move |e: leptos::ev::DragEvent| {
         e.prevent_default();
         let files = e.data_transfer().and_then(|dt| dt.files());
-        queue_files(files, pending, session_name, next_local_id);
+        queue_files(files, pending, session_name, next_local_id, input);
     };
 
     view! {
@@ -1854,7 +1865,7 @@ where
     let on_files = move |_| {
         if let Some(el) = file_ref.get() {
             let input_el: &web_sys::HtmlInputElement = &el;
-            queue_files(input_el.files(), pending, session_name, next_local_id);
+            queue_files(input_el.files(), pending, session_name, next_local_id, input);
             input_el.set_value("");
         }
     };
@@ -1868,7 +1879,7 @@ where
             && files.length() > 0
         {
             e.prevent_default();
-            queue_files(Some(files), pending, session_name, next_local_id);
+            queue_files(Some(files), pending, session_name, next_local_id, input);
         }
     };
     let remove_pending = move |local_id: u32| {

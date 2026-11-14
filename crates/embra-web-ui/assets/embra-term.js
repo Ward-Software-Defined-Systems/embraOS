@@ -438,17 +438,30 @@
   // What the picker, a drop or a paste may upload: an image, a text file
   // by type or by extension, or a file the browser cannot type (the brain
   // then decides). Anything else is said so and skipped.
-  const TEXT_EXT = [".md", ".markdown", ".txt", ".csv", ".json", ".jsonl", ".yaml", ".yml", ".toml"];
+  const TEXT_EXT = [".md", ".markdown", ".txt", ".csv", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".pem", ".crt"];
   function embraAcceptsFile(f) {
     const name = f.name.toLowerCase();
     return f.type.startsWith("image/") || f.type.startsWith("text/") ||
       f.type === "application/json" || f.type === "" || TEXT_EXT.some((e) => name.endsWith(e));
   }
 
+  // What an uploaded certificate file asks for: the `/ca import` of the
+  // file where it landed, which shows the certificate and writes nothing.
+  // Null for any other file. The rule of `app::certificate_import_command`.
+  function embraCertificateCommand(name, path) {
+    const lower = name.toLowerCase();
+    if (!(lower.endsWith(".pem") || lower.endsWith(".crt")) || !path) return null;
+    return "/ca import " + path.replace(/^\/embra\/workspace\//, "");
+  }
+
   // Upload one or more files and inject `/attach <id|path>` per success:
   // an image answers with a media id, a text file with its uploads/ path.
-  // Errors surface as a terminal line (bracketed, dim) so the operator
-  // sees them where they are looking.
+  // A certificate file is not attached: its `/ca import` is typed into the
+  // input and no Enter is sent. At a setup question that is a list of
+  // choices, Enter answers the list whatever was typed, so the command
+  // waits in the input for the operator, and for a question that takes
+  // text. Errors surface as a terminal line (bracketed, dim) so the
+  // operator sees them where they are looking.
   window.embraUploadFiles = async function (files) {
     for (const f of Array.from(files)) {
       if (!embraAcceptsFile(f)) {
@@ -467,8 +480,18 @@
         const body = await resp.json().catch(() => ({}));
         const handle = body.id || body.path;
         if (!resp.ok || !handle) {
-          const msg = body.error || ("upload rejected (" + resp.status + ")");
+          let msg = body.error || ("upload rejected (" + resp.status + ")");
+          // A certificate in DER is not text, and the upload takes text.
+          if (embraCertificateCommand(f.name, "x") && /not UTF-8 text/.test(msg)) {
+            msg += ": a certificate in DER is not text. Convert it (openssl x509 -inform der -in <file> -out <file>.pem), or give /ca import a URL";
+          }
           if (term) term.write("\r\n\x1b[2m[embra-web] attach failed: " + msg + "\x1b[0m\r\n");
+          continue;
+        }
+        const certificate = embraCertificateCommand(f.name, body.path);
+        if (certificate) {
+          if (writable) window.embraTermInject(certificate);
+          else if (term) term.write("\r\n\x1b[2m[embra-web] uploaded " + handle + " — take control and run " + certificate + "\x1b[0m\r\n");
           continue;
         }
         if (writable) window.embraTermInject("/attach " + handle + "\r");
