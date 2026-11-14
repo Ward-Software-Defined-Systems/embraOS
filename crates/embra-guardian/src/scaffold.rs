@@ -116,6 +116,33 @@ const HOST_FN_HTTP_REQUEST: &str = r#"
     }
 "#;
 
+const HOST_FN_WEBSOCKET: &str = r#"
+    #[link(wasm_import_module = "guardian")]
+    extern "C" {
+        #[link_name = "websocket"]
+        fn guardian_websocket(op_ptr: u32, op_len: u32) -> u64;
+    }
+    /// Guardian-mediated WebSocket: one operation as a JSON object.
+    /// {"op":"open","url":"wss://..","headers":{..},"protocols":[..]}
+    /// {"op":"send","id":..,"text":".." | "json":<any> | "binary":"<base64>"}
+    /// {"op":"receive","id":..}   {"op":"close","id":..}   {"op":"list"}
+    /// send and receive take "reply_id" (the text frame whose JSON has that
+    /// top-level id, answered alone), "until" (the frames through the first
+    /// text frame that contains it), "wait_ms", "max_frames", "max_bytes".
+    /// Envelope: {"ok":true,..} or {"ok":false,"error":..}; frames come as
+    /// {"text":..} or {"binary":"<base64>","bytes":n}. The connection is the
+    /// host's and stays open between calls, bounded. The host runs the
+    /// egress policy at open (wss:// only, the operator's allowlist for
+    /// private hosts, loopback never), adds the operator's per-host secrets
+    /// to the handshake (`/guardian secret`; a guest may not set
+    /// authorization or cookie) and refuses a frame that carries one.
+    pub fn websocket(op_json: &str) -> String {
+        read_packed(unsafe {
+            guardian_websocket(op_json.as_ptr() as u32, op_json.len() as u32)
+        })
+    }
+"#;
+
 const HOST_MOD_CLOSE: &str = "}\n";
 
 /// Compose the single scaffold-owned `mod host` from the declared caps.
@@ -124,7 +151,8 @@ fn host_module(caps: &[String]) -> String {
     let http = caps.iter().any(|c| c == abi::CAP_HTTP_GET);
     let request = caps.iter().any(|c| c == abi::CAP_HTTP_REQUEST);
     let search = caps.iter().any(|c| c == abi::CAP_WEB_SEARCH);
-    if !http && !request && !search {
+    let websocket = caps.iter().any(|c| c == abi::CAP_WEBSOCKET);
+    if !http && !request && !search && !websocket {
         return String::new();
     }
     let mut s = String::from(HOST_MOD_OPEN);
@@ -136,6 +164,10 @@ fn host_module(caps: &[String]) -> String {
     }
     if search {
         s.push_str(HOST_FN_WEB_SEARCH);
+    }
+    // Last, so that the shim of every tool without it is what it was.
+    if websocket {
+        s.push_str(HOST_FN_WEBSOCKET);
     }
     s.push_str(HOST_MOD_CLOSE);
     s
@@ -350,6 +382,24 @@ mod tests {
         assert!(s.contains("#[link_name = \"http_request\"]"));
         assert!(!s.contains("pub fn http_get("));
         assert_eq!(s.matches("mod host {").count(), 1);
+    }
+
+    /// The websocket shim is in a tool that declares the capability and in
+    /// no other, and it stands last: the shim of every tool without it is
+    /// byte for byte what it was, so no built tool's inputs move.
+    #[test]
+    fn assemble_websocket_shim() {
+        let caps = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let alone = host_module(&caps(&["websocket"]));
+        assert!(alone.contains("#[link_name = \"websocket\"]"), "{alone}");
+        assert!(alone.contains("pub fn websocket(op_json: &str) -> String"), "{alone}");
+        assert!(!alone.contains("http_request"), "no other import is declared: {alone}");
+        let without = host_module(&caps(&["http_get", "http_request", "web_search"]));
+        assert!(!without.contains("websocket"), "{without}");
+        let with = host_module(&caps(&["http_request", "websocket"]));
+        let request_only = host_module(&caps(&["http_request"]));
+        assert!(with.starts_with(request_only.trim_end_matches(HOST_MOD_CLOSE)), "the websocket shim is appended");
+        assert!(with.ends_with(&format!("{}{HOST_MOD_CLOSE}", HOST_FN_WEBSOCKET)));
     }
 
     #[test]

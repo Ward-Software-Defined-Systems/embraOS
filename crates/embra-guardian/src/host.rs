@@ -143,6 +143,15 @@ impl WasmHost {
                 },
             )
             .map_err(|e| GuardianError::Instantiate(e.to_string()))?;
+        linker
+            .func_wrap(
+                abi::IMPORT_MODULE,
+                abi::CAP_WEBSOCKET,
+                |mut caller: Caller<'_, StoreData>, op_ptr: u32, op_len: u32| -> u64 {
+                    host_websocket(&mut caller, op_ptr, op_len)
+                },
+            )
+            .map_err(|e| GuardianError::Instantiate(e.to_string()))?;
 
         Ok(Self { engine, linker, ticker_stop })
     }
@@ -295,6 +304,15 @@ fn host_http_get(caller: &mut Caller<'_, StoreData>, url_ptr: u32, url_len: u32)
 /// added host-side.
 fn host_http_request(caller: &mut Caller<'_, StoreData>, req_ptr: u32, req_len: u32) -> u64 {
     guest_call(caller, req_ptr, req_len, guarded_http_request)
+}
+
+/// `guardian::websocket` host import: one operation on the tool's
+/// connections (open, send, receive, close, list) through the guard. The
+/// connections live on the host between calls; the call blocks here for
+/// as long as its wait, on the host's time, which the epoch deadline
+/// covers (`deadline_for_budget` of the call's budget).
+fn host_websocket(caller: &mut Caller<'_, StoreData>, op_ptr: u32, op_len: u32) -> u64 {
+    guest_call(caller, op_ptr, op_len, crate::ws::guarded_websocket)
 }
 
 /// `guardian::web_search` host import: the query (or a JSON request)

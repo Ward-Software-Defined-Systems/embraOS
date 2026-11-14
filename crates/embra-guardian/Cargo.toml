@@ -20,6 +20,10 @@ tokio.workspace = true
 # `blocking` client since wasmtime host imports are synchronous).
 reqwest = { workspace = true, features = ["blocking"] }
 url = "2"
+# The websocket capability: a binary frame travels as base64 between the
+# guest and the host. In the tree already (the brain, reqwest): an edge in
+# the lock, no package.
+base64 = "0.22"
 # Static validation of the pasted guest module (parse-only; NOT a
 # proc-macro). span-locations gives file line/col for reject messages.
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }

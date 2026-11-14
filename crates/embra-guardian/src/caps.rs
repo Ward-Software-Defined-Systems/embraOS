@@ -208,6 +208,11 @@ pub struct Capabilities {
     /// the kind and never the value (`SecretSet::found_in`). The brain
     /// fills it for every tool with a network capability.
     pub outbound_secrets: Arc<SecretSet>,
+    /// The connections of a tool with `websocket` (`ws::WebSocketBroker`).
+    /// `None` ⇒ the import answers "not granted". The brain grants one
+    /// scoped to the calling tool, so a tool reaches its own connections
+    /// alone.
+    pub websocket: Option<Arc<dyn crate::ws::WebSocketBroker>>,
 }
 
 impl Capabilities {
@@ -224,6 +229,7 @@ impl Capabilities {
             search: None,
             files: None,
             outbound_secrets: Arc::default(),
+            websocket: None,
         }
     }
     /// Grant `web_search` backed by `provider`.
@@ -232,7 +238,7 @@ impl Capabilities {
     }
 }
 
-fn err_json(msg: &str) -> String {
+pub(crate) fn err_json(msg: &str) -> String {
     serde_json::json!({ "ok": false, "error": msg }).to_string()
 }
 
@@ -240,7 +246,7 @@ fn err_json(msg: &str) -> String {
 /// operator's stored secrets (`Capabilities::outbound_secrets`), naming the
 /// kind. It runs before the save pre-flight, the DNS lookup and the
 /// transport, so a refused request costs nothing and resolves no name.
-fn carries_secret(caps: &Capabilities, texts: &[&str]) -> Result<(), String> {
+pub(crate) fn carries_secret(caps: &Capabilities, texts: &[&str]) -> Result<(), String> {
     for text in texts {
         if let Some(kind) = caps.outbound_secrets.found_in(text) {
             return Err(format!(
@@ -388,10 +394,6 @@ pub const MAX_REDIRECTS: usize = 3;
 #[derive(Debug)]
 pub(crate) struct Destination {
     pub(crate) url: url::Url,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the websocket capability of the commit that follows dials these")
-    )]
     pub(crate) addrs: Vec<SocketAddr>,
 }
 
@@ -583,7 +585,7 @@ const TRANSPORT_HEADERS: &[&str] = &[
 /// Response headers that never reach the guest.
 const HIDDEN_RESPONSE_HEADERS: &[&str] = &["set-cookie", "set-cookie2"];
 
-fn is_header_token(name: &str) -> bool {
+pub(crate) fn is_header_token(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(|b| {
             b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
@@ -757,7 +759,7 @@ fn request_content_type_allowed(content_type: &str) -> bool {
 /// The response headers a guest sees: lowercase, no cookies, at most
 /// `HTTP_HEADERS_MAX` and `HTTP_HEADERS_BYTES_MAX` in all, in the order
 /// sent.
-fn guest_headers(headers: &[(String, String)]) -> serde_json::Map<String, serde_json::Value> {
+pub(crate) fn guest_headers(headers: &[(String, String)]) -> serde_json::Map<String, serde_json::Value> {
     let mut out = serde_json::Map::new();
     let mut bytes = 0usize;
     for (name, value) in headers {
@@ -800,7 +802,7 @@ pub fn secret_place(stored: &str) -> (&str, u16) {
 /// port, and nothing wider. A secret stored for a host reaches no other
 /// port of it: another port is another service, which the operator did not
 /// name.
-fn secret_is_for(stored: &str, hop: &url::Url) -> bool {
+pub(crate) fn secret_is_for(stored: &str, hop: &url::Url) -> bool {
     let (host, port) = secret_place(stored);
     hop.host_str().is_some_and(|h| h.eq_ignore_ascii_case(host))
         && hop.port_or_known_default().unwrap_or(SECRET_DEFAULT_PORT) == port

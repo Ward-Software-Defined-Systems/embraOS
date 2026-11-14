@@ -54,8 +54,15 @@ pub const CAP_WEB_SEARCH: &str = "web_search";
 /// policy on every hop, injects the operator's per-host secrets and never
 /// echoes a request header.
 pub const CAP_HTTP_REQUEST: &str = "http_request";
+/// Capability: a WebSocket connection that stays open between calls.
+/// `fn(op_ptr: u32, op_len: u32) -> u64` (packed ptr/len of a JSON
+/// envelope). The guest sends one operation as a JSON object: open, send,
+/// receive, close or list. The connection is the host's; the host runs the
+/// egress policy at open (`wss://` alone), adds the operator's per-host
+/// secrets to the handshake and refuses a frame that carries one.
+pub const CAP_WEBSOCKET: &str = "websocket";
 /// The complete capability allowlist (`validator` rejects anything else).
-pub const KNOWN_CAPS: &[&str] = &[CAP_HTTP_GET, CAP_HTTP_REQUEST, CAP_WEB_SEARCH];
+pub const KNOWN_CAPS: &[&str] = &[CAP_HTTP_GET, CAP_HTTP_REQUEST, CAP_WEB_SEARCH, CAP_WEBSOCKET];
 
 /// Pack a `(ptr, len)` pair into the single `u64` `guardian_run` returns.
 #[inline]

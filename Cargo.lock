@@ -1484,6 +1484,7 @@ name = "embra-guardian"
 version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "embra-tools-core",
  "hex",
  "proc-macro2",

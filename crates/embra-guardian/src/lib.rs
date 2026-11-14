@@ -25,6 +25,7 @@ pub mod scaffold;
 pub mod shipped;
 pub mod store;
 pub mod validator;
+pub mod ws;
 
 // The vendored guest reducer, compiled on the host as well: the search
 // guard reduces a result's description with the very bytes every tool
@@ -40,6 +41,10 @@ pub use caps::{
     SavedFile, SearchProvider, SearchRequest, SearchResponse, SearchResult, SecretHeader,
 };
 pub use error::GuardianError;
+pub use ws::{
+    WebSocketBroker, WsBatch, WsBuffer, WsClosed, WsConnInfo, WsFrame, WsOpen, WsOpenError, WsOpened,
+    WsPayload, WsPick, WsTake,
+};
 pub use overlay::{runtime, CompiledTool, GuardianRuntime};
 pub use scaffold::{assemble_lib_rs, scaffold, ScaffoldPaths};
 pub use store::{GuardianPersistence, ToolDoc, ToolStatus};
