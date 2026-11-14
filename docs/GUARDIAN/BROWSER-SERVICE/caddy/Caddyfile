@@ -3,16 +3,19 @@
 # Two certificate paths; keep one `tls` line:
 #   tls internal
 #       Caddy's own CA signs a certificate for BROWSER_HOST (a name or an IP
-#       literal). Copy its root into the OS, with the VM stopped (in this
-#       compose directory; seed-state.sh writes to a raw disk image, and
-#       Imported_CAs/ is the route for every other machine):
+#       literal). Take its root out of the container, in this compose
+#       directory:
 #         mkdir -p ca
 #         docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > ca/browser-root.crt
+#       and give it to the OS. On a running machine that is /ca import
+#       (from a URL or an upload, by the certificate's SHA-256); on a
+#       stopped raw disk image it is
 #         ../../../scripts/seed-state.sh --ca-dir ca
+#       and Imported_CAs/ is the route into an image before it is built.
 #   tls /certs/fullchain.pem /certs/privkey.pem
 #       a certificate from your own CA, mounted at /certs (the commented
-#       volume in docker-compose.yml); no reseed when that CA's root is
-#       already in /embra/state/ca-certificates/.
+#       volume in docker-compose.yml); nothing to add on the OS when that
+#       CA's root is already trusted there (/ca lists them).
 {
 	# Never touch the Docker host's trust store.
 	skip_install_trust

@@ -114,13 +114,26 @@ Two ways, one `tls` line in `caddy/Caddyfile`:
   OS changes.
 - **Caddy's internal CA** (`tls internal`, the default). Caddy signs a
   certificate for `BROWSER_HOST` with a root it keeps in the `caddy_data`
-  volume. Copy the root into the OS, with the VM stopped (in
+  volume. Take the root out of the container (in
   `docs/GUARDIAN/BROWSER-SERVICE`, where the compose runs; git ignores
-  `*.crt`):
+  `*.crt`) and read its SHA-256:
 
   ```text
   mkdir -p ca
   docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > ca/browser-root.crt
+  openssl x509 -in ca/browser-root.crt -noout -fingerprint -sha256
+  ```
+
+  On a running machine `/ca import` takes the file from a URL (any plain
+  file server on your network: the fingerprint is the check, not the
+  transport) or from an upload through the web console, and imports it
+  by that SHA-256
+  ([COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md)); the brain
+  trusts it from its next request and a connection's next `open`, with
+  no restart. The run of 2026-11-14 took the URL route. On a stopped raw
+  image the file is seeded instead:
+
+  ```text
   ../../../scripts/seed-state.sh --ca-dir ca
   ```
 
@@ -179,7 +192,9 @@ Ask in plain language; these are the inputs Embra sends:
 - **A script in one request** (`/function`):
   `{"url":"https://browser.example.lan/function","method":"POST","json":{"code":"export default async ({ page, context }) => { await page.goto(context.url); await page.click('#more'); return { data: await page.title(), type: 'text/plain' }; }","context":{"url":"https://example.com/"}}}`.
   The function runs against a fresh page and returns `{data, type}`; the
-  session closes after it. Nothing survives between two calls.
+  session closes after it. Nothing survives between two calls; a session
+  that does is a WebSocket connection (*A session over several calls*,
+  below).
 - **A screenshot** (`/screenshot`):
   `{"url":"https://browser.example.lan/screenshot","method":"POST","json":{"url":"https://example.com/","options":{"type":"png"}},"save_to":"shots/example.png"}`.
   The PNG lands under `/embra/workspace/shots/`; `image_view` on that path

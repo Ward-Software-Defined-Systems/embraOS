@@ -46,7 +46,7 @@ A change is saved to `SystemConfig.provider_gateway` (serde-additive; an instanc
 
 Ollama and LM Studio keep the endpoint stored in embraOS; the gateway's `[backends.<name>] upstream` is the server that answers while the gateway is on, and the stored endpoint is used again when it is off. `/model` lists the models the gateway's upstream serves.
 
-Direct, whatever `/local-ai-gateway` says: the Guardian tools (`web_search`, `http_request`, `http_get`), which have their own egress rules (`/guardian egress`); the sentence-embedding model, which runs inside the OS and sends nothing. The wizard's key check and preset probe are direct only when its gateway step chose direct.
+Direct, whatever `/local-ai-gateway` says: the Guardian tools (`web_search`, `http_request`, `http_get` and the connections of `websocket`), which have their own egress rules (`/guardian egress`); the sentence-embedding model, which runs inside the OS and sends nothing. The wizard's key check and preset probe are direct only when its gateway step chose direct.
 
 ## Caveats
 
@@ -84,4 +84,4 @@ Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4
 
 Checked from the build host on 2026-10-25, through the brain's own `identify` with the exported CA as `EMBRA_CA_DIR`: `https://axiom-app.ops.wsds:4000` identified itself as WSDS Local AI Gateway 0.1.0; without the CA the refusal read `invalid peer certificate: UnknownIssuer` and named the drop-in directory; `http://axiom-app.ops.wsds:4000` read `invalid HTTP version parsed` and named `https://`. With curl and the same CA, `GET /v1/models` and a 404 both carried `x-local-ai-gateway: 0.1.0`.
 
-*Last updated: 2026-11-11.*
+*Last updated: 2026-11-14.*

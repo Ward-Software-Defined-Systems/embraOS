@@ -14,6 +14,8 @@ Operator-authored modules start sandboxed. How do they earn broader access? A tr
 
 **2026-10-09.** An internal-only rung, by the operator: `/guardian egress allow <host>` admits a private host (a name with its subdomains, or an IP literal) to the `http_get` and `http_request` guards, and a loopback, link-local, multicast or reserved address is refused whatever the list says (`AddressClass` in `caps.rs`). A credential for a host is stored with `/guardian secret` and injected by the host on a matching request only, so a tool holds no secret. Both are still approval per definition; nothing is earned from operating history.
 
+**2026-11-14.** A fourth host import, `websocket`, and the first grant that outlives a call: a `wss://` connection the brain holds for the tool between calls (`guarded_websocket` in `crates/embra-guardian/src/ws.rs`; the connections in `crates/embra-brain/src/guardian/ws.rs`). It is opened under the rules of `http_request` — the address classes, the allowlist, the host's stored secret on the handshake — and what bounds it afterwards is fixed, not earned: four connections a tool and eight in all, ten minutes unused, sixty minutes at most, a close when its host is denied or its secret removed, and the operator's `/guardian connections`. Still approval per definition; nothing is earned from operating history.
+
 ## Resource contention: LLM vs modules
 
 Local LLM inference is resource-intensive. Module containers also need CPU and memory. embrad needs to arbitrate. The Continuity Engine should reason about "more inference capacity" vs "more module capacity" as a scheduling decision — but the scheduling policy is not yet designed.
