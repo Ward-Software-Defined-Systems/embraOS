@@ -64,7 +64,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("System", &[
         ("/status", "overview"), ("/help", "help"), ("/reboot", "reboot"), ("/backup", "backups"),
-        ("/update", "OS update"),
+        ("/ca", "CA certificates"), ("/update", "OS update"),
         ("/feedback-loop", "experimental"),
     ]),
 ];
@@ -204,6 +204,12 @@ const SPECS: &[Spec] = &[
         join: " ", guided: false,
         fields: &[sel("Action", &["(status)", "create", "list", "restore", "delete", BACKUP_UPLOAD], false),
             t("Label (create) or name (restore, delete, upload)", "blank = manual; for an upload, the file's name", false)] },
+    Spec { cmd: "/ca", title: "Certificate authorities",
+        note: "Blank = the certificate authorities this machine trusts beside the public ones: the image's and the ones on its STATE. import reads a certificate from a URL, or from a file uploaded here (drop a .pem or .crt on the terminal), and shows it; nothing is written. Given its SHA-256 as well, it imports that certificate: the brain trusts it at once, git and the OS updater after the next boot. Compare the SHA-256 with the one the certificate's owner shows before you give it. remove takes one of STATE's files. Works before the first session too, so a provider gateway's authority goes in ahead of the provider's setup.",
+        join: " ", guided: false,
+        fields: &[sel("Action", &["(list)", "import", "remove"], false),
+            t("Source (import): a URL or uploads/<file>; file (remove)", "https://gateway.example:8787/ca.pem · uploads/ca.pem", false),
+            t("SHA-256 (import, to write it)", "sha256:AB:CD:… as the owner shows it", false)] },
     Spec { cmd: "/update", title: "OS update",
         note: "Blank = check the release published at the update source against this one (the manifest's signature is verified first). apply writes it into the inactive slot and stages it for the next boot; status shows both slots; rollback makes the other slot the default; source shows, sets or resets your own source. A check and an apply take --tag <v…>, one release of a GitHub releases source in place of the latest; apply takes --allow-downgrade for an older release or another build of this version.",
         join: " ", guided: false,

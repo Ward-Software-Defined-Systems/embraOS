@@ -62,6 +62,29 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// What is wrong with PEM that does not parse.
+fn pem_fault(e: pem::Error) -> &'static str {
+    match e {
+        pem::Error::MissingSectionEnd { .. } => "a block has no END line",
+        pem::Error::IllegalSectionStart { .. } => "a BEGIN line is malformed",
+        pem::Error::Base64Decode(_) => "a block is not base64",
+        _ => "it is not PEM",
+    }
+}
+
+/// The certificates of a file in a certificate directory, split as the
+/// trust loader has always split one (`reqwest::Certificate::from_pem_bundle`
+/// runs this parser): every CERTIFICATE block in order, any other block
+/// passed over, and a block that does not parse refusing the whole file.
+/// No cap and no refusal of a key: a file an operator seeded keeps loading
+/// as it did. A source the command is given is read by
+/// [`certificates_of`], which is stricter.
+pub(crate) fn file_certificates(file: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+    rustls_pki_types::CertificateDer::pem_slice_iter(file)
+        .map(|block| block.map(|der| der.to_vec()).map_err(pem_fault))
+        .collect()
+}
+
 /// The certificates of a source, each as DER, in the source's order. PEM is
 /// split by the parser the trust loader uses: text outside the blocks and
 /// blocks of another kind (a revocation list, a request) are passed over,
@@ -88,14 +111,7 @@ pub(crate) fn certificates_of(source: &[u8]) -> Result<Vec<Vec<u8>>, SourceError
     }
     let mut certificates = Vec::new();
     for section in <(SectionKind, Vec<u8>)>::pem_slice_iter(source) {
-        let (kind, der) = section.map_err(|e| {
-            SourceError::Pem(match e {
-                pem::Error::MissingSectionEnd { .. } => "a block has no END line",
-                pem::Error::IllegalSectionStart { .. } => "a BEGIN line is malformed",
-                pem::Error::Base64Decode(_) => "a block is not base64",
-                _ => "it is not PEM",
-            })
-        })?;
+        let (kind, der) = section.map_err(|e| SourceError::Pem(pem_fault(e)))?;
         match kind {
             SectionKind::Certificate => certificates.push(der),
             SectionKind::RsaPrivateKey | SectionKind::PrivateKey | SectionKind::EcPrivateKey => {
@@ -144,7 +160,7 @@ impl Fingerprint {
     pub(crate) fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         let text = match text.get(..7) {
-            Some(prefix) if prefix.eq_ignore_ascii_case("sha256:") => &text[7..],
+            Some(prefix) if prefix.eq_ignore_ascii_case("sha256:") => text[7..].trim_start(),
             _ => text,
         };
         let digits: String = text.chars().filter(|c| *c != ':').collect();
@@ -571,6 +587,7 @@ A4VxDNMCIE+MW3vHLOk/mxfUo/327DXbTp2YINc24U5tO78fOWbQ
             format!("sha256:{hex}"),
             format!("SHA256:{FIXTURE_FINGERPRINT}"),
             format!("  sha256:{FIXTURE_FINGERPRINT}  "),
+            format!("sha256: {hex}"),
         ] {
             assert_eq!(Fingerprint::parse(&text), Some(want), "{text}");
         }

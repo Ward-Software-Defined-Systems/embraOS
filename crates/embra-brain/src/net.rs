@@ -17,7 +17,7 @@
 //! or `EMBRA_CA_DIR` alone when set), so a host behind the operator's own
 //! certificate authority — a self-hosted GitLab, the provider gateway over
 //! HTTPS — verifies. The directories are read at the first client built and
-//! again at a reload ([`reload_roots`]); the two long-lived clients are
+//! again at a reload ([`RootStore::reload`]); the two long-lived clients are
 //! built anew when the reading moved ([`SharedClient`]). The database client
 //! is built apart: loopback, plain HTTP, no roots.
 
@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use reqwest::redirect::{Attempt, Policy};
+
+use crate::ca::cert::Fingerprint;
 
 /// The most same-origin hops a request follows, reqwest's own default.
 const MAX_REDIRECTS: usize = 10;
@@ -93,6 +95,16 @@ pub(crate) struct Roots {
     /// ([`SharedClient`]).
     pub(crate) generation: u64,
     pub(crate) certs: Vec<reqwest::Certificate>,
+    /// The SHA-256 of each certificate, in the order of `certs`: what the
+    /// `/ca` command tells a trusted certificate by.
+    pub(crate) fingerprints: Vec<Fingerprint>,
+}
+
+impl Roots {
+    /// Whether a client built from this reading trusts the certificate.
+    pub(crate) fn trusts(&self, fingerprint: &Fingerprint) -> bool {
+        self.fingerprints.contains(fingerprint)
+    }
 }
 
 /// The readings of the certificate directories, the newest in force. The
@@ -100,7 +112,7 @@ pub(crate) struct Roots {
 /// [`RootStore::reload`]: a certificate that comes in while the brain runs
 /// is a root to every client built after the reload, with no restart. A
 /// client keeps the roots it was built with. The process has one store
-/// ([`roots`], [`reload_roots`]); a test makes its own.
+/// ([`process_roots`]); a test makes its own.
 pub(crate) struct RootStore {
     current: Mutex<Option<Arc<Roots>>>,
 }
@@ -135,8 +147,9 @@ impl RootStore {
 /// One reading of `dirs`, in their order.
 fn read_roots(dirs: &[PathBuf], generation: u64) -> Roots {
     let mut certs = Vec::new();
+    let mut fingerprints = Vec::new();
     for dir in dirs {
-        let found = operator_roots_in(dir);
+        let found = loaded_roots_in(dir);
         if !found.is_empty() {
             // The operator's line reads as it always has; the image's has a
             // line of its own, so the journal says which trust came with
@@ -148,15 +161,28 @@ fn read_roots(dirs: &[PathBuf], generation: u64) -> Roots {
             };
             tracing::info!("{whose}: {} certificate(s) from {}", found.len(), dir.display());
         }
-        certs.extend(found);
+        for (cert, fingerprint) in found {
+            certs.push(cert);
+            fingerprints.push(fingerprint);
+        }
     }
-    Roots { generation, certs }
+    Roots { generation, certs, fingerprints }
 }
 
 /// The process's readings.
 static PROCESS_ROOTS: RootStore = RootStore::new();
 
-fn dirs_in_force() -> Vec<PathBuf> {
+/// The process's store. The `/ca` command reloads it after it wrote or
+/// removed a certificate: every client built from then on trusts what the
+/// directories hold, the two long-lived ones included, and a request in
+/// flight keeps the client it was sent with.
+pub(crate) fn process_roots() -> &'static RootStore {
+    &PROCESS_ROOTS
+}
+
+/// The certificate directories in force: the image's and STATE's, or the
+/// development override alone.
+pub(crate) fn dirs_in_force() -> Vec<PathBuf> {
     ca_dirs(std::env::var(OPERATOR_CA_DIR_ENV).ok())
 }
 
@@ -167,21 +193,13 @@ pub(crate) fn roots() -> Arc<Roots> {
     PROCESS_ROOTS.current(dirs_in_force)
 }
 
-/// Reads the certificate directories again. Every client built from now on
-/// trusts what they hold, the two long-lived ones included; a request in
-/// flight keeps the client it was sent with.
-#[expect(dead_code, reason = "the /ca command reloads the roots; it arrives in the commits that follow")]
-pub(crate) fn reload_roots() -> Arc<Roots> {
-    PROCESS_ROOTS.reload(&dirs_in_force())
-}
-
 /// The certificates of the `*.pem` and `*.crt` files in `dir`. A missing
 /// directory is no drop-in. A file that does not parse, and a certificate
 /// the root store refuses (PEM framing around something that is not a
 /// certificate), are skipped with a warning and never fail a client's
 /// build: `builder()` feeds every client of the brain, and a trust anchor
 /// that is truly missing shows as the TLS error of the request itself.
-fn operator_roots_in(dir: &Path) -> Vec<reqwest::Certificate> {
+fn loaded_roots_in(dir: &Path) -> Vec<(reqwest::Certificate, Fingerprint)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -196,28 +214,50 @@ fn operator_roots_in(dir: &Path) -> Vec<reqwest::Certificate> {
             continue;
         }
         let Ok(bytes) = std::fs::read(&path) else { continue };
-        let parsed = match reqwest::Certificate::from_pem_bundle(&bytes) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                tracing::warn!("operator CA file skipped: {}: {e}", path.display());
+        // The parser `reqwest::Certificate::from_pem_bundle` runs, called
+        // here so that each certificate's bytes are in hand for its
+        // fingerprint.
+        let ders = match crate::ca::cert::file_certificates(&bytes) {
+            Ok(ders) => ders,
+            Err(fault) => {
+                tracing::warn!("operator CA file skipped: {}: {fault}", path.display());
                 continue;
             }
         };
-        for cert in parsed {
-            // `from_pem_bundle` checks the PEM framing; the root store
-            // checks the certificate when a client is built. A throwaway
-            // client finds that out here, so no `build().expect(..)` of
-            // the brain is reachable through a bad drop-in.
-            match reqwest::Client::builder().add_root_certificate(cert.clone()).build() {
-                Ok(_) => roots.push(cert),
-                Err(e) => tracing::warn!(
-                    "operator CA certificate skipped: {}: {e}",
-                    path.display()
-                ),
+        for der in ders {
+            // The split checks the PEM framing; the root store checks the
+            // certificate when a client is built. `as_root` builds a
+            // throwaway client to find that out here, so no
+            // `build().expect(..)` of the brain is reachable through a bad
+            // drop-in.
+            match crate::ca::cert::as_root(&der) {
+                Ok(cert) => roots.push((cert, Fingerprint::of(&der))),
+                Err(e) => tracing::warn!("operator CA certificate skipped: {}: {e}", path.display()),
             }
         }
     }
     roots
+}
+
+/// The certificates of `dir` alone, as a client takes them.
+#[cfg(test)]
+fn operator_roots_in(dir: &Path) -> Vec<reqwest::Certificate> {
+    loaded_roots_in(dir).into_iter().map(|(cert, _)| cert).collect()
+}
+
+/// A client that verifies no certificate and follows no redirect, for the
+/// one caller that fetches a certificate authority's certificate before
+/// anything can verify its host (`ca::fetch`). What it returns is trusted
+/// by nothing but the fingerprint the operator confirms. Guard
+/// `certificate_verification_is_switched_off_in_one_place_for_one_caller`.
+pub(crate) fn unverified(timeout: std::time::Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(timeout)
+        .build()
+        .expect("a reqwest client with two timeouts and no redirect builds")
 }
 
 /// A client builder with the redirect policy and the operator's roots set;
@@ -878,6 +918,15 @@ mod tests {
             "embrad's per-file cap moved: the build's IMPORTED_CAS_MAX_BYTES follows it"
         );
         assert_eq!(shell_value("IMPORTED_CAS_MAX_BYTES"), (256 * 1024).to_string());
+        assert_eq!(crate::ca::cert::MAX_SOURCE_BYTES, 256 * 1024, "the /ca command takes what embrad would merge");
+        assert!(
+            embrad.contains(&format!("const CA_MERGED_BUNDLE: &str = \"{}\";", crate::ca::BOOT_BUNDLE)),
+            "embrad writes its bundle elsewhere than {}: /ca list reads it there",
+            crate::ca::BOOT_BUNDLE
+        );
+        // embrad takes the two extensions the loader here takes, and a file
+        // the /ca command writes is named `.pem`.
+        assert!(embrad.contains("Some(\"pem\") | Some(\"crt\")"), "embrad's extensions moved");
 
         let hook = std::fs::read_to_string(root.join("buildroot/board/embraos/post_build.sh")).unwrap();
         assert!(
@@ -954,6 +1003,67 @@ mod tests {
                 out.push(path);
             }
         }
+    }
+
+    /// The trust loader splits a file with the parser `reqwest` runs for a
+    /// bundle, called by hand since the `/ca` command so that a
+    /// certificate's bytes are there for its fingerprint. On every kind of
+    /// file a directory has held, the two give the same number of
+    /// certificates, and refuse the same files.
+    #[test]
+    fn the_loader_splits_a_file_as_reqwest_does() {
+        let (ca_pem, _, _) = mint_ca_and_leaf();
+        let (other_pem, _, _) = mint_ca_and_leaf();
+        let files: Vec<(&str, String)> = vec![
+            ("one certificate", ca_pem.clone()),
+            ("two certificates", format!("{ca_pem}{other_pem}")),
+            ("text around the blocks", format!("# ours\n{ca_pem}\nand theirs\n{other_pem}trailing")),
+            ("CRLF line ends", ca_pem.replace('\n', "\r\n")),
+            ("no final line end", ca_pem.trim_end().to_string()),
+            ("not PEM", "not a certificate".to_string()),
+            ("empty", String::new()),
+            ("a block of another kind", format!("-----BEGIN X509 CRL-----\nAAAA\n-----END X509 CRL-----\n{ca_pem}")),
+            ("a key beside the certificate", format!("{ca_pem}-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")),
+            ("a block without its end", "-----BEGIN CERTIFICATE-----\nAAAA\n".to_string()),
+            ("a block that is not base64", "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n".to_string()),
+            ("framing around what is no certificate", "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n".to_string()),
+        ];
+        let mut refused = 0;
+        for (what, file) in files {
+            let reqwest_says = reqwest::Certificate::from_pem_bundle(file.as_bytes()).map(|certs| certs.len()).ok();
+            let ours = crate::ca::cert::file_certificates(file.as_bytes()).map(|ders| ders.len()).ok();
+            assert_eq!(ours, reqwest_says, "{what}");
+            refused += usize::from(ours.is_none());
+        }
+        assert!(refused >= 2, "the two malformed files are refused by both");
+    }
+
+    /// Certificate verification is switched off in one function, and one
+    /// file calls it: the fetch of a certificate authority's certificate,
+    /// whose answer is trusted by the confirmed fingerprint alone. Host
+    /// name verification is never switched off by itself.
+    #[test]
+    fn certificate_verification_is_switched_off_in_one_place_for_one_caller() {
+        let mut files = Vec::new();
+        rust_sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        // Spelled in pieces so this test does not read itself.
+        let off = ["danger_accept_", "invalid_certs"].concat();
+        let hostnames = ["danger_accept_", "invalid_hostnames"].concat();
+        let call = ["net::", "unverified("].concat();
+        let (mut switches, mut callers) = (Vec::new(), Vec::new());
+        for file in files {
+            let source = std::fs::read_to_string(&file).unwrap();
+            let name = file.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().display().to_string();
+            assert!(!source.contains(&hostnames), "{name} switches host name verification off");
+            for _ in source.match_indices(&off) {
+                switches.push(name.clone());
+            }
+            if source.contains(&call) {
+                callers.push(name);
+            }
+        }
+        assert_eq!(switches, vec!["src/net.rs".to_string()], "where verification is switched off");
+        assert_eq!(callers, vec!["src/ca/fetch.rs".to_string()], "who asks for the unverified client");
     }
 
     /// A provider keeps no client of its own: each request takes the

@@ -92,6 +92,8 @@ System:
   /status                        System status
   /reboot                        Say what a reboot does; /reboot now reboots embraOS through the boot menu
   /backup                        Snapshots of STATE and DATA: create [label], list, restore <name>, delete <name>, upload, status
+  /ca                            Certificate authorities beside the public ones: list, import <url|uploads/file> [sha256:<fingerprint>],
+                                 remove <file>; an import is trusted by the brain at once, by git and the OS updater after the next boot
   /update                        Check the published release; apply, status, rollback, source [<url>|reset];
                                  --tag <v…> names one release, apply --allow-downgrade takes an older one
   /feedback-loop                 Trigger Phase 2 Continuity Engine self-evaluation (experimental)

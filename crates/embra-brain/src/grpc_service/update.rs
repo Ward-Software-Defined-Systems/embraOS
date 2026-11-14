@@ -444,6 +444,9 @@ pub(super) async fn cancel_pending_restore(
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SetupCommand {
     Backup,
+    /// The provider gateway's certificate authority goes in before the
+    /// provider is set up.
+    Ca,
     Reboot,
     /// Any other: answered once the setup is complete.
     Later,
@@ -452,6 +455,7 @@ pub(super) enum SetupCommand {
 pub(super) fn setup_command(command: &str) -> SetupCommand {
     match command.trim() {
         "/backup" => SetupCommand::Backup,
+        "/ca" => SetupCommand::Ca,
         "/reboot" => SetupCommand::Reboot,
         _ => SetupCommand::Later,
     }
@@ -461,7 +465,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
 /// the command but that it was not run: the word may be one no command has.
 pub(super) fn later_notice(command: &str) -> String {
     let shown: String = command.trim().chars().take(40).collect();
-    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup and /reboot are.")
+    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca and /reboot are.")
 }
 
 /// What the stages before a session do with a client's frame: the
@@ -469,9 +473,11 @@ pub(super) fn later_notice(command: &str) -> String {
 /// Each reads the stream itself and wants the operator's messages alone, and
 /// a command sent then used to be dropped without a word. A machine that is
 /// installed again is restored from exactly there (a backup uploaded through
-/// the web console, `/backup restore`, `/reboot now`), so `/backup` and
-/// `/reboot` are answered as in a session, the confirmation of a restore is
-/// taken, and any other command gets one line.
+/// the web console, `/backup restore`, `/reboot now`), and the provider
+/// gateway's certificate authority is imported there, ahead of the
+/// provider's setup (`/ca import`). So `/backup`, `/ca` and `/reboot` are
+/// answered as in a session, the confirmation of a restore is taken, and
+/// any other command gets one line.
 #[derive(Clone)]
 pub(crate) struct SetupCommands {
     tx: mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -510,6 +516,7 @@ impl SetupCommands {
                 cancel_pending_restore(&self.pending_restore, &self.tx).await;
                 match setup_command(&cmd.command) {
                     SetupCommand::Backup => handle_backup_command(&cmd.args, &self.tx, &self.pending_restore).await,
+                    SetupCommand::Ca => super::ca::handle_ca_command(&cmd.args, &self.tx).await,
                     SetupCommand::Reboot => handle_reboot_command(&cmd.args, &self.tx).await,
                     SetupCommand::Later => {
                         let _ = self
@@ -563,11 +570,11 @@ mod backup_tests {
         out
     }
 
-    /// Before a session the operator's messages go to the stage, `/backup`
-    /// and `/reboot` are answered, and any other command gets its one line:
-    /// none is dropped without a word.
+    /// Before a session the operator's messages go to the stage, `/backup`,
+    /// `/ca` and `/reboot` are answered, and any other command gets its one
+    /// line: none is dropped without a word.
     #[tokio::test]
-    async fn before_a_session_backup_and_reboot_are_answered_and_any_other_command_is_told_to_wait() {
+    async fn before_a_session_backup_ca_and_reboot_are_answered_and_any_other_command_is_told_to_wait() {
         let (tx, mut rx) = mpsc::channel(16);
         let pending = Arc::new(Mutex::new(None));
         let door = SetupCommands::new(&tx, &pending);
@@ -587,11 +594,20 @@ mod backup_tests {
         assert_eq!(reboot.len(), 1);
         assert!(reboot[0].contains("PID 1 is not embrad") || reboot[0].contains("Reboot embraOS?"), "{reboot:?}");
 
+        // `/ca` is the command itself: its usage, and a refusal that only
+        // the command gives (an import reads its source before anything).
+        assert_eq!(door.take(command("/ca", "help")).await, None);
+        assert_eq!(said(&mut rx), vec![crate::ca::USAGE.to_string()], "/ca is answered as in a session");
+        assert_eq!(door.take(command("/ca", "import https://user:pw@gateway.example/ca.pem")).await, None);
+        let import = said(&mut rx);
+        assert_eq!(import.len(), 1);
+        assert!(import[0].starts_with("Credentials in the URL are refused") && import[0].ends_with("Nothing was written."), "{import:?}");
+
         for other in ["/status", "/sessions", "/provider", "/frobnicate"] {
             assert_eq!(door.take(command(other, "now")).await, None);
             let line = said(&mut rx);
             assert_eq!(line, vec![later_notice(other)], "{other}");
-            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup and /reboot are"), "{line:?}");
+            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca and /reboot are"), "{line:?}");
         }
 
         // A frame the stages never read is still not theirs, and says nothing.
@@ -629,6 +645,8 @@ mod backup_tests {
 
         assert_eq!(setup_command("/backup"), SetupCommand::Backup);
         assert_eq!(setup_command(" /reboot "), SetupCommand::Reboot);
+        assert_eq!(setup_command("/ca"), SetupCommand::Ca);
+        assert_eq!(setup_command("/cas"), SetupCommand::Later);
         assert_eq!(setup_command("/backups"), SetupCommand::Later);
         assert_eq!(setup_command(""), SetupCommand::Later);
         assert!(later_notice(&"/x".repeat(100)).len() < 220, "a long word is cut");

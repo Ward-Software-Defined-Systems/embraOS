@@ -3,6 +3,7 @@
 //! Bridges Phase 0 Brain + tools + sessions into a gRPC streaming interface.
 
 mod attach;
+mod ca;
 mod learning_loop;
 mod provider_setup;
 mod slash;

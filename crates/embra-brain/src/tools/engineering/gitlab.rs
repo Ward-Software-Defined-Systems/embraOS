@@ -18,8 +18,8 @@ use crate::tools::registry::DispatchContext;
 /// mkcert) verifies. It was built per call "so a seeded operator CA takes
 /// effect without a restart", a reason that was never true then: the roots
 /// were read once per process. They are read again at a reload now
-/// (`net::reload_roots`), and this client is built anew on the new reading
-/// (`net::SharedClient`).
+/// (`net::RootStore::reload`, the `/ca` command), and this client is built
+/// anew on the new reading (`net::SharedClient`).
 fn gitlab_client() -> reqwest::Client {
     crate::net::shared()
 }
