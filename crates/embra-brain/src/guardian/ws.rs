@@ -26,6 +26,9 @@ use embra_guardian::ws::{
     WS_IDLE, WS_IO_BUDGET, WS_LIFETIME, WS_MESSAGE_MAX, WS_PER_PROCESS, WS_PER_TOOL,
 };
 use futures::{SinkExt, StreamExt};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -33,12 +36,17 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{self, Message};
 use tracing::info;
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+type Tls = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
+type Socket = tokio_tungstenite::WebSocketStream<Returning<Tls>>;
 
 /// How long a closed connection that no call has read stays in the table.
 const CLOSED_KEPT: Duration = Duration::from_secs(60);
 /// How long a close waits for the peer's own close frame.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// How long a refused handshake waits for the rest of the refusal's words,
+/// and how many bytes of them it reads at most.
+const REFUSAL_WAIT: Duration = Duration::from_millis(500);
+const REFUSAL_READ_MAX: usize = 4096;
 
 /// The bounds a table runs under. The process's are the capability's
 /// constants; a test names shorter ones.
@@ -378,30 +386,132 @@ async fn dial(
     let mut config = WebSocketConfig::default();
     config.max_message_size = Some(message_max);
     config.max_frame_size = Some(message_max);
+    let (stream, mut handed_back) = Returning::new(stream);
     match tokio_tungstenite::client_async_with_config(handshake, stream, Some(config)).await {
         Ok(opened) => Ok(opened),
-        Err(tungstenite::Error::Http(response)) => Err(WsOpenError::Http {
-            status: response.status().as_u16(),
-            location: response
-                .headers()
-                .get(tungstenite::http::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string),
-            body: refusal_body(response.headers(), response.body().as_deref().unwrap_or_default()),
-        }),
+        Err(tungstenite::Error::Http(response)) => {
+            // The library answers what had arrived when the headers ended,
+            // which is often nothing: a proxy sends the body after them.
+            // The refused handshake dropped the stream, which came back.
+            let mut body = response.body().clone().unwrap_or_default();
+            if let Ok(mut stream) = handed_back.try_recv() {
+                body = rest_of_refusal(&mut stream, response.headers(), body).await;
+            }
+            Err(WsOpenError::Http {
+                status: response.status().as_u16(),
+                location: response
+                    .headers()
+                    .get(tungstenite::http::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+                body: refusal_body(response.headers(), &body),
+            })
+        }
         Err(e) => Err(failed(format!("the WebSocket handshake with {} failed: {e}", request.host))),
     }
 }
 
-/// The words of a refused handshake. The library hands over the bytes that
-/// followed the headers as they arrived, so a body sent chunked (a proxy in
-/// front of the service does that) still carries its chunk sizes: they are
-/// taken out, and what does not read as chunks is answered as it came.
-fn refusal_body(headers: &tungstenite::http::HeaderMap, raw: &[u8]) -> Vec<u8> {
-    let chunked = headers
-        .get(tungstenite::http::header::TRANSFER_ENCODING)
-        .and_then(|v| v.to_str().ok())
+/// A stream that goes back to whoever made it when it is dropped. A
+/// handshake the server refused drops its stream, and the words of the
+/// refusal may not have arrived by then. Reads and writes pass through.
+struct Returning<S> {
+    inner: Option<S>,
+    back: Option<oneshot::Sender<S>>,
+}
+
+impl<S> Returning<S> {
+    fn new(inner: S) -> (Self, oneshot::Receiver<S>) {
+        let (back, handed_back) = oneshot::channel();
+        (Self { inner: Some(inner), back: Some(back) }, handed_back)
+    }
+}
+
+impl<S> Drop for Returning<S> {
+    fn drop(&mut self) {
+        if let (Some(inner), Some(back)) = (self.inner.take(), self.back.take()) {
+            // Nobody waits for the stream of a connection that was opened.
+            let _ = back.send(inner);
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Returning<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.inner.as_mut() {
+            Some(inner) => Pin::new(inner).poll_read(cx, buf),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Returning<S> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        match self.inner.as_mut() {
+            Some(inner) => Pin::new(inner).poll_write(cx, buf),
+            None => Poll::Ready(Err(std::io::ErrorKind::NotConnected.into())),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.inner.as_mut() {
+            Some(inner) => Pin::new(inner).poll_flush(cx),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.inner.as_mut() {
+            Some(inner) => Pin::new(inner).poll_shutdown(cx),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+/// What a refusal's headers say of its body: chunked, or of a length.
+fn refusal_framing(headers: &tungstenite::http::HeaderMap) -> (bool, Option<usize>) {
+    let text = |name| headers.get(name).and_then(|v: &tungstenite::http::HeaderValue| v.to_str().ok());
+    let chunked = text(tungstenite::http::header::TRANSFER_ENCODING)
         .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    let length = text(tungstenite::http::header::CONTENT_LENGTH).and_then(|v| v.trim().parse().ok());
+    (chunked, length)
+}
+
+/// The body of a refused handshake, read on from what the library had: to
+/// its length, to its last chunk or to the end of the stream, and never
+/// past [`REFUSAL_WAIT`] or [`REFUSAL_READ_MAX`].
+async fn rest_of_refusal<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    headers: &tungstenite::http::HeaderMap,
+    mut body: Vec<u8>,
+) -> Vec<u8> {
+    let (chunked, length) = refusal_framing(headers);
+    let whole = |body: &[u8]| match length {
+        Some(length) if !chunked => body.len() >= length,
+        _ => chunked && body.ends_with(b"0\r\n\r\n"),
+    };
+    let _ = tokio::time::timeout(REFUSAL_WAIT, async {
+        let mut piece = [0u8; 1024];
+        while !whole(&body) && body.len() < REFUSAL_READ_MAX {
+            match stream.read(&mut piece).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => body.extend_from_slice(&piece[..n]),
+            }
+        }
+    })
+    .await;
+    body
+}
+
+/// The words of a refused handshake, from the bytes that followed its
+/// headers. A body sent chunked (a proxy in front of the service does that)
+/// still carries its chunk sizes: they are taken out, and what does not
+/// read as chunks is answered as it came.
+fn refusal_body(headers: &tungstenite::http::HeaderMap, raw: &[u8]) -> Vec<u8> {
+    let (chunked, _) = refusal_framing(headers);
     let body = if chunked { dechunked(raw).unwrap_or_else(|| raw.to_vec()) } else { raw.to_vec() };
     body.trim_ascii().to_vec()
 }
@@ -1265,6 +1375,78 @@ mod tests {
         let WsOpenError::Http { status, location, body } = refused else { panic!("{refused:?}") };
         assert_eq!((status, location), (401, None));
         assert_eq!(String::from_utf8_lossy(&body), "Bad or missing authentication.");
+        assert!(registry.list_all().is_empty());
+    }
+
+    /// A refusal's words are read whatever way they travel. Behind a proxy
+    /// they come chunked and after the headers, in a record of their own:
+    /// against a browser service behind Caddy the body the library handed
+    /// over was empty on two runs of three. And a server that says nothing
+    /// more is not waited for long.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refusal_that_arrives_in_pieces_is_answered_whole() {
+        /// A TLS server that answers one request with `pieces`, a pause
+        /// before each, and then holds the connection open.
+        async fn refusing(pki: &Pki, pieces: &'static [&'static str]) -> SocketAddr {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let acceptor = pki.acceptor.clone();
+            tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut tls = acceptor.accept(tcp).await.unwrap();
+                let mut head = vec![0u8; 4096];
+                let _ = tls.read(&mut head).await;
+                for piece in pieces {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    let _ = tls.write_all(piece.as_bytes()).await;
+                    let _ = tls.flush().await;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            });
+            addr
+        }
+        let pki = pki();
+        let registry = Arc::new(Registry::new(Limits::default()));
+        let tls = client_tls(Some(&pki.ca_der));
+        let refusal = |addr: SocketAddr| {
+            let (broker, _) = call(&registry, "websocket", &tls, BUDGET);
+            async move {
+                let started = Instant::now();
+                let refused = blocking(move || broker.open(&request(addr))).await.unwrap_err();
+                let WsOpenError::Http { status, body, .. } = refused else { panic!("{refused:?}") };
+                (status, String::from_utf8_lossy(&body).into_owned(), started.elapsed())
+            }
+        };
+
+        // Chunked, as the proxy sent it: the headers, then the chunk, then
+        // the last chunk.
+        let chunked = refusing(
+            &pki,
+            &[
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=UTF-8\r\nTransfer-Encoding: chunked\r\n\r\n",
+                "20\r\n\r\nBad or missing authentication.\r\n",
+                "0\r\n\r\n",
+            ],
+        )
+        .await;
+        let (status, words, took) = refusal(chunked).await;
+        assert_eq!((status, words.as_str()), (401, "Bad or missing authentication."));
+        assert!(took < Duration::from_secs(2), "{took:?}");
+
+        // With a length, in two pieces after the headers.
+        let sized = refusing(
+            &pki,
+            &["HTTP/1.1 429 Too Many Requests\r\ncontent-length: 17\r\n\r\n", "Too many", " requests"],
+        )
+        .await;
+        let (status, words, _) = refusal(sized).await;
+        assert_eq!((status, words.as_str()), (429, "Too many requests"));
+
+        // Headers and no more: the status, after the wait and no longer.
+        let silent = refusing(&pki, &["HTTP/1.1 503 Service Unavailable\r\n\r\n"]).await;
+        let (status, words, took) = refusal(silent).await;
+        assert_eq!((status, words.as_str()), (503, ""));
+        assert!(took >= REFUSAL_WAIT && took < REFUSAL_WAIT + Duration::from_secs(2), "{took:?}");
         assert!(registry.list_all().is_empty());
     }
 
