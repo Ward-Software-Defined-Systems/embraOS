@@ -671,6 +671,86 @@ mod tests {
         Ok(v["sum"].as_f64().expect("the probe answers a sum"))
     }
 
+    /// The shipped `websocket` module, built from its source
+    /// (`embra-guardian/tests/websocket_roundtrip.rs` has the commands).
+    const WEBSOCKET_WASM: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../embra-guardian/tests/fixtures/websocket.wasm"
+    ));
+    /// Its name in the process-wide overlay; no other test uses it.
+    const WEBSOCKET: &str = "websocket_through_dispatch";
+
+    /// Invoke the websocket module, loaded into the overlay, through the
+    /// registry and return what it answered. There is no database behind
+    /// it: the invoke arm then runs on no configuration, public hosts only
+    /// and no secrets.
+    async fn websocket_call(input: serde_json::Value) -> Result<serde_json::Value, DispatchError> {
+        let config: crate::config::SystemConfig = serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3, "kg_traversal_depth_ceiling": 5,
+            "kg_edge_candidate_limit": 50, "api_provider": "anthropic",
+        }))
+        .unwrap();
+        let db = crate::db::WardsonDbClient::from_url("http://127.0.0.1:1");
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let ctx = DispatchContext {
+            db: &db,
+            config: &config,
+            session_name: "test",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+            deleting_session: None,
+        };
+        let args = serde_json::json!({"action": "invoke", "tool": WEBSOCKET, "input": input});
+        let out = crate::tools::registry::dispatch("guardian_call", args, ctx).await?;
+        Ok(serde_json::from_str(&out.text).expect("the tool answers JSON"))
+    }
+
+    /// The invoke arm, for a tool that declares `websocket`: a broker made
+    /// for the call is granted, the tool's operation reaches the guard and
+    /// the process's table, and the call comes back. The connections
+    /// themselves are tested where they live (`guardian/ws.rs`); a real
+    /// `open` cannot be made here, since the guard never dials the
+    /// loopback a test server listens on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tool_with_the_websocket_capability_reaches_its_broker_through_guardian_call() {
+        let rt = embra_guardian::overlay::init("test").expect("guardian runtime");
+        rt.compile_insert(
+            WEBSOCKET,
+            "websocket",
+            serde_json::json!({"type": "object"}),
+            vec![embra_guardian::abi::CAP_WEBSOCKET.to_string()],
+            WEBSOCKET_WASM,
+        )
+        .expect("the module compiles");
+        // The table of this tool: empty.
+        let listed = websocket_call(serde_json::json!({"op": "list"})).await.unwrap();
+        assert_eq!(listed, serde_json::json!({"connections": []}));
+        // The guard, in its own words, before any network.
+        let plain = websocket_call(serde_json::json!({"op": "open", "url": "ws://1.1.1.1/"})).await.unwrap();
+        assert!(plain["error"].as_str().unwrap().contains("only wss:// destinations are allowed"), "{plain}");
+        let loopback = websocket_call(serde_json::json!({"op": "open", "url": "wss://127.0.0.1:9/"})).await.unwrap();
+        assert!(loopback["error"].as_str().unwrap().contains("loopback"), "{loopback}");
+        let credential = websocket_call(
+            serde_json::json!({"op": "open", "url": "wss://1.1.1.1/", "headers": {"Authorization": "Bearer t"}}),
+        )
+        .await
+        .unwrap();
+        assert!(credential["error"].as_str().unwrap().contains("/guardian secret"), "{credential}");
+        // The broker: an id that names no connection of this tool.
+        let unknown =
+            websocket_call(serde_json::json!({"op": "receive", "id": "ws-00000000", "wait_ms": 1})).await.unwrap();
+        assert_eq!(
+            unknown,
+            serde_json::json!({"error": "no open connection ws-00000000 of this tool (op=list names them)"})
+        );
+        // The same call, its input sent as JSON text: decoded before the tool.
+        let listed = websocket_call(serde_json::Value::String(r#"{"op":"list"}"#.into())).await.unwrap();
+        assert_eq!(listed, serde_json::json!({"connections": []}));
+    }
+
     /// The bug, end to end. An OpenAI-compatible server that keeps an
     /// argument without a declared type as text (Ollama's Qwen3-Coder
     /// parser) hands guardian_call the object as JSON text. It reached the
