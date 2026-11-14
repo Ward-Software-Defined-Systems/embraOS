@@ -746,7 +746,15 @@ async fn handle_key_event(
                         return Ok(());
                     }
                 }
-                app.setup_default = None;
+                // An answer spends its question's default. A command is no
+                // answer: before a session the brain answers it and the
+                // question stands (`/ca import` at the wizard's name
+                // question), so its default stands with it. In a session a
+                // command ends the flow that asked, and the default with it.
+                let question_stands = input.starts_with('/') && !matches!(app.mode, AppMode::Operational { .. });
+                if !question_stands {
+                    app.setup_default = None;
+                }
 
                 // Check for slash commands
                 if input.starts_with('/') {
@@ -1715,6 +1723,63 @@ mod key_tests {
             .await
             .expect("key handling never fails");
         rx.try_recv().ok()
+    }
+
+    /// A command is no answer. Before a session the brain answers it and the
+    /// question stands, so Enter on an empty line still sends the question's
+    /// default: `/ca import` at the wizard's name question, then Enter for
+    /// the name. In a session a command ends the flow that asked, and an
+    /// empty line sends nothing.
+    #[tokio::test]
+    async fn before_a_session_a_command_keeps_the_questions_default() {
+        fn ask(app: &mut AppState) {
+            handle_console_event(
+                ConsoleEvent::SetupPrompt {
+                    field_type: "text".to_string(),
+                    prompt: "What should this intelligence be called?".to_string(),
+                    options: vec![],
+                    default_value: "Embra".to_string(),
+                },
+                app,
+            );
+        }
+        async fn typed(app: &mut AppState, text: &str) -> Option<ConversationRequest> {
+            for c in text.chars() {
+                press(app, KeyCode::Char(c), KeyModifiers::NONE).await;
+            }
+            submit(app).await
+        }
+
+        let mut app = AppState::new();
+        assert!(!matches!(app.mode, AppMode::Operational { .. }), "the console starts before a session");
+        ask(&mut app);
+        let sent = typed(&mut app, "/ca import uploads/ca.pem").await.expect("the command went to the brain");
+        match sent.request_type {
+            Some(conversation_request::RequestType::SlashCommand(c)) => {
+                assert_eq!((c.command.as_str(), c.args.as_str()), ("/ca", "import uploads/ca.pem"));
+            }
+            other => panic!("expected the command, got {other:?}"),
+        }
+        assert_eq!(app.setup_default.as_deref(), Some("Embra"), "the question's default stands");
+        let sent = submit(&mut app).await.expect("an empty line sends the default");
+        match sent.request_type {
+            Some(conversation_request::RequestType::UserMessage(m)) => assert_eq!(m.content, "Embra"),
+            other => panic!("expected the default as the answer, got {other:?}"),
+        }
+        assert_eq!(app.setup_default, None, "the answer spends it");
+
+        // An answer typed out spends it as before.
+        ask(&mut app);
+        assert!(typed(&mut app, "Axiom").await.is_some());
+        assert_eq!(app.setup_default, None);
+
+        // In a session a command ends the flow that asked.
+        let mut app = AppState::new();
+        app.mode = AppMode::Operational { session_name: "main".to_string() };
+        ask(&mut app);
+        assert!(typed(&mut app, "/status").await.is_some());
+        assert_eq!(app.setup_default, None, "no stale default in a session");
+        assert!(submit(&mut app).await.is_none(), "an empty line sends nothing");
     }
 
     /// #20: while a `secret` prompt is pending the input box draws one
