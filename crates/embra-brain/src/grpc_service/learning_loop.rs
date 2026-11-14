@@ -1,6 +1,7 @@
 //! Learning Mode: the learning loop and the seal.
 
 use super::*;
+use crate::identity_graph::import_flow::{wait_for_user_line, Wait};
 
 /// Build the Learning→Operational `ModeChange` announced when the soul is
 /// sealed. Emitted both by the stream that drives learning to completion AND
@@ -28,15 +29,18 @@ pub(super) fn soul_sealed_mode_change(config: &config::SystemConfig) -> Conversa
 /// Drive the 6-phase Learning Mode over gRPC.
 /// Creates LearningState, runs each phase with Brain calls, detects [PHASE_COMPLETE],
 /// persists extracted documents, and transitions to Operational when complete.
-pub(super) async fn run_learning_loop(
-    incoming: &mut Streaming<ConversationRequest>,
+pub(super) async fn run_learning_loop<S>(
+    incoming: &mut S,
     db: &Arc<WardsonDbClient>,
     config: &config::SystemConfig,
     api_key: &str,
     onboarding_stage: &Arc<watch::Sender<i32>>,
     stop: TurnStop<'_>,
     commands: &SetupCommands,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: futures::Stream<Item = Result<ConversationRequest, Status>> + Unpin,
+{
     // The client's stream, which the door for commands answers on too.
     let tx = commands.stream();
     let mut state = learning::LearningState::new();
@@ -108,9 +112,10 @@ pub(super) async fn run_learning_loop(
     })).await;
 
     // Wake signal: fires when ANOTHER stream advances the global onboarding
-    // stage (i.e. seals the soul) while we sit blocked on `incoming.next()`
-    // below. Without it, a second client that entered its own learning loop
-    // stays frozen on Learning after the driver completes onboarding.
+    // stage (i.e. seals the soul) while we sit blocked on the operator's
+    // next message below (`wait_for_user_line`). Without it, a second
+    // client that entered its own learning loop stays frozen on Learning
+    // after the driver completes onboarding.
     let mut stage_rx = onboarding_stage.subscribe();
 
     // The import offer fires once per learning loop, at the entry to
@@ -124,6 +129,14 @@ pub(super) async fn run_learning_loop(
     loop {
         if state.phase == learning::LearningPhase::Complete {
             break;
+        }
+
+        // Another console may have sealed the soul while this one was in a
+        // turn or at the import offer. A phase before the seal has nothing
+        // left to do then: its model turn is not run and nothing is written.
+        if before_the_seal(&state.phase) && learning::is_soul_sealed(db).await.unwrap_or(false) {
+            let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
+            return Ok(());
         }
 
         if state.phase == learning::LearningPhase::IdentityFormation && !import_offered {
@@ -207,16 +220,29 @@ pub(super) async fn run_learning_loop(
                 )),
             })).await;
 
-            if let Err(e) = learning::handle_phase_complete(&mut state, db, &config).await {
-                error!("Phase 4 auto-advance failed: {}", e);
-                let _ = tx.send(Ok(ConversationResponse {
-                    response_type: Some(conversation_response::ResponseType::System(
-                        SystemMessage {
-                            content: format!("Error processing phase: {}", e),
-                            msg_type: SystemMessageType::Error as i32,
+            match complete_phase(&mut state, db, &mut config, tx, &learning_model).await {
+                PhaseEnd::Advanced => {}
+                PhaseEnd::SealedElsewhere => {
+                    let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
+                    return Ok(());
+                }
+                PhaseEnd::Open | PhaseEnd::Failed => {
+                    // The registry was not written, and this phase has no
+                    // conversation to wait in. It is tried again when the
+                    // operator says so: a database that is down would
+                    // otherwise be written to as fast as this loop turns.
+                    match wait_for_user_line(incoming, &mut stage_rx, db, commands).await? {
+                        Wait::Line(_) => continue,
+                        Wait::Sealed => {
+                            let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
+                            return Ok(());
                         }
-                    )),
-                })).await;
+                        Wait::Disconnected => {
+                            debug!("Client disconnected during learning");
+                            return Ok(());
+                        }
+                    }
+                }
             }
 
             let _ = tx.send(Ok(ConversationResponse {
@@ -286,183 +312,215 @@ pub(super) async fn run_learning_loop(
         // over (`[PHASE_COMPLETE]`, never on a stopped turn).
         let (history_entry, phase_complete) = learning_turn_outcome(&answer);
         state.conversation_history.push(Message::assistant(&history_entry));
+        let mut ended = if phase_complete {
+            complete_phase(&mut state, db, &mut config, tx, &learning_model).await
+        } else {
+            PhaseEnd::Open
+        };
 
-        if phase_complete {
-            // Persist extracted documents and advance phase
-            match learning::handle_phase_complete(&mut state, db, &config).await {
-                Err(e) => {
-                    error!("Phase complete handling failed: {}", e);
-                    let _ = tx.send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::System(
-                            SystemMessage {
-                                content: format!("Error processing phase: {}", e),
-                                msg_type: SystemMessageType::Error as i32,
-                            }
-                        )),
-                    })).await;
+        // The phase stays open until it advances, a turn a message of the
+        // operator's. A completion that failed is tried again by the model's
+        // answer to the next one, and never by a turn this loop starts on
+        // its own: the kickoff above is sent once a phase.
+        while matches!(ended, PhaseEnd::Open | PhaseEnd::Failed) {
+            // The operator's message is the conversation's; a command is the
+            // door's (`SetupCommands`), answered or told to wait and never
+            // sent to the model. A wake with the soul sealed is another
+            // console that completed onboarding: this one announces
+            // Operational on its own stream and hands off (the converse
+            // handler runs its post-learning setup on `Ok`).
+            let content = match wait_for_user_line(incoming, &mut stage_rx, db, commands).await? {
+                Wait::Line(content) => content,
+                Wait::Sealed => {
+                    let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
+                    return Ok(());
                 }
-                Ok(Some(new_name)) => {
-                    // Phase 2 renamed the intelligence (identity → config
-                    // sync, already persisted). Adopt it in the loop's
-                    // working copy so phases 3–6 prompts and the seal-time
-                    // ModeChange carry it, tell the operator, and refresh
-                    // the console name mid-learning (the console parses the
-                    // `Name:` token on any ModeTransition).
-                    let old_name = std::mem::replace(&mut config.name, new_name);
-                    let _ = tx.send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::System(
-                            SystemMessage {
-                                content: format!(
-                                    "Name updated: {} → {} (synced from the Phase-2 \
-                                     identity; persisted to config).",
-                                    old_name, config.name
-                                ),
-                                msg_type: SystemMessageType::Info as i32,
-                            }
-                        )),
-                    })).await;
-                    let _ = tx.send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::ModeChange(
-                            ModeTransition {
-                                from_mode: OperatingMode::Learning as i32,
-                                to_mode: OperatingMode::Learning as i32,
-                                message: format!(
-                                    "Learning Mode — Name: {} — Phase: {} — TZ: {} — Brain: {}",
-                                    config.name,
-                                    learning::phase_label(&state.phase),
-                                    config.timezone,
-                                    learning_model
-                                ),
-                            }
-                        )),
-                    })).await;
+                Wait::Disconnected => {
+                    debug!("Client disconnected during learning");
+                    return Ok(());
                 }
-                Ok(None) => {}
-            }
+            };
+            state.conversation_history.push(Message::user(&content));
 
-            if state.phase == learning::LearningPhase::Complete {
-                // Save learning conversation history
-                let _ = save_learning_history(db, &state.conversation_history).await;
+            // Rebuild system prompt (may include newly extracted docs)
+            let system_prompt = learning::system_prompt_for_phase(&state, &config);
+            let system_bundle = SystemPromptBundle {
+                text: system_prompt,
+                session_name: "learning".to_string(),
+            };
 
-                // Transition to Operational
-                let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-                // We're the driver — soul is sealed. Wake any other stream
-                // blocked in its own learning loop so it advances too.
-                let _ = onboarding_stage.send_replace(OperatingMode::Operational as i32);
-                break;
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::Thinking(
+                    ThinkingState { is_thinking: true, name: config.name.clone(), current_tool: String::new() }
+                )),
+            })).await;
+
+            let messages: Vec<ApiMessage> = crate::sessions::model_view::fold_stopped_turns(
+                state.conversation_history.iter().map(legacy_message_to_api).collect(),
+            );
+            let (in_turn_guard, mut stop_check) = stop.begin("learning");
+            let mut brain_rx = provider
+                .stream_turn(
+                    &messages,
+                    &system_bundle,
+                    &empty_manifest,
+                    LlmRequestOptions {
+                        include_reasoning: config.show_reasoning(),
+                    },
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
+
+            let answer = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
+            drop(in_turn_guard);
+
+            let (history_entry, phase_complete) = learning_turn_outcome(&answer);
+            state.conversation_history.push(Message::assistant(&history_entry));
+            ended = if phase_complete {
+                complete_phase(&mut state, db, &mut config, tx, &learning_model).await
             } else {
-                // Notify phase change
+                PhaseEnd::Open
+            };
+        }
+
+        if matches!(ended, PhaseEnd::SealedElsewhere) {
+            let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
+            return Ok(());
+        }
+
+        if state.phase == learning::LearningPhase::Complete {
+            // Save learning conversation history
+            let _ = save_learning_history(db, &state.conversation_history).await;
+
+            // Transition to Operational
+            let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
+            // We're the driver — soul is sealed. Wake any other stream
+            // blocked in its own learning loop so it advances too.
+            let _ = onboarding_stage.send_replace(OperatingMode::Operational as i32);
+            break;
+        }
+        // Notify phase change
+        let _ = tx.send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::System(
+                SystemMessage {
+                    content: format!("Phase complete — advancing to: {}", learning::phase_label(&state.phase)),
+                    msg_type: SystemMessageType::Info as i32,
+                }
+            )),
+        })).await;
+    }
+
+    Ok(())
+}
+
+/// The phases a console runs before the soul is sealed. A console that
+/// finds the soul sealed while it is in one of them is behind another
+/// console's seal; in the two after it (the toolset, the confirmation) the
+/// seal is its own.
+fn before_the_seal(phase: &learning::LearningPhase) -> bool {
+    matches!(
+        phase,
+        learning::LearningPhase::UserConfiguration
+            | learning::LearningPhase::IdentityFormation
+            | learning::LearningPhase::SoulDefinition
+    )
+}
+
+/// What became of a phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseEnd {
+    /// The model has not called it complete: the conversation goes on.
+    Open,
+    /// Its documents are stored and the state is on the next phase.
+    Advanced,
+    /// Another console sealed the soul while this one was in the phase.
+    /// Nothing was written here.
+    SealedElsewhere,
+    /// Completing it failed, and the state is on the same phase.
+    Failed,
+}
+
+/// Complete the phase the model called complete, and tell the client what
+/// the completion did: a name the phase changed, or the failure.
+///
+/// The one place a completion is handled. A failure used to fall back into
+/// the loop, which sent the phase's kickoff and ran a model turn again at
+/// once: with two consoles finishing the first phase together the second
+/// write of the profile was refused, and a provider that kept calling the
+/// phase complete was asked again without end. It is said to the operator
+/// now, and the phase stays open for the next message.
+async fn complete_phase(
+    state: &mut learning::LearningState,
+    db: &Arc<WardsonDbClient>,
+    config: &mut config::SystemConfig,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    learning_model: &str,
+) -> PhaseEnd {
+    let behind_a_seal = before_the_seal(&state.phase);
+    if behind_a_seal && learning::is_soul_sealed(db).await.unwrap_or(false) {
+        return PhaseEnd::SealedElsewhere;
+    }
+    match learning::handle_phase_complete(state, db, config).await {
+        Ok(renamed) => {
+            if let Some(new_name) = renamed {
+                // Phase 2 renamed the intelligence (identity → config sync,
+                // already persisted). Adopt it in the loop's working copy so
+                // the later phases' prompts, the name the seal stamps and the
+                // seal-time ModeChange carry it, tell the operator, and
+                // refresh the console name mid-learning (the console parses
+                // the `Name:` token on any ModeTransition).
+                let old_name = std::mem::replace(&mut config.name, new_name);
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
                         SystemMessage {
-                            content: format!("Phase complete — advancing to: {}", learning::phase_label(&state.phase)),
+                            content: format!(
+                                "Name updated: {} → {} (synced from the Phase-2 \
+                                 identity; persisted to config).",
+                                old_name, config.name
+                            ),
                             msg_type: SystemMessageType::Info as i32,
                         }
                     )),
                 })).await;
-            }
-        } else {
-            // No [PHASE_COMPLETE] — wait for user input and continue conversation
-            loop {
-                let next = tokio::select! {
-                    msg = incoming.next() => msg,
-                    _ = stage_rx.changed() => {
-                        // Another stream sealed the soul while we sat blocked
-                        // here waiting for input that may never come. Re-check
-                        // the authoritative DB state; if sealed, announce
-                        // Operational on OUR own stream and hand off to the
-                        // operational loop (the converse handler runs its
-                        // post-learning setup on `Ok`). This is the fix for a
-                        // second client staying frozen on Learning after another
-                        // completes onboarding. The task owns an `Arc<Sender>`
-                        // clone for its lifetime, so `changed()` never errors.
-                        if learning::is_soul_sealed(db).await.unwrap_or(false) {
-                            let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-                            return Ok(());
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::ModeChange(
+                        ModeTransition {
+                            from_mode: OperatingMode::Learning as i32,
+                            to_mode: OperatingMode::Learning as i32,
+                            message: format!(
+                                "Learning Mode — Name: {} — Phase: {} — TZ: {} — Brain: {}",
+                                config.name,
+                                learning::phase_label(&state.phase),
+                                config.timezone,
+                                learning_model
+                            ),
                         }
-                        continue;
-                    }
-                };
-                match next {
-                    Some(Ok(req)) => {
-                        // The operator's message is the conversation's; a
-                        // command is the door's (`SetupCommands`), answered
-                        // or told to wait and never sent to the model.
-                        if let Some(content) = commands.take(req).await {
-                            state.conversation_history.push(Message::user(&content));
-
-                            // Rebuild system prompt (may include newly extracted docs)
-                            let system_prompt = learning::system_prompt_for_phase(&state, &config);
-                            let system_bundle = SystemPromptBundle {
-                                text: system_prompt,
-                                session_name: "learning".to_string(),
-                            };
-
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::Thinking(
-                                    ThinkingState { is_thinking: true, name: config.name.clone(), current_tool: String::new() }
-                                )),
-                            })).await;
-
-                            let messages: Vec<ApiMessage> = crate::sessions::model_view::fold_stopped_turns(
-                                state.conversation_history.iter().map(legacy_message_to_api).collect(),
-                            );
-                            let (in_turn_guard, mut stop_check) = stop.begin("learning");
-                            let mut brain_rx = provider
-                                .stream_turn(
-                                    &messages,
-                                    &system_bundle,
-                                    &empty_manifest,
-                                    LlmRequestOptions {
-                                        include_reasoning: config.show_reasoning(),
-                                    },
-                                )
-                                .await
-                                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
-
-                            let answer = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
-                            drop(in_turn_guard);
-
-                            let (history_entry, phase_complete) = learning_turn_outcome(&answer);
-                            state.conversation_history.push(Message::assistant(&history_entry));
-
-                            if phase_complete {
-                                if let Err(e) = learning::handle_phase_complete(&mut state, db, &config).await {
-                                    error!("Phase complete handling failed: {}", e);
-                                }
-
-                                if state.phase == learning::LearningPhase::Complete {
-                                    let _ = save_learning_history(db, &state.conversation_history).await;
-                                    let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-                                    // Driver path — soul sealed. Wake any other
-                                    // stream blocked in its own learning loop so
-                                    // it advances to Operational too.
-                                    let _ = onboarding_stage
-                                        .send_replace(OperatingMode::Operational as i32);
-                                    return Ok(());
-                                } else {
-                                    let _ = tx.send(Ok(ConversationResponse {
-                                        response_type: Some(conversation_response::ResponseType::System(
-                                            SystemMessage {
-                                                content: format!("Phase complete — advancing to: {}", learning::phase_label(&state.phase)),
-                                                msg_type: SystemMessageType::Info as i32,
-                                            }
-                                        )),
-                                    })).await;
-                                }
-                                break; // Back to outer loop for next phase kickoff
-                            }
-                            // No phase complete — continue waiting for user input
-                        }
-                    }
-                    Some(Err(e)) => { warn!("Stream error during learning: {}", e); return Err(e.into()); }
-                    None => { debug!("Client disconnected during learning"); return Ok(()); }
-                }
+                    )),
+                })).await;
             }
+            PhaseEnd::Advanced
+        }
+        Err(e) => {
+            // A seal that another console wrote first is refused here as a
+            // conflict: that is a seal, not a failure.
+            if behind_a_seal && learning::is_soul_sealed(db).await.unwrap_or(false) {
+                return PhaseEnd::SealedElsewhere;
+            }
+            error!("Phase complete handling failed: {}", e);
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(
+                    SystemMessage {
+                        content: format!(
+                            "Error processing phase: {e}\nThe phase stays open and nothing was advanced. \
+                             Send a message to try again."
+                        ),
+                        msg_type: SystemMessageType::Error as i32,
+                    }
+                )),
+            })).await;
+            PhaseEnd::Failed
         }
     }
-
-    Ok(())
 }
 
 /// What one model turn of the learning loop produced.
@@ -651,3 +709,330 @@ pub(super) async fn save_learning_history(db: &Arc<WardsonDbClient>, history: &[
 }
 
 // ── NATIVE-TOOLS-01 helpers ──
+
+#[cfg(test)]
+mod loop_tests {
+    //! The learning loop itself, between a provider and a database that are
+    //! mocks: what it asks the model, what it writes, what it tells the
+    //! client. The provider is the LM Studio preset pointed at a mock that
+    //! answers a stream; the database answers 404 to what a test did not
+    //! mount, which is "no such document" and "no seal".
+    use super::*;
+    use crate::config::tests_support::minimal_cfg;
+    use embra_common::proto::brain::conversation_response::ResponseType;
+    use serde_json::json;
+    use std::time::Duration;
+    use tokio_stream::wrappers::ReceiverStream;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A model's answer as the OpenAI-compatible stream carries it.
+    fn answer(text: &str) -> ResponseTemplate {
+        let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+            let frame = json!({
+                "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            });
+            format!("data: {frame}\n\n")
+        };
+        let body = format!("{}{}data: [DONE]\n\n", chunk(json!({"content": text}), None), chunk(json!({}), Some("stop")));
+        ResponseTemplate::new(200).set_body_raw(body, "text/event-stream")
+    }
+
+    /// An answer that calls the phase complete with `document`.
+    fn completes_with(document: &str) -> ResponseTemplate {
+        answer(&format!("Noted.\n```json\n{document}\n```\n[PHASE_COMPLETE]"))
+    }
+
+    fn stored(doc: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": doc, "meta": {}}))
+    }
+
+    /// One console in Learning Mode: what it sends, what it is sent, and
+    /// the loop's task.
+    struct Console {
+        say: mpsc::Sender<Result<ConversationRequest, Status>>,
+        frames: mpsc::Receiver<Result<ConversationResponse, Status>>,
+        task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    }
+
+    impl Console {
+        fn attach(provider: &MockServer, db: &MockServer) -> Self {
+            let mut config = minimal_cfg();
+            config.api_provider = "lm_studio".into();
+            config.openai_compat.lm_studio_endpoint = provider.uri();
+            config.openai_compat.lm_studio_model = "scripted".into();
+            let db = Arc::new(WardsonDbClient::from_url(&db.uri()));
+            let (say, said) = mpsc::channel(8);
+            let (tx, frames) = mpsc::channel(256);
+            let task = tokio::spawn(async move {
+                let mut incoming = ReceiverStream::new(said);
+                let in_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (stop_tx, stop_rx) = watch::channel(0u64);
+                let pending = Arc::new(Mutex::new(None));
+                let commands = SetupCommands::new(&tx, &pending);
+                let stage = Arc::new(watch::channel(OperatingMode::Learning as i32).0);
+                let ended = run_learning_loop(
+                    &mut incoming,
+                    &db,
+                    &config,
+                    "k",
+                    &stage,
+                    TurnStop { in_turn: &in_turn, stop_rx: &stop_rx },
+                    &commands,
+                )
+                .await;
+                drop(stop_tx);
+                ended
+            });
+            Console { say, frames, task }
+        }
+
+        async fn message(&self, text: &str) {
+            let request = ConversationRequest {
+                request_type: Some(conversation_request::RequestType::UserMessage(UserMessage {
+                    content: text.to_string(),
+                    ..Default::default()
+                })),
+            };
+            self.say.send(Ok(request)).await.expect("the loop reads its console");
+        }
+
+        /// The frames up to and including the first one `wanted` accepts.
+        async fn until(&mut self, what: &str, wanted: impl Fn(&ResponseType) -> bool) -> Vec<ResponseType> {
+            let mut seen = Vec::new();
+            loop {
+                let frame = tokio::time::timeout(Duration::from_secs(10), self.frames.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("no {what} within 10 s; the frames so far: {seen:?}"))
+                    .unwrap_or_else(|| panic!("the stream ended before {what}; the frames so far: {seen:?}"))
+                    .expect("a frame")
+                    .response_type
+                    .expect("a typed frame");
+                let found = wanted(&frame);
+                seen.push(frame);
+                if found {
+                    return seen;
+                }
+            }
+        }
+
+        /// The console goes away; how the loop ended.
+        async fn detach(self) -> anyhow::Result<()> {
+            drop(self.say);
+            tokio::time::timeout(Duration::from_secs(10), self.task).await.expect("the loop ends").expect("no panic")
+        }
+    }
+
+    fn system(frame: &ResponseType, kind: SystemMessageType, part: &str) -> bool {
+        matches!(frame, ResponseType::System(m) if m.msg_type == kind as i32 && m.content.contains(part))
+    }
+
+    async fn asked(provider: &MockServer) -> Vec<serde_json::Value> {
+        provider
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).expect("a JSON request"))
+            .collect()
+    }
+
+    /// The loop of 2026-11-14. A completion that failed fell back into the
+    /// loop, which sent the kickoff and asked the model again at once; a
+    /// provider that calls the phase complete each time was asked 3,742
+    /// times in forty seconds. The failure is said to the operator, nothing
+    /// is asked until the operator writes, and the message that follows is
+    /// one turn in the same phase.
+    #[tokio::test]
+    async fn a_phase_that_cannot_be_completed_waits_for_the_operator_and_asks_the_model_nothing() {
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(completes_with(r#"{"name": "Operator"}"#))
+            .mount(&provider)
+            .await;
+        let db = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/memory.user")).respond_with(ResponseTemplate::new(200)).mount(&db).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.user/docs"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("busy"))
+            .mount(&db)
+            .await;
+        let mut console = Console::attach(&provider, &db);
+
+        let frames = console.until("the failure", |f| system(f, SystemMessageType::Error, "Error processing phase")).await;
+        let ResponseType::System(said) = frames.last().unwrap() else { unreachable!() };
+        assert!(said.content.contains("503") && said.content.contains("Send a message to try again"), "{}", said.content);
+        assert!(
+            !frames.iter().any(|f| system(f, SystemMessageType::Info, "advancing to")),
+            "a phase that did not advance is not announced as one that did: {frames:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(asked(&provider).await.len(), 1, "the kickoff's turn and no other");
+
+        console.message("try again").await;
+        console.until("the second failure", |f| system(f, SystemMessageType::Error, "Error processing phase")).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let requests = asked(&provider).await;
+        assert_eq!(requests.len(), 2, "one more turn, for the operator's message");
+        // The same phase's conversation: the kickoff once, then the answer
+        // and the operator's message.
+        let texts: Vec<&str> = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "user")
+            .filter_map(|m| m["content"].as_str())
+            .collect();
+        assert_eq!(texts, [learning::phase_kickoff(&learning::LearningPhase::UserConfiguration).as_str(), "try again"]);
+
+        console.detach().await.expect("a console that goes away ends the loop without an error");
+    }
+
+    /// Two consoles finish the first phase together: the web console keeps
+    /// a console of its own attached beside a chat client. The second one's
+    /// profile is refused by the store as a conflict; it adopts the stored
+    /// one and goes on to the next phase, with no error and nothing
+    /// written over.
+    #[tokio::test]
+    async fn a_console_that_finishes_a_phase_second_adopts_the_first_ones_document() {
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(completes_with(r#"{"name": "Second Console"}"#))
+            .up_to_n_times(1)
+            .mount(&provider)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(answer("What would you like me to be called?"))
+            .mount(&provider)
+            .await;
+        let db = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/memory.user")).respond_with(ResponseTemplate::new(200)).mount(&db).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.user/docs"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "error": {"code": "DOCUMENT_CONFLICT", "message": "Document conflict: Document already exists: user"},
+                "meta": {}, "ok": false,
+            })))
+            .expect(1)
+            .mount(&db)
+            .await;
+        // Absent when the loop starts (the first console has not written it
+        // yet), there when this console's own write is refused.
+        Mock::given(method("GET"))
+            .and(path("/memory.user/docs/user"))
+            .respond_with(ResponseTemplate::new(404))
+            .up_to_n_times(1)
+            .mount(&db)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/memory.user/docs/user"))
+            .respond_with(stored(json!({"_id": "user", "name": "First Console"})))
+            .mount(&db)
+            .await;
+        Mock::given(method("PUT")).and(path("/memory.user/docs/user")).respond_with(stored(json!({}))).expect(0).mount(&db).await;
+        let mut console = Console::attach(&provider, &db);
+
+        let frames = console
+            .until("the next phase's first answer", |f| matches!(f, ResponseType::Done(d) if d.full_response.contains("called")))
+            .await;
+        assert!(frames.iter().any(|f| system(f, SystemMessageType::Info, "advancing to: Identity Formation")), "{frames:?}");
+        assert!(
+            !frames.iter().any(|f| matches!(f, ResponseType::System(m) if m.msg_type == SystemMessageType::Error as i32)),
+            "a document another console stored is no failure: {frames:?}"
+        );
+        // The next phase is built on the profile that is stored.
+        let requests = asked(&provider).await;
+        assert_eq!(requests.len(), 2);
+        let prompt = requests[1]["messages"][0]["content"].as_str().unwrap();
+        assert!(prompt.contains("First Console") && !prompt.contains("Second Console"), "{prompt}");
+
+        console.detach().await.unwrap();
+        db.verify().await;
+    }
+
+    /// Another console seals the soul while this one is in a turn of a
+    /// phase before the seal. The answer that calls the phase complete
+    /// writes nothing; this console announces the sealed soul and hands
+    /// off, as it does when it is woken while it waits.
+    #[tokio::test]
+    async fn a_console_behind_another_ones_seal_writes_nothing_and_hands_off() {
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(completes_with(r#"{"name": "Operator"}"#))
+            .mount(&provider)
+            .await;
+        let db = MockServer::start().await;
+        // Unsealed at the loop's two reads before the turn, sealed after it.
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(404)).up_to_n_times(2).mount(&db).await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(200)).mount(&db).await;
+        // The profile's write would go through, were it made.
+        Mock::given(method("GET")).and(path("/memory.user")).respond_with(ResponseTemplate::new(200)).mount(&db).await;
+        Mock::given(method("POST")).and(path("/memory.user/docs")).respond_with(stored(json!({"_id": "user"}))).expect(0).mount(&db).await;
+        let mut console = Console::attach(&provider, &db);
+
+        let frames = console
+            .until("the hand-off", |f| matches!(f, ResponseType::ModeChange(m) if m.to_mode == OperatingMode::Operational as i32))
+            .await;
+        assert!(
+            !frames.iter().any(|f| matches!(f, ResponseType::System(m) if m.msg_type == SystemMessageType::Error as i32)),
+            "{frames:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(10), console.task).await.expect("the loop ends").unwrap().unwrap();
+        assert_eq!(asked(&provider).await.len(), 1);
+        db.verify().await;
+    }
+
+    /// A phase ends in the conversation far more often than on its kickoff,
+    /// and the name the identity phase gives was taken up only on the
+    /// kickoff's path: the phases after it kept the wizard's name, and the
+    /// seal stamped it on the sealed graph beside a configuration that
+    /// carried the new one. The name is taken up wherever the phase ends.
+    #[tokio::test]
+    async fn a_name_the_identity_phase_gives_in_conversation_is_the_later_phases_name() {
+        let provider = MockServer::start().await;
+        let turn = |template: ResponseTemplate| {
+            Mock::given(method("POST")).and(path("/v1/chat/completions")).respond_with(template).up_to_n_times(1)
+        };
+        turn(answer("What would you like me to be called?")).mount(&provider).await;
+        turn(completes_with(r#"{"name": "Aster"}"#)).mount(&provider).await;
+        turn(answer("Now the values.")).mount(&provider).await;
+        let db = MockServer::start().await;
+        // The first phase is done: the loop starts at the identity.
+        Mock::given(method("GET")).and(path("/memory.user/docs/user")).respond_with(stored(json!({"_id": "user", "name": "Operator"}))).mount(&db).await;
+        Mock::given(method("GET")).and(path("/memory.identity")).respond_with(ResponseTemplate::new(200)).mount(&db).await;
+        Mock::given(method("POST")).and(path("/memory.identity/docs")).respond_with(stored(json!({"_id": "identity"}))).expect(1).mount(&db).await;
+        let mut config_doc = serde_json::to_value(minimal_cfg()).unwrap();
+        config_doc["_id"] = json!("config");
+        Mock::given(method("GET")).and(path("/config.system")).respond_with(ResponseTemplate::new(200)).mount(&db).await;
+        Mock::given(method("GET")).and(path("/config.system/docs/config")).respond_with(stored(config_doc)).mount(&db).await;
+        Mock::given(method("POST")).and(path("/config.system/docs")).respond_with(stored(json!({"_id": "config"}))).mount(&db).await;
+        let mut console = Console::attach(&provider, &db);
+
+        console.until("the identity phase's question", |f| matches!(f, ResponseType::Done(d) if d.full_response.contains("called"))).await;
+        console.message("Aster").await;
+        let frames = console
+            .until("the next phase's first answer", |f| matches!(f, ResponseType::Done(d) if d.full_response.contains("values")))
+            .await;
+        assert!(
+            frames.iter().any(|f| system(f, SystemMessageType::Info, "Name updated: Embra → Aster (synced from the Phase-2 identity")),
+            "{frames:?}"
+        );
+        assert!(
+            frames.iter().any(|f| matches!(f, ResponseType::ModeChange(m)
+                if m.to_mode == OperatingMode::Learning as i32 && m.message.contains("Name: Aster") && m.message.contains("Phase: Soul Definition"))),
+            "{frames:?}"
+        );
+        let requests = asked(&provider).await;
+        assert_eq!(requests.len(), 3);
+        let prompt = requests[2]["messages"][0]["content"].as_str().unwrap();
+        assert!(prompt.contains("Aster"), "the soul phase's prompt carries the new name: {prompt}");
+
+        console.detach().await.unwrap();
+        db.verify().await;
+    }
+}

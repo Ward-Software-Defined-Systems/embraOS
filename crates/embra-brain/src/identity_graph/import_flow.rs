@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use embra_common::proto::brain::*;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::StreamExt;
-use tonic::{Status, Streaming};
+use tonic::Status;
 use tracing::{info, warn};
 
 use crate::config::SystemConfig;
@@ -186,22 +186,30 @@ fn summary_message(c: &ImportCandidate) -> String {
     out
 }
 
-enum Wait {
+/// What a wait for the operator ended on.
+pub(crate) enum Wait {
+    /// The operator's message.
     Line(String),
+    /// The onboarding stage moved and the soul is sealed: another console
+    /// completed onboarding.
     Sealed,
     Disconnected,
 }
 
-/// Wait for the next operator line, mirroring the learning loop's
-/// select-against-the-onboarding-stage pattern (another stream sealing
-/// the soul must unblock us). A command is answered or told to wait by
-/// `SetupCommands`, as in the learning loop, and is never the line.
-async fn wait_for_user_line(
-    incoming: &mut Streaming<ConversationRequest>,
+/// Wait for the next operator line, selecting against the onboarding stage
+/// (another stream sealing the soul must unblock us). A command is
+/// answered or told to wait by `SetupCommands` and is never the line. The
+/// learning loop waits through this too: for its conversation, and after a
+/// phase it could not complete.
+pub(crate) async fn wait_for_user_line<S>(
+    incoming: &mut S,
     stage_rx: &mut watch::Receiver<i32>,
     db: &WardsonDbClient,
     commands: &crate::grpc_service::SetupCommands,
-) -> anyhow::Result<Wait> {
+) -> anyhow::Result<Wait>
+where
+    S: tokio_stream::Stream<Item = Result<ConversationRequest, Status>> + Unpin,
+{
     loop {
         let next = tokio::select! {
             msg = incoming.next() => msg,
@@ -219,7 +227,7 @@ async fn wait_for_user_line(
                 }
             }
             Some(Err(e)) => {
-                warn!("Stream error during import dialogue: {e}");
+                warn!("Stream error while waiting for the operator: {e}");
                 return Err(e.into());
             }
             None => return Ok(Wait::Disconnected),
@@ -278,15 +286,18 @@ async fn send_selector(
 /// The import offer. Called once per learning loop when the phase reaches
 /// `IdentityFormation`; every terminal path leaves `state` consistent for
 /// the caller (only `Imported` mutates it).
-pub async fn offer_import(
+pub async fn offer_import<S>(
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
-    incoming: &mut Streaming<ConversationRequest>,
+    incoming: &mut S,
     stage_rx: &mut watch::Receiver<i32>,
     db: &WardsonDbClient,
     config: &SystemConfig,
     state: &mut LearningState,
     commands: &crate::grpc_service::SetupCommands,
-) -> anyhow::Result<ImportOutcome> {
+) -> anyhow::Result<ImportOutcome>
+where
+    S: tokio_stream::Stream<Item = Result<ConversationRequest, Status>> + Unpin,
+{
     let (candidates, issues) = scan_import_dirs();
     if !issues.is_empty() {
         send_system(

@@ -652,25 +652,32 @@ mod backup_tests {
         assert!(later_notice(&"/x".repeat(100)).len() < 220, "a long word is cut");
     }
 
-    /// The three stages before a session read the stream themselves. Each
-    /// hands every frame to `SetupCommands::take`, so a stage added later
-    /// that reads the stream its own way, and drops commands again, fails
-    /// here.
+    /// The stages before a session read the stream in two places: the
+    /// configuration wizard, and the wait Learning Mode and the import
+    /// dialogue share (`import_flow::wait_for_user_line`). Each hands every
+    /// frame to `SetupCommands::take`, so a stage added later that reads
+    /// the stream its own way, and drops commands again, fails here.
     #[test]
     fn every_stage_before_a_session_takes_its_frames_through_the_one_door() {
+        let learning = include_str!("learning_loop.rs");
+        let import = include_str!("../identity_graph/import_flow.rs");
         let stages = [
             ("grpc_service/mod.rs (the configuration wizard)", include_str!("mod.rs")),
-            ("grpc_service/learning_loop.rs (Learning Mode)", include_str!("learning_loop.rs")),
-            ("identity_graph/import_flow.rs (the import dialogue)", include_str!("../identity_graph/import_flow.rs")),
+            ("identity_graph/import_flow.rs (the wait of Learning Mode and of the import dialogue)", import),
         ];
         for (stage, source) in stages {
             assert!(source.contains(".take(req).await"), "{stage} no longer takes its frames through SetupCommands");
             assert!(!source.contains("Ignore non-UserMessage"), "{stage} drops a frame without a word");
         }
-        // The stream is read in these three files and in the session's loop, and nowhere else.
+        // Learning Mode waits through that one function: for its
+        // conversation, and after a phase it could not complete.
+        let waits = learning.split("#[cfg(test)]").next().unwrap_or(learning).matches("wait_for_user_line(incoming").count();
+        assert_eq!(waits, 2, "Learning Mode waits for the operator through the import dialogue's wait");
+        assert_eq!(import.matches("incoming.next()").count(), 1, "one read of the stream in the import flow, inside the wait");
+        // In the service the stream is read by the wizard and by the session's loop, and nowhere else.
         let readers: Vec<&str> = [
             ("mod.rs", include_str!("mod.rs")),
-            ("learning_loop.rs", include_str!("learning_loop.rs")),
+            ("learning_loop.rs", learning),
             ("turn.rs", include_str!("turn.rs")),
             ("attach.rs", include_str!("attach.rs")),
             ("slash.rs", include_str!("slash.rs")),
@@ -680,7 +687,7 @@ mod backup_tests {
         .filter(|(_, source)| source.contains("incoming.next()"))
         .map(|(name, _)| *name)
         .collect();
-        assert_eq!(readers, ["mod.rs", "learning_loop.rs"], "a new reader of the client's stream: it takes its frames through SetupCommands before a session");
+        assert_eq!(readers, ["mod.rs"], "a new reader of the client's stream: it takes its frames through SetupCommands before a session");
     }
 
     #[test]

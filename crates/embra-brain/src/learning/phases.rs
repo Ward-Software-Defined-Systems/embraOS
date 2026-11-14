@@ -219,18 +219,18 @@ pub async fn handle_phase_complete(
     match state.phase {
         LearningPhase::UserConfiguration => {
             if let Some(profile) = doc {
-                state.user_profile = Some(profile.clone());
-                persist_document(db, "memory.user", &profile, Some("user")).await?;
-                tracing::info!("User profile persisted");
+                // Stored first, and into the state only then: a write that
+                // fails leaves the phase and its state as they were.
+                let kept = persist_or_adopt(db, "memory.user", &profile, "user", "User profile").await?;
+                state.user_profile = Some(kept);
             }
             state.phase = LearningPhase::IdentityFormation;
         }
         LearningPhase::IdentityFormation => {
             if let Some(identity) = doc {
-                state.identity = Some(identity.clone());
-                persist_document(db, "memory.identity", &identity, Some("identity")).await?;
-                tracing::info!("Identity persisted");
-                renamed_to = sync_name_from_identity(db, config, &identity).await;
+                let kept = persist_or_adopt(db, "memory.identity", &identity, "identity", "Identity").await?;
+                renamed_to = sync_name_from_identity(db, config, &kept).await;
+                state.identity = Some(kept);
             }
             state.phase = LearningPhase::SoulDefinition;
         }
@@ -369,6 +369,55 @@ async fn persist_document(
     }
     db.write(collection, &write_doc).await?;
     Ok(())
+}
+
+/// Store a phase's document under its fixed id and answer the document
+/// that stands in the store: `doc`, or the one already there.
+///
+/// One is already there when another console finished the same phase first
+/// (the web console keeps a console of its own attached beside a chat
+/// client's, and each runs its own learning loop). That document is kept
+/// as it is and adopted: it is what the other console's later phases were
+/// built on, and after a seal `memory.user` is the graph the seal made of
+/// it, which a flat profile must never replace. The write used to fail
+/// there with the store's conflict, and the loop took the failure for a
+/// phase to run again.
+async fn persist_or_adopt(
+    db: &WardsonDbClient,
+    collection: &str,
+    doc: &serde_json::Value,
+    doc_id: &str,
+    what: &str,
+) -> Result<serde_json::Value> {
+    if !db.collection_exists(collection).await? {
+        // Two consoles may both find it missing; the second create is told so.
+        if let Err(e) = db.create_collection(collection).await
+            && !crate::db::error::is_conflict(&e)
+        {
+            return Err(e);
+        }
+    }
+    let mut write_doc = doc.clone();
+    if let Some(obj) = write_doc.as_object_mut() {
+        obj.insert("_id".into(), serde_json::json!(doc_id));
+    }
+    match db.write(collection, &write_doc).await {
+        Ok(_) => {
+            tracing::info!("{what} persisted");
+            Ok(doc.clone())
+        }
+        Err(e) if crate::db::error::is_conflict(&e) => {
+            let stored = db.read(collection, doc_id).await?;
+            tracing::info!(
+                target: "learning",
+                collection,
+                id = doc_id,
+                "{what}: another console stored the phase's document first; kept and adopted"
+            );
+            Ok(stored)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn extract_last_json_document(history: &[crate::brain::Message]) -> Option<serde_json::Value> {
@@ -608,5 +657,140 @@ mod extraction_tests {
         assert_eq!(extract_json_from_text("open { and never closed \"}\""), None);
         assert_eq!(extract_json_from_text("```json\n{broken\n```"), None);
         assert_eq!(extract_json_from_text("no object at all"), None);
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    //! What a completed phase writes, against a database that answers as
+    //! WardSONDB does.
+    use super::*;
+    use crate::brain::Message;
+    use crate::config::tests_support::minimal_cfg;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// The store's answer to a create that found its document there, as
+    /// the brain's log carried it on 2026-11-14.
+    fn conflict(id: &str) -> ResponseTemplate {
+        ResponseTemplate::new(409).set_body_json(json!({
+            "error": {"code": "DOCUMENT_CONFLICT", "message": format!("Document conflict: Document already exists: {id}")},
+            "meta": {}, "ok": false,
+        }))
+    }
+
+    fn stored(doc: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": doc, "meta": {}}))
+    }
+
+    /// A state in `phase` whose model just answered `document`.
+    fn state_with(phase: LearningPhase, document: &str) -> LearningState {
+        let mut state = LearningState::new();
+        state.phase = phase;
+        state.conversation_history.push(Message::user("kickoff"));
+        state.conversation_history.push(Message::assistant(format!("Noted.\n```json\n{document}\n```")));
+        state
+    }
+
+    /// Two consoles can finish the first phase together: the web console
+    /// keeps a console of its own attached beside a chat client's. The
+    /// second one's profile used to be refused by the store, and the loop
+    /// ran the phase again for it. It adopts the profile that is stored,
+    /// writes nothing over it and moves on.
+    #[tokio::test]
+    async fn a_profile_another_console_stored_first_is_adopted_and_not_written_over() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/memory.user")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.user/docs")).respond_with(conflict("user")).expect(1).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/memory.user/docs/user"))
+            .respond_with(stored(json!({"_id": "user", "name": "First Console"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT")).and(path("/memory.user/docs/user")).respond_with(stored(json!({}))).expect(0).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let mut state = state_with(LearningPhase::UserConfiguration, r#"{"name": "Second Console"}"#);
+
+        let renamed = handle_phase_complete(&mut state, &db, &minimal_cfg()).await.expect("no failure");
+        assert_eq!(renamed, None);
+        assert_eq!(state.phase, LearningPhase::IdentityFormation);
+        assert_eq!(state.user_profile, Some(json!({"_id": "user", "name": "First Console"})));
+        server.verify().await;
+    }
+
+    /// The same for the identity, whose name the first console may have
+    /// synced into the configuration already: the adopted document's name
+    /// is the one this console goes on with.
+    #[tokio::test]
+    async fn an_identity_another_console_stored_first_is_adopted_with_its_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/memory.identity")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.identity/docs")).respond_with(conflict("identity")).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/memory.identity/docs/identity"))
+            .respond_with(stored(json!({"_id": "identity", "name": "Aster"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT")).and(path("/memory.identity/docs/identity")).respond_with(stored(json!({}))).expect(0).mount(&server).await;
+        // The name sync reads the configuration and writes it back.
+        let mut config_doc = serde_json::to_value(minimal_cfg()).unwrap();
+        config_doc["_id"] = json!("config");
+        Mock::given(method("GET")).and(path("/config.system")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/config.system/docs/config")).respond_with(stored(config_doc)).mount(&server).await;
+        Mock::given(method("POST")).and(path("/config.system/docs")).respond_with(stored(json!({"_id": "config"}))).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let mut state = state_with(LearningPhase::IdentityFormation, r#"{"name": "Borealis"}"#);
+
+        let renamed = handle_phase_complete(&mut state, &db, &minimal_cfg()).await.expect("no failure");
+        assert_eq!(renamed.as_deref(), Some("Aster"), "the stored identity's name, not this console's");
+        assert_eq!(state.phase, LearningPhase::SoulDefinition);
+        assert_eq!(state.identity, Some(json!({"_id": "identity", "name": "Aster"})));
+        server.verify().await;
+    }
+
+    /// A write the store refuses for any other reason is a failure: the
+    /// phase and its state stay where they were, for the retry.
+    #[tokio::test]
+    async fn a_write_that_fails_leaves_the_phase_and_its_state_as_they_were() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/memory.user")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.user/docs")).respond_with(ResponseTemplate::new(503).set_body_string("busy")).mount(&server).await;
+        Mock::given(method("GET")).and(path("/memory.user/docs/user")).respond_with(stored(json!({}))).expect(0).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let mut state = state_with(LearningPhase::UserConfiguration, r#"{"name": "Operator"}"#);
+
+        let err = handle_phase_complete(&mut state, &db, &minimal_cfg()).await.unwrap_err();
+        assert!(err.to_string().contains("503"), "{err}");
+        assert_eq!(state.phase, LearningPhase::UserConfiguration);
+        assert_eq!(state.user_profile, None);
+        server.verify().await;
+    }
+
+    /// The path every first boot takes: the profile is written under its
+    /// id, and the state keeps it as the model gave it.
+    #[tokio::test]
+    async fn a_profile_is_written_under_its_id_and_kept_as_the_model_gave_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/memory.user")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        Mock::given(method("POST")).and(path("/_collections")).respond_with(stored(json!({}))).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.user/docs")).respond_with(stored(json!({"_id": "user"}))).expect(1).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let mut state = state_with(LearningPhase::UserConfiguration, r#"{"name": "Operator"}"#);
+
+        handle_phase_complete(&mut state, &db, &minimal_cfg()).await.expect("no failure");
+        assert_eq!(state.phase, LearningPhase::IdentityFormation);
+        assert_eq!(state.user_profile, Some(json!({"name": "Operator"})));
+        let written = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.url.path() == "/memory.user/docs")
+            .expect("the profile was written");
+        let body: serde_json::Value = serde_json::from_slice(&written.body).unwrap();
+        assert_eq!(body, json!({"_id": "user", "name": "Operator"}));
+        server.verify().await;
     }
 }
