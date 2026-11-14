@@ -256,6 +256,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Guardian Tool Examples](docs/GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
 | **[Guardian Advanced Example](docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md)** | The shipped flagship: a worked end-to-end Guardian tool |
 | **[Guardian HTTP Request Example](docs/GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md)** | The second shipped tool: `http_request`, a guarded curl for pages, resources and API work |
+| **[Guardian WebSocket Example](docs/GUARDIAN/GUARDIAN-WEBSOCKET-EXAMPLE.md)** | The third shipped tool: `websocket`, a client whose connections stay open between tool calls, for a service that speaks over a socket |
 | **[Guardian KG-Scan Example](docs/GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md)** | `kg_scan`, the first intelligence-proposed tool — structural pattern scans over a `knowledge_dump` JSONL |
 
 ---
