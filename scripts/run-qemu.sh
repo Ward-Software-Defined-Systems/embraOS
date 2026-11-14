@@ -148,7 +148,10 @@ if [ -n "${EMBRA_KBD:-}" ]; then
     KNOBS="$KNOBS embra.kbd=${EMBRA_KBD}"
 fi
 
-NIC="user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345"
+# The user-mode network. QEMU forwards the REST port (8443) to the host's
+# loopback and the web console (3345) to every host interface. The two gRPC
+# ports (50000, 50002) bind the guest's loopback and are not forwarded.
+NIC="user,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345"
 if [ -n "${EMBRA_DHCP_START:-}" ]; then
     if ! [[ "$EMBRA_DHCP_START" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
         echo "ERROR: EMBRA_DHCP_START must be an IPv4 address, got '$EMBRA_DHCP_START'" >&2; exit 2
@@ -221,10 +224,10 @@ echo "  Acceleration: $ACCEL_NAME"
 echo "  Serial console: this terminal"
 if [ "${EMBRA_TUI:-}" = "1" ]; then
     echo "  UI mode: serial TUI (EMBRA_TUI=1) — embra-web not started"
-    echo "  Port forwards: 127.0.0.1:50000→50000 (gRPC), 127.0.0.1:8443→8443 (REST)"
+    echo "  Port forwards: 127.0.0.1:8443→8443 (REST)"
 else
     echo "  UI mode: web console (default) — set EMBRA_TUI=1 for the serial TUI"
-    echo "  Port forwards: 127.0.0.1:50000→50000 (gRPC), 127.0.0.1:8443→8443 (REST), *:3345→3345 (HTTPS web)"
+    echo "  Port forwards: 127.0.0.1:8443→8443 (REST), *:3345→3345 (HTTPS web)"
     echo "  Web console: the URL embraOS prints below at boot (it carries this boot's access token; accept the embraOS-CA cert)"
 fi
 
