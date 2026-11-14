@@ -62,10 +62,17 @@
       "tags": ["guardian", "capabilities", "network", "api", "http_request"]
     },
     {
+      "id": "seed_guardian_websocket",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "host::websocket(op_json) exists only when GUARDIAN_CAPS includes \"websocket\": one operation as a JSON object with an op (open, send, receive, close or list) and a JSON envelope STRING back to parse, {\"ok\":true,...} or {\"ok\":false,\"error\":...}. open takes a wss:// url (and headers, protocols) and answers an id. The connection is the host's, not the tool's: it stays open in the brain between calls of the tool that opened it, at most 4 a tool and 8 in all, closed after 10 minutes unused or 60 minutes, gone when the brain restarts, and a tool reaches its own alone. send takes the id and one of text, json (serialized by the host, so a 64-bit integer arrives exact) or binary (base64). A read is a receive, or a send that carries reply_id, until or wait_ms; it answers frames as {\"text\":...} or {\"binary\":<base64>,\"bytes\":n} with matched, timed_out, buffered, dropped and closed. reply_id waits for the text frame whose JSON has that top-level id and answers it alone, so a CDP or JSON-RPC command and its reply are one call whatever events arrive between them; until waits for a text frame that contains a text and answers the frames through it; wait_ms is 10 s unless given, 60 s at most. max_bytes (64 KiB unless given, 1 MiB at most) counts JSON text: a frame that does not fit is cut and gone, and its truncated.needs_max_bytes names what answers such a frame whole. The egress policy of http_request applies at open with wss in the place of https (a private host only on the operator's allowlist, loopback never), and the operator's stored secret for the host and port rides the handshake. The shipped websocket tool wraps it and needs no key; its frames come back as sent and are scanned, never rewritten, and injection_suspected is false unless the scan matched. The operator lists and ends connections with /guardian connections.",
+      "tags": ["guardian", "capabilities", "network", "api", "websocket"]
+    },
+    {
       "id": "seed_guardian_secrets",
       "kind": "semantic",
       "category": "fact",
-      "content": "A credential never goes into a Guardian tool's input, a tool's source, the turn trace or the session history. The operator stores it host-side with /guardian secret <host> <header> <value> (for example /guardian secret gitlab.example.com PRIVATE-TOKEN glpat-...); the http_request guard adds it to a request to exactly that host and port and to no other hop, so a redirect to another host never carries it. A host stored without a port means port 443; a service on another port of the same host needs an entry of its own, stored as <host>:<port>. A tool may not set Authorization, Proxy-Authorization or Cookie itself: the guard refuses the header and names the command. /guardian secret lists the hosts and header names, never a value; /guardian secret <host> remove forgets one. A private host (an RFC 1918 address and the like) is admitted with /guardian egress allow <host>, a name with its subdomains or an IP literal; loopback, link-local and multicast addresses are refused always. Asked for a token, the intelligence tells the operator these two commands instead of asking for the value.",
+      "content": "A credential never goes into a Guardian tool's input, a tool's source, the turn trace or the session history. The operator stores it host-side with /guardian secret <host> <header> <value> (for example /guardian secret gitlab.example.com PRIVATE-TOKEN glpat-...); the http_request guard adds it to a request to exactly that host and port and to no other hop, so a redirect to another host never carries it, and the websocket guard adds it to the handshake of a connection there. A host stored without a port means port 443; a service on another port of the same host needs an entry of its own, stored as <host>:<port>. A tool may not set Authorization, Proxy-Authorization or Cookie itself: the guard refuses the header and names the command. /guardian secret lists the hosts and header names, never a value; /guardian secret <host> remove forgets one. A private host (an RFC 1918 address and the like) is admitted with /guardian egress allow <host>, a name with its subdomains or an IP literal; loopback, link-local and multicast addresses are refused always. Asked for a token, the intelligence tells the operator these two commands instead of asking for the value.",
       "tags": ["guardian", "secrets", "credentials", "egress", "operator"]
     },
     {
@@ -87,7 +94,7 @@
       "id": "seed_guardian_runtime_model",
       "kind": "semantic",
       "category": "fact",
-      "content": "Guardian tools run in a wasmtime sandbox with a fresh instance per call, a bounded execution timeout, and a fixed memory arena of 56 MiB that never frees — keep parse-heavy inputs to a few MiB (the data_file bridge stops at 2 MiB). Nothing persists inside the guest between calls: there is no state, no filesystem, and no ambient authority. To persist results, return them and let the brain write memories or knowledge nodes.",
+      "content": "Guardian tools run in a wasmtime sandbox with a fresh instance per call, a bounded execution timeout, and a fixed memory arena of 56 MiB that never frees — keep parse-heavy inputs to a few MiB (the data_file bridge stops at 2 MiB). Nothing persists inside the guest between calls: there is no state, no filesystem, and no ambient authority. To persist results, return them and let the brain write memories or knowledge nodes. What does outlive a call is the host's: a WebSocket connection a tool with the websocket capability opened stays open in the brain, bounded, and the next call names it by its id.",
       "tags": ["guardian", "sandbox", "runtime", "wasm"]
     },
     {
@@ -102,7 +109,7 @@
       "id": "seed_guardian_lifecycle",
       "kind": "semantic",
       "category": "fact",
-      "content": "Tool lifecycle: a draft goes through guardian_propose (the known-good template is embedded in that tool's description — start from it), then syn static validation, then the replicant check — an independent soul-verdict call that returns allow, escalate, or refuse and FAILS CLOSED. allow/escalate store the draft as Proposed for the operator; refuse blocks it and is not waivable, not even for an operator paste. The operator runs /guardian approve <name> to trigger the wasm32 build (or /guardian reject <name>); poll guardian_call action=\"status\" until the tool reads ready, then invoke it with schema-shaped JSON input. Two tools take neither path: web_search and http_request ship with embraOS and the brain installs them at boot (/guardian list marks them shipped); web_search stays inert until the operator sets a Brave key with /guardian key brave, http_request needs no key; the operator may edit either (/guardian-define, same name; /guardian list then marks it shipped, edited, and a later image leaves it alone) or delete it for good (/guardian delete).",
+      "content": "Tool lifecycle: a draft goes through guardian_propose (the known-good template is embedded in that tool's description — start from it), then syn static validation, then the replicant check — an independent soul-verdict call that returns allow, escalate, or refuse and FAILS CLOSED. allow/escalate store the draft as Proposed for the operator; refuse blocks it and is not waivable, not even for an operator paste. The operator runs /guardian approve <name> to trigger the wasm32 build (or /guardian reject <name>); poll guardian_call action=\"status\" until the tool reads ready, then invoke it with schema-shaped JSON input. Three tools take neither path: web_search, http_request and websocket ship with embraOS and the brain installs them at boot (/guardian list marks them shipped); web_search stays inert until the operator sets a Brave key with /guardian key brave, http_request and websocket need no key; the operator may edit any of them (/guardian-define, same name; /guardian list then marks it shipped, edited, and a later image leaves it alone) or delete it for good (/guardian delete).",
       "tags": ["guardian", "lifecycle", "replicant-check", "authoring"]
     },
     {
@@ -118,7 +125,7 @@
       "title": "Author and ship a Guardian tool",
       "description": "The propose-to-ready path for a dynamic tool, converging in the fewest redrafts.",
       "steps": [
-        "Read the authoring reference first — docs/GUARDIAN/ in the embraOS repository (GUARDIAN-TOOL-EXAMPLES.md, GUARDIAN-KG-SCAN-EXAMPLE.md, GUARDIAN-HTTP-REQUEST-EXAMPLE.md; clone the repository into the workspace if it is not there) — then start from the template embedded in guardian_propose's description: copy its exact shape, never write scaffold-owned items (no_std, allocator, ABI, mod declarations)",
+        "Read the authoring reference first — docs/GUARDIAN/ in the embraOS repository (GUARDIAN-TOOL-EXAMPLES.md, GUARDIAN-KG-SCAN-EXAMPLE.md, GUARDIAN-HTTP-REQUEST-EXAMPLE.md, GUARDIAN-WEBSOCKET-EXAMPLE.md; clone the repository into the workspace if it is not there) — then start from the template embedded in guardian_propose's description: copy its exact shape, never write scaffold-owned items (no_std, allocator, ABI, mod declarations)",
         "Fill the marker line and GUARDIAN_NAME (identical strings), GUARDIAN_DESC, and a GUARDIAN_SCHEMA with object root; declare GUARDIAN_CAPS only for the host:: functions actually called",
         "Write one non-pub fn run(input: &str) -> String plus private helpers; parse input with the vendored json module, never unwrap on input, return a JSON string",
         "Call guardian_propose with the full module; on validation failure, fix EVERY listed error in one redraft (the template is appended to the failure) and re-propose",
@@ -152,6 +159,10 @@
     { "src": "seed_guardian_http_request", "dst": "seed_guardian_untrusted_content", "relation": "related_to" },
     { "src": "seed_guardian_secrets", "dst": "seed_guardian_http_request", "relation": "refines" },
     { "src": "seed_guardian_secrets", "dst": "seed_guardian_lifecycle", "relation": "related_to" },
+    { "src": "seed_guardian_websocket", "dst": "seed_guardian_http_request", "relation": "related_to" },
+    { "src": "seed_guardian_websocket", "dst": "seed_guardian_runtime_model", "relation": "refines" },
+    { "src": "seed_guardian_websocket", "dst": "seed_guardian_untrusted_content", "relation": "related_to" },
+    { "src": "seed_guardian_secrets", "dst": "seed_guardian_websocket", "relation": "refines" },
     { "_comment": "into the core pack" },
     { "src": "seed_guardian_contract", "dst": "seed_core_guardian_gate", "relation": "related_to", "weight": 0.8 },
     { "src": "seed_guardian_authoring_procedure", "dst": "seed_core_docs_map", "relation": "related_to", "weight": 0.8 },

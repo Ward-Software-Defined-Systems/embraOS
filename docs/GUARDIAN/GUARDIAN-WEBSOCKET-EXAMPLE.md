@@ -100,7 +100,9 @@ policy lives on the host:
 
 answers `{"id": "ws-3f9a1c2e", "protocol": "v1", "headers": {…}}`, or
 `{"error": …, "status": 401, "body": "…"}` when the server answered the
-handshake with something else.
+handshake with something else: `body` is up to 512 bytes of that answer's
+body, read for half a second after its headers at most, and `redirect`
+names a redirect's target, which is not followed.
 
 ```json
 {"op": "send", "id": "ws-3f9a1c2e", "json": {"id": 1, "method": "ping"}, "reply_id": 1}
@@ -139,7 +141,7 @@ Each line is the `input` of `guardian_call` with `tool: "websocket"`. The
 reply of each command names the next one's ids.
 
 ```json
-{"op": "open", "url": "wss://browser.example.lan/chromium"}
+{"op": "open", "url": "wss://browser.example.lan/chromium?timeout=300000"}
 {"op": "send", "id": "<id>", "json": {"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank"}}, "reply_id": 1}
 {"op": "send", "id": "<id>", "json": {"id": 2, "method": "Target.attachToTarget", "params": {"targetId": "<T>", "flatten": true}}, "reply_id": 2}
 {"op": "send", "id": "<id>", "json": {"id": 3, "sessionId": "<S>", "method": "Page.enable"}, "reply_id": 3}
@@ -149,8 +151,11 @@ reply of each command names the next one's ids.
 {"op": "close", "id": "<id>"}
 ```
 
-Run against the browser service of [BROWSER-SERVICE.md](./BROWSER-SERVICE.md):
-**TBD**.
+Run 2026-11-14 against the browser service of
+[BROWSER-SERVICE.md](./BROWSER-SERVICE.md), from the build host: that
+page's *A session over several calls* has the answers, its *Limits* what
+`?timeout=` is for, and its *Validated* how the run was made. On a booted
+machine, driven by the intelligence: **TBD**.
 
 ## The module
 
@@ -250,9 +255,11 @@ fn err(msg: &str) -> String {
   unless the call asks more. A frame that does not fit is answered cut and
   is gone from the buffer, as a body over `http_request`'s `max_bytes` is
   cut: the head of a long text is there to read, and a command whose
-  reply has to arrive whole is sent with a larger `max_bytes` (the cut
-  frame's `needs_max_bytes` names it) or asks the service for less. A
-  message is kept up to 1 MiB whatever a call asks. A screenshot or a PDF
+  reply has to arrive whole is sent with a larger `max_bytes` or asks the
+  service for less. The cut frame's `needs_max_bytes` is the measure; a
+  repeated command's reply is seldom the same size to the byte (its `id`
+  may have another digit), so ask above it. A message is kept up to 1 MiB
+  whatever a call asks. A screenshot or a PDF
   goes through the service's REST route with `http_request` and `save_to`
   ([BROWSER-SERVICE.md](./BROWSER-SERVICE.md)), not through a frame.
 - **The operator's hold.** `/guardian connections` lists the open

@@ -9,7 +9,9 @@ before the model sees it. Read
 contract and the `json` / `host` / `html_text` / `inject` APIs.
 
 The second shipped tool, `http_request` (a guarded curl for pages and API
-work), is in [GUARDIAN-HTTP-REQUEST-EXAMPLE.md](./GUARDIAN-HTTP-REQUEST-EXAMPLE.md).
+work), is in [GUARDIAN-HTTP-REQUEST-EXAMPLE.md](./GUARDIAN-HTTP-REQUEST-EXAMPLE.md);
+the third, `websocket` (connections that stay open between calls), in
+[GUARDIAN-WEBSOCKET-EXAMPLE.md](./GUARDIAN-WEBSOCKET-EXAMPLE.md).
 
 **It ships with embraOS.** The module below is the shipped source
 (`crates/embra-guardian/src/shipped/web_search.rs`, the same bytes as this

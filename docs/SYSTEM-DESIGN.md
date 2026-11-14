@@ -26,7 +26,7 @@ The runtime services that implement those layers:
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). The web console is the primary interface; the serial TUI is functional but is preferred for debugging. |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
 | `embra-update` | — | The OS's backups, updates and installs: snapshots and restores of STATE and DATA, an uploaded backup checked and taken in, the signed release fetched, verified and written into the inactive slot, the installer of the ISO, and DATA grown to the disk's end ([OPERATIONS/UPDATES-AND-BACKUPS.md](OPERATIONS/UPDATES-AND-BACKUPS.md)). Not a service: run by `embrad` in the maintenance boots, before a trial boot's services and at every normal boot, and by the brain for `/backup` and `/update`. |
-| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; two tools (`web_search`, `http_request`) ship with the image and are installed at boot; capability-broker host imports. |
+| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; three tools (`web_search`, `http_request`, `websocket`) ship with the image and are installed at boot; capability-broker host imports, and the WebSocket connections a tool holds open between calls live in the brain (`guardian/ws.rs`). |
 
 ### Boot chain and disk layout
 

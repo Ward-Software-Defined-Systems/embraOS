@@ -44,8 +44,8 @@ You paste **only** these items — the scaffold owns everything else
 - `const GUARDIAN_DESC: &str = "…";`
 - `const GUARDIAN_SCHEMA: &str = r#"{ "type":"object", "properties":{…} }"#;`
 - *(optional)* `const GUARDIAN_CAPS: &[&str] = &["http_get"];`
-  (v1 capabilities: `"http_get"`, `"http_request"`, `"web_search"` — declare
-  only what the tool uses; the validator refuses a capability it does not know, and
+  (v1 capabilities: `"http_get"`, `"http_request"`, `"web_search"`,
+  `"websocket"` — declare only what the tool uses; the validator refuses a capability it does not know, and
   a `host::` call the module did not declare fails in the build, since the scaffold
   generates the host functions of the declared capabilities alone)
 - Exactly one `fn run(input: &str) -> String` (not `pub`, not `unsafe`).
@@ -196,6 +196,72 @@ host::http_request(request_json: &str) -> String
 // (GUARDIAN-HTTP-REQUEST-EXAMPLE.md).
 ```
 
+`host::websocket` — when `GUARDIAN_CAPS` includes `"websocket"`:
+
+```text
+host::websocket(op_json: &str) -> String
+// One operation, a JSON object with an "op":
+//   {"op":"open","url":"wss://…",       // wss only
+//    "headers":{"X-Trace":"…"},        // token names, no CR/LF; a
+//                                      // credential header is refused
+//                                      // (/guardian secret sets it); Host,
+//                                      // Upgrade, Connection and
+//                                      // Sec-WebSocket-* are dropped
+//    "protocols":["v1"]}               // subprotocols offered, at most 8
+//   {"op":"send","id":"ws-…",           // the id open answered
+//    "text":"…" | "json":<any> | "binary":"<base64>"}
+//                                      // one of the three, 256 KiB; json
+//                                      // is serialized by the host
+//   {"op":"receive","id":"ws-…"}
+//   {"op":"close","id":"ws-…","code":1000,"reason":"…"}
+//   {"op":"list"}
+// A receive reads; a send reads as well when it carries one of the first
+// three:
+//    "reply_id":<number|string>,       // wait for the text frame whose
+//                                      // JSON has this top-level id and
+//                                      // answer it alone; the frames
+//                                      // around it stay buffered
+//    "until":"<text>",                 // wait for a text frame that
+//                                      // contains it; the frames in
+//                                      // order through it
+//    "wait_ms":10000,                  // default 10 s, ≤ 60 s
+//    "max_frames":20,                  // ≤ 100
+//    "max_bytes":65536                 // JSON text answered, ≤ 1 MiB
+// Envelope:
+//   open     {"ok":true,"id":"ws-…","protocol":"v1"|null,
+//             "headers":{"<lowercase>":"…"}}       // no cookies
+//            {"ok":false,"error":"…","status":<u16>,"redirect":"…"|null,
+//             "body":"…"}              // the server answered the handshake
+//                                      // with something else; 512 bytes
+//                                      // of its body; a redirect is
+//                                      // named, never followed
+//   send     {"ok":true,"sent":true}   // and a read's fields when the op
+//                                      // asked for one
+//   receive  {"ok":true,
+//             "frames":[{"text":"…"} | {"binary":"<base64>","bytes":<n>}],
+//             "matched":true|false,    // with reply_id or until
+//             "timed_out":true|false,"buffered":<n>,"dropped":<n>,
+//             "closed":{"code":<u16>|null,"reason":"…"}}  // once it ended
+//            a frame that was cut also carries
+//            "truncated":{"bytes":<the message's size as it arrived>,
+//                         "needs_max_bytes":<what answers it whole>}
+//   close    {"ok":true,"closed":{"code":…,"reason":"…"},"dropped":<n>}
+//   list     {"ok":true,"connections":[{"id":…,"host":…,"port":…,
+//             "path":…,"open_seconds":…,"idle_seconds":…,"buffered":…,
+//             "dropped":…,"closed":…}]}
+//   {"ok":false,"error":"…"}
+// The connection is the host's. It stays open between calls of the tool
+// that opened it, which reaches its own and no other tool's: 4 a tool and
+// 8 in all, closed after 10 minutes unused or 60 minutes, gone at a
+// restart of the brain. The host runs http_get's egress policy at open,
+// with wss in the place of https, and dials the addresses it checked; it
+// adds the operator's secrets for that host and port to the handshake
+// and refuses a URL, a header, a subprotocol or a frame that carries a
+// stored one. A call has one budget, 10 s of I/O and its wait, and the
+// sandbox's deadline follows it. Needs no key. The shipped websocket
+// wraps it (GUARDIAN-WEBSOCKET-EXAMPLE.md).
+```
+
 ### Provided `html_text` API (always available, zero-dep)
 
 ```text
@@ -233,7 +299,8 @@ inject::flagged(text: &str) -> bool
 // scrub and scan with a bool in place of the names.
 // A lexical pass, and it says so: a typoglycemia, spaced-out or base64
 // directive passes. The shipped web_search uses scrub; http_request uses
-// scrub on a page, scan_json on a JSON body and scan on any other.
+// scrub on a page, scan_json on a JSON body and scan on any other;
+// websocket uses scan_json on a frame that is JSON and scan on any other.
 ```
 
 ## Minimal template
@@ -377,4 +444,5 @@ fn run(input: &str) -> String {
 
 - [GUARDIAN-ADVANCED-EXAMPLE.md](./GUARDIAN-ADVANCED-EXAMPLE.md) — the flagship: prompt-injection-hardened `web_search` declaring two capabilities, shipped with the image and installed at boot.
 - [GUARDIAN-HTTP-REQUEST-EXAMPLE.md](./GUARDIAN-HTTP-REQUEST-EXAMPLE.md) — the second shipped tool: `http_request`, a guarded curl for pages, resources and API work over one capability; needs no key, credentials host-side.
+- [GUARDIAN-WEBSOCKET-EXAMPLE.md](./GUARDIAN-WEBSOCKET-EXAMPLE.md) — the third shipped tool: `websocket`, a client whose connections the host keeps open between calls, for a service that speaks over a socket (a browser's DevTools endpoint among them).
 - [GUARDIAN-KG-SCAN-EXAMPLE.md](./GUARDIAN-KG-SCAN-EXAMPLE.md) — `kg_scan`, the first intelligence-proposed tool: pure-compute structural scanning over a `knowledge_dump` JSONL, fed in via `guardian_call`'s `data_file` bridge.
