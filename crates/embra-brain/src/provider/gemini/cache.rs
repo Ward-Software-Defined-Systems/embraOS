@@ -30,7 +30,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -65,7 +64,8 @@ impl CacheHandle {
 }
 
 pub struct GeminiCacheManager {
-    http: Client,
+    // No client is kept: each request takes `crate::net::shared()`, the
+    // client of the roots in force (see `AnthropicProvider`).
     api_key: String,
     db: Arc<WardsonDbClient>,
     model_id: String,
@@ -103,7 +103,6 @@ impl GeminiCacheManager {
         base_url: String,
     ) -> Self {
         Self {
-            http: crate::net::shared(),
             api_key,
             db,
             model_id,
@@ -216,8 +215,7 @@ impl GeminiCacheManager {
     /// gone).
     pub async fn delete(&self, cache_name: &str) -> Result<(), ProviderError> {
         let url = format!("{}{}/{}", self.base_url, super::V1BETA, cache_name);
-        match self
-            .http
+        match crate::net::shared()
             .delete(&url)
             .header("x-goog-api-key", &self.api_key)
             .send()
@@ -281,8 +279,7 @@ impl GeminiCacheManager {
             "ttl": format!("{}s", DEFAULT_TTL_SECS),
         });
 
-        let resp = self
-            .http
+        let resp = crate::net::shared()
             .post(&url)
             .header("x-goog-api-key", &self.api_key)
             .header("content-type", "application/json")

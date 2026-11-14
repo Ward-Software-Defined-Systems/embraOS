@@ -956,6 +956,37 @@ mod tests {
         }
     }
 
+    /// A provider keeps no client of its own: each request takes the
+    /// long-lived client of the roots in force. A client kept in the struct
+    /// was built on the roots of the day the instance was made, and Learning
+    /// Mode makes one instance for its whole loop: a certificate authority
+    /// imported meanwhile would not have reached it.
+    #[test]
+    fn no_provider_keeps_a_client_of_its_own() {
+        let mut files = Vec::new();
+        let providers = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("provider");
+        // The three chat providers. The image provider is made for one
+        // `image_generate` call and builds a client of its own bounds then.
+        for dir in ["anthropic", "gemini", "openai_compat"] {
+            rust_sources(&providers.join(dir), &mut files);
+        }
+        assert!(files.len() >= 8, "the scan found {} provider files; the tree moved", files.len());
+        let mut asked = 0;
+        for file in files {
+            let source = std::fs::read_to_string(&file).unwrap();
+            for line in source.lines().map(str::trim) {
+                // A field or a by-value parameter of the client's type; a
+                // function that sends takes `&Client`.
+                let kept = line.ends_with(": Client,") || line.ends_with(": reqwest::Client,");
+                assert!(!kept, "{}: a client kept by value: {line}", file.display());
+                if line.contains("net::shared()") || line.contains("shared_client()") {
+                    asked += 1;
+                }
+            }
+        }
+        assert!(asked >= 5, "the providers ask for the long-lived client at {asked} sites; the pattern moved");
+    }
+
     /// #26: a client built from the bare `builder()` sets a timeout itself —
     /// the validate and probe clients a total one, the streaming and API
     /// clients the two bounds — so no reqwest client of the brain can hang

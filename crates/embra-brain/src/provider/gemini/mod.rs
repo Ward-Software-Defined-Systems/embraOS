@@ -122,7 +122,8 @@ const RETRY_DELAYS_SECS: &[u64] = &[1, 2, 4, 8, 16, 32, 60];
 
 pub struct GeminiProvider {
     api_key: String,
-    http: Client,
+    // No client is kept: each request takes `crate::net::shared()`, the
+    // client of the roots in force (see `AnthropicProvider`).
     model_id: String,
     display_name: String,
     /// The base every URL is built on: [`DIRECT_BASE`], or the provider
@@ -150,7 +151,6 @@ impl GeminiProvider {
         let display_name = display_name_for(&model_id);
         Self {
             api_key,
-            http: crate::net::shared(),
             model_id,
             display_name,
             base_url: DIRECT_BASE.to_string(),
@@ -282,7 +282,7 @@ impl LlmProvider for GeminiProvider {
 
         let url = self.stream_url();
         let api_key = self.api_key.clone();
-        let http = self.http.clone();
+        let http = crate::net::shared();
 
         // First attempt: with cache (if active). On a stale-cache
         // error from the server, invalidate the local handle and

@@ -123,7 +123,10 @@ pub struct AnthropicProvider {
     /// The base every URL is built on: [`DIRECT_BASE`], or the provider
     /// gateway's prefixed base ([`Self::with_base_url`]).
     base_url: String,
-    http: Client,
+    // No client is kept: each request takes `shared_client()`, the client
+    // of the roots in force, so an instance that lives across an import of
+    // a certificate authority (Learning Mode builds one for its whole loop)
+    // trusts it at its next request.
 }
 
 impl AnthropicProvider {
@@ -147,7 +150,6 @@ impl AnthropicProvider {
             display_name,
             effort: DEFAULT_EFFORT.to_string(),
             base_url: DIRECT_BASE.to_string(),
-            http: shared_client(),
         }
     }
 
@@ -319,7 +321,7 @@ impl LlmProvider for AnthropicProvider {
         // (`AnthropicStreamEvent::Error`) — the error path every caller
         // is built around — and the caller gets the stream back
         // immediately while any backoff runs.
-        let http = self.http.clone();
+        let http = shared_client();
         let api_key = self.api_key.clone();
         let url = self.messages_url();
 

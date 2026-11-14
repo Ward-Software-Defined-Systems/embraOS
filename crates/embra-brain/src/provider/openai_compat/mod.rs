@@ -28,7 +28,6 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use reqwest::Client;
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -85,7 +84,8 @@ pub struct OpenAICompatProvider {
     preset: OpenAiCompatPreset,
     base_url: String,
     bearer_token: Option<String>,
-    http: Client,
+    // No client is kept: each request takes `crate::net::shared()`, the
+    // client of the roots in force (see `AnthropicProvider`).
     model_id: String,
     display_name: String,
     /// `/effort` override for this preset, sent verbatim when set.
@@ -112,7 +112,6 @@ impl OpenAICompatProvider {
             preset,
             base_url,
             bearer_token: bearer,
-            http: crate::net::shared(),
             model_id: model,
             display_name,
             reasoning_effort_override: None,
@@ -196,8 +195,7 @@ impl OpenAICompatProvider {
         url: &str,
         body: &OpenAIChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
-        let mut req = self
-            .http
+        let mut req = crate::net::shared()
             .post(url)
             .header("content-type", "application/json")
             .json(body);
