@@ -89,12 +89,12 @@ emit(f'<rect width="{W}" height="{H}" fill="url(#glow)"/>')
 text(40, 32, "embraOS — system architecture", size=15, fill="#d4a056", weight="bold", spacing=0.5)
 text(356, 32, "Phase 2 · one Buildroot tree builds x86_64 and aarch64", size=10.5, fill=DIM)
 # legend
-lx = 744
+lx = 714
 emit(f'<line x1="{lx}" y1="28" x2="{lx+26}" y2="28" stroke="{ARROW}" stroke-width="1.3" marker-end="url(#head)"/>')
 text(lx + 32, 32, "gRPC · REST · PTY inside the OS", size=9.4, fill=DIM)
-lx2 = 946
+lx2 = 916
 emit(f'<line x1="{lx2}" y1="28" x2="{lx2+26}" y2="28" stroke="{ARROW}" stroke-width="1.3" stroke-dasharray="2 3" marker-end="url(#head)"/>')
-text(lx2 + 32, 32, "outbound HTTPS", size=9.4, fill=DIM)
+text(lx2 + 32, 32, "outbound HTTPS · WSS", size=9.4, fill=DIM)
 badge(1090, 28, 5, DIM)
 text(1104, 32, "start order", size=9.4, fill=DIM)
 
@@ -139,7 +139,7 @@ box(60, 400, 680, 124, "embra-brain", [
 ], BRAIN, order=4, port="gRPC :50002", size=9.9, lead=12)
 box(420, 428, 308, 86, "embra-guardian · in-process", [
     "syn validator · wasmtime sandbox, a fresh instance per call",
-    "capability broker: http_get, http_request, web_search —",
+    "broker: http_get, http_request, web_search, websocket —",
     "egress policy and secrets host-side · replicant check +",
     "operator approval · built by the in-OS Rust toolchain",
 ], GUARD, size=9.6, lead=11.6)
@@ -150,8 +150,8 @@ box(880, 400, 280, 136, "Outside the OS", [
     "Brave Search (web_search)",
     "GitHub · GitLab (gh_*, gl_*, git)",
     "GitHub Releases · the signed OS update",
-    "Guardian egress: https only, address",
-    "classes, /guardian egress allow <host>",
+    "Guardian egress: https and wss only,",
+    "address classes, egress allow <host>",
 ], DIM, dash="3 3", size=9.8, lead=12)
 # row D
 box(60, 560, 320, 98, "wardsondb", [
@@ -214,7 +214,7 @@ text(415, 649, "reads the soul", size=9.0, fill="#bdbac4", anchor="middle")
 # web → trustd (certificate), along the left margin and under wardsondb
 arrow([(60, 250), (48, 250), (48, 672), (560, 672), (560, 659)], "GenerateCertificate :50001 at every embra-web start", (300, 668), anchor="middle", label_dy=-4)
 # brain → outside
-arrow([(740, 450), (879, 450)], "HTTPS out", (810, 445), anchor="middle", dash="2 3")
+arrow([(740, 450), (879, 450)], "HTTPS · WSS out", (810, 445), anchor="middle", dash="2 3")
 text(810, 462, "providers · tools · Guardian", size=9.0, fill="#bdbac4", anchor="middle")
 
 # ------------------------------------------------------------------ slabs --
@@ -252,7 +252,7 @@ slab(Y_GRUB, H_GRUB, "UEFI firmware · GRUB 2.12 on the EFI System Partition · 
 ])
 slab(Y_HOST, H_HOST, "Where it runs · one disk, converted or installed", QEMU, [
     "QEMU (run-qemu.sh, run-qemu-aarch64.sh): kvm | hvf · -m 4G · the firmware on pflash (EMBRA_BOOT=uefi, default) | -kernel + -initrd (direct) · -serial mon:stdio · EMBRA_VNC=1 gives the x86_64 VM a display",
-    "-nic user: hostfwd 3345 → every host interface, 50000 and 8443 → the host's loopback · QEMU's DHCP leases 10.0.2.15 · on a bridged or a real NIC the leased address answers on 3345, 50000, 8443 and 50002",
+    "-nic user: hostfwd 3345 → every host interface, 8443 → the host's loopback · QEMU's DHCP leases 10.0.2.15 · a bridged or a real NIC answers on 3345 and 8443; gRPC 50000 and 50002 listen on loopback alone",
     "hypervisors: vmware/embraos.ova and .vmdk (ESXi, Fusion) · hyper-v/embraos.vhdx (generation 2) · parallels/embraos.vmx with its VMDK · any of them, and bare metal: embraos.iso as a DVD or a USB stick",
     "embraos.img · GPT aligned to 1 MiB: esp vfat 64 MiB (GRUB, grub.cfg, grubenv) · rootfs_a | rootfs_b 2 GiB each, an xz SquashFS with its kernel and initrds · state ext4 256 MiB · data ext4 4 GiB, grown at boot",
 ])

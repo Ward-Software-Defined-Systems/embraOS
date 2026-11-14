@@ -47,8 +47,8 @@ Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors an
 > operator's own key, and `/local-ai-gateway off` restores the direct path. A URL is stored
 > only once the listener has identified itself with the gateway's `x-local-ai-gateway`
 > header, and the gateway's own certificate authority is trusted through the operator's
-> CA drop-ins (`seed-state.sh --ca-dir`, or `Imported_CAs/` at build time for a machine
-> installed from the ISO), so the key travels to the gateway over HTTPS.
+> CA drop-ins (`/ca import` on a running machine, `seed-state.sh --ca-dir` on a stopped
+> image, or `Imported_CAs/` at build time), so the key travels to the gateway over HTTPS.
 > The gateway records every request with its bodies, tokens, timing and routing for
 > inspection, prices cloud traffic at list rates, and blocks a request that carries a
 > secret before it leaves the network — embraOS reports such a block as the turn's error,
@@ -106,10 +106,11 @@ Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors an
 > returns *allow / refuse / escalate*, and fails closed. A **refuse** blocks both
 > paths: the soul outranks even an operator paste and is not waivable. A passing
 > proposal still needs an operator's `/guardian approve` — the intelligence never
-> approves its own draft. Two tools ship ready, installed at boot: the
+> approves its own draft. Three tools ship ready, installed at boot: the
 > prompt-injection-hardened `web_search`, inert until an operator sets a Brave key with
-> `/guardian key brave`, and `http_request`, a guarded curl for pages and API work whose
-> credentials the operator stores host-side. This is the first landing of *soul-as-enforced-runtime*: the
+> `/guardian key brave`; `http_request`, a guarded curl for pages and API work whose
+> credentials the operator stores host-side; and `websocket`, a client whose connections
+> stay open between tool calls. This is the first landing of *soul-as-enforced-runtime*: the
 > soul moving from text the model is asked to honor to a gate the OS enforces.
 > **[How the check works →](docs/GUARDIAN/REPLICANT-CHECK.md)** ·
 > [worked example](docs/GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md) ·
