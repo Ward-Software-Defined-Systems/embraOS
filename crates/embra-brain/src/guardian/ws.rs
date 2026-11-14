@@ -1546,4 +1546,277 @@ mod tests {
         assert!(!batch.timed_out);
         assert!(send_text(&broker, &id, "x").await.unwrap_err().contains("no open connection"));
     }
+
+    // ── against a live service ────────────────────────────────────────
+
+    /// What one `guardian_call` of the shipped tool runs on, as the invoke
+    /// arm puts it together: a broker for the call alone, the guard's
+    /// policy and secrets, the tool's own wasm on a blocking thread under
+    /// the call's deadline.
+    struct Live {
+        registry: Arc<Registry>,
+        tls: Arc<rustls::ClientConfig>,
+        host: Arc<embra_guardian::host::WasmHost>,
+        tool: Arc<embra_guardian::CompiledTool>,
+        private_hosts: Vec<String>,
+        secrets: Vec<embra_guardian::caps::SecretHeader>,
+    }
+
+    impl Live {
+        async fn call(&self, input: serde_json::Value) -> serde_json::Value {
+            self.call_with(input, true).await
+        }
+
+        async fn call_with(&self, input: serde_json::Value, with_secret: bool) -> serde_json::Value {
+            let budget = embra_guardian::ws::call_budget(&input);
+            let stop = Arc::new(StopFlag::default());
+            let broker =
+                CallBroker::new(self.registry.clone(), Handle::current(), "websocket", self.tls.clone(), budget, stop);
+            let caps = embra_guardian::Capabilities {
+                websocket: Some(Arc::new(broker)),
+                http_policy: embra_guardian::EgressPolicy {
+                    private_hosts: self.private_hosts.clone(),
+                    ..Default::default()
+                },
+                secrets: if with_secret { self.secrets.clone() } else { Vec::new() },
+                ..embra_guardian::Capabilities::none()
+            };
+            let (host, tool) = (self.host.clone(), self.tool.clone());
+            let text = input.to_string();
+            let started = Instant::now();
+            let out = blocking(move || {
+                host.call(
+                    &tool.module,
+                    &text,
+                    caps,
+                    embra_guardian::host::deadline_for_budget(budget),
+                    embra_guardian::host::DEFAULT_MEMORY_CAP,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| panic!("the sandbox: {e}"));
+            let answer: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+            eprintln!(
+                "  [{:>5} ms, {:>7} bytes] {}",
+                started.elapsed().as_millis(),
+                out.len(),
+                input.get("json").and_then(|j| j.get("method")).or_else(|| input.get("op")).unwrap()
+            );
+            answer
+        }
+
+        /// A command and its reply, as the JSON the reply frame carries.
+        async fn command(&self, id: &str, n: u64, session: Option<&str>, method: &str, params: serde_json::Value) -> serde_json::Value {
+            let mut command = serde_json::json!({"id": n, "method": method, "params": params});
+            if let Some(session) = session {
+                command["sessionId"] = serde_json::json!(session);
+            }
+            let answer = self.call(serde_json::json!({"op": "send", "id": id, "json": command, "reply_id": n, "wait_ms": 30000})).await;
+            assert_eq!(answer["matched"], true, "{method}: {answer}");
+            serde_json::from_str(answer["frames"][0]["text"].as_str().unwrap()).unwrap()
+        }
+    }
+
+    /// The shipped tool against a live DevTools endpoint: the guard, this
+    /// broker, the roots as the brain reads them from a directory and the
+    /// tool's own wasm, one `guardian_call` after another. It prints what
+    /// the service answered; the token is read from the compose's `.env`
+    /// and is neither printed nor allowed in an answer. Not run by the
+    /// suite: it needs the browser service of
+    /// `docs/GUARDIAN/BROWSER-SERVICE.md`, holds both of its `CONCURRENT`
+    /// slots for a while and takes a minute and a half.
+    ///
+    /// ```text
+    /// EMBRA_WS_LIVE_URL=wss://<BROWSER_HOST>[:<port>]/chromium \
+    /// EMBRA_WS_LIVE_CA_DIR=<the directory with the service's CA certificate> \
+    /// EMBRA_WS_LIVE_ENV=<the compose's .env> \
+    ///   cargo test -p embra-brain a_devtools_session_against_a_live_browser_service -- --ignored --nocapture
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a live browser service"]
+    async fn a_devtools_session_against_a_live_browser_service() {
+        use serde_json::json;
+        let url = std::env::var("EMBRA_WS_LIVE_URL").expect("EMBRA_WS_LIVE_URL");
+        let ca_dir = std::path::PathBuf::from(std::env::var("EMBRA_WS_LIVE_CA_DIR").expect("EMBRA_WS_LIVE_CA_DIR"));
+        let env = std::fs::read_to_string(std::env::var("EMBRA_WS_LIVE_ENV").expect("EMBRA_WS_LIVE_ENV")).unwrap();
+        let token = env
+            .lines()
+            .find_map(|l| l.strip_prefix("BROWSERLESS_TOKEN="))
+            .expect("BROWSERLESS_TOKEN in the env file")
+            .trim()
+            .to_string();
+        let parsed: tungstenite::http::Uri = url.parse().unwrap();
+        let host_name = parsed.host().unwrap().to_string();
+        let place = match parsed.port_u16() {
+            Some(port) => format!("{host_name}:{port}"),
+            None => host_name.clone(),
+        };
+        let roots = crate::net::RootStore::new().reload(std::slice::from_ref(&ca_dir));
+        eprintln!("roots: {} operator certificate(s)", roots.certs.len());
+        let wasm: &[u8] = include_bytes!("../../../embra-guardian/tests/fixtures/websocket.wasm");
+        let host = Arc::new(embra_guardian::host::WasmHost::new().unwrap());
+        let module = host.precompile(wasm).unwrap();
+        let live = Live {
+            registry: Arc::new(Registry::new(Limits::default())),
+            tls: Arc::new(roots.rustls_client_config().unwrap()),
+            host,
+            tool: Arc::new(embra_guardian::CompiledTool {
+                name: "websocket".into(),
+                description: String::new(),
+                schema: json!({}),
+                caps: vec!["websocket".into()],
+                module,
+            }),
+            private_hosts: vec![host_name.clone()],
+            secrets: vec![embra_guardian::caps::SecretHeader {
+                host: place,
+                name: "authorization".into(),
+                value: format!("Bearer {token}"),
+            }],
+        };
+        let show = |what: &str, v: &serde_json::Value| {
+            let text = v.to_string();
+            assert!(!text.contains(&token), "the token is in an answer");
+            let cut: String = text.chars().take(700).collect();
+            eprintln!("{what}: {cut}{}", if text.len() > cut.len() { " …" } else { "" });
+        };
+
+        eprintln!("== 1. an open without the stored credential");
+        let refused = live.call_with(json!({"op": "open", "url": url}), false).await;
+        show("refused", &refused);
+        assert_eq!(refused["status"], 401, "{refused}");
+
+        eprintln!("== 2. the open, with the stored bearer on the handshake");
+        let opened = live.call(json!({"op": "open", "url": format!("{url}?timeout=300000")})).await;
+        show("opened", &opened);
+        let id = opened["id"].as_str().expect("an id").to_string();
+
+        eprintln!("== 3. a DevTools exchange, one call a command");
+        let version = live.command(&id, 1, None, "Browser.getVersion", json!({})).await;
+        show("Browser.getVersion", &version);
+        let target = live.command(&id, 2, None, "Target.createTarget", json!({"url": "about:blank"})).await;
+        show("Target.createTarget", &target);
+        let target_id = target["result"]["targetId"].as_str().expect("a targetId").to_string();
+        let attached = live.command(&id, 3, None, "Target.attachToTarget", json!({"targetId": target_id, "flatten": true})).await;
+        show("Target.attachToTarget", &attached);
+        let session = attached["result"]["sessionId"].as_str().expect("a sessionId").to_string();
+        let enabled = live.command(&id, 4, Some(&session), "Page.enable", json!({})).await;
+        show("Page.enable", &enabled);
+        let navigated = live.command(&id, 5, Some(&session), "Page.navigate", json!({"url": "https://example.com/"})).await;
+        show("Page.navigate", &navigated);
+        let loaded = live.call(json!({"op": "receive", "id": id, "until": "Page.loadEventFired", "wait_ms": 30000})).await;
+        eprintln!(
+            "until Page.loadEventFired: matched {} timed_out {} frames {} buffered {} suspected {}",
+            loaded["matched"], loaded["timed_out"], loaded["frames"].as_array().map_or(0, Vec::len), loaded["buffered"], loaded["injection_suspected"]
+        );
+        for frame in loaded["frames"].as_array().unwrap() {
+            let text: String = frame["text"].as_str().unwrap_or("<binary>").chars().take(110).collect();
+            eprintln!("    {text}");
+        }
+        let title = live
+            .command(&id, 6, Some(&session), "Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true}))
+            .await;
+        show("Runtime.evaluate document.title", &title);
+        assert_eq!(title["result"]["result"]["value"], "Example Domain");
+
+        eprintln!("== 4. frames that arrive while no call reads");
+        live.command(&id, 7, Some(&session), "Network.enable", json!({})).await;
+        live.command(&id, 8, Some(&session), "Page.navigate", json!({"url": "https://example.org/"})).await;
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let listed = live.call(json!({"op": "list"})).await;
+        show("list after 4 s without a call", &listed);
+        let waiting = listed["connections"][0]["buffered"].as_u64().unwrap();
+        assert!(waiting > 0, "nothing was buffered between calls");
+        let drained = live.call(json!({"op": "receive", "id": id, "max_frames": 100, "max_bytes": 1048576, "wait_ms": 1})).await;
+        let methods: Vec<String> = drained["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| serde_json::from_str::<serde_json::Value>(f["text"].as_str()?).ok())
+            .filter_map(|v| v["method"].as_str().map(str::to_string))
+            .collect();
+        eprintln!("drained {} frames (buffered was {waiting}), in order: {methods:?}", methods.len());
+
+        eprintln!("== 5. a reply larger than the default answer, then larger than a connection keeps");
+        let big = live
+            .call(json!({"op": "send", "id": id, "reply_id": 9, "wait_ms": 30000,
+                "json": {"id": 9, "sessionId": session, "method": "Runtime.evaluate", "params": {"expression": "'\"x\\n'.repeat(40000)", "returnByValue": true}}}))
+            .await;
+        eprintln!(
+            "120 KiB of quotes and line breaks at the default: text {} bytes, truncated {}",
+            big["frames"][0]["text"].as_str().map_or(0, str::len),
+            big["frames"][0]["truncated"]
+        );
+        let needs = big["frames"][0]["truncated"]["needs_max_bytes"].as_u64().expect("the figure");
+        let whole = live
+            .call(json!({"op": "send", "id": id, "reply_id": 10, "wait_ms": 30000, "max_bytes": needs + 1024,
+                "json": {"id": 10, "sessionId": session, "method": "Runtime.evaluate", "params": {"expression": "'\"x\\n'.repeat(40000)", "returnByValue": true}}}))
+            .await;
+        eprintln!(
+            "the same asked with max_bytes {needs} + 1024: text {} bytes, truncated {}",
+            whole["frames"][0]["text"].as_str().map_or(0, str::len),
+            whole["frames"][0]["truncated"]
+        );
+        assert!(whole["frames"][0].get("truncated").is_none());
+        let huge = live
+            .call(json!({"op": "send", "id": id, "reply_id": 11, "wait_ms": 30000, "max_bytes": 1048576,
+                "json": {"id": 11, "sessionId": session, "method": "Runtime.evaluate", "params": {"expression": "'x'.repeat(1500000)", "returnByValue": true}}}))
+            .await;
+        eprintln!(
+            "a 1.5 MB reply at the ceiling: matched {} text {} bytes, truncated {}",
+            huge["matched"],
+            huge["frames"][0]["text"].as_str().map_or(0, str::len),
+            huge["frames"][0]["truncated"]
+        );
+
+        eprintln!("== 6. the service's slots: a second connection, then a third");
+        let second = live.call(json!({"op": "open", "url": url})).await;
+        show("second (no ?timeout)", &second);
+        let second_id = second["id"].as_str().map(str::to_string);
+        let third = live.call(json!({"op": "open", "url": url})).await;
+        show("third", &third);
+        if let Some(third_id) = third["id"].as_str() {
+            let v = live.call(json!({"op": "send", "id": third_id, "json": {"id": 1, "method": "Browser.getVersion"}, "reply_id": 1, "wait_ms": 5000})).await;
+            eprintln!("third answers a command: matched {} timed_out {} closed {}", v["matched"], v["timed_out"], v["closed"]);
+            let closed = live.call(json!({"op": "close", "id": third_id})).await;
+            show("third closed", &closed);
+        }
+
+        eprintln!("== 7. the service's TIMEOUT against ?timeout=: 70 s without a call");
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        let listed = live.call(json!({"op": "list"})).await;
+        show("list after 70 s", &listed);
+        let with_timeout = live.call(json!({"op": "send", "id": id, "json": {"id": 12, "method": "Browser.getVersion"}, "reply_id": 12, "wait_ms": 5000})).await;
+        eprintln!(
+            "the connection opened with ?timeout=300000: matched {} timed_out {} closed {} error {}",
+            with_timeout["matched"], with_timeout["timed_out"], with_timeout["closed"], with_timeout["error"]
+        );
+        if let Some(second_id) = second_id {
+            let without = live.call(json!({"op": "send", "id": second_id, "json": {"id": 2, "method": "Browser.getVersion"}, "reply_id": 2, "wait_ms": 5000})).await;
+            show("the connection opened without it", &without);
+            let after = live.call(json!({"op": "receive", "id": second_id, "wait_ms": 1})).await;
+            show("its next read", &after);
+        }
+
+        eprintln!("== 8. the close");
+        let closed = live.call(json!({"op": "close", "id": id, "reason": "done"})).await;
+        show("closed", &closed);
+        let listed = live.call(json!({"op": "list"})).await;
+        show("list at the end", &listed);
+
+        eprintln!("== 9. a new connection is a new browser: the page of the first is gone");
+        let again = live.call(json!({"op": "open", "url": url})).await;
+        let again_id = again["id"].as_str().expect("an id").to_string();
+        let targets = live.command(&again_id, 1, None, "Target.getTargets", json!({})).await;
+        show("Target.getTargets", &targets);
+        let known: Vec<&str> = targets["result"]["targetInfos"]
+            .as_array()
+            .expect("targetInfos")
+            .iter()
+            .filter_map(|t| t["targetId"].as_str())
+            .collect();
+        assert!(!known.contains(&target_id.as_str()), "the first connection's page outlived it");
+        live.call(json!({"op": "close", "id": again_id})).await;
+        live.registry.close_all("the live check is over");
+    }
 }
