@@ -257,6 +257,8 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Guardian Advanced Example](docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md)** | The shipped flagship: a worked end-to-end Guardian tool |
 | **[Guardian HTTP Request Example](docs/GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md)** | The second shipped tool: `http_request`, a guarded curl for pages, resources and API work |
 | **[Guardian WebSocket Example](docs/GUARDIAN/GUARDIAN-WEBSOCKET-EXAMPLE.md)** | The third shipped tool: `websocket`, a client whose connections stay open between tool calls, for a service that speaks over a socket |
+| **[Microsoft 365 Shared Mailbox](docs/GUARDIAN/M365-SHARED-MAILBOX.md)** | One Microsoft 365 shared mailbox for `http_request`: an Entra application scoped to that mailbox with Exchange Online RBAC for Applications, its token stored with `/guardian secret` |
+| **[Browser Service](docs/GUARDIAN/BROWSER-SERVICE.md)** | A headless browser beside the OS (Browserless behind Caddy in Docker Compose), reached with `http_request` for pages, screenshots and PDFs and with `websocket` for a session over several tool calls |
 | **[Guardian KG-Scan Example](docs/GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md)** | `kg_scan`, the first intelligence-proposed tool — structural pattern scans over a `knowledge_dump` JSONL |
 
 ---
