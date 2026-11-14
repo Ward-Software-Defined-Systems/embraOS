@@ -21,6 +21,7 @@ use crate::db::WardsonDbClient;
 
 mod replicant;
 mod save;
+pub(crate) mod ws;
 
 /// Guardian's writable sub-tree of the workspace (DATA, persists reboots).
 /// The write jail fences it for every tool (`jail::GUARDIAN_DIR`).
@@ -1924,9 +1925,10 @@ pub async fn guardian_call(
             };
             let wants_search =
                 compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_WEB_SEARCH);
+            let wants_ws = compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_WEBSOCKET);
             // Before setup there is no config: public hosts only and no
             // secrets, never a failed call.
-            let cfg = if wants_http || wants_request || wants_search {
+            let cfg = if wants_http || wants_request || wants_search || wants_ws {
                 crate::config::load_config(db).await.ok()
             } else {
                 None
@@ -1978,17 +1980,59 @@ pub async fn guardian_call(
                     }
                 }
             }
+            // A tool with `websocket` reaches its own connections through a
+            // broker made for this one call: the tool's name, the call's
+            // budget (the I/O of its operations and its wait) and a flag an
+            // operator's stop sets. The guard applies the egress policy and
+            // adds the operator's secrets at open, as it does for a request.
+            let ws_budget = embra_guardian::ws::call_budget(&input);
+            let stop = Arc::new(ws::StopFlag::default());
+            let mut stop_guard = None;
+            if wants_ws {
+                let tls = crate::net::roots().rustls_client_config().map_err(|e| {
+                    DispatchError::Handler(format!("guardian: websocket capability init failed: {e}"))
+                })?;
+                caps.websocket = Some(Arc::new(ws::CallBroker::new(
+                    ws::registry(),
+                    tokio::runtime::Handle::current(),
+                    tool,
+                    Arc::new(tls),
+                    ws_budget,
+                    stop.clone(),
+                )));
+                if !(wants_http || wants_request) {
+                    caps.http_policy = embra_guardian::EgressPolicy {
+                        private_hosts: cfg
+                            .as_ref()
+                            .and_then(|c| c.guardian_private_hosts.clone())
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    };
+                }
+                if !wants_request {
+                    caps.secrets = cfg.as_ref().map(secrets_from).unwrap_or_default();
+                }
+                // The dispatch future is dropped by an operator's stop while
+                // the sandbox's thread goes on: the guard then ends the
+                // call's waits, and the broker closes what the call opened.
+                stop_guard = Some(ws::StopOnDrop::new(stop.clone()));
+            }
             // A request that carries one of the operator's stored secrets is
             // refused by the broker before the transport, whatever capability
             // carries it (`Capabilities.outbound_secrets`).
-            if wants_http || wants_request || wants_search {
+            if wants_http || wants_request || wants_search || wants_ws {
                 caps.outbound_secrets = Arc::new(crate::secrets::collect(cfg.as_ref()));
             }
             let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
             let module = compiled.module.clone();
             // A tool that fetches waits on the network inside its budget;
             // its deadline is the fetch budget plus the guest's own time.
-            let deadline = if wants_http || wants_request {
+            // A tool with a connection waits for frames inside its call's
+            // budget, and for a fetch beside it when it also fetches.
+            let deadline = if wants_ws {
+                let fetch = if wants_http || wants_request { budget } else { std::time::Duration::ZERO };
+                embra_guardian::host::deadline_for_budget(ws_budget + fetch)
+            } else if wants_http || wants_request {
                 embra_guardian::host::deadline_for_budget(budget)
             } else {
                 embra_guardian::host::DEFAULT_DEADLINE
@@ -2005,6 +2049,10 @@ pub async fn guardian_call(
             })
             .await
             .map_err(|e| DispatchError::Handler(format!("guardian: task join: {e}")))?;
+            // The call came back: nothing is left to stop.
+            if let Some(guard) = stop_guard {
+                guard.disarm();
+            }
             // One line per invoke, names and numbers only: the tool, how
             // long, whether the sandbox answered, how much. Never the input
             // or the output (a sandbox error names no guest text either).

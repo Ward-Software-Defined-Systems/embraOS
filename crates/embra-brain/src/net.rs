@@ -100,10 +100,6 @@ pub(crate) struct Roots {
     pub(crate) fingerprints: Vec<Fingerprint>,
     /// Each certificate as DER, in the order of `certs`: what a TLS client
     /// that is not reqwest's takes ([`Roots::rustls_client_config`]).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Guardian's WebSocket broker of the commit that follows reads it")
-    )]
     pub(crate) der: Vec<Vec<u8>>,
 }
 
@@ -119,10 +115,6 @@ impl Roots {
     /// on the `ring` provider, with no client certificate, speaking
     /// HTTP/1.1. A certificate the store does not take is left out with a
     /// warning; the loader took each one once already.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Guardian's WebSocket broker of the commit that follows calls it")
-    )]
     pub(crate) fn rustls_client_config(&self) -> Result<rustls::ClientConfig, String> {
         let mut store = rustls::RootCertStore::empty();
         store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
