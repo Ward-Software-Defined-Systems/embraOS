@@ -27,8 +27,8 @@ identifiers:
     value: "10.5281/zenodo.20673525"
     description: "Concept DOI — resolves to the latest version"
   - type: doi
-    value: "10.5281/zenodo.23875651"
-    description: "Version DOI — v0.23.0-phase1"
+    value: "10.5281/zenodo.24212273"
+    description: "Version DOI — v0.24.0-phase2"
 keywords:
   - "operating system"
   - "artificial intelligence"
