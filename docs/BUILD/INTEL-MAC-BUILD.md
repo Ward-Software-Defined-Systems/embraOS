@@ -54,8 +54,9 @@
 > VMDK converts and boots to the web console, its display console at 1920x1080,
 > and `embraos.iso` installs on a machine set to UEFI with Secure Boot off.
 > William ran the install and the import through Parallels' window. The pair as
-> the build writes it now, in `output/images/parallels/`, the pointer and a
-> click on the display console there are **TBD**.
+> the build writes it now, in `output/images/parallels/`, passed there on
+> 2026-11-14 (William's test). The pointer and a click on the display console
+> there are **TBD**.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
 > named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
