@@ -59,9 +59,9 @@ forwards DNS to the host's resolver.
 ## The certificate
 
 The OS trusts the operator's CA drop-ins in `/embra/state/ca-certificates/`
-on the Guardian transport, and the certificate authorities an image was built
-with from `Imported_CAs/`, the route for a machine `seed-state.sh` does not
-reach
+on the Guardian transport (`/ca import` adds one on a running machine,
+`seed-state.sh --ca-dir` on a stopped raw image), and the certificate
+authorities an image was built with from `Imported_CAs/`
 ([QUICK-START.md — Self-hosted git servers (private CA)](../BUILD/QUICK-START.md#self-hosted-git-servers-private-ca)).
 Two ways, one `tls` line in `caddy/Caddyfile`:
 

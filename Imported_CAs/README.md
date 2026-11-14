@@ -2,7 +2,7 @@
 
 Certificate authorities of the builder's own, baked into an image at build time.
 
-Drop a private CA's certificate into this folder before a build, and every machine installed from that build trusts it from its first boot: the raw disk image, the disks converted for VMware, Hyper-V and Parallels, a machine installed from the ISO, bare metal, and an update built from the same tree. The other route, `scripts/seed-state.sh --ca-dir`, writes to the STATE partition of a raw image on the build host and reaches none of the others.
+Drop a private CA's certificate into this folder before a build, and every machine installed from that build trusts it from its first boot: the raw disk image, the disks converted for VMware, Hyper-V and Parallels, a machine installed from the ISO, bare metal, and an update built from the same tree. Two other routes fill STATE's own directory: `/ca import` on a running machine ([docs/OPERATIONS/COMMAND-REFERENCE.md](../docs/OPERATIONS/COMMAND-REFERENCE.md)), and `scripts/seed-state.sh --ca-dir`, which writes to the STATE partition of a raw image on the build host and reaches none of the others.
 
 ## What goes here
 
@@ -26,7 +26,7 @@ Nothing in this folder but this README is in git (`.gitignore`): every push of t
 
 ## What to know
 
-- The trust follows the image. A machine updated to an image built without a file no longer trusts that CA. A CA that has to outlive updates belongs in STATE's `ca-certificates/`, which `seed-state.sh --ca-dir` fills on a raw image; an installed machine has no step for that yet.
+- The trust follows the image. A machine updated to an image built without a file no longer trusts that CA. A CA that has to outlive updates belongs in STATE's `ca-certificates/`, which `/ca import` fills on a running machine and `seed-state.sh --ca-dir` on a raw image.
 - Every machine installed from the build trusts these CAs on the connections named above, for any host name. Bake only CAs you operate.
 - `scripts/release-update.sh` signs no release from an image that carries imported CAs, nor from a tree whose folder holds certificate files. `--allow-imported-cas` overrides both.
 - To remove a CA, take its file out of the folder and rebuild.
