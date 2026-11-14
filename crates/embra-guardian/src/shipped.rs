@@ -46,8 +46,18 @@ pub const HTTP_REQUEST: ShippedTool = ShippedTool {
     source: include_str!("shipped/http_request.rs"),
 };
 
+/// A WebSocket client whose connections the host keeps open between calls,
+/// for a service that speaks over a socket, a browser's CDP endpoint among
+/// them (`docs/GUARDIAN/GUARDIAN-WEBSOCKET-EXAMPLE.md`). Needs no key:
+/// credentials come from `/guardian secret`, private hosts from `/guardian
+/// egress allow`.
+pub const WEBSOCKET: ShippedTool = ShippedTool {
+    name: "websocket",
+    source: include_str!("shipped/websocket.rs"),
+};
+
 /// Every shipped tool, in install order.
-pub const SHIPPED: &[ShippedTool] = &[WEB_SEARCH, HTTP_REQUEST];
+pub const SHIPPED: &[ShippedTool] = &[WEB_SEARCH, HTTP_REQUEST, WEBSOCKET];
 
 /// Every version of the `web_search` module the project has shipped as
 /// the doc example, oldest first; the last is the current source. A stored
@@ -81,6 +91,7 @@ pub fn known_sha256s(name: &str) -> &'static [&'static str] {
     match name {
         "web_search" => KNOWN_WEB_SEARCH_SHA256,
         "http_request" => KNOWN_HTTP_REQUEST_SHA256,
+        "websocket" => KNOWN_WEBSOCKET_SHA256,
         _ => &[],
     }
 }
@@ -100,12 +111,20 @@ pub const KNOWN_HTTP_REQUEST_SHA256: &[&str] = &[
     "3d4814a3b865fae984f0d6f32fdcc806f0e2218c7011f6072682be1cbc674de0",
 ];
 
+/// Every version of the `websocket` module the project has shipped,
+/// oldest first; the last is the current source.
+pub const KNOWN_WEBSOCKET_SHA256: &[&str] = &[
+    // 2026-11-14: the first version
+    "c2237ff71ac826248a72ab4532c3a655984b5fa28553534d7be40d13c4b642af",
+];
+
 /// The doc page a shipped tool's module is mirrored on, byte for byte.
 #[cfg(test)]
 fn doc_of(name: &str) -> &'static str {
     match name {
         "web_search" => include_str!("../../../docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md"),
         "http_request" => include_str!("../../../docs/GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md"),
+        "websocket" => include_str!("../../../docs/GUARDIAN/GUARDIAN-WEBSOCKET-EXAMPLE.md"),
         other => panic!("no doc for the shipped tool {other}"),
     }
 }
@@ -167,6 +186,20 @@ mod tests {
         assert!(m.input_schema["properties"]["json"].is_object(), "{}", m.input_schema);
         assert!(m.input_schema["properties"]["save_to"].is_object(), "{}", m.input_schema);
         assert!(m.description.contains("save_to"), "the description names the save");
+        let m = crate::validate(WEBSOCKET.source, &[]).unwrap();
+        assert_eq!(m.caps, vec!["websocket".to_string()]);
+        assert!(
+            m.description.contains("/guardian secret") && m.description.contains("/guardian egress allow"),
+            "the description names the two commands"
+        );
+        assert!(m.description.len() <= 600, "{} bytes", m.description.len());
+        assert_eq!(
+            m.input_schema["properties"]["op"]["enum"],
+            serde_json::json!(["open", "send", "receive", "close", "list"])
+        );
+        for field in ["reply_id", "until", "wait_ms", "json", "binary"] {
+            assert!(m.input_schema["properties"][field].is_object(), "{field}: {}", m.input_schema);
+        }
     }
 
     #[test]
@@ -182,6 +215,6 @@ mod tests {
         }
         assert!(known_sha256s("other").is_empty());
         let names: Vec<&str> = SHIPPED.iter().map(|t| t.name).collect();
-        assert_eq!(names, ["web_search", "http_request"]);
+        assert_eq!(names, ["web_search", "http_request", "websocket"]);
     }
 }

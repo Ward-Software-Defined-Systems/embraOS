@@ -16,6 +16,7 @@ use embra_guardian::caps::{Capabilities, EgressPolicy, HttpResponse, HttpTranspo
 use embra_guardian::host::{
     deadline_for_budget, WasmHost, DEADLINE_WITH_HTTP, DEFAULT_DEADLINE, DEFAULT_MEMORY_CAP,
 };
+use embra_guardian::ws::{call_budget, WS_IO_BUDGET, WS_WAIT_DEFAULT, WS_WAIT_MAX};
 use embra_guardian::GuardianError;
 
 /// The committed probe tool: `{a,b,url?}` → `{sum, fetched}`; it calls
@@ -154,6 +155,28 @@ fn the_http_deadline_is_the_fetch_budget_plus_five_seconds() {
     // An input may ask for more, up to the ceiling; the deadline follows.
     assert!(HTTP_TIMEOUT_MAX >= EgressPolicy::default().timeout);
     assert_eq!(deadline_for_budget(HTTP_TIMEOUT_MAX), HTTP_TIMEOUT_MAX + DEFAULT_DEADLINE);
+}
+
+#[test]
+fn the_websocket_deadline_is_the_call_budget_plus_five_seconds() {
+    // The budget of a call with a connection is its I/O and its wait; the
+    // brain's deadline is `deadline_for_budget` of it. A deadline made of
+    // the wait alone would trap a guest whose `open` took nine seconds.
+    let asks_nothing = serde_json::json!({"op": "open", "url": "wss://service.example/"});
+    assert_eq!(call_budget(&asks_nothing), WS_IO_BUDGET + WS_WAIT_DEFAULT);
+    assert_eq!(deadline_for_budget(call_budget(&asks_nothing)), Duration::from_secs(25));
+    let asks_two_seconds = serde_json::json!({"op": "receive", "id": "ws-1", "wait_ms": 2000});
+    assert_eq!(deadline_for_budget(call_budget(&asks_two_seconds)), Duration::from_secs(17));
+    // An input may ask for more, up to the ceiling; the deadline follows
+    // and goes no further.
+    let asks_an_hour = serde_json::json!({"op": "receive", "id": "ws-1", "wait_ms": 3_600_000});
+    assert_eq!(
+        deadline_for_budget(call_budget(&asks_an_hour)),
+        WS_IO_BUDGET + WS_WAIT_MAX + DEFAULT_DEADLINE
+    );
+    assert_eq!(deadline_for_budget(call_budget(&asks_an_hour)), Duration::from_secs(75));
+    assert_eq!(call_budget(&serde_json::json!({"wait_ms": "soon"})), WS_IO_BUDGET + WS_WAIT_DEFAULT);
+    assert_eq!(call_budget(&serde_json::Value::Null), WS_IO_BUDGET + WS_WAIT_DEFAULT);
 }
 
 #[test]

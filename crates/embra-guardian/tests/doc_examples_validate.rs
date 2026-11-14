@@ -7,6 +7,7 @@ const DOCS: &[&str] = &[
     include_str!("../../../docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md"),
     include_str!("../../../docs/GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md"),
     include_str!("../../../docs/GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md"),
+    include_str!("../../../docs/GUARDIAN/GUARDIAN-WEBSOCKET-EXAMPLE.md"),
 ];
 
 #[test]
@@ -47,6 +48,7 @@ fn every_doc_module_passes_the_validator() {
                         "http_fetch" => &["http_get"],
                         "web_search" => &["http_get", "web_search"],
                         "http_request" => &["http_request"],
+                        "websocket" => &["websocket"],
                         _ => &[],
                     };
                     assert_eq!(
