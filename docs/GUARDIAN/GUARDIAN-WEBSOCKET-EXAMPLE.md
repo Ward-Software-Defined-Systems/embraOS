@@ -154,8 +154,9 @@ reply of each command names the next one's ids.
 Run 2026-11-14 against the browser service of
 [BROWSER-SERVICE.md](./BROWSER-SERVICE.md), from the build host: that
 page's *A session over several calls* has the answers, its *Limits* what
-`?timeout=` is for, and its *Validated* how the run was made. On a booted
-machine, driven by the intelligence: **TBD**.
+`?timeout=` is for, and its *Validated* how the runs were made, the one
+inside a scratch OS among them. An intelligence driving it of its own
+accord: **TBD**.
 
 ## The module
 

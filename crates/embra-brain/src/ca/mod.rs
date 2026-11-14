@@ -372,7 +372,7 @@ impl CaEnv<'_> {
                 );
                 Reply::said(format!(
                     "Imported: state/{name} ({}, SHA-256 {}).\n\
-                     The brain trusts it from its next request: the setup's gateway step, /local-ai-gateway, the providers, the GitLab and GitHub tools, http_get and http_request. A request in flight keeps the roots it started with.\n\
+                     The brain trusts it from its next request: the setup's gateway step, /local-ai-gateway, the providers, the GitLab and GitHub tools, http_get, http_request and a WebSocket connection's next open. A request in flight keeps the roots it started with, and so does a connection that is open.\n\
                      git and the OS updater trust it after the next boot (/reboot now).",
                     entry.subject(),
                     wanted.shown()
@@ -425,7 +425,7 @@ impl CaEnv<'_> {
             text.push_str(&format!(" ({subject}, SHA-256 {})", fingerprint.shown()));
         }
         text.push_str(
-            ".\nThe brain no longer trusts it from its next request. git and the OS updater trust it until the next boot.",
+            ".\nThe brain no longer trusts it from its next request. A WebSocket connection that is open stays as it was opened until it closes (/guardian connections). git and the OS updater trust it until the next boot.",
         );
         for (fingerprint, _) in &held {
             if let Some(holder) = self.holder_of(fingerprint) {
@@ -795,6 +795,7 @@ mod tests {
             imported.text
         );
         assert!(imported.text.contains("The brain trusts it from its next request"), "{}", imported.text);
+        assert!(imported.text.contains("a WebSocket connection's next open"), "{}", imported.text);
         assert!(imported.text.contains("git and the OS updater trust it after the next boot"), "{}", imported.text);
         assert_eq!(scratch.state_files(), vec![name.clone()], "one file, and no temporary one left");
         let written = std::fs::read_to_string(scratch.root.join("state").join(&name)).unwrap();

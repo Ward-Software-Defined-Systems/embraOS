@@ -35,9 +35,25 @@ published on the Docker host's bridge address alone, `BROWSER_HOST` an IP
 literal with the `default_sni` line of *Start it*. Every answer, refusal
 and figure under *A session over several calls* and in the last three
 *Limits* is from those runs, and so is the bare upgrade under *Check it
-from the host*. Driven by the intelligence on a booted machine, across
-turns, with `/guardian connections`, `/guardian egress deny` and a stop
-during a wait: **TBD**.
+from the host*.
+
+The same day it ran inside the OS: a scratch VM of the `v0.24.0-phase2`
+image with this change's binaries in its slot, and in the place of a model
+a scripted stand-in for the provider that issues the tool call the
+operator types. The tool was installed and built at boot by the in-OS
+toolchain (`/guardian status websocket`: `Ready`, 1.24 s). An `open` was
+refused as a private address, then for its issuer, then with the service's
+401, as `/guardian egress allow`, `/ca import` and `/guardian secret` went
+in one after the other, with no restart between them. The exchange above
+ran a command a turn. A stop from the web console ended a 60 s wait at
+once and left the connection open; `/guardian connections` listed it and
+closed it; `/guardian egress deny` and the removal of the host's secret
+each closed a connection and said so; a 5 MB reply closed its connection
+with code 1009; a connection left unused was closed after ten minutes;
+`http_request` reached `/content` on the same service. After a reboot the
+tool was loaded as built, an id from before named nothing, and an `open`
+went through at once. An intelligence driving the service of its own
+accord, and a machine that is not a VM: **TBD**.
 
 ## What runs
 

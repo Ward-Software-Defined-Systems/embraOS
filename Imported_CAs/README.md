@@ -22,7 +22,7 @@ Nothing in this folder but this README is in git (`.gitignore`): every push of t
 ## What the OS does
 
 - embrad merges the image's certificates and those of `/embra/state/ca-certificates/` with the stock bundle at every boot and exports `SSL_CERT_FILE` and `GIT_SSL_CAINFO` to every service (`crates/embrad/src/ca_bundle.rs`).
-- The brain's HTTP clients trust both directories beside the compiled-in roots (`crates/embra-brain/src/net.rs`): the providers through an HTTPS gateway, the GitLab and GitHub tools, the Guardian transport of `http_get` and `http_request`. One client does not: `web_search`'s, which reaches `api.search.brave.com` on the compiled-in roots alone.
+- The brain's HTTP clients trust both directories beside the compiled-in roots (`crates/embra-brain/src/net.rs`): the providers through an HTTPS gateway, the GitLab and GitHub tools, the Guardian transport of `http_get` and `http_request`, the TLS of a Guardian WebSocket connection. One client does not: `web_search`'s, which reaches `api.search.brave.com` on the compiled-in roots alone.
 
 ## What to know
 
