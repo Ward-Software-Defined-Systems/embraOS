@@ -27,12 +27,17 @@ pub(crate) const GATEWAY_HEADER: &str = "x-local-ai-gateway";
 /// The whole of the identification request: connect, TLS and the answer.
 const IDENTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// What a refused certificate means here, and what fixes it: the STATE
-/// drop-in on a raw image, or the build's own folder for a machine that
-/// `seed-state.sh` does not reach (an ISO install, a hypervisor's disk).
-const CA_HINT: &str = " The listener's certificate is not trusted: put the gateway's CA certificate \
-     (local-ai-gateway tls ca-cert) in /embra/state/ca-certificates/ with seed-state.sh --ca-dir, \
-     or in Imported_CAs/ before the image is built, and boot again.";
+/// What a refused certificate means here, and what fixes it. First the
+/// `/ca` command, on the running machine: the brain trusts an imported
+/// certificate at once, and the command is answered before a session, so
+/// the wizard's question can be answered again right after it. Then the two
+/// routes from outside the OS: the STATE drop-in on a raw image, and the
+/// build's own folder.
+const CA_HINT: &str = " The listener's certificate is not trusted. /ca import <url | uploads/<file>> reads \
+     the gateway's CA certificate and imports it by its SHA-256 (on the gateway's host, local-ai-gateway \
+     tls ca-cert prints the certificate and tls show its SHA-256); the brain trusts it at once. From outside \
+     the OS the file goes into /embra/state/ca-certificates/ with seed-state.sh --ca-dir, or into \
+     Imported_CAs/ before the image is built, and is trusted from the next boot.";
 
 /// What an answer that is not HTTP to a plain `http://` request means: a
 /// TLS listener answers a plaintext request with an alert, which hyper
@@ -552,7 +557,7 @@ mod tests {
         let err = identify(&format!("http://{closed}")).await.unwrap_err();
         assert!(err.starts_with(&format!("nothing answered at http://{closed}/v1/models: ")), "{err}");
         assert!(err.ends_with('.'), "{err}");
-        assert!(!err.contains("ca-certificates") && !err.contains("https://"), "no hint on a refused connection: {err}");
+        assert!(!err.contains("ca-certificates") && !err.contains("/ca import") && !err.contains("https://"), "no hint on a refused connection: {err}");
     }
 
     /// A preset set up through the gateway with no direct endpoint is named
@@ -594,7 +599,17 @@ mod tests {
         // The hint the brain makes of the bare-metal line names no CA directory.
         let hint = crate::net::certificate_date_hint(dated).expect("a date refusal");
         assert!(hint.contains("2018-01-01 00:07:01 UTC") && hint.contains("2026-11-04 00:00:00 UTC"), "{hint}");
-        assert!(!identify_hint("https://gw:4000", dated, Some(hint)).contains("ca-certificates"));
+        let for_dates = identify_hint("https://gw:4000", dated, Some(hint));
+        assert!(!for_dates.contains("ca-certificates") && !for_dates.contains("/ca import"), "{for_dates}");
+        // The certificate hint names the command of the running machine
+        // first, with where the owner shows the fingerprint, and then the
+        // two routes from outside the OS.
+        let at = |needle: &str| CA_HINT.find(needle).unwrap_or_else(|| panic!("the hint lacks {needle}: {CA_HINT}"));
+        assert!(CA_HINT.starts_with(" The listener's certificate is not trusted."));
+        assert!(at("/ca import <url | uploads/<file>>") < at("/embra/state/ca-certificates/"));
+        assert!(at("local-ai-gateway tls ca-cert") < at("tls show its SHA-256"));
+        assert!(at("the brain trusts it at once") < at("seed-state.sh --ca-dir"));
+        assert!(at("Imported_CAs/") < at("is trusted from the next boot"));
     }
 
     /// A TLS listener given as `http://` answers the plaintext request with

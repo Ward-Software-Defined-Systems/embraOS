@@ -826,7 +826,7 @@ mod tests {
             format!(" This machine's clock reads 2026-11-12 03:08:42 UTC: either the clock is behind or the certificate is dated in the future, and nothing confirmed the clock.{FIX}")
         );
         for hint in [date_hint(not_yet, Some(&guess), 0), date_hint(expired, Some(&unconfirmed), 0), date_hint(not_yet, None, 0)] {
-            assert!(!hint.contains("ca-certificates") && !hint.contains("Imported_CAs"), "a date refusal says nothing about the CA: {hint}");
+            assert!(!hint.contains("ca-certificates") && !hint.contains("Imported_CAs") && !hint.contains("/ca "), "a date refusal says nothing about the CA: {hint}");
         }
     }
 
@@ -841,20 +841,20 @@ mod tests {
         let err = crate::provider::gateway::identify(&format!("https://{addr}")).await.unwrap_err();
         assert!(err.contains("certificate not valid yet: verification time "), "{err}");
         assert!(err.contains(" and the certificate begins 2090-01-01 00:00:00 UTC") || err.contains("The certificate begins 2090-01-01 00:00:00 UTC"), "{err}");
-        assert!(!err.contains("ca-certificates") && !err.contains("not trusted"), "{err}");
+        assert!(!err.contains("ca-certificates") && !err.contains("/ca import") && !err.contains("not trusted"), "{err}");
 
         let (_, leaf, key) = mint_ca_and_leaf_dated(Some((2001, 2002)));
         let addr = refused_tls_listener(leaf, key, 1).await;
         let err = crate::provider::gateway::identify(&format!("https://{addr}")).await.unwrap_err();
         assert!(err.contains("certificate expired: verification time "), "{err}");
         assert!(err.contains("ended 2002-01-01 00:00:00 UTC"), "{err}");
-        assert!(!err.contains("ca-certificates") && !err.contains("not trusted"), "{err}");
+        assert!(!err.contains("ca-certificates") && !err.contains("/ca import") && !err.contains("not trusted"), "{err}");
 
-        // A certificate in date under a CA nobody dropped in: the CA directory, as before.
+        // A certificate in date under a CA nobody imported: the /ca command, and the CA directory as before.
         let (_, leaf, key) = mint_ca_and_leaf();
         let addr = refused_tls_listener(leaf, key, 1).await;
         let err = crate::provider::gateway::identify(&format!("https://{addr}")).await.unwrap_err();
-        assert!(err.contains("/embra/state/ca-certificates/") && err.contains("is not trusted"), "{err}");
+        assert!(err.contains("/ca import") && err.contains("/embra/state/ca-certificates/") && err.contains("is not trusted"), "{err}");
         assert!(!err.contains("firmware setup"), "{err}");
     }
 
