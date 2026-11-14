@@ -12,15 +12,17 @@
 //!
 //! Every client built here also trusts the certificate authorities the
 //! image was built with and the operator's CA drop-ins beside the
-//! compiled-in webpki roots ([`operator_roots`]:
+//! compiled-in webpki roots ([`roots`]:
 //! `/usr/share/embra/ca-certificates/` and `/embra/state/ca-certificates/`,
-//! or `EMBRA_CA_DIR` alone when set, read once per process), so a host
-//! behind the operator's own certificate authority — a self-hosted GitLab,
-//! the provider gateway over HTTPS — verifies. The database client is built
-//! apart: loopback, plain HTTP, no roots.
+//! or `EMBRA_CA_DIR` alone when set), so a host behind the operator's own
+//! certificate authority — a self-hosted GitLab, the provider gateway over
+//! HTTPS — verifies. The directories are read at the first client built and
+//! again at a reload ([`reload_roots`]); the two long-lived clients are
+//! built anew when the reading moved ([`SharedClient`]). The database client
+//! is built apart: loopback, plain HTTP, no roots.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use reqwest::redirect::{Attempt, Policy};
 
@@ -83,33 +85,94 @@ fn ca_dirs(dev_override: Option<String>) -> Vec<PathBuf> {
     }
 }
 
-/// The certificate authorities of the image and the operator's CA
-/// drop-ins, read once per process at the first client built, and shared by
-/// every client of the brain and by the Guardian transport. The image's
-/// directory is read-only and STATE's is seeded while the OS is stopped, so
-/// a read at every client build would see the same files; a seeded
-/// certificate takes effect at the next boot.
-pub(crate) fn operator_roots() -> &'static [reqwest::Certificate] {
-    static ROOTS: OnceLock<Vec<reqwest::Certificate>> = OnceLock::new();
-    ROOTS.get_or_init(|| {
-        let mut roots = Vec::new();
-        for dir in ca_dirs(std::env::var(OPERATOR_CA_DIR_ENV).ok()) {
-            let found = operator_roots_in(&dir);
-            if !found.is_empty() {
-                // The operator's line reads as it always has; the image's
-                // has a line of its own, so the journal says which trust
-                // came with the build.
-                let whose = if dir == Path::new(IMAGE_CA_DIR) {
-                    "image CA certificates"
-                } else {
-                    "operator CA drop-ins"
-                };
-                tracing::info!("{whose}: {} certificate(s) from {}", found.len(), dir.display());
-            }
-            roots.extend(found);
+/// One reading of the certificate directories: what a client built from it
+/// trusts beside the compiled-in webpki roots.
+pub(crate) struct Roots {
+    /// Which reading this is, from 1. A long-lived client is kept for as
+    /// long as the reading it was built from is the newest
+    /// ([`SharedClient`]).
+    pub(crate) generation: u64,
+    pub(crate) certs: Vec<reqwest::Certificate>,
+}
+
+/// The readings of the certificate directories, the newest in force. The
+/// directories are read at the first asking and again at every
+/// [`RootStore::reload`]: a certificate that comes in while the brain runs
+/// is a root to every client built after the reload, with no restart. A
+/// client keeps the roots it was built with. The process has one store
+/// ([`roots`], [`reload_roots`]); a test makes its own.
+pub(crate) struct RootStore {
+    current: Mutex<Option<Arc<Roots>>>,
+}
+
+impl RootStore {
+    pub(crate) const fn new() -> Self {
+        Self { current: Mutex::new(None) }
+    }
+
+    /// The reading in force. The first call reads `dirs()`; every later one
+    /// answers from memory.
+    pub(crate) fn current(&self, dirs: impl FnOnce() -> Vec<PathBuf>) -> Arc<Roots> {
+        let mut current = self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(roots) = current.as_ref() {
+            return roots.clone();
         }
+        let roots = Arc::new(read_roots(&dirs(), 1));
+        *current = Some(roots.clone());
         roots
-    })
+    }
+
+    /// Reads `dirs` again and puts that reading in force.
+    pub(crate) fn reload(&self, dirs: &[PathBuf]) -> Arc<Roots> {
+        let mut current = self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let generation = current.as_ref().map_or(1, |roots| roots.generation + 1);
+        let roots = Arc::new(read_roots(dirs, generation));
+        *current = Some(roots.clone());
+        roots
+    }
+}
+
+/// One reading of `dirs`, in their order.
+fn read_roots(dirs: &[PathBuf], generation: u64) -> Roots {
+    let mut certs = Vec::new();
+    for dir in dirs {
+        let found = operator_roots_in(dir);
+        if !found.is_empty() {
+            // The operator's line reads as it always has; the image's has a
+            // line of its own, so the journal says which trust came with
+            // the build.
+            let whose = if dir == Path::new(IMAGE_CA_DIR) {
+                "image CA certificates"
+            } else {
+                "operator CA drop-ins"
+            };
+            tracing::info!("{whose}: {} certificate(s) from {}", found.len(), dir.display());
+        }
+        certs.extend(found);
+    }
+    Roots { generation, certs }
+}
+
+/// The process's readings.
+static PROCESS_ROOTS: RootStore = RootStore::new();
+
+fn dirs_in_force() -> Vec<PathBuf> {
+    ca_dirs(std::env::var(OPERATOR_CA_DIR_ENV).ok())
+}
+
+/// The certificate authorities of the image and the operator's CA drop-ins
+/// as the process last read them, shared by every client of the brain and
+/// by the Guardian transport.
+pub(crate) fn roots() -> Arc<Roots> {
+    PROCESS_ROOTS.current(dirs_in_force)
+}
+
+/// Reads the certificate directories again. Every client built from now on
+/// trusts what they hold, the two long-lived ones included; a request in
+/// flight keeps the client it was sent with.
+#[expect(dead_code, reason = "the /ca command reloads the roots; it arrives in the commits that follow")]
+pub(crate) fn reload_roots() -> Arc<Roots> {
+    PROCESS_ROOTS.reload(&dirs_in_force())
 }
 
 /// The certificates of the `*.pem` and `*.crt` files in `dir`. A missing
@@ -158,13 +221,12 @@ fn operator_roots_in(dir: &Path) -> Vec<reqwest::Certificate> {
 }
 
 /// A client builder with the redirect policy and the operator's roots set;
-/// the caller adds its timeouts (`bounded()` for the two standard ones).
-/// Guard `every_net_builder_sets_a_timeout`.
+/// the caller adds its timeouts. Guard `every_net_builder_sets_a_timeout`.
 pub(crate) fn builder() -> reqwest::ClientBuilder {
-    builder_with(operator_roots())
+    builder_with(&roots().certs)
 }
 
-/// `builder()` on the roots given; `builder()` passes the drop-ins.
+/// `builder()` on the roots given; `builder()` passes the reading in force.
 fn builder_with(roots: &[reqwest::Certificate]) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder().redirect(same_origin_redirect_policy());
     for cert in roots {
@@ -173,45 +235,79 @@ fn builder_with(roots: &[reqwest::Certificate]) -> reqwest::ClientBuilder {
     builder
 }
 
-/// `builder()` with the two standard bounds.
-pub(crate) fn bounded() -> reqwest::ClientBuilder {
-    builder().connect_timeout(CONNECT_TIMEOUT).read_timeout(READ_IDLE_TIMEOUT)
-}
-
-/// A client with the redirect policy, the roots and the two bounds (#26).
-/// The chat, GitHub and GitLab clients take `shared`, one per process; this
-/// builds a fresh one for a caller that needs its own. The roots are read
-/// once per process either way (`operator_roots`), so a CA drop-in seeded
-/// while the brain runs takes effect at the next boot.
+/// A client of its own with the redirect policy, the roots in force and the
+/// two bounds (#26), as `shared` builds its long-lived one. The chat, GitHub
+/// and GitLab paths take `shared`; a test that wants a client apart takes
+/// this.
+#[cfg(test)]
 pub(crate) fn client() -> reqwest::Client {
-    bounded()
+    builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_IDLE_TIMEOUT)
         .build()
         .expect("a reqwest client with a redirect policy and the two bounds builds")
 }
 
-/// The brain's long-lived `client()`, built on first use (#36). `reqwest`'s
+/// A long-lived client, one for each reading of the roots (#36). `reqwest`'s
 /// connection pool lives inside the client: a client built per turn threw
 /// every warm connection away, and the first call of the next turn paid a
-/// new TCP and TLS handshake. The key is a per-request header on every
-/// provider and the bounds are fixed, so one client serves Gemini and its
-/// cache manager, the OpenAI-compatible presets and the GitHub tools. The
-/// Anthropic client keeps its own pair of bounds and its own instance
-/// (`provider::anthropic::shared_client`). The roots are read once per
-/// process either way.
-pub(crate) fn shared() -> reqwest::Client {
-    static SHARED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    SHARED
-        .get_or_init(|| {
-            #[cfg(test)]
-            SHARED_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            client()
-        })
-        .clone()
+/// new TCP and TLS handshake. So the client is kept until the roots are
+/// read again and built anew then: a client keeps the roots it was built
+/// with.
+pub(crate) struct SharedClient {
+    built: Mutex<Option<(u64, reqwest::Client)>>,
 }
 
-/// How many times `shared` built its client: at most once per process.
-#[cfg(test)]
-pub(crate) static SHARED_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+impl SharedClient {
+    pub(crate) const fn new() -> Self {
+        Self { built: Mutex::new(None) }
+    }
+
+    /// The client for `roots`: the one built from that reading, or `build`'s.
+    /// A reading older than the client's is answered with the client: the
+    /// directories were read again since, and the newer reading is in force.
+    pub(crate) fn get(
+        &self,
+        roots: &Roots,
+        build: impl FnOnce(&[reqwest::Certificate]) -> reqwest::Client,
+    ) -> reqwest::Client {
+        let mut built = self.built.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((generation, client)) = built.as_ref()
+            && *generation >= roots.generation
+        {
+            return client.clone();
+        }
+        let client = build(&roots.certs);
+        *built = Some((roots.generation, client.clone()));
+        client
+    }
+}
+
+/// `cell`'s client on the process's roots, finished by `finish` from a
+/// builder that carries the redirect policy and the roots; the caller adds
+/// its timeouts. Guard `every_net_builder_sets_a_timeout`.
+pub(crate) fn shared_through(
+    cell: &SharedClient,
+    finish: impl FnOnce(reqwest::ClientBuilder) -> reqwest::Client,
+) -> reqwest::Client {
+    cell.get(&roots(), |certs| finish(builder_with(certs)))
+}
+
+/// The brain's long-lived `client()` (#36). The key is a per-request header
+/// on every provider and the bounds are fixed, so one client serves Gemini
+/// and its cache manager, the OpenAI-compatible presets and the GitHub and
+/// GitLab tools. The Anthropic client keeps its own pair of bounds and its
+/// own instance (`provider::anthropic::shared_client`).
+pub(crate) fn shared() -> reqwest::Client {
+    static SHARED: SharedClient = SharedClient::new();
+    shared_through(&SHARED, |builder| {
+        builder
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_IDLE_TIMEOUT)
+            .build()
+            .expect("a reqwest client with a redirect policy and the two bounds builds")
+    })
+}
 
 /// What a request error says, its causes joined. reqwest's own line names
 /// the kind and the URL and keeps the cause behind `source()` ("client
@@ -346,16 +442,82 @@ pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockSt
 mod tests {
     use super::*;
 
-    /// #36: the shared client is one per process, however many turns and
-    /// tools ask for it.
+    /// #36: a long-lived client is one for each reading of the roots,
+    /// however many turns and tools ask for it, and a reload makes the next
+    /// asker build a new one. A caller that still holds the older reading
+    /// gets the newer client. On a store and a cell of the test's own: the
+    /// process's are every other test's too.
     #[test]
-    fn a_shared_client_is_built_once() {
+    fn a_shared_client_is_built_once_per_generation_of_the_roots() {
+        let dir = fresh_dir("shared");
+        let dirs = vec![dir.clone()];
+        let store = RootStore::new();
+        let cell = SharedClient::new();
+        let builds = std::sync::atomic::AtomicUsize::new(0);
+        let ask = |roots: &Roots| {
+            cell.get(roots, |certs| {
+                builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                builder_with(certs).timeout(CONNECT_TIMEOUT).build().unwrap()
+            })
+        };
+        let built = || builds.load(std::sync::atomic::Ordering::SeqCst);
+        let first = store.current(|| dirs.clone());
         for _ in 0..3 {
-            let _ = shared();
+            let _ = ask(&store.current(|| dirs.clone()));
         }
-        assert!(SHARED_BUILDS.load(std::sync::atomic::Ordering::SeqCst) <= 1);
+        assert_eq!(built(), 1, "one client for the first reading");
+        let second = store.reload(&dirs);
+        assert_eq!((first.generation, second.generation), (1, 2));
+        for _ in 0..3 {
+            let _ = ask(&store.current(|| dirs.clone()));
+        }
+        assert_eq!(built(), 2, "one more after the reload");
+        let _ = ask(&first);
+        assert_eq!(built(), 2, "an older reading is answered with the newer client");
+        std::fs::remove_dir_all(&dir).ok();
     }
-    use std::sync::Arc;
+
+    /// The directories are read at the first asking and kept, and read again
+    /// at a reload: a certificate dropped in while the brain runs is no root
+    /// until then and a root from then on, to a client built after it, and
+    /// a certificate removed is no root after the next reload.
+    #[tokio::test]
+    async fn the_roots_are_read_again_on_a_reload_and_the_generation_moves() {
+        let (ca_pem, leaf_der, leaf_key) = mint_ca_and_leaf();
+        let dir = fresh_dir("reload");
+        let dirs = vec![dir.clone()];
+        let store = RootStore::new();
+        let before = store.current(|| dirs.clone());
+        assert_eq!((before.generation, before.certs.len()), (1, 0));
+
+        std::fs::write(dir.join("gateway-ca.pem"), &ca_pem).unwrap();
+        let kept = store.current(|| panic!("the directories are read once until a reload"));
+        assert_eq!((kept.generation, kept.certs.len()), (1, 0), "a reading is kept until a reload");
+
+        let after = store.reload(&dirs);
+        assert_eq!((after.generation, after.certs.len()), (2, 1));
+        assert_eq!(store.current(|| dirs.clone()).generation, 2, "the reload's reading is in force");
+
+        // One listener, three handshakes: refused on the first reading,
+        // served on the second, refused again once the file is gone.
+        let addr = tls_listener(leaf_der, leaf_key, 3).await;
+        let url = format!("https://{addr}/v1/models");
+        let ask = |roots: Arc<Roots>| {
+            let url = url.clone();
+            async move {
+                builder_with(&roots.certs).timeout(READ_IDLE_TIMEOUT).build().unwrap().get(url).send().await
+            }
+        };
+        let refused = ask(before).await.unwrap_err();
+        assert!(error_chain(&refused).contains("UnknownIssuer"), "{}", error_chain(&refused));
+        assert_eq!(ask(after).await.unwrap().status(), 200);
+
+        std::fs::remove_file(dir.join("gateway-ca.pem")).unwrap();
+        let removed = store.reload(&dirs);
+        assert_eq!((removed.generation, removed.certs.len()), (3, 0));
+        assert!(ask(removed).await.is_err(), "a removed certificate is no root after the reload");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     use rcgen::{
         BasicConstraints, CertificateParams, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa,
@@ -481,6 +643,36 @@ mod tests {
         assert!(!cause.contains("https://"), "the causes, not reqwest's URL line: {cause}");
 
         assert_eq!(server.await.unwrap(), 1, "one connection served, one handshake refused");
+    }
+
+    /// A TLS listener on the loopback presenting `leaf`, for `connections`
+    /// connections: a handshake the client ends serves nothing, and any
+    /// other is answered 200 with the provider gateway's header.
+    async fn tls_listener(leaf: rustls::pki_types::CertificateDer<'static>, key: Vec<u8>, connections: usize) -> std::net::SocketAddr {
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf], PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)))
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..connections {
+                let Ok((tcp, _)) = listener.accept().await else { return };
+                let Ok(mut tls) = acceptor.accept(tcp).await else { continue };
+                let mut head = vec![0u8; 4096];
+                let _ = tls.read(&mut head).await;
+                let _ = tls
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nx-local-ai-gateway: 0.1.0\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    )
+                    .await;
+                tls.shutdown().await.ok();
+            }
+        });
+        addr
     }
 
     /// A TLS listener on the loopback presenting `leaf`, for `connections`
@@ -767,28 +959,34 @@ mod tests {
     /// #26: a client built from the bare `builder()` sets a timeout itself —
     /// the validate and probe clients a total one, the streaming and API
     /// clients the two bounds — so no reqwest client of the brain can hang
-    /// on a connection that has gone dead. `client()` and `bounded()` carry
-    /// the bounds already; this reads every other use.
+    /// on a connection that has gone dead. This reads every use of
+    /// `builder()` outside this file and the two long-lived clients' own
+    /// builders (`shared_through`).
     #[test]
     fn every_net_builder_sets_a_timeout() {
         let mut files = Vec::new();
         rust_sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
-        // Spelled in two pieces so this test does not read itself.
-        let call = ["crate::net::", "builder()"].concat();
-        let mut seen = 0;
+        // Spelled in pieces so this test does not read itself. The second
+        // pattern is a call of `shared_through`, whose cell is passed by
+        // reference: the two long-lived clients finish their own builder.
+        let calls = [["crate::net::", "builder()"].concat(), ["shared_", "through(&"].concat()];
+        let mut seen = [0usize; 2];
         for file in files {
             let source = std::fs::read_to_string(&file).unwrap();
-            for (at, _) in source.match_indices(&call) {
-                seen += 1;
-                let rest = &source[at..];
-                let statement = &rest[..rest.find(".build()").unwrap_or(rest.len().min(600))];
-                assert!(
-                    statement.contains("timeout"),
-                    "{}: a client built from net::builder() sets no timeout:\n{statement}",
-                    file.display()
-                );
+            for (which, call) in calls.iter().enumerate() {
+                for (at, _) in source.match_indices(call.as_str()) {
+                    seen[which] += 1;
+                    let rest = &source[at..];
+                    let statement = &rest[..rest.find(".build()").unwrap_or(rest.len().min(600))];
+                    assert!(
+                        statement.contains("timeout"),
+                        "{}: a client built from {call} sets no timeout:\n{statement}",
+                        file.display()
+                    );
+                }
             }
         }
-        assert!(seen >= 5, "the scan found {seen} builder sites; the pattern or the tree moved");
+        assert!(seen[0] >= 5, "the scan found {} builder sites; the pattern or the tree moved", seen[0]);
+        assert_eq!(seen[1], 2, "the two long-lived clients: net::shared and the Anthropic stream's");
     }
 }

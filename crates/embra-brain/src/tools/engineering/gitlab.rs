@@ -16,9 +16,10 @@ use crate::tools::registry::DispatchContext;
 /// the stock webpki roots and the operator's CA drop-ins like every client
 /// of the brain, so a self-hosted instance behind a private CA (e.g.
 /// mkcert) verifies. It was built per call "so a seeded operator CA takes
-/// effect without a restart", a reason that was never true: the roots are
-/// read once per process (`net::operator_roots`), so a drop-in seeded
-/// while the brain runs takes effect at the next boot either way.
+/// effect without a restart", a reason that was never true then: the roots
+/// were read once per process. They are read again at a reload now
+/// (`net::reload_roots`), and this client is built anew on the new reading
+/// (`net::SharedClient`).
 fn gitlab_client() -> reqwest::Client {
     crate::net::shared()
 }

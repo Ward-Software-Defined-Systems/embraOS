@@ -11,8 +11,8 @@ use crate::tools::registry::DispatchContext;
 
 /// A request to the GitHub API (#37): the brain's shared client (the
 /// compiled-in roots and the redirect policy of `crate::net`: the same
-/// origin only, so the bearer never travels to a third host; one pool per
-/// process, #36), the user agent and the token. Every `gh_*` request is
+/// origin only, so the bearer never travels to a third host; one pool for
+/// each reading of the roots, #36), the user agent and the token. Every `gh_*` request is
 /// built here and nowhere else.
 fn github_request(method: reqwest::Method, token: &str, url: &str) -> reqwest::RequestBuilder {
     crate::net::shared()

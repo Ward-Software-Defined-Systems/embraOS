@@ -72,23 +72,21 @@ pub(crate) const MODELS_PATH: &str = "/v1/models";
 pub(crate) const API_VERSION: &str = "2023-06-01";
 const BETA: &str = "prompt-caching-2024-07-31";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
-/// The streaming client, one per process (#36): bounded connect + per-read
-/// idle timeouts only (see the const docs — a total timeout is deliberately
-/// absent), and a redirect followed to the same origin only (`crate::net`).
-/// The key is a per-request header, so one client serves every instance;
-/// built once, its warm connections outlive the turn. The builder cannot
-/// fail on these options.
+/// The streaming client, one for each reading of the roots (#36,
+/// `crate::net::SharedClient`): bounded connect + per-read idle timeouts
+/// only (see the const docs — a total timeout is deliberately absent), and
+/// a redirect followed to the same origin only (`crate::net`). The key is a
+/// per-request header, so one client serves every instance, and its warm
+/// connections outlive the turn. The builder cannot fail on these options.
 pub(crate) fn shared_client() -> reqwest::Client {
-    static SHARED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    SHARED
-        .get_or_init(|| {
-            crate::net::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .read_timeout(READ_IDLE_TIMEOUT)
-                .build()
-                .expect("a reqwest client with two timeouts and a redirect policy builds")
-        })
-        .clone()
+    static SHARED: crate::net::SharedClient = crate::net::SharedClient::new();
+    crate::net::shared_through(&SHARED, |builder| {
+        builder
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_IDLE_TIMEOUT)
+            .build()
+            .expect("a reqwest client with two timeouts and a redirect policy builds")
+    })
 }
 
 /// TCP + TLS establishment bound for the streaming client.
