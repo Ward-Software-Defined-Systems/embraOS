@@ -11,7 +11,7 @@
 //! optional domain allowlist, then size + content-type caps after. The
 //! search guard clamps the request, filters and reduces the results.
 
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -381,12 +381,45 @@ fn refuse_class(class: AddressClass, private_ok: bool, verb: &str) -> Result<(),
 /// `.html`, a moved path); a 301 used to come back as an empty page.
 pub const MAX_REDIRECTS: usize = 3;
 
+/// A destination the guard passed: the URL, and the addresses DNS gave for
+/// its host, each one classified. A capability that dials by itself
+/// connects to these and to nothing else, so the name is not resolved a
+/// second time between the check and the connection.
+#[derive(Debug)]
+pub(crate) struct Destination {
+    pub(crate) url: url::Url,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the websocket capability of the commit that follows dials these")
+    )]
+    pub(crate) addrs: Vec<SocketAddr>,
+}
+
+/// What a URL of another scheme than the capability's is told.
+fn wrong_scheme(wanted: &str, found: &str) -> String {
+    match (wanted, found) {
+        ("https", "ws" | "wss") => "only https:// destinations are allowed here: a WebSocket (wss://) is opened by \
+             the shipped websocket tool, which guardian_list shows when it is installed"
+            .to_string(),
+        ("wss", _) => "only wss:// destinations are allowed (a plain ws:// connection is refused, as plain \
+             http:// is)"
+            .to_string(),
+        _ => "only https:// destinations are allowed".to_string(),
+    }
+}
+
 /// The policy on one URL: https only, no userinfo, a host, the allowlist,
 /// and no private or loopback address, as a literal or as DNS resolves it.
 fn check_url(caps: &Capabilities, url: &str) -> Result<url::Url, String> {
+    check_destination(caps, url, "https").map(|destination| destination.url)
+}
+
+/// [`check_url`] for a capability of scheme `scheme`, with the addresses
+/// that were classified.
+pub(crate) fn check_destination(caps: &Capabilities, url: &str, scheme: &str) -> Result<Destination, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
-    if parsed.scheme() != "https" {
-        return Err("only https:// destinations are allowed".to_string());
+    if parsed.scheme() != scheme {
+        return Err(wrong_scheme(scheme, parsed.scheme()));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("url userinfo (user:pass@) is not allowed".to_string());
@@ -416,20 +449,20 @@ fn check_url(caps: &Capabilities, url: &str) -> Result<url::Url, String> {
         refuse_class(classify(&ip), private_ok, "is")?;
     }
     let port = parsed.port_or_known_default().unwrap_or(443);
+    let mut addrs = Vec::new();
     match (host.as_str(), port).to_socket_addrs() {
-        Ok(addrs) => {
-            let mut resolved = false;
-            for a in addrs {
-                resolved = true;
+        Ok(found) => {
+            for a in found {
                 refuse_class(classify(&a.ip()), private_ok, "resolves to")?;
+                addrs.push(a);
             }
-            if !resolved {
+            if addrs.is_empty() {
                 return Err("destination did not resolve".to_string());
             }
         }
         Err(e) => return Err(format!("dns resolution failed: {e}")),
     }
-    Ok(parsed)
+    Ok(Destination { url: parsed, addrs })
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -1585,6 +1618,39 @@ mod tests {
         let v = parse_ok(&guarded_http_get(&mock_caps(), "http://1.1.1.1/"));
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("https"));
+    }
+
+    /// A WebSocket URL at an HTTP capability is refused, and the refusal
+    /// names the tool that opens one.
+    #[test]
+    fn a_websocket_url_at_an_http_capability_names_the_websocket_tool() {
+        for url in ["wss://1.1.1.1/chromium", "ws://1.1.1.1/"] {
+            let v = parse_ok(&guarded_http_get(&mock_caps(), url));
+            assert_eq!(v["ok"], false);
+            let said = v["error"].as_str().unwrap();
+            assert!(
+                said.starts_with("only https:// destinations are allowed here") && said.contains("the shipped websocket tool"),
+                "{said}"
+            );
+        }
+        let v = parse_ok(&guarded_http_get(&mock_caps(), "ftp://1.1.1.1/"));
+        assert_eq!(v["error"], "only https:// destinations are allowed");
+    }
+
+    /// The check hands back the addresses it classified, for a capability
+    /// that dials them itself; the scheme is the capability's.
+    #[test]
+    fn the_destination_check_returns_the_addresses_it_classified() {
+        let at = |text: &str| text.parse::<SocketAddr>().unwrap();
+        let destination = check_destination(&mock_caps(), "https://1.1.1.1:8443/x", "https").unwrap();
+        assert_eq!(destination.addrs, vec![at("1.1.1.1:8443")]);
+        assert_eq!(destination.url.as_str(), "https://1.1.1.1:8443/x");
+        let destination = check_destination(&mock_caps(), "wss://1.1.1.1/chromium", "wss").unwrap();
+        assert_eq!(destination.addrs, vec![at("1.1.1.1:443")], "wss is port 443");
+        let wrong = check_destination(&mock_caps(), "https://1.1.1.1/", "wss").unwrap_err();
+        assert!(wrong.starts_with("only wss:// destinations are allowed"), "{wrong}");
+        let loopback = check_destination(&mock_caps(), "wss://127.0.0.1/", "wss").unwrap_err();
+        assert!(loopback.contains("loopback"), "{loopback}");
     }
 
     #[test]
