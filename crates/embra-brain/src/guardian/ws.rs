@@ -172,13 +172,11 @@ impl Registry {
     }
 
     /// A tool that was deleted or replaced takes its connections with it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the operator's commands of the commit that follows call it"))]
     pub(crate) fn close_tool(&self, tool: &str, why: &str) -> usize {
         self.close_where(why, |conn| conn.tool == tool)
     }
 
     /// A host the operator denied, or whose secret was removed.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the operator's commands of the commit that follows call it"))]
     pub(crate) fn close_host(&self, host: &str, why: &str) -> usize {
         let host = host.to_ascii_lowercase();
         let (name, port) = embra_guardian::caps::secret_place(&host);
@@ -188,7 +186,6 @@ impl Registry {
         })
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "the operator's commands of the commit that follows call it"))]
     pub(crate) fn close_all(&self, why: &str) -> usize {
         self.close_where(why, |_| true)
     }
@@ -1083,6 +1080,52 @@ mod tests {
         assert_eq!(registry.close_host(&format!("127.0.0.1:{}", addr.port()), "its secret was removed"), 2);
         open(&one, addr).await;
         assert_eq!(registry.close_all("closed by the operator"), 1);
+    }
+
+    /// The operator's command on the table: the open connections with
+    /// their tool and their host, one closed by its id, all closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_operators_command_lists_and_closes_connections() {
+        use super::super::{closing_note, connections_reply, span};
+        let pki = pki();
+        let addr = serve(&pki, echo()).await;
+        let registry = Arc::new(Registry::new(Limits::default()));
+        let tls = client_tls(Some(&pki.ca_der));
+        assert_eq!(connections_reply(&registry, ""), "guardian: no WebSocket connection is open.");
+        let (one, _) = call(&registry, "websocket", &tls, BUDGET);
+        let (other, _) = call(&registry, "cdp_helper", &tls, BUDGET);
+        let first = open(&one, addr).await;
+        let second = open(&other, addr).await;
+
+        let listing = connections_reply(&registry, " list ");
+        let lines: Vec<&str> = listing.lines().collect();
+        assert_eq!(lines[0], "guardian: 2 WebSocket connection(s) open:");
+        assert_eq!(
+            lines[1],
+            format!("  {second}  cdp_helper  127.0.0.1:{}/chromium  open 0 s, unused 0 s, 0 frame(s) waiting, 0 dropped", addr.port()),
+            "by tool, with the path and never the query"
+        );
+        assert!(lines[2].starts_with(&format!("  {first}  websocket  127.0.0.1:{}/chromium  ", addr.port())), "{listing}");
+        assert_eq!(lines[3], "/guardian connections close <id> ends one, close all every one.");
+
+        assert_eq!(connections_reply(&registry, &format!("close {first}")), format!("guardian: {first} closed"));
+        assert_eq!(
+            connections_reply(&registry, &format!("close {first}")),
+            format!("guardian: no open connection {first} (/guardian connections lists them)")
+        );
+        assert!(send_text(&one, &first, "x").await.unwrap_err().contains("no open connection"));
+        assert_eq!(connections_reply(&registry, "close all"), "guardian: 1 WebSocket connection(s) closed");
+        assert_eq!(connections_reply(&registry, "close all"), "guardian: 0 WebSocket connection(s) closed");
+        for bad in ["close", "open ws-1", "shut all"] {
+            assert_eq!(connections_reply(&registry, bad), "Usage: /guardian connections [close <id>|all]", "{bad}");
+        }
+
+        assert_eq!(closing_note("guardian: 10.0.0.5 removed from the egress allowlist".into(), 0), "guardian: 10.0.0.5 removed from the egress allowlist");
+        assert_eq!(
+            closing_note("guardian: 10.0.0.5 removed from the egress allowlist".into(), 2),
+            "guardian: 10.0.0.5 removed from the egress allowlist; 2 open WebSocket connection(s) to it closed"
+        );
+        assert_eq!([span(0), span(119), span(120), span(7199), span(7200), span(9000)], ["0 s", "119 s", "2 min", "119 min", "2 h 0 min", "2 h 30 min"].map(String::from));
     }
 
     /// A message over the cap ends the connection with close code 1009; the

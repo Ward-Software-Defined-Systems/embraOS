@@ -79,8 +79,9 @@ Guardian:
   /guardian approve <n>|reject <n>   Approve/reject a tool the intelligence proposed
   /guardian rebuild <n>|--all    Rebuild tools an OS update left unloaded, or failed builds
   /guardian key brave <token>    Set the Brave Search API key (web_search tools)
-  /guardian secret <host> <header> <value>   A credential the host adds to http_request calls to that host
+  /guardian secret <host> <header> <value>   A credential the host adds to http_request calls and websocket handshakes to that host
   /guardian egress allow|deny <host>   Private hosts the tools may reach (loopback never)
+  /guardian connections [close <id>|all]   WebSocket connections the tools hold open
 
 Identity:
   /soul                          Display the soul document

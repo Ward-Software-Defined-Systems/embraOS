@@ -329,7 +329,10 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
         "status" => match load_doc(db, rest.trim()).await {
             Some(d) => {
                 let mut out = status_human(&d, &availability_now(&d));
-                if d.caps.iter().any(|c| c == embra_guardian::abi::CAP_HTTP_REQUEST) {
+                let takes_secrets = |c: &String| {
+                    c == embra_guardian::abi::CAP_HTTP_REQUEST || c == embra_guardian::abi::CAP_WEBSOCKET
+                };
+                if d.caps.iter().any(takes_secrets) {
                     let hosts = crate::config::load_config(db)
                         .await
                         .ok()
@@ -341,6 +344,15 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
                     } else {
                         format!("secrets: for {} (names only; values never shown)", hosts.join(", "))
                     };
+                    out = out.replacen("--- build log tail ---", &format!("{line}\n--- build log tail ---"), 1);
+                }
+                if d.caps.iter().any(|c| c == embra_guardian::abi::CAP_WEBSOCKET) {
+                    let open = ws::registry()
+                        .list_all()
+                        .iter()
+                        .filter(|(tool, info)| *tool == d.name && !info.closed)
+                        .count();
+                    let line = format!("connections: {open} open (/guardian connections)");
                     out = out.replacen("--- build log tail ---", &format!("{line}\n--- build log tail ---"), 1);
                 }
                 out
@@ -374,16 +386,18 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
         "key" => key_cmd(rest),
         "secret" => secret_cmd(db, rest).await,
         "egress" => egress_cmd(db, rest).await,
+        "connections" => connections_cmd(rest),
         "" => "Usage: /guardian-define (paste a module) | /guardian list | \
                 /guardian status <name> | /guardian show <name> | \
                 /guardian approve <name> | /guardian reject <name> | \
                 /guardian rebuild <name> | /guardian rebuild --all | \
                 /guardian delete <name> | /guardian key brave <token> | \
-                /guardian secret <host> <header> <value> | /guardian egress allow <host>"
+                /guardian secret <host> <header> <value> | /guardian egress allow <host> | \
+                /guardian connections [close <id>|all]"
             .to_string(),
         other => format!(
             "guardian: unknown subcommand '{other}'. Use list|status|show|approve|reject|\
-             rebuild|delete|key|secret|egress, or /guardian-define to paste a module."
+             rebuild|delete|key|secret|egress|connections, or /guardian-define to paste a module."
         ),
     }
 }
@@ -519,7 +533,7 @@ fn secret_stored_reply(host: &str, header: &str) -> String {
     let (name, port) = embra_guardian::caps::secret_place(host);
     format!(
         "guardian: secret stored for {host}: header '{header}' (value not shown). The host \
-         adds it to every http_request to {name} on port {port}, and to no other port of it \
+         adds it to every http_request and every websocket handshake to {name} on port {port}, and to no other port of it \
          (/guardian secret {name}:<port> … stores one for another); a tool never sees it."
     )
 }
@@ -536,11 +550,13 @@ async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
         Err(e) => return format!("guardian: could not load config — {e}"),
     };
     let mut secrets = cfg.guardian_secrets.take().unwrap_or_default();
+    // The host whose secret went: a connection opened with it is closed.
+    let mut revoked: Option<String> = None;
     let reply = match op {
         SecretOp::List => {
             if secrets.is_empty() {
                 return "guardian: no secrets stored. /guardian secret <host> <header> <value> \
-                        adds one; the host injects it into every http_request to that host \
+                        adds one; the host injects it into every http_request and websocket handshake to that host \
                         on its port (443, or the one in <host>:<port>), and the model never \
                         sees it."
                     .to_string();
@@ -561,7 +577,10 @@ async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
             };
         }
         SecretOp::RemoveHost(host) => match secrets.remove(&host) {
-            Some(m) => format!("guardian: {} secret(s) removed for {host}", m.len()),
+            Some(m) => {
+                revoked = Some(host.clone());
+                format!("guardian: {} secret(s) removed for {host}", m.len())
+            }
             None => return format!("guardian: no secrets stored for {host}"),
         },
         SecretOp::RemoveHeader(host, header) => {
@@ -574,6 +593,7 @@ async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
             if !removed {
                 return format!("guardian: no secret '{header}' stored for {host}");
             }
+            revoked = Some(host.clone());
             format!("guardian: secret '{header}' removed for {host}")
         }
         SecretOp::Set { host, header, value } => {
@@ -583,8 +603,79 @@ async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
     };
     cfg.guardian_secrets = if secrets.is_empty() { None } else { Some(secrets) };
     match crate::config::save_config(db, &cfg).await {
-        Ok(()) => reply,
+        Ok(()) => with_closed(reply, revoked.as_deref(), "the operator removed the host's secret"),
         Err(e) => format!("guardian: could not save config — {e}"),
+    }
+}
+
+/// A revocation reaches a live connection: the WebSocket connections to
+/// `host` are closed, and the reply says how many.
+fn with_closed(reply: String, host: Option<&str>, why: &str) -> String {
+    closing_note(reply, host.map_or(0, |host| ws::registry().close_host(host, why)))
+}
+
+fn closing_note(reply: String, closed: usize) -> String {
+    match closed {
+        0 => reply,
+        n => format!("{reply}; {n} open WebSocket connection(s) to it closed"),
+    }
+}
+
+/// How long, in the largest two units that say it.
+fn span(seconds: u64) -> String {
+    match seconds {
+        0..=119 => format!("{seconds} s"),
+        120..=7199 => format!("{} min", seconds / 60),
+        _ => format!("{} h {} min", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
+/// `/guardian connections` | `connections close <id>` | `connections close
+/// all`: the WebSocket connections the tools hold open. A public host
+/// passes the egress policy without any list, so this is where the
+/// operator ends a connection to one.
+fn connections_cmd(rest: &str) -> String {
+    connections_reply(&ws::registry(), rest)
+}
+
+/// [`connections_cmd`] on a table.
+fn connections_reply(registry: &ws::Registry, rest: &str) -> String {
+    let rest = rest.trim();
+    if rest.is_empty() || rest.eq_ignore_ascii_case("list") {
+        let open: Vec<(String, embra_guardian::WsConnInfo)> =
+            registry.list_all().into_iter().filter(|(_, info)| !info.closed).collect();
+        if open.is_empty() {
+            return "guardian: no WebSocket connection is open.".to_string();
+        }
+        let mut out = vec![format!("guardian: {} WebSocket connection(s) open:", open.len())];
+        for (tool, c) in &open {
+            out.push(format!(
+                "  {}  {tool}  {}:{}{}  open {}, unused {}, {} frame(s) waiting, {} dropped",
+                c.id,
+                c.host,
+                c.port,
+                c.path,
+                span(c.open_secs),
+                span(c.idle_secs),
+                c.buffered,
+                c.dropped
+            ));
+        }
+        out.push("/guardian connections close <id> ends one, close all every one.".to_string());
+        return out.join("\n");
+    }
+    match rest.split_once(char::is_whitespace).map(|(verb, id)| (verb, id.trim())) {
+        Some(("close", "all")) => {
+            format!("guardian: {} WebSocket connection(s) closed", registry.close_all("closed by the operator"))
+        }
+        Some(("close", id)) if !id.is_empty() => {
+            if registry.close_id(id, "closed by the operator") {
+                format!("guardian: {id} closed")
+            } else {
+                format!("guardian: no open connection {id} (/guardian connections lists them)")
+            }
+        }
+        _ => "Usage: /guardian connections [close <id>|all]".to_string(),
     }
 }
 
@@ -676,6 +767,8 @@ async fn egress_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
         Err(e) => return format!("guardian: could not load config — {e}"),
     };
     let mut hosts = cfg.guardian_private_hosts.take().unwrap_or_default();
+    // A host that left the list: a connection to it is closed.
+    let mut revoked: Option<String> = None;
     let reply = match op {
         EgressOp::List => {
             return if hosts.is_empty() {
@@ -693,8 +786,8 @@ async fn egress_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
             hosts.push(host.clone());
             hosts.sort();
             format!(
-                "guardian: {host} added to the egress allowlist: http_get and http_request may \
-                 reach it although it resolves to a private address. Loopback stays refused."
+                "guardian: {host} added to the egress allowlist: http_get, http_request and \
+                 websocket may reach it although it resolves to a private address. Loopback stays refused."
             )
         }
         EgressOp::Deny(host) => {
@@ -703,12 +796,13 @@ async fn egress_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
             if hosts.len() == before {
                 return format!("guardian: {host} is not on the egress allowlist");
             }
+            revoked = Some(host.clone());
             format!("guardian: {host} removed from the egress allowlist")
         }
     };
     cfg.guardian_private_hosts = if hosts.is_empty() { None } else { Some(hosts) };
     match crate::config::save_config(db, &cfg).await {
-        Ok(()) => reply,
+        Ok(()) => with_closed(reply, revoked.as_deref(), "the operator removed the host from the egress allowlist"),
         Err(e) => format!("guardian: could not save config — {e}"),
     }
 }
@@ -1421,6 +1515,8 @@ async fn delete(db: &Arc<WardsonDbClient>, name: &str) -> String {
     if let Some(rt) = embra_guardian::runtime() {
         rt.remove(name);
     }
+    // A deleted tool takes its connections with it.
+    ws::registry().close_tool(name, "the tool was deleted");
     let _ = db.delete(COLLECTION, name).await;
     let _ = std::fs::remove_dir_all(base().join("tools").join(name));
     let _ = std::fs::remove_file(artifact_path(name));
@@ -1764,6 +1860,9 @@ async fn build_and_register(db: Arc<WardsonDbClient>, module: ValidatedModule) {
                 &art.wasm,
             ) {
                 Ok(()) => {
+                    // Another build of the tool is loaded: the connections
+                    // the one before it held are not the new one's.
+                    ws::registry().close_tool(&module.name, "the tool was built again");
                     // The hash of the bytes just loaded: what boot reconcile
                     // demands of the file on DATA (`artifact_check`).
                     let artifact = Some(sha256_hex_bytes(&art.wasm));
