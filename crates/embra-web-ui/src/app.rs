@@ -64,7 +64,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("System", &[
         ("/status", "overview"), ("/help", "help"), ("/reboot", "reboot"), ("/backup", "backups"),
-        ("/ca", "CA certificates"), ("/update", "OS update"),
+        ("/ca", "CA certificates"), ("/network", "network"), ("/update", "OS update"),
         ("/feedback-loop", "experimental"),
     ]),
 ];
@@ -225,6 +225,12 @@ const SPECS: &[Spec] = &[
         fields: &[sel("Action", &["(list)", "import", "remove"], false),
             t("Source (import): a URL or uploads/<file>; file (remove)", "https://gateway.example:8787/ca.pem · uploads/ca.pem", false),
             t("SHA-256 (import, to write it)", "sha256:AB:CD:… as the owner shows it", false)] },
+    Spec { cmd: "/network", title: "Network",
+        note: "Blank = the network cards with their links and addresses, the default route, the resolvers and the machine's name. static gives a card an address of its own, for a network without DHCP: the card, then the address with its prefix, a gateway and resolvers; dhcp puts the card back on DHCP. hostname names the machine (auto = the name a DHCP server assigns, or embraos). A setting is applied within a few seconds; one made for the card this console is open through moves the console to the new address.",
+        join: " ", guided: false,
+        fields: &[sel("Action", &["(show)", "static", "dhcp", "hostname"], false),
+            t("Card (static, dhcp) or name (hostname)", "eth0 · axiom · auto", false),
+            t("Address/prefix [gateway] [dns server ...] (static)", "192.168.1.50/24 192.168.1.1 dns 192.168.1.1", false)] },
     Spec { cmd: "/update", title: "OS update",
         note: "Blank = check the release published at the update source against this one (the manifest's signature is verified first). apply writes it into the inactive slot and stages it for the next boot; status shows both slots; rollback makes the other slot the default; source shows, sets or resets your own source; auto shows, or turns on or off, the check the brain runs by itself a few minutes after boot and once a day. A check and an apply take --tag <v…>, one release of a GitHub releases source in place of the latest; apply takes --allow-downgrade for an older release or another build of this version.",
         join: " ", guided: false,

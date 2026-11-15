@@ -31,6 +31,7 @@ mod guardian;
 mod media;
 mod embedding;
 mod net;
+mod network;
 mod secrets;
 mod update_check;
 

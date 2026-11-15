@@ -447,6 +447,9 @@ pub(super) enum SetupCommand {
     /// The provider gateway's certificate authority goes in before the
     /// provider is set up.
     Ca,
+    /// A machine on a network without DHCP is given its address before
+    /// anything that needs the network.
+    Network,
     Reboot,
     /// Any other: answered once the setup is complete.
     Later,
@@ -456,6 +459,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
     match command.trim() {
         "/backup" => SetupCommand::Backup,
         "/ca" => SetupCommand::Ca,
+        "/network" => SetupCommand::Network,
         "/reboot" => SetupCommand::Reboot,
         _ => SetupCommand::Later,
     }
@@ -465,7 +469,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
 /// the command but that it was not run: the word may be one no command has.
 pub(super) fn later_notice(command: &str) -> String {
     let shown: String = command.trim().chars().take(40).collect();
-    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca and /reboot are.")
+    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca, /network and /reboot are.")
 }
 
 /// What the stages before a session do with a client's frame: the
@@ -475,9 +479,10 @@ pub(super) fn later_notice(command: &str) -> String {
 /// installed again is restored from exactly there (a backup uploaded through
 /// the web console, `/backup restore`, `/reboot now`), and the provider
 /// gateway's certificate authority is imported there, ahead of the
-/// provider's setup (`/ca import`). So `/backup`, `/ca` and `/reboot` are
-/// answered as in a session, the confirmation of a restore is taken, and
-/// any other command gets one line.
+/// provider's setup (`/ca import`), and a machine on a network without
+/// DHCP is given its address there (`/network static`). So `/backup`, `/ca`,
+/// `/network` and `/reboot` are answered as in a session, the confirmation
+/// of a restore is taken, and any other command gets one line.
 #[derive(Clone)]
 pub(crate) struct SetupCommands {
     tx: mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -517,6 +522,7 @@ impl SetupCommands {
                 match setup_command(&cmd.command) {
                     SetupCommand::Backup => handle_backup_command(&cmd.args, &self.tx, &self.pending_restore).await,
                     SetupCommand::Ca => super::ca::handle_ca_command(&cmd.args, &self.tx).await,
+                    SetupCommand::Network => super::network::handle_network_command(&cmd.args, &self.tx).await,
                     SetupCommand::Reboot => handle_reboot_command(&cmd.args, &self.tx).await,
                     SetupCommand::Later => {
                         let _ = self
@@ -574,7 +580,7 @@ mod backup_tests {
     /// `/ca` and `/reboot` are answered, and any other command gets its one
     /// line: none is dropped without a word.
     #[tokio::test]
-    async fn before_a_session_backup_ca_and_reboot_are_answered_and_any_other_command_is_told_to_wait() {
+    async fn before_a_session_backup_ca_network_and_reboot_are_answered_and_any_other_command_is_told_to_wait() {
         let (tx, mut rx) = mpsc::channel(16);
         let pending = Arc::new(Mutex::new(None));
         let door = SetupCommands::new(&tx, &pending);
@@ -603,11 +609,20 @@ mod backup_tests {
         assert_eq!(import.len(), 1);
         assert!(import[0].starts_with("Credentials in the URL are refused") && import[0].ends_with("Nothing was written."), "{import:?}");
 
+        // `/network` is the command itself too: its usage, and a refusal
+        // only the command gives (no such card on this host).
+        assert_eq!(door.take(command("/network", "help")).await, None);
+        assert_eq!(said(&mut rx), vec![crate::network::USAGE.to_string()], "/network is answered as in a session");
+        assert_eq!(door.take(command("/network", "dhcp no-such-card")).await, None);
+        let network = said(&mut rx);
+        assert_eq!(network.len(), 1);
+        assert!(network[0].starts_with("No card named no-such-card"), "{network:?}");
+
         for other in ["/status", "/sessions", "/provider", "/frobnicate"] {
             assert_eq!(door.take(command(other, "now")).await, None);
             let line = said(&mut rx);
             assert_eq!(line, vec![later_notice(other)], "{other}");
-            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca and /reboot are"), "{line:?}");
+            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca, /network and /reboot are"), "{line:?}");
         }
 
         // A frame the stages never read is still not theirs, and says nothing.

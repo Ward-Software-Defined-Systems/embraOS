@@ -259,6 +259,11 @@ pub struct SystemStatus {
     /// asks by itself; omitted on a machine without the updater.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update: Option<crate::update_check::UpdateStatus>,
+    /// The network as embrad keeps it (`/network` shows the same): the
+    /// machine's name, each card with its link and address, the resolvers;
+    /// omitted on a machine without embrad's status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<crate::network::NetworkReport>,
     pub embedding: EmbeddingHealth,
 }
 
@@ -347,6 +352,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
         provider: crate::provider::health::latest().map(ProviderStatus::from),
         provider_gateway: cfg.ok().and_then(|c| c.provider_gateway),
         update: crate::update_check::status_for_report(),
+        network: crate::network::report(&crate::network::NetEnv::in_force()),
         embedding: EmbeddingHealth {
             failures_write: failures.write,
             failures_query: failures.query,
@@ -1015,6 +1021,7 @@ mod native_args_tests {
             provider: None,
             provider_gateway: None,
             update: None,
+            network: None,
             embedding: EmbeddingHealth { failures_write: 0, failures_query: 0, last_failure: None },
         };
         let v = serde_json::to_value(&s).unwrap();
@@ -1237,6 +1244,7 @@ mod slot_report_tests {
             provider: None,
             provider_gateway: None,
             update: None,
+            network: None,
             embedding: EmbeddingHealth { failures_write: 0, failures_query: 0, last_failure: None },
         };
         let json = serde_json::to_value(&s).unwrap();

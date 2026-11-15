@@ -95,6 +95,8 @@ System:
   /backup                        Snapshots of STATE and DATA: create [label], list, restore <name>, delete <name>, upload, status
   /ca                            Certificate authorities beside the public ones: list, import <url|uploads/file> [sha256:<fingerprint>],
                                  remove <file>; an import is trusted by the brain at once, by git and the OS updater after the next boot
+  /network                       The network cards, their addresses and the machine's name: static <card> <address>/<prefix>
+                                 [<gateway>] [dns <server> ...], dhcp <card>, hostname <name>|auto; applied within a few seconds
   /update                        Check the published release; apply, status, rollback, source [<url>|reset];
                                  --tag <v…> names one release, apply --allow-downgrade takes an older one;
                                  auto [on|off] is the check the brain runs by itself once a day
