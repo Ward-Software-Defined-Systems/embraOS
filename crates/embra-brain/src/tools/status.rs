@@ -199,8 +199,9 @@ pub fn slot_report() -> Option<SlotReport> {
     embra_boot::BootStatus::read().map(SlotReport::from)
 }
 
-/// The clock as embrad left it at boot (`/run/embra/clock-status`;
-/// `embra_boot::ClockStatus`): whether a time server set it, whether it is
+/// The clock as embrad keeps it (`/run/embra/clock-status`, written at boot
+/// and at every check since; `embra_boot::ClockStatus`): whether a time
+/// server set it this boot, whether it is
 /// known to be behind (the hardware clock had lost its time and no server
 /// answered, so the clock resumed from the last time this machine saved,
 /// or from the image's build time), and the sentence that says which.
@@ -209,8 +210,8 @@ pub fn slot_report() -> Option<SlotReport> {
 pub struct ClockReport {
     pub synchronized: bool,
     /// The clock is known to be behind the real time: every certificate
-    /// date check runs against it, and every timestamp written this boot
-    /// carries it.
+    /// date check runs against it, and every timestamp written until a time
+    /// server answers carries it.
     pub behind: bool,
     pub summary: String,
 }
@@ -232,7 +233,8 @@ pub struct SystemStatus {
     /// The A/B slots (`slot_report`); omitted on a boot without a slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot: Option<SlotReport>,
-    /// What the boot made of the clock (`clock_report`); omitted without
+    /// What set the clock and what the last check came to (`clock_report`);
+    /// omitted without
     /// embrad's record.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clock: Option<ClockReport>,

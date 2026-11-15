@@ -456,8 +456,11 @@ pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockSt
     let (at, bound) = match refusal {
         DateRefusal::NotYet { at, bound } | DateRefusal::Expired { at, bound } => (format_utc(at.unwrap_or(now)), bound.map(format_utc)),
     };
-    let set_from = clock.and_then(|c| match &c.sync {
-        Sync::Synchronized { server, .. } => Some(server.as_str()),
+    // What set the clock, and when: the newest check since the boot that
+    // was applied, else the boot's own answer.
+    let set_from = clock.and_then(|c| match (&c.checked, &c.sync) {
+        (Some(check), _) => Some(format!("{} at {}", check.server, format_utc(check.at))),
+        (None, Sync::Synchronized { server, .. }) => Some(format!("{server} at boot")),
         _ => None,
     });
     let guess = clock.is_some_and(|c| c.is_a_guess());
@@ -484,7 +487,7 @@ pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockSt
     match (refusal, set_from) {
         (DateRefusal::NotYet { .. }, Some(server)) => {
             let begins = bound.map(|b| format!("begins {b}, after this machine's clock ({at})")).unwrap_or_else(|| format!("is not valid yet by this machine's clock ({at})"));
-            format!(" The certificate {begins}, and that clock was set from {server} at boot: the certificate is dated in the future. Check the clock of the machine that issued it.")
+            format!(" The certificate {begins}, and that clock was set from {server}: the certificate is dated in the future. Check the clock of the machine that issued it.")
         }
         (DateRefusal::NotYet { .. }, None) => {
             let begins = bound.map(|b| format!(" and the certificate begins {b}")).unwrap_or_default();
@@ -493,7 +496,7 @@ pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockSt
         }
         (DateRefusal::Expired { .. }, Some(server)) => {
             let ended = bound.map(|b| format!("ended {b}, before this machine's clock ({at})")).unwrap_or_else(|| format!("has ended by this machine's clock ({at})"));
-            format!(" The certificate {ended}, and that clock was set from {server} at boot: the certificate has expired, and the listener needs a new one.")
+            format!(" The certificate {ended}, and that clock was set from {server}: the certificate has expired, and the listener needs a new one.")
         }
         (DateRefusal::Expired { .. }, None) if guess => {
             let ended = bound.map(|b| format!("ended {b}")).unwrap_or_else(|| "has ended".to_string());
@@ -830,6 +833,18 @@ mod tests {
             assert_eq!(certificate_date_hint(&cause), None, "{cause}");
         }
         assert_eq!(date_refusal("error sending request: connection refused"), None);
+    }
+
+    #[test]
+    fn a_clock_a_later_check_set_is_named_with_that_check() {
+        // The boot had no network; an hour on a server answered. A refusal
+        // after that is the certificate's fault, and the hint says what set
+        // the clock and when.
+        let mut c = clock(Some(1_514_764_803), embra_boot::clock::Sync::Failed { server: "time.cloudflare.com".into(), reason: "no network card has an address yet".into() });
+        c.checked = Some(embra_boot::clock::Check { at: 1_794_456_000, server: "192.168.1.1".into(), source: "dhcp".into(), offset: Some(3600.0), outcome: "stepped".into() });
+        let hint = date_hint(DateRefusal::Expired { at: Some(1_794_456_100), bound: Some(1_794_400_000) }, Some(&c), 1_794_456_100);
+        assert!(hint.contains("that clock was set from 192.168.1.1 at 2026-11-12 04:00:00 UTC: the certificate has expired"), "{hint}");
+        assert!(!hint.contains("At boot"), "a clock that was confirmed since is not called unconfirmed: {hint}");
     }
 
     fn clock(floored_from: Option<i64>, sync: embra_boot::clock::Sync) -> embra_boot::ClockStatus {

@@ -21,14 +21,15 @@ use std::path::{Path, PathBuf};
 
 use embra_boot::net::{self as cards, Card};
 use embra_boot::net_lease::{self, CardStatus, Lease, Mode, Source};
-use embra_boot::net_settings::{self, Settings, StaticCard};
+use embra_boot::net_settings::{self, Settings, StaticCard, TimeSetting};
 use serde::Serialize;
 
-pub(crate) const USAGE: &str = "Usage: /network | /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...] | /network dhcp <card> | /network hostname <name>|auto\n\
+pub(crate) const USAGE: &str = "Usage: /network | /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...] | /network dhcp <card> | /network hostname <name>|auto | /network time [<server> ...|default|off]\n\
   /network                 The cards, their links and addresses, the default route, the resolvers and the machine's name.\n\
   /network static ...      That card keeps this address; DHCP is no longer asked on it. Example: /network static eth0 192.168.1.50/24 192.168.1.1 dns 192.168.1.1\n\
   /network dhcp <card>     Back to DHCP.\n\
   /network hostname <name> The machine's name (letters, digits and hyphens); auto takes the name a DHCP server assigns, or embraos.\n\
+  /network time ...        The time servers the clock is checked against, every hour and when the network returns: your own (four at most, host or host:port), default (the ones a DHCP lease names, then time.cloudflare.com), or off. Blank shows the clock.\n\
 A setting is stored on STATE and applied within a few seconds.";
 
 /// What a run of the command answers.
@@ -62,6 +63,10 @@ pub(crate) struct NetEnv {
     pub(crate) resolv: PathBuf,
     /// The kernel's hostname.
     pub(crate) hostname: PathBuf,
+    /// embrad's record of the clock.
+    pub(crate) clock: PathBuf,
+    /// The kernel line: its `embra.ntp=` decides the time servers of its boot.
+    pub(crate) cmdline: PathBuf,
 }
 
 impl NetEnv {
@@ -72,6 +77,8 @@ impl NetEnv {
             settings: PathBuf::from(net_settings::SETTINGS_PATH),
             resolv: PathBuf::from(net_lease::RESOLV_PATH),
             hostname: PathBuf::from("/proc/sys/kernel/hostname"),
+            clock: PathBuf::from(embra_boot::clock::STATUS_PATH),
+            cmdline: PathBuf::from("/proc/cmdline"),
         }
     }
 
@@ -97,7 +104,17 @@ pub(crate) enum Action {
     Dhcp(String),
     /// `None`: `auto`.
     Hostname(Option<String>),
+    Time(TimeAction),
     Usage,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TimeAction {
+    Show,
+    /// No setting of the operator's.
+    Default,
+    /// `off`, or the servers.
+    Set(Vec<String>),
 }
 
 pub(crate) fn parse(args: &str) -> Action {
@@ -119,6 +136,9 @@ pub(crate) fn parse(args: &str) -> Action {
         ["dhcp", card] => Action::Dhcp(card.to_string()),
         ["hostname", "auto"] => Action::Hostname(None),
         ["hostname", name] => Action::Hostname(Some(name.to_string())),
+        ["time"] => Action::Time(TimeAction::Show),
+        ["time", "default"] => Action::Time(TimeAction::Default),
+        ["time", servers @ ..] => Action::Time(TimeAction::Set(servers.iter().map(|s| s.to_string()).collect())),
         _ => Action::Usage,
     }
 }
@@ -150,6 +170,56 @@ fn name_words(env: &NetEnv, settings: &Settings, leases: &[Lease]) -> String {
         (None, Some(k)) if leases.iter().any(|l| l.hostname.as_deref() == Some(k.as_str())) => format!("{k} (assigned by the DHCP server)"),
         (None, Some(k)) => format!("{k} (the default; /network hostname <name> sets another)"),
         (None, None) => "none yet".to_string(),
+    }
+}
+
+/// What this boot's kernel line says about the time servers, as it is
+/// written there: `off`, or a server. `None` without the knob.
+fn kernel_time_knob(env: &NetEnv) -> Option<String> {
+    let line = embra_boot::Cmdline::parse(&std::fs::read_to_string(&env.cmdline).unwrap_or_default());
+    match line.time_server() {
+        embra_boot::TimeServer::Default => None,
+        embra_boot::TimeServer::Off => Some("off".to_string()),
+        embra_boot::TimeServer::Named { host, port } if port == embra_boot::TimeServer::NTP_PORT => Some(host.to_string()),
+        embra_boot::TimeServer::Named { host, port } => Some(format!("{host}:{port}")),
+    }
+}
+
+/// The clock and whom it is checked against, two lines.
+fn time_lines(env: &NetEnv, settings: &Settings, leases: &[Lease]) -> String {
+    let clock = std::fs::read_to_string(&env.clock).ok().and_then(|t| embra_boot::ClockStatus::parse(&t));
+    let said = clock.map(|c| c.summary()).unwrap_or_else(|| "embrad has written no record of the clock".to_string());
+    let stored = match &settings.time {
+        TimeSetting::Off => "none: /network time off (the clock is not checked)".to_string(),
+        TimeSetting::Servers(list) => format!("{} (set by you)", list.join(", ")),
+        TimeSetting::Default => {
+            let mut named: Vec<String> = Vec::new();
+            for server in leases.iter().flat_map(|l| l.ntp.iter()) {
+                if named.len() < 2 && !named.contains(server) {
+                    named.push(server.clone());
+                }
+            }
+            match named.is_empty() {
+                true => format!("{} (the default)", embra_boot::clock::DEFAULT_TIME_SERVER),
+                false => format!("{} (named by the DHCP server), then {} (the default)", named.join(", "), embra_boot::clock::DEFAULT_TIME_SERVER),
+            }
+        }
+    };
+    // The kernel line decides for its boot; what is stored holds after it.
+    let servers = match kernel_time_knob(env).as_deref() {
+        None => stored,
+        Some("off") => format!("none this boot: embra.ntp=off on the kernel line (the clock is not checked); without it: {stored}"),
+        Some(server) => format!("{server} this boot (embra.ntp on the kernel line); without it: {stored}"),
+    };
+    format!("  Clock: {said}\n  Time servers: {servers}\n")
+}
+
+/// When embrad asks the servers just stored: within seconds, unless this
+/// boot's kernel line decides.
+fn asked_when(env: &NetEnv) -> String {
+    match kernel_time_knob(env) {
+        None => "embrad asks within a few seconds, then every hour, when the network returns and at every boot; /network time shows the answer.".to_string(),
+        Some(knob) => format!("This boot's kernel line carries embra.ntp={knob}, which decides until a boot without it: the setting holds from then."),
     }
 }
 
@@ -188,10 +258,11 @@ fn show(env: &NetEnv) -> Reply {
     }
     let resolvers = env.resolvers();
     text.push_str(&format!("  Resolvers: {}\n", if resolvers.is_empty() { "none".to_string() } else { resolvers.join(" ") }));
+    text.push_str(&time_lines(env, &settings, &leases));
     for line in refused {
         text.push_str(&format!("  A line of the settings file was not accepted: {line}\n"));
     }
-    text.push_str("  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...] · /network dhcp <card> · /network hostname <name>|auto");
+    text.push_str("  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...] · /network dhcp <card> · /network hostname <name>|auto · /network time <server> ...|default|off");
     Reply::said(text)
 }
 
@@ -265,6 +336,33 @@ pub(crate) fn answer(args: &str, env: &NetEnv) -> Reply {
                 "Stored: {} goes back to DHCP.\nembrad takes the address off the card within a few seconds and asks for a lease; /network shows the result.\nIf this console is open through {}, it is at the leased address from then on.",
                 target.name, target.name
             );
+            store(env, &settings, done)
+        }
+        Action::Time(TimeAction::Show) => {
+            let (settings, _) = net_settings::read(&env.settings);
+            Reply::said(time_lines(env, &settings, &net_lease::read_all(&env.net_dir)).trim_end().to_string())
+        }
+        Action::Time(TimeAction::Default) => {
+            let (mut settings, _) = net_settings::read(&env.settings);
+            if settings.time == TimeSetting::Default {
+                return Reply::said("The time servers are automatic already: the ones a DHCP lease names, then the default. Nothing changed.");
+            }
+            settings.time = TimeSetting::Default;
+            store(env, &settings, format!("Stored: the time servers are automatic again, the ones a DHCP lease names and then {}.\n{}", embra_boot::clock::DEFAULT_TIME_SERVER, asked_when(env)))
+        }
+        Action::Time(TimeAction::Set(words)) => {
+            let words: Vec<&str> = words.iter().map(String::as_str).collect();
+            let setting = match TimeSetting::from_words(&words) {
+                Ok(s) => s,
+                Err(reason) => return Reply::refusal(format!("Not stored: {reason}. A time server is a host name or an address, with a port when it is not 123; four at most; or off, or default.")),
+            };
+            let done = match &setting {
+                TimeSetting::Off => "Stored: no time server is asked, at boot or after. The clock keeps what the hardware clock gave it; /network time default asks again.".to_string(),
+                TimeSetting::Servers(list) => format!("Stored: the clock is checked against {}, in that order, and no other.\n{}", list.join(", "), asked_when(env)),
+                TimeSetting::Default => String::new(),
+            };
+            let (mut settings, _) = net_settings::read(&env.settings);
+            settings.time = setting;
             store(env, &settings, done)
         }
         Action::Hostname(None) => {
@@ -366,6 +464,8 @@ mod tests {
             settings: root.join("state").join("network").join("settings"),
             resolv: root.join("resolv.conf"),
             hostname: root.join("hostname"),
+            clock: root.join("clock-status"),
+            cmdline: root.join("cmdline"),
         };
         (root, env)
     }
@@ -383,6 +483,10 @@ mod tests {
         assert_eq!(parse("dhcp eth1"), Action::Dhcp("eth1".into()));
         assert_eq!(parse("hostname axiom"), Action::Hostname(Some("axiom".into())));
         assert_eq!(parse("hostname auto"), Action::Hostname(None));
+        assert_eq!(parse("time"), Action::Time(TimeAction::Show));
+        assert_eq!(parse("time default"), Action::Time(TimeAction::Default));
+        assert_eq!(parse("time off"), Action::Time(TimeAction::Set(vec!["off".into()])));
+        assert_eq!(parse("time 192.168.1.1 ntp.example.org"), Action::Time(TimeAction::Set(vec!["192.168.1.1".into(), "ntp.example.org".into()])));
         for odd in ["static", "static eth0", "static eth0 10.0.0.9/8 10.0.0.1 extra", "static eth0 10.0.0.9/8 dns", "dhcp", "dhcp eth0 eth1", "hostname", "hostname a b", "frobnicate", "help"] {
             assert_eq!(parse(odd), Action::Usage, "{odd}");
         }
@@ -467,6 +571,58 @@ mod tests {
         assert_eq!(report.hostname.as_deref(), Some("axiom"));
         assert_eq!(report.cards.iter().map(|c| (c.name.as_str(), c.mode, c.address.as_deref(), c.link)).collect::<Vec<_>>(), [("eth0", "static", Some("192.168.1.50/24"), Some(true)), ("eth1", "dhcp", None, Some(false))]);
         assert_eq!(report.resolvers, ["192.168.1.1"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_time_servers_are_stored_shown_and_taken_away() {
+        let (root, env) = machine("time");
+        // Nothing stored, no lease: the default, and no record of the clock.
+        let shown = answer("time", &env).text;
+        assert_eq!(shown, "  Clock: embrad has written no record of the clock\n  Time servers: time.cloudflare.com (the default)");
+        // A lease names two: they are asked first.
+        std::fs::write(net_lease::lease_path(&env.net_dir, "eth0"), "interface=eth0\nip=192.168.1.42\nmask=24\nntp=192.168.1.1 192.168.1.5 192.168.1.9\nmetric=102\nsource=dhcp\n").unwrap();
+        assert!(answer("time", &env).text.ends_with("Time servers: 192.168.1.1, 192.168.1.5 (named by the DHCP server), then time.cloudflare.com (the default)"));
+        // The operator's own replace both.
+        let stored = answer("time ntp.example.org 10.0.2.2:11123", &env);
+        assert_eq!(
+            stored.text,
+            "Stored: the clock is checked against ntp.example.org, 10.0.2.2:11123, in that order, and no other.\nembrad asks within a few seconds, then every hour, when the network returns and at every boot; /network time shows the answer."
+        );
+        assert_eq!(net_settings::read(&env.settings).0.time, TimeSetting::Servers(vec!["ntp.example.org".into(), "10.0.2.2:11123".into()]));
+        assert!(answer("time", &env).text.ends_with("Time servers: ntp.example.org, 10.0.2.2:11123 (set by you)"));
+        // Off, and back; a name stored beside it is kept.
+        assert!(!answer("hostname axiom", &env).refused);
+        assert!(answer("time off", &env).text.starts_with("Stored: no time server is asked"));
+        assert!(answer("time default", &env).text.starts_with("Stored: the time servers are automatic again"));
+        assert!(answer("time default", &env).text.starts_with("The time servers are automatic already"));
+        let (settings, _) = net_settings::read(&env.settings);
+        assert_eq!((settings.time, settings.hostname.as_deref()), (TimeSetting::Default, Some("axiom")));
+        // What is not a server is refused, and the clock's record is shown as embrad wrote it.
+        for bad in ["time not_a_name", "time a b c d e", "time host:0"] {
+            assert!(answer(bad, &env).refused, "{bad}");
+        }
+        std::fs::write(&env.clock, "sync=synchronized\nserver=192.168.1.1\naddress=192.168.1.1:123\noffset=0.012\nstratum=2\nrtc=unchanged\n").unwrap();
+        assert!(answer("", &env).text.contains("  Clock: set from 192.168.1.1 (192.168.1.1:123) at boot, corrected by +0.012 s\n"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_kernel_line_that_names_the_time_server_decides_for_its_boot_and_is_said() {
+        let (root, env) = machine("time-knob");
+        std::fs::write(&env.cmdline, "console=ttyS0 embra.slot=a embra.ntp=10.0.2.2:11123 quiet\n").unwrap();
+        assert!(answer("time", &env).text.ends_with("Time servers: 10.0.2.2:11123 this boot (embra.ntp on the kernel line); without it: time.cloudflare.com (the default)"));
+        // A setting is stored all the same, and the answer says when it holds.
+        let stored = answer("time ntp.example.org", &env);
+        assert_eq!(
+            stored.text,
+            "Stored: the clock is checked against ntp.example.org, in that order, and no other.\nThis boot's kernel line carries embra.ntp=10.0.2.2:11123, which decides until a boot without it: the setting holds from then."
+        );
+        assert!(answer("time", &env).text.ends_with("Time servers: 10.0.2.2:11123 this boot (embra.ntp on the kernel line); without it: ntp.example.org (set by you)"));
+        // Off on the kernel line: nobody is asked this boot.
+        std::fs::write(&env.cmdline, "embra.ntp=off\n").unwrap();
+        assert!(answer("time", &env).text.ends_with("Time servers: none this boot: embra.ntp=off on the kernel line (the clock is not checked); without it: ntp.example.org (set by you)"));
+        assert!(answer("time default", &env).text.ends_with("This boot's kernel line carries embra.ntp=off, which decides until a boot without it: the setting holds from then."));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
