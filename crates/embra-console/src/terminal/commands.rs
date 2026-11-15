@@ -96,7 +96,8 @@ System:
   /ca                            Certificate authorities beside the public ones: list, import <url|uploads/file> [sha256:<fingerprint>],
                                  remove <file>; an import is trusted by the brain at once, by git and the OS updater after the next boot
   /update                        Check the published release; apply, status, rollback, source [<url>|reset];
-                                 --tag <v…> names one release, apply --allow-downgrade takes an older one
+                                 --tag <v…> names one release, apply --allow-downgrade takes an older one;
+                                 auto [on|off] is the check the brain runs by itself once a day
   /feedback-loop                 Trigger Phase 2 Continuity Engine self-evaluation (experimental)
 
 Keyboard:
