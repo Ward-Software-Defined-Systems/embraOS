@@ -1,6 +1,6 @@
 # Recommended Models for OpenAI-Compatible Providers
 
-**Status:** Phase 1 stable since `v0.5.0-phase1` (2026-05-07). The models below are operator-vetted as full-toolset-capable (the README header callout lists the same picks); operator-overridable at wizard time.
+**Status:** The OpenAI-compatible presets (Ollama, LM Studio) are stable since `v0.5.0-phase1` (2026-05-07). The models below are operator-vetted as full-toolset-capable (the README header callout lists the same picks); operator-overridable at wizard time.
 
 The wizard's selector reads `GET /v1/models` from the configured server, so any pulled (Ollama) or loaded (LM Studio) model is selectable regardless of what's listed here.
 
@@ -193,4 +193,4 @@ See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 
 ---
 
-*Last updated: 2026-10-26.*
+*Last updated: 2026-11-14.*

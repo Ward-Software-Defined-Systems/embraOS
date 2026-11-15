@@ -1,6 +1,6 @@
 # embraOS — Open Problems
 
-Unresolved design questions tracked at the architecture level rather than as code comments. Each is something that will need a decision during Phase 1–3 implementation. Implementation bugs go in the Embra_Debug tracker — this list is design-state tracking, not defects.
+Unresolved design questions tracked at the architecture level rather than as code comments. Each is something that will need a decision during Phase 2–3 implementation. Implementation bugs go in the Embra_Debug tracker — this list is design-state tracking, not defects.
 
 Extracted from `ARCHITECTURE.md` (a local design record, not in the repository) — `### Architectural Tensions (Known Open Problems)` — on 2026-05-23. Wording verbatim. A dated note under an entry says what has happened since; the entry itself is left as it was written.
 

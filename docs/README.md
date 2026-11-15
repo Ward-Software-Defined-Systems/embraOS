@@ -7,7 +7,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 - [ROADMAP.md](ROADMAP.md) — Phase 0–5 delivery status, sprint by sprint, the post-Sprint-5 increments, the code-review pit stop and Phase 2.
 - [CHANGE-LOG.md](CHANGE-LOG.md) — Chronological merge log for `main`, anchored on tagged releases.
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — The 7-layer continuity architecture, the boot chain and disk layout, the network, trust boundaries, the four LLM providers, reasoning controls, prompt caching.
-- [OPEN-PROBLEMS.md](OPEN-PROBLEMS.md) — Unresolved Phase 1–3 design questions tracked at the architecture level.
+- [OPEN-PROBLEMS.md](OPEN-PROBLEMS.md) — Unresolved Phase 2–3 design questions tracked at the architecture level.
 
 ## Build — `BUILD/`
 
