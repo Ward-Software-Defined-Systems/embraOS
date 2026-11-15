@@ -7,6 +7,7 @@
 //!
 //! ```text
 //! hostname=axiom
+//! time=192.168.1.1 time.example.org
 //! static=52:54:00:aa:00:01 192.168.1.50/24 gateway 192.168.1.1 dns 192.168.1.1 9.9.9.9
 //! ```
 //!
@@ -26,6 +27,56 @@ pub const SETTINGS_PATH: &str = "/embra/state/network/settings";
 
 /// How many resolvers a card's setting names at most (musl reads three).
 const RESOLVERS_MAX: usize = 3;
+/// How many time servers the operator names at most.
+const TIME_SERVERS_MAX: usize = 4;
+
+/// The time servers the clock is checked against, as the operator set them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum TimeSetting {
+    /// No setting: the servers a DHCP lease names, then the default one.
+    #[default]
+    Default,
+    /// Nobody is asked.
+    Off,
+    /// These, in this order, and no other.
+    Servers(Vec<String>),
+}
+
+/// A time server as the operator names one: a host name or an address,
+/// with a port when it is not NTP's (`time.example.org`, `192.168.1.1`,
+/// `10.0.2.2:11123`).
+pub fn time_server_ok(text: &str) -> bool {
+    let (host, port) = match text.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (text, None),
+    };
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && !host.starts_with(['-', '.'])
+        && !host.ends_with(['-', '.'])
+        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
+    host_ok && port.is_none_or(|p| p.parse::<u16>().is_ok_and(|n| n != 0))
+}
+
+impl TimeSetting {
+    /// The setting from the words after `/network time` or `time=`: `off`,
+    /// or the servers. The error is a sentence for the operator.
+    pub fn from_words(words: &[&str]) -> Result<Self, String> {
+        match words {
+            [] => Err("no time server named".to_string()),
+            ["off"] => Ok(TimeSetting::Off),
+            servers => {
+                if servers.len() > TIME_SERVERS_MAX {
+                    return Err(format!("{} time servers: four at most", servers.len()));
+                }
+                if let Some(bad) = servers.iter().find(|s| !time_server_ok(s)) {
+                    return Err(format!("{bad} is not a time server's name or address"));
+                }
+                Ok(TimeSetting::Servers(servers.iter().map(|s| s.to_string()).collect()))
+            }
+        }
+    }
+}
 
 /// An address the operator gave a card.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +185,8 @@ impl StaticCard {
 pub struct Settings {
     /// The machine's name, when the operator set one.
     pub hostname: Option<String>,
+    /// The time servers, when the operator chose them.
+    pub time: TimeSetting,
     /// The cards the operator gave an address, one entry a card.
     pub statics: Vec<StaticCard>,
 }
@@ -165,6 +218,11 @@ impl Settings {
         if let Some(name) = &self.hostname {
             text.push_str(&format!("hostname={name}\n"));
         }
+        match &self.time {
+            TimeSetting::Default => {}
+            TimeSetting::Off => text.push_str("time=off\n"),
+            TimeSetting::Servers(servers) => text.push_str(&format!("time={}\n", servers.join(" "))),
+        }
         for card in &self.statics {
             text.push_str(&format!("static={}\n", card.to_value()));
         }
@@ -191,6 +249,10 @@ pub fn parse(text: &str) -> (Settings, Vec<String>) {
         match key.trim() {
             "hostname" if hostname_ok(value) => settings.hostname = Some(value.to_string()),
             "hostname" => refused.push(format!("{shown}: not a hostname (letters, digits and hyphens, 63 at most)")),
+            "time" => match TimeSetting::from_words(&value.split_whitespace().collect::<Vec<_>>()) {
+                Ok(setting) => settings.time = setting,
+                Err(reason) => refused.push(format!("{shown}: {reason}")),
+            },
             "static" => match StaticCard::parse(value) {
                 Ok(card) => settings.set_static(card),
                 Err(reason) => refused.push(format!("{shown}: {reason}")),
@@ -265,7 +327,7 @@ mod tests {
 
     #[test]
     fn the_settings_read_back_and_a_second_setting_for_a_card_replaces_the_first() {
-        let mut settings = Settings { hostname: Some("axiom".into()), statics: Vec::new() };
+        let mut settings = Settings { hostname: Some("axiom".into()), time: TimeSetting::Servers(vec!["192.168.1.1".into(), "time.example.org".into()]), statics: Vec::new() };
         settings.set_static(StaticCard::new(MAC, "192.168.1.50/24", Some("192.168.1.1"), &["192.168.1.1"]).unwrap());
         settings.set_static(StaticCard::new("02:00:00:00:01:00", "10.0.0.9/8", None, &[]).unwrap());
         let (back, refused) = parse(&settings.to_text());
@@ -304,6 +366,28 @@ mod tests {
         let _ = parse(&bytes);
         let _ = parse(&format!("static={}", "x ".repeat(100_000)));
         assert_eq!(parse("").0, Settings::default());
+    }
+
+    #[test]
+    fn the_time_servers_are_the_operators_or_off_or_not_set() {
+        assert_eq!(parse("").0.time, TimeSetting::Default);
+        assert_eq!(parse("time=off\n").0.time, TimeSetting::Off);
+        assert_eq!(parse("time=192.168.1.1 time.example.org 10.0.2.2:11123\n").0.time, TimeSetting::Servers(vec!["192.168.1.1".into(), "time.example.org".into(), "10.0.2.2:11123".into()]));
+        // What is not a server is refused whole, and the setting stays unset.
+        for bad in ["time=\n", "time=a b c d e\n", "time=bad_name\n", "time=host:0\n", "time=host:port\n", "time=-lead.example\n", "time=two words;rm\n"] {
+            let (settings, refused) = parse(bad);
+            assert_eq!(settings.time, TimeSetting::Default, "{bad:?}");
+            assert_eq!(refused.len(), 1, "{bad:?}");
+        }
+        assert_eq!(TimeSetting::from_words(&["off"]), Ok(TimeSetting::Off));
+        assert!(TimeSetting::from_words(&[]).unwrap_err().contains("no time server"));
+        assert!(TimeSetting::from_words(&["a", "b", "c", "d", "e"]).unwrap_err().contains("four at most"));
+        assert!(time_server_ok("time.cloudflare.com") && time_server_ok("192.168.1.1") && time_server_ok("ntp-1.lan:123"));
+        // The file's text for each.
+        let mut settings = Settings::default();
+        assert!(!settings.to_text().contains("time="));
+        settings.time = TimeSetting::Off;
+        assert!(settings.to_text().contains("time=off\n"));
     }
 
     #[test]

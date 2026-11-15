@@ -95,6 +95,7 @@ fn main() -> Result<()> {
     };
     boot::write_status(&cmdline, mode, &boot::Confirmed::Pending, None, release.as_ref());
 
+    let mut clock_at_boot = None;
     // Step 4.5: the time from a time server, now that the network is up
     // and before anything depends on it: a maintenance job's download, a
     // snapshot's name, the database, the certificate authority trustd makes
@@ -103,10 +104,20 @@ fn main() -> Result<()> {
     // is set by now, so the thread the lookup runs on meets no `set_var`.
     if pid == 1 {
         let missing = clock::network_missing(network.cards, network.leases.len(), network.any_link);
-        let status = clock::sync_at_boot(&clock::ThisMachine, cmdline.time_server(), floored, built, missing);
+        // Whom to ask: the kernel line's server for this boot, else the
+        // operator's (`/network time`), else the time servers the leases
+        // name and then the default.
+        let kernel = clock::Kernel::from(cmdline.time_server());
+        let (settings, _) = embra_boot::net_settings::read(std::path::Path::new(embra_boot::net_settings::SETTINGS_PATH));
+        let targets = clock::targets(&kernel, &settings.time, &network.leases);
+        // What the network had counted before this request left: a first
+        // address that comes after it brings the keeper's first check.
+        let network_events = net::events();
+        let status = clock::sync_at_boot_from(&clock::ThisMachine, targets.as_deref(), floored, built, missing);
         if let Err(e) = status.write() {
             warn!("the clock's record could not be written to {}: {e}", embra_boot::clock::STATUS_PATH);
         }
+        clock_at_boot = Some((status, kernel, network_events));
         // The clock as it stands now is the first save of this boot: a time
         // server's, the hardware clock's, or the floor's.
         clock::save_to_state(built);
@@ -158,6 +169,13 @@ fn main() -> Result<()> {
                 "pre-update snapshot failed: {reason}; GRUB counts this try and falls back to the previous release when the tries run out"
             ));
         }
+    }
+
+    // The clock is checked again while the services run: every hour, and
+    // when the network arrives or returns (`clock::keep_checked`, a thread
+    // of its own). A maintenance boot has done its job and restarted by now.
+    if let Some((status, kernel, network_events)) = clock_at_boot {
+        clock::keep_checked(status, kernel, built, network_events);
     }
 
     // The runtime is built by hand, so a failure is a halt with its reason

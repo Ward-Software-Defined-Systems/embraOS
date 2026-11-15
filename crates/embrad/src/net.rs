@@ -26,6 +26,7 @@
 //! or unwraps.
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -64,6 +65,17 @@ pub(crate) fn helpers() -> MutexGuard<'static, Vec<u32>> {
     // A poisoned lock means a thread panicked, and a panic halts PID 1; in
     // a test the list is still the list.
     HELPERS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What the clock's keeper checks the time on (`clock.rs`), counted since
+/// the boot: the network arrived (a card got an address it did not have),
+/// it returned (the link back on a card that holds an address), or the
+/// operator named other time servers. [`Net::events`] is the count; the
+/// boot's wait and the keeper publish it here after each look.
+static EVENTS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn events() -> u64 {
+    EVENTS.load(Ordering::Relaxed)
 }
 
 /// Runs `sweep` with the helpers' pids and the lock held.
@@ -152,6 +164,8 @@ pub(crate) struct Net {
     status: Option<String>,
     /// The name the machine was last given.
     named: Option<String>,
+    /// See [`EVENTS`].
+    events: u64,
 }
 
 fn same_card(a: &Card, b: &Card) -> bool {
@@ -161,7 +175,7 @@ fn same_card(a: &Card, b: &Card) -> bool {
 
 impl Net {
     pub(crate) fn new(hostname: &str) -> Self {
-        Net { default_name: hostname.to_string(), settings: Settings::default(), slots: Vec::new(), resolver: None, status: None, named: None }
+        Net { default_name: hostname.to_string(), settings: Settings::default(), slots: Vec::new(), resolver: None, status: None, named: None, events: 0 }
     }
 
     /// The name a DHCP request carries: the operator's, or the default. A
@@ -171,11 +185,21 @@ impl Net {
         self.settings.hostname.clone().unwrap_or_else(|| self.default_name.clone())
     }
 
+    /// See [`EVENTS`].
+    pub(crate) fn events(&self) -> u64 {
+        self.events
+    }
+
     /// One look: the settings, the cards that went and came, each card's
     /// address or client and its link, the records, the resolver file, the
     /// machine's name, the status.
     pub(crate) fn tick(&mut self, host: &mut dyn Host, now: Instant) -> Summary {
         if let Some(settings) = host.settings() {
+            // Other time servers: the clock is checked against them now,
+            // not at the next hour.
+            if settings.time != self.settings.time {
+                self.events += 1;
+            }
             self.settings = settings;
         }
         let seen = host.cards();
@@ -268,6 +292,7 @@ impl Net {
                 info!("{}: the link is down", slot.card.name);
             } else if !was_up && is_up {
                 if let (Some(pid), Some(_), Some(down)) = (slot.client, slot.lease.as_ref(), slot.down_since) {
+                    self.events += 1;
                     if now.saturating_duration_since(down) < SHORT_BREAK {
                         info!("{}: the link is back; the lease is renewed in place", slot.card.name);
                         host.renew(pid);
@@ -287,12 +312,14 @@ impl Net {
             let current = leases.iter().find(|l| l.interface == slot.card.name).cloned();
             if current != slot.lease {
                 match (&current, &slot.lease) {
-                    (Some(l), _) => info!(
-                        "{}: {} after {:.1} s",
-                        slot.card.name,
-                        l.summary(),
-                        now.saturating_duration_since(slot.asking_since).as_secs_f32()
-                    ),
+                    (Some(l), had) => {
+                        info!("{}: {} after {:.1} s", slot.card.name, l.summary(), now.saturating_duration_since(slot.asking_since).as_secs_f32());
+                        // An address on a card that had none: a network has
+                        // arrived, and its lease may name a time server.
+                        if had.is_none() {
+                            self.events += 1;
+                        }
+                    }
                     (None, Some(_)) => {
                         info!("{}: its address is gone", slot.card.name);
                         slot.asking_since = now;
@@ -363,6 +390,7 @@ pub(crate) fn boot(net: &mut Net, host: &mut dyn Host, pace: &mut dyn Pace) -> S
     loop {
         let now = pace.now();
         let summary = net.tick(host, now);
+        EVENTS.store(net.events(), Ordering::Relaxed);
         if !summary.leases.is_empty() {
             return summary;
         }
@@ -390,6 +418,7 @@ fn keep(mut net: Net, mut host: this_machine::ThisMachine) {
         loop {
             std::thread::sleep(KEEPER_TICK);
             net.tick(&mut host, Instant::now());
+            EVENTS.store(net.events(), Ordering::Relaxed);
         }
     });
     if let Err(e) = spawned {
@@ -950,6 +979,61 @@ mod tests {
     }
 
     #[test]
+    fn the_clock_is_told_when_the_network_arrives_or_returns_and_when_its_servers_change() {
+        let mut host = Fake { cards: vec![card("eth0", 2)], ..Fake::default() };
+        host.link("eth0", Some(true));
+        let mut net = Net::new("embraos");
+        let t = Instant::now();
+        let secs = |n: u64| t + Duration::from_secs(n);
+        // A card that is still asking: nothing to check the clock through.
+        net.tick(&mut host, t);
+        net.tick(&mut host, secs(2));
+        assert_eq!(net.events(), 0);
+        // Its first address: the network has arrived. Once.
+        host.leases = vec![lease("eth0", "192.168.1.42", "192.168.1.1", 102)];
+        net.tick(&mut host, secs(4));
+        assert_eq!(net.events(), 1);
+        net.tick(&mut host, secs(6));
+        assert_eq!(net.events(), 1, "an address that stays is no news");
+        // The cable pulled and put back: the network has returned.
+        host.link("eth0", Some(false));
+        net.tick(&mut host, secs(8));
+        assert_eq!(net.events(), 1, "a link that went is nothing to ask through");
+        host.link("eth0", Some(true));
+        net.tick(&mut host, secs(10));
+        assert_eq!(net.events(), 2);
+        // The address lost and given again (another network's lease).
+        host.leases.clear();
+        net.tick(&mut host, secs(12));
+        assert_eq!(net.events(), 2);
+        host.leases = vec![lease("eth0", "10.9.0.7", "10.9.0.1", 102)];
+        net.tick(&mut host, secs(14));
+        assert_eq!(net.events(), 3);
+        // The same lease with another resolver (a renewal): no news.
+        host.leases = vec![lease("eth0", "10.9.0.7", "10.9.0.2", 102)];
+        net.tick(&mut host, secs(15));
+        assert_eq!(net.events(), 3);
+        // The operator names other time servers; another setting is no news.
+        host.new_settings = Some(Settings { time: embra_boot::net_settings::TimeSetting::Servers(vec!["192.168.1.1".into()]), ..Settings::default() });
+        net.tick(&mut host, secs(16));
+        assert_eq!(net.events(), 4);
+        host.new_settings = Some(Settings { time: embra_boot::net_settings::TimeSetting::Servers(vec!["192.168.1.1".into()]), hostname: Some("axiom".into()), ..Settings::default() });
+        net.tick(&mut host, secs(18));
+        assert_eq!(net.events(), 4);
+        host.new_settings = Some(Settings::default());
+        net.tick(&mut host, secs(20));
+        assert_eq!(net.events(), 5, "back to the automatic servers");
+        // A second card gets its address: another network, whose lease may
+        // name the time server the first one's could not reach.
+        host.cards.push(card("wlan0", 3));
+        net.tick(&mut host, secs(22));
+        assert_eq!(net.events(), 5);
+        host.leases.push(lease("wlan0", "192.168.7.20", "192.168.7.1", 603));
+        net.tick(&mut host, secs(24));
+        assert_eq!(net.events(), 6);
+    }
+
+    #[test]
     fn the_client_is_started_again_when_it_exits() {
         let mut host = Fake { cards: vec![card("eth0", 2)], ..Fake::default() };
         let mut net = Net::new("embraos");
@@ -1081,7 +1165,7 @@ mod tests {
         net.tick(&mut host, t + KEEPER_TICK * 2);
         assert_eq!(host.names.len(), 2);
         // The operator's name wins over the lease's.
-        host.new_settings = Some(Settings { hostname: Some("axiom".into()), statics: Vec::new() });
+        host.new_settings = Some(Settings { hostname: Some("axiom".into()), ..Settings::default() });
         net.tick(&mut host, t + KEEPER_TICK * 3);
         assert_eq!(host.names.last().map(String::as_str), Some("axiom"));
         // And taken away, the lease's is back.
@@ -1106,7 +1190,7 @@ mod tests {
         net.tick(&mut host, t + Duration::from_secs(6));
         assert_eq!(host.started.iter().map(|(_, name, _)| name.as_str()).collect::<Vec<_>>(), ["embraos", "embraos"]);
         // With a name of the operator's, a card that appears asks under it.
-        host.new_settings = Some(Settings { hostname: Some("axiom".into()), statics: Vec::new() });
+        host.new_settings = Some(Settings { hostname: Some("axiom".into()), ..Settings::default() });
         host.cards.push(card("eth1", 3));
         net.tick(&mut host, t + Duration::from_secs(8));
         assert_eq!(host.started.last().map(|(c, name, _)| (c.as_str(), name.as_str())), Some(("eth1", "axiom")));

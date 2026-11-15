@@ -455,7 +455,7 @@ mod tests {
         std::fs::write(net_lease::lease_path(&env.net_dir, "eth0"), "interface=eth0\nip=192.168.1.50\nmask=24\nrouter=192.168.1.1\ndns=192.168.1.1\nmetric=102\nsource=static\n").unwrap();
         std::fs::write(&env.resolv, "nameserver 192.168.1.1\n").unwrap();
         std::fs::write(&env.hostname, "axiom\n").unwrap();
-        net_settings::write(&env.settings, &Settings { hostname: Some("axiom".into()), statics: vec![StaticCard::new(MAC0, "192.168.1.50/24", Some("192.168.1.1"), &["192.168.1.1"]).unwrap(), StaticCard::new("02:00:00:00:09:09", "10.9.9.9/8", None, &[]).unwrap()] }).unwrap();
+        net_settings::write(&env.settings, &Settings { hostname: Some("axiom".into()), time: Default::default(), statics: vec![StaticCard::new(MAC0, "192.168.1.50/24", Some("192.168.1.1"), &["192.168.1.1"]).unwrap(), StaticCard::new("02:00:00:00:09:09", "10.9.9.9/8", None, &[]).unwrap()] }).unwrap();
         let text = answer("", &env).text;
         assert!(text.contains("  Name: axiom (set by you)\n"), "{text}");
         assert!(text.contains(&format!("    eth0     wired {MAC0}  link up      192.168.1.50/24 (set by you), gateway 192.168.1.1\n")), "{text}");

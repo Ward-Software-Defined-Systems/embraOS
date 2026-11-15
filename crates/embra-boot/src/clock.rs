@@ -1,4 +1,5 @@
-//! The clock as embrad left it at boot, for every reader after it.
+//! The clock as embrad left it at boot and as it has kept it since, for
+//! every reader after it.
 //!
 //! The kernel takes the time from the machine's hardware clock, and a board
 //! whose clock battery ran down starts at its firmware's default date:
@@ -261,6 +262,36 @@ impl Rtc {
     }
 }
 
+/// The time server asked when nobody names one (no knob on the kernel
+/// line, no setting of the operator's), after any a DHCP lease names: Cloudflare's
+/// public time service, one anycast name, free to use by its own
+/// documentation (developers.cloudflare.com/time-services/ntp/usage/).
+///
+/// Not a `pool.ntp.org` name: the NTP Pool's rules for vendors
+/// (ntppool.org/vendors.html) forbid its zone names as the default of a
+/// distributed system or appliance without a vendor zone of its own, and
+/// embraOS has none. With one, this constant becomes that zone's name
+/// (`0.<vendor>.pool.ntp.org`) and nothing else changes.
+pub const DEFAULT_TIME_SERVER: &str = "time.cloudflare.com";
+
+/// A check of the clock against a time server after the boot's own: embrad
+/// asks again every hour and when the network arrives or returns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Check {
+    /// When, in seconds after the epoch (by the clock as it then stood).
+    pub at: i64,
+    /// The server as it was named.
+    pub server: String,
+    /// Where its name came from: `operator`, `dhcp`, `default`, `kernel line`.
+    pub source: String,
+    /// The difference the answer showed, in seconds, positive when the
+    /// clock was behind; none when nobody answered.
+    pub offset: Option<f64>,
+    /// `slewed` or `stepped` for an answer that was applied; for one that
+    /// was not, and for no answer, the reason as a sentence.
+    pub outcome: String,
+}
+
 /// The record at [`STATUS_PATH`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClockStatus {
@@ -275,12 +306,18 @@ pub struct ClockStatus {
     pub resumed_from: Option<i64>,
     pub sync: Sync,
     pub rtc: Rtc,
+    /// The newest check after the boot's whose answer was applied.
+    pub checked: Option<Check>,
+    /// A check after that one which came to nothing: no answer, or an
+    /// answer that was not applied. A good clock stays a good clock: this
+    /// says only that the last look could not confirm it.
+    pub missed: Option<Check>,
 }
 
 impl ClockStatus {
-    /// A time server set the clock this boot.
+    /// A time server set the clock this boot: at boot, or at a check since.
     pub fn synchronized(&self) -> bool {
-        matches!(self.sync, Sync::Synchronized { .. })
+        matches!(self.sync, Sync::Synchronized { .. }) || self.checked.is_some()
     }
 
     /// The clock is a floor and nothing confirmed it: the last time this
@@ -314,6 +351,15 @@ impl ClockStatus {
             Sync::Off => out.push_str("sync=off\n"),
         }
         out.push_str(&format!("rtc={}\n", one_line(&self.rtc.to_string())));
+        for (key, check) in [("checked", &self.checked), ("missed", &self.missed)] {
+            if let Some(c) = check {
+                out.push_str(&format!("{key}_at={}\n{key}_server={}\n{key}_source={}\n", c.at, one_line(&c.server), one_line(&c.source)));
+                if let Some(offset) = c.offset {
+                    out.push_str(&format!("{key}_offset={offset:.3}\n"));
+                }
+                out.push_str(&format!("{key}_outcome={}\n", one_line(&c.outcome)));
+            }
+        }
         out
     }
 
@@ -335,12 +381,23 @@ impl ClockStatus {
             "off" => Sync::Off,
             _ => return None,
         };
+        let check = |key: &str| {
+            Some(Check {
+                at: field(&format!("{key}_at"))?.parse().ok()?,
+                server: field(&format!("{key}_server")).unwrap_or("").to_string(),
+                source: field(&format!("{key}_source")).unwrap_or("").to_string(),
+                offset: field(&format!("{key}_offset")).and_then(|v| v.parse().ok()),
+                outcome: field(&format!("{key}_outcome")).unwrap_or("").to_string(),
+            })
+        };
         Some(ClockStatus {
             floored_from: field("floored_from").and_then(|v| v.parse().ok()),
             built: field("built").and_then(|v| v.parse().ok()),
             resumed_from: field("resumed_from").and_then(|v| v.parse().ok()),
             sync,
             rtc: Rtc::parse(field("rtc").unwrap_or("")),
+            checked: check("checked"),
+            missed: check("missed"),
         })
     }
 
@@ -364,13 +421,32 @@ impl ClockStatus {
 
     /// One line for a status surface.
     pub fn summary(&self) -> String {
-        let mut out = match &self.sync {
+        let at_boot = match &self.sync {
             Sync::Synchronized { server, address, offset, .. } => {
                 format!("set from {server} ({address}) at boot, corrected by {offset:+.3} s")
             }
             Sync::Failed { server, reason } => format!("not confirmed: no time from {server} at boot ({reason})"),
             Sync::Off => "not confirmed: embra.ntp=off, no time server was asked".to_string(),
         };
+        // A check since the boot that was applied: said after the boot's
+        // own answer, or in its place when the boot got none.
+        let mut out = match (&self.checked, &self.sync) {
+            (Some(c), Sync::Synchronized { .. }) => {
+                format!("{at_boot}; checked against {} ({}) at {}: {:+.3} s, {}", c.server, c.source, format_utc(c.at), c.offset.unwrap_or(0.0), c.outcome)
+            }
+            (Some(c), Sync::Failed { server, reason }) => format!(
+                "set from {} ({}) at {}, corrected by {:+.3} s; at boot no time came from {server} ({reason})",
+                c.server,
+                c.source,
+                format_utc(c.at),
+                c.offset.unwrap_or(0.0)
+            ),
+            (Some(c), Sync::Off) => format!("set from {} ({}) at {}, corrected by {:+.3} s", c.server, c.source, format_utc(c.at), c.offset.unwrap_or(0.0)),
+            (None, _) => at_boot,
+        };
+        if let Some(m) = &self.missed {
+            out.push_str(&format!("; the check at {} against {} ({}) came to nothing: {}", format_utc(m.at), m.server, m.source, m.outcome));
+        }
         if let Some(was) = self.floored_from {
             out.push_str(&format!("; the hardware clock read {} at boot, earlier than the image was built", format_utc(was)));
             if !self.synchronized() {
@@ -465,6 +541,8 @@ mod tests {
             resumed_from: None,
             sync: Sync::Synchronized { server: "time.cloudflare.com".into(), address: "162.159.200.1:123".into(), offset: 279_687_519.25, stratum: 3 },
             rtc: Rtc::Written,
+            checked: None,
+            missed: None,
         };
         let text = synced.to_text();
         assert_eq!(
@@ -484,6 +562,8 @@ mod tests {
             resumed_from: None,
             sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: "time.cloudflare.com could not be resolved:\nno answer".into() },
             rtc: Rtc::Unchanged,
+            checked: None,
+            missed: None,
         };
         let text = guess.to_text();
         assert_eq!(text.lines().count(), 6, "a reason is one line: {text}");
@@ -493,7 +573,7 @@ mod tests {
         assert!(back.summary().starts_with("not confirmed: no time from time.cloudflare.com at boot (time.cloudflare.com could not be resolved: no answer); the hardware clock read 2018-01-01 00:00:03 UTC"), "{}", back.summary());
         assert!(back.summary().ends_with("so the clock is the build time, 2026-11-12 02:58:42 UTC, and counting"), "{}", back.summary());
 
-        let off = ClockStatus { floored_from: None, built: None, resumed_from: None, sync: Sync::Off, rtc: Rtc::Absent };
+        let off = ClockStatus { floored_from: None, built: None, resumed_from: None, sync: Sync::Off, rtc: Rtc::Absent, checked: None, missed: None };
         assert_eq!(off.to_text(), "sync=off\nrtc=absent\n");
         assert_eq!(ClockStatus::parse("sync=off\nrtc=absent\n"), Some(off.clone()));
         assert!(!off.is_a_guess(), "a clock nobody checked is not known to be wrong");
@@ -515,6 +595,8 @@ mod tests {
             resumed_from: Some(1_794_500_000),
             sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: "no network interface came up".into() },
             rtc: Rtc::Unchanged,
+            checked: None,
+            missed: None,
         };
         let text = resumed.to_text();
         assert_eq!(
@@ -561,5 +643,72 @@ mod tests {
         assert!(write_saved_time(&dir.join("absent").join(LAST_KNOWN_NAME), 1).is_err(), "a directory that is not there is an error, not a panic");
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(LAST_KNOWN_PATH.ends_with(LAST_KNOWN_NAME) && LAST_KNOWN_PATH.starts_with("/embra/state/"));
+    }
+
+    fn check(at: i64, source: &str, offset: Option<f64>, outcome: &str) -> Check {
+        Check { at, server: "192.168.1.1".into(), source: source.into(), offset, outcome: outcome.into() }
+    }
+
+    #[test]
+    fn a_check_since_the_boot_reads_back_and_is_said_after_the_boots_answer() {
+        let status = ClockStatus {
+            floored_from: None,
+            built: Some(1_794_452_322),
+            resumed_from: None,
+            sync: Sync::Synchronized { server: "time.cloudflare.com".into(), address: "162.159.200.1:123".into(), offset: 0.012, stratum: 3 },
+            rtc: Rtc::Unchanged,
+            checked: Some(check(1_794_456_000, "dhcp", Some(-0.031), "slewed")),
+            missed: None,
+        };
+        assert_eq!(ClockStatus::parse(&status.to_text()), Some(status.clone()));
+        assert_eq!(
+            status.summary(),
+            "set from time.cloudflare.com (162.159.200.1:123) at boot, corrected by +0.012 s; checked against 192.168.1.1 (dhcp) at 2026-11-12 04:00:00 UTC: -0.031 s, slewed"
+        );
+        // A record from before the checks existed reads as one without any.
+        let old = "built=1794452322\nsync=synchronized\nserver=s\naddress=a\noffset=0.012\nstratum=3\nrtc=unchanged\n";
+        let back = ClockStatus::parse(old).unwrap();
+        assert_eq!((back.checked, back.missed), (None, None));
+    }
+
+    #[test]
+    fn a_boot_without_an_answer_is_confirmed_by_a_later_check() {
+        // A boot with no network: the clock is the build time, a guess. The
+        // network comes, a server answers, and the clock is a guess no more.
+        let mut status = ClockStatus {
+            floored_from: Some(1_514_764_803),
+            built: Some(1_794_452_322),
+            resumed_from: None,
+            sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: "no network card has an address yet".into() },
+            rtc: Rtc::Unchanged,
+            checked: None,
+            missed: None,
+        };
+        assert!(status.is_a_guess() && !status.synchronized());
+        status.checked = Some(check(1_794_456_000, "default", Some(3600.5), "stepped"));
+        assert!(status.synchronized() && !status.is_a_guess());
+        let said = status.summary();
+        assert!(said.starts_with("set from 192.168.1.1 (default) at 2026-11-12 04:00:00 UTC, corrected by +3600.500 s; at boot no time came from time.cloudflare.com (no network card has an address yet)"), "{said}");
+        assert!(!said.contains("so the clock is the build time"), "{said}");
+        assert_eq!(ClockStatus::parse(&status.to_text()), Some(status));
+    }
+
+    #[test]
+    fn a_check_that_came_to_nothing_leaves_a_good_clock_good() {
+        let status = ClockStatus {
+            floored_from: None,
+            built: None,
+            resumed_from: None,
+            sync: Sync::Synchronized { server: "s".into(), address: "a".into(), offset: 1.0, stratum: 2 },
+            rtc: Rtc::Written,
+            checked: None,
+            missed: Some(check(1_794_456_000, "default", None, "no answer within 5 s")),
+        };
+        assert!(status.synchronized(), "one look that found nobody does not unconfirm the clock");
+        assert!(status.summary().ends_with("; the check at 2026-11-12 04:00:00 UTC against 192.168.1.1 (default) came to nothing: no answer within 5 s"), "{}", status.summary());
+        assert_eq!(ClockStatus::parse(&status.to_text()), Some(status.clone()));
+        // An answer that was refused carries what it showed.
+        let refused = ClockStatus { missed: Some(check(1_794_456_000, "dhcp", Some(157_680_000.0), "it answered a time 157680000 s from this clock, which a time server set this boot; not applied")), ..status };
+        assert_eq!(ClockStatus::parse(&refused.to_text()), Some(refused));
     }
 }

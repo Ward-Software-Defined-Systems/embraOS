@@ -49,20 +49,13 @@ use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use embra_boot::clock::{format_utc, CivilTime, ClockStatus, Rtc, Sync};
+use embra_boot::clock::{format_utc, Check, CivilTime, ClockStatus, Rtc, Sync};
+use embra_boot::net_lease::Lease;
+use embra_boot::net_settings::TimeSetting;
 use embra_boot::TimeServer;
 use tracing::{info, warn};
 
-/// The time server asked when the kernel line names none: Cloudflare's
-/// public time service, one anycast name, free to use by its own
-/// documentation (developers.cloudflare.com/time-services/ntp/usage/).
-///
-/// Not a `pool.ntp.org` name: the NTP Pool's rules for vendors
-/// (ntppool.org/vendors.html) forbid its zone names as the default of a
-/// distributed system or appliance without a vendor zone of its own, and
-/// embraOS has none. With one, this constant becomes that zone's name
-/// (`0.<vendor>.pool.ntp.org`) and nothing else changes.
-pub const DEFAULT_TIME_SERVER: &str = "time.cloudflare.com";
+pub use embra_boot::clock::DEFAULT_TIME_SERVER;
 
 /// How long the boot waits for the time, the name lookup included. An
 /// answer takes a fraction of a second; the wait is spent only when nothing
@@ -126,6 +119,9 @@ pub trait Machine {
     fn set(&self, to: Timestamp) -> io::Result<()>;
     /// Set the hardware clock to `unix_secs`, in UTC.
     fn write_rtc(&self, unix_secs: i64) -> Rtc;
+    /// Run the clock a little fast or slow until it has gained `seconds`
+    /// (lost them, when negative): no reading ever goes backwards.
+    fn slew(&self, seconds: f64) -> io::Result<()>;
 }
 
 /// The machine embrad is PID 1 of.
@@ -153,6 +149,24 @@ impl Machine for ThisMachine {
     #[cfg(not(target_os = "linux"))]
     fn set(&self, _to: Timestamp) -> io::Result<()> {
         Err(io::Error::other("the clock is set on Linux only"))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn slew(&self, seconds: f64) -> io::Result<()> {
+        // SAFETY: a timex is plain integers, and all zeroes is one.
+        let mut tx: libc::timex = unsafe { std::mem::zeroed() };
+        // The single-shot offset is adjtime(3)'s: the kernel works it off at
+        // 500 microseconds a second and puts no cap on the amount.
+        tx.modes = libc::ADJ_OFFSET_SINGLESHOT;
+        tx.offset = (seconds * 1e6) as _;
+        // SAFETY: adjtimex(2) reads and writes the timex it is handed; its
+        // return is the clock's state, and -1 alone is a failure.
+        if unsafe { libc::adjtimex(&mut tx) } == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn slew(&self, _seconds: f64) -> io::Result<()> {
+        Err(io::Error::other("the clock is slewed on Linux only"))
     }
 
     #[cfg(target_os = "linux")]
@@ -431,11 +445,12 @@ fn seconds(wait: Duration) -> String {
     format!("{} s", wait.as_secs_f32())
 }
 
-/// An exchange that set no clock: why, and whether another address may be asked.
+/// An exchange that set no clock: why, and whether another address may be
+/// asked (`stop`: a kiss-of-death, the server's word to stay away).
 #[derive(Debug, PartialEq, Eq)]
-struct Miss {
-    reason: String,
-    stop: bool,
+pub(crate) struct Miss {
+    pub(crate) reason: String,
+    pub(crate) stop: bool,
 }
 
 impl Miss {
@@ -488,17 +503,17 @@ fn exchange(address: SocketAddr, wait: Duration, nonce: u64) -> Result<Sample, M
 
 /// The name's addresses, IPv4 first (the lease is IPv4), asked one after
 /// the other until one answers.
-fn fetch(host: &str, port: u16, reply_wait: Duration) -> Result<Sample, String> {
-    let mut addresses: Vec<SocketAddr> = (host, port).to_socket_addrs().map_err(|e| format!("the name could not be resolved: {e}"))?.collect();
+fn fetch(host: &str, port: u16, reply_wait: Duration) -> Result<Sample, Miss> {
+    let mut addresses: Vec<SocketAddr> = (host, port).to_socket_addrs().map_err(|e| Miss::next(format!("the name could not be resolved: {e}")))?.collect();
     addresses.sort_by_key(|a| !a.is_ipv4());
     addresses.dedup();
     addresses.truncate(MAX_ADDRESSES);
-    let mut last = "the name resolved to no address".to_string();
+    let mut last = Miss::next("the name resolved to no address");
     for address in addresses {
         match exchange(address, reply_wait, nonce()) {
             Ok(sample) => return Ok(sample),
             Err(miss) => {
-                last = format!("{address}: {}", miss.reason);
+                last = Miss { reason: format!("{address}: {}", miss.reason), stop: miss.stop };
                 if miss.stop {
                     break;
                 }
@@ -512,17 +527,22 @@ fn fetch(host: &str, port: u16, reply_wait: Duration) -> Result<Sample, String> 
 /// timeouts, longer than `wait`, so it runs on a thread of its own: past
 /// `wait` the boot goes on, and a late answer sets nothing.
 fn fetch_within(host: &str, port: u16, wait: Duration) -> Result<Sample, String> {
+    ask_within(host, port, wait).map_err(|miss| miss.reason)
+}
+
+/// [`fetch_within`] that keeps the kiss-of-death apart from a plain miss.
+pub(crate) fn ask_within(host: &str, port: u16, wait: Duration) -> Result<Sample, Miss> {
     let (tx, rx) = std::sync::mpsc::channel();
     let name = host.to_string();
     let spawned = std::thread::Builder::new().name("clock-fetch".into()).spawn(move || {
         let _ = tx.send(fetch(&name, port, REPLY_WAIT));
     });
     if let Err(e) = spawned {
-        return Err(format!("no thread for the request: {e}"));
+        return Err(Miss::next(format!("no thread for the request: {e}")));
     }
     match rx.recv_timeout(wait) {
         Ok(result) => result,
-        Err(_) => Err(format!("no answer within {}", seconds(wait))),
+        Err(_) => Err(Miss::next(format!("no answer within {}", seconds(wait)))),
     }
 }
 
@@ -539,34 +559,6 @@ pub fn network_missing(cards: usize, addresses: usize, any_link: bool) -> Option
     None
 }
 
-/// How the kernel line's choice is named in a line for the operator, and
-/// what is asked: `None` for `embra.ntp=off`.
-fn target(server: TimeServer<'_>) -> Option<(String, String, u16)> {
-    match server {
-        TimeServer::Off => None,
-        TimeServer::Default => Some((DEFAULT_TIME_SERVER.to_string(), DEFAULT_TIME_SERVER.to_string(), TimeServer::NTP_PORT)),
-        TimeServer::Named { host, port } if port == TimeServer::NTP_PORT => Some((host.to_string(), host.to_string(), port)),
-        TimeServer::Named { host, port } => Some((format!("{host}:{port}"), host.to_string(), port)),
-    }
-}
-
-/// Step 2. The time from the server the kernel line names (or the default),
-/// applied to the clock and, when that was a second or more off, to the
-/// hardware clock. `network_missing` is why no request can leave, when that
-/// is already known. Never an error: a boot without the time goes on, with
-/// the reason in the record this returns.
-pub fn sync_at_boot(machine: &impl Machine, server: TimeServer<'_>, floored: Option<Floored>, built: Option<i64>, network_missing: Option<&str>) -> ClockStatus {
-    let Some((named, host, port)) = target(server) else {
-        info!("clock: embra.ntp=off, no time server is asked; the clock reads {}", format_utc(machine.now().secs));
-        return ClockStatus { floored_from: floored.map(|f| f.was), built, resumed_from: floored.and_then(|f| f.resumed_from), sync: Sync::Off, rtc: Rtc::Unchanged };
-    };
-    let fetched = match network_missing {
-        Some(why) => Err(why.to_string()),
-        None => fetch_within(&host, port, FETCH_WAIT),
-    };
-    apply(machine, &named, fetched, floored, built)
-}
-
 /// What a fetch came to, applied: the clock set from a sample that is not
 /// earlier than the image's build time, the hardware clock after it.
 fn apply(machine: &impl Machine, server: &str, fetched: Result<Sample, String>, floored: Option<Floored>, built: Option<i64>) -> ClockStatus {
@@ -580,7 +572,7 @@ fn apply(machine: &impl Machine, server: &str, fetched: Result<Sample, String>, 
             None => "",
         };
         warn!("clock: no time from {server}: {reason}; the clock stays at {}{guess}", format_utc(now));
-        ClockStatus { floored_from, built, resumed_from, sync: Sync::Failed { server: server.to_string(), reason }, rtc: Rtc::Unchanged }
+        ClockStatus { floored_from, built, resumed_from, sync: Sync::Failed { server: server.to_string(), reason }, rtc: Rtc::Unchanged, checked: None, missed: None }
     };
     let sample = match fetched {
         Ok(sample) => sample,
@@ -611,7 +603,303 @@ fn apply(machine: &impl Machine, server: &str, fetched: Result<Sample, String>, 
         sample.stratum,
         sample.round_trip.as_secs_f64() * 1000.0
     );
-    ClockStatus { floored_from, built, resumed_from, sync: Sync::Synchronized { server: server.to_string(), address: sample.address.to_string(), offset, stratum: sample.stratum }, rtc }
+    ClockStatus { floored_from, built, resumed_from, sync: Sync::Synchronized { server: server.to_string(), address: sample.address.to_string(), offset, stratum: sample.stratum }, rtc, checked: None, missed: None }
+}
+
+/// A time server to ask: how it is named in a line for the operator, its
+/// host and port, and where its name came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub named: String,
+    pub host: String,
+    pub port: u16,
+    /// `kernel line`, `operator`, `dhcp` or `default`.
+    pub source: &'static str,
+}
+
+impl Target {
+    /// A server written as `host` or `host:port`.
+    fn of(text: &str, source: &'static str) -> Target {
+        match text.rsplit_once(':').and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h, p))) {
+            Some((host, port)) if port != TimeServer::NTP_PORT => Target { named: text.to_string(), host: host.to_string(), port, source },
+            Some((host, port)) => Target { named: host.to_string(), host: host.to_string(), port, source },
+            None => Target { named: text.to_string(), host: text.to_string(), port: TimeServer::NTP_PORT, source },
+        }
+    }
+}
+
+/// The kernel line's `embra.ntp=`, owned: the keeper's thread outlives the
+/// line it was read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Kernel {
+    /// No knob on the line.
+    Unset,
+    Off,
+    Named(String, u16),
+}
+
+impl From<TimeServer<'_>> for Kernel {
+    fn from(server: TimeServer<'_>) -> Kernel {
+        match server {
+            TimeServer::Default => Kernel::Unset,
+            TimeServer::Off => Kernel::Off,
+            TimeServer::Named { host, port } => Kernel::Named(host.to_string(), port),
+        }
+    }
+}
+
+/// How many of a lease's time servers are asked before the default.
+const LEASE_SERVERS: usize = 2;
+
+/// Whom to ask, in order; `None` when nobody is to be asked. The kernel
+/// line decides for its boot; else the operator's servers and no other; else
+/// the time servers the DHCP leases name (a network that blocks outside
+/// time servers announces its own) and then the default.
+pub fn targets(kernel: &Kernel, setting: &TimeSetting, leases: &[Lease]) -> Option<Vec<Target>> {
+    match kernel {
+        Kernel::Off => return None,
+        Kernel::Named(host, port) => {
+            let named = if *port == TimeServer::NTP_PORT { host.clone() } else { format!("{host}:{port}") };
+            return Some(vec![Target { named, host: host.clone(), port: *port, source: "kernel line" }]);
+        }
+        Kernel::Unset => {}
+    }
+    match setting {
+        TimeSetting::Off => None,
+        TimeSetting::Servers(servers) => Some(servers.iter().map(|s| Target::of(s, "operator")).collect()),
+        TimeSetting::Default => {
+            let mut list: Vec<Target> = Vec::new();
+            for server in leases.iter().flat_map(|l| l.ntp.iter()) {
+                if list.len() < LEASE_SERVERS && !list.iter().any(|t| t.host == *server) {
+                    list.push(Target::of(server, "dhcp"));
+                }
+            }
+            list.push(Target::of(DEFAULT_TIME_SERVER, "default"));
+            Some(list)
+        }
+    }
+}
+
+/// Step 2. The time from a time server, applied to the clock and, when
+/// that was a second or more off, to the hardware clock. Each server of the
+/// list is asked in turn inside the boot's one wait; a lease's server is one
+/// address and has that address's wait ([`REPLY_WAIT`]) and no more, so the
+/// default still gets its turn. The first answer sets the clock. `network_missing` is why no request can leave, when that
+/// is already known. Never an error: a boot without the time goes on, with
+/// the reason in the record this returns.
+pub fn sync_at_boot_from(machine: &impl Machine, targets: Option<&[Target]>, floored: Option<Floored>, built: Option<i64>, network_missing: Option<&str>) -> ClockStatus {
+    let Some(targets) = targets.filter(|t| !t.is_empty()) else {
+        info!("clock: no time server is asked (embra.ntp=off, or /network time off); the clock reads {}", format_utc(machine.now().secs));
+        return ClockStatus { floored_from: floored.map(|f| f.was), built, resumed_from: floored.and_then(|f| f.resumed_from), sync: Sync::Off, rtc: Rtc::Unchanged, checked: None, missed: None };
+    };
+    let names = targets.iter().map(|t| t.named.as_str()).collect::<Vec<_>>().join(", ");
+    if let Some(why) = network_missing {
+        return apply(machine, &names, Err(why.to_string()), floored, built);
+    }
+    let started = Instant::now();
+    let mut reasons = Vec::new();
+    for target in targets {
+        let left = FETCH_WAIT.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        match fetch_within(&target.host, target.port, left) {
+            Ok(sample) => return apply(machine, &target.named, Ok(sample), floored, built),
+            Err(reason) => reasons.push(named_reason(target, targets.len(), reason)),
+        }
+    }
+    apply(machine, &names, Err(reasons.join("; ")), floored, built)
+}
+
+/// Why one server of a list gave no time, with the server's name in front
+/// unless the reason already starts with it (an address is its own name)
+/// or it is the only one asked.
+fn named_reason(target: &Target, asked: usize, reason: String) -> String {
+    if asked == 1 || reason.starts_with(&target.host) { reason } else { format!("{}: {reason}", target.named) }
+}
+
+/// How often the clock is checked against a time server while the machine
+/// runs, after an answer. (An ordinary crystal is some tens of parts in a
+/// million off: a few hundredths of a second in the hour.)
+pub const CHECK_EVERY: Duration = Duration::from_secs(3600);
+/// How long after a check that came to nothing the next one follows; and
+/// after an answer that found more than [`SOON_BEYOND`], so that a clock
+/// which runs fast or slow is held by slews and not by steps.
+pub const RETRY_AFTER: Duration = Duration::from_secs(900);
+const SOON_BEYOND: f64 = 0.25;
+/// Below this the clock is slewed, from it on it is stepped.
+const SLEW_BELOW: f64 = 0.5;
+/// A running machine whose clock a time server has already set this boot
+/// does not take an answer further away than this: one wrong or forged
+/// answer must not move it by years (the database's retention would cut by
+/// the new time, every reminder and cron job would fire, and the hardware
+/// clock would keep the error). The answer is recorded, and the next boot
+/// decides. (ntpd refuses beyond 1000 s the same way.)
+const REFUSE_BEYOND: f64 = 900.0;
+/// How long a server that answered with a kiss-of-death is left alone.
+const KISS_REST: Duration = Duration::from_secs(24 * 3600);
+/// How often the keeper looks whether a check is due.
+const KEEPER_TICK: Duration = Duration::from_secs(5);
+
+/// The clock while the machine runs: when the next check is due, and what
+/// the checks since the boot came to.
+pub struct Keeper {
+    status: ClockStatus,
+    built: Option<i64>,
+    /// A time server set or slewed the clock in this boot.
+    confirmed: bool,
+    next_due: Instant,
+    /// The network's events as last seen (`net::events`).
+    seen_events: u64,
+    /// Servers that answered with a kiss-of-death, and until when they rest.
+    resting: Vec<(String, Instant)>,
+}
+
+impl Keeper {
+    /// From the boot's record: a clock the boot set is checked again in an
+    /// hour, one it could not set in a quarter of an hour.
+    pub fn new(status: ClockStatus, built: Option<i64>, now: Instant, events: u64) -> Keeper {
+        let confirmed = status.synchronized();
+        Keeper { status, built, confirmed, next_due: now + if confirmed { CHECK_EVERY } else { RETRY_AFTER }, seen_events: events, resting: Vec::new() }
+    }
+
+    /// Whether a check is due: its time has come, or the network arrived or
+    /// returned since the last look.
+    pub fn due(&mut self, now: Instant, events: u64) -> bool {
+        let network_changed = events != self.seen_events;
+        self.seen_events = events;
+        network_changed || now >= self.next_due
+    }
+
+    /// Nothing could be asked this time (no address, nobody to ask): the
+    /// next look is a quarter of an hour on, or when the network returns.
+    pub fn wait(&mut self, now: Instant) {
+        self.next_due = now + RETRY_AFTER;
+    }
+
+    pub fn status(&self) -> &ClockStatus {
+        &self.status
+    }
+
+    /// One check: the servers in order until one answers, and what is made
+    /// of its answer. `ask` is the exchange with one server.
+    pub(crate) fn check(&mut self, machine: &impl Machine, targets: &[Target], ask: &mut dyn FnMut(&Target) -> Result<Sample, Miss>, now: Instant) {
+        self.resting.retain(|(_, until)| *until > now);
+        let mut reasons = Vec::new();
+        for target in targets {
+            if self.resting.iter().any(|(named, _)| *named == target.named) {
+                reasons.push(format!("{}: left alone for a day after its kiss-of-death", target.named));
+                continue;
+            }
+            match ask(target) {
+                Ok(sample) => return self.took(machine, target, &sample, now),
+                Err(miss) => {
+                    if miss.stop {
+                        self.resting.push((target.named.clone(), now + KISS_REST));
+                    }
+                    reasons.push(named_reason(target, targets.len(), miss.reason));
+                }
+            }
+        }
+        let server = targets.iter().map(|t| t.named.as_str()).collect::<Vec<_>>().join(", ");
+        // Every source that was asked, each once, in the order asked.
+        let mut sources: Vec<&str> = Vec::new();
+        for target in targets {
+            if !sources.contains(&target.source) {
+                sources.push(target.source);
+            }
+        }
+        let source = sources.join(", ");
+        let outcome = reasons.join("; ");
+        warn!("clock: no time from {server}: {outcome}; the next check is in {} min", RETRY_AFTER.as_secs() / 60);
+        self.status.missed = Some(Check { at: machine.now().secs, server, source, offset: None, outcome });
+        self.next_due = now + RETRY_AFTER;
+    }
+
+    /// An answer: refused, slewed or stepped.
+    fn took(&mut self, machine: &impl Machine, target: &Target, sample: &Sample, now: Instant) {
+        let time = sample.time.plus(sample.at.elapsed());
+        let before = machine.now();
+        let offset = time.seconds_since(before);
+        let missed = |keeper: &mut Keeper, outcome: String, next: Duration| {
+            warn!("clock: {} ({}): {outcome}", target.named, target.source);
+            keeper.status.missed = Some(Check { at: before.secs, server: target.named.clone(), source: target.source.to_string(), offset: Some(offset), outcome });
+            keeper.next_due = now + next;
+        };
+        if let Some(built) = self.built
+            && time.secs < built
+        {
+            return missed(self, format!("it answered {}, earlier than this image was built; not applied", format_utc(time.secs)), RETRY_AFTER);
+        }
+        if self.confirmed && offset.abs() > REFUSE_BEYOND {
+            return missed(
+                self,
+                format!("it answered {}, {offset:+.0} s from this clock, which a time server set this boot; not applied, and the next boot decides", format_utc(time.secs)),
+                CHECK_EVERY,
+            );
+        }
+        let how = if offset.abs() < SLEW_BELOW {
+            match machine.slew(offset) {
+                Ok(()) => "slewed",
+                Err(e) => return missed(self, format!("it answered and the clock could not be slewed: {e}"), RETRY_AFTER),
+            }
+        } else {
+            match machine.set(time) {
+                Ok(()) => {
+                    self.status.rtc = machine.write_rtc(time.secs);
+                    "stepped"
+                }
+                Err(e) => return missed(self, format!("it answered and the clock could not be set: {e}"), RETRY_AFTER),
+            }
+        };
+        info!(
+            "clock: checked against {} ({}, {}, stratum {}): {offset:+.3} s, {how}",
+            target.named, target.source, sample.address, sample.stratum
+        );
+        self.status.checked = Some(Check { at: time.secs, server: target.named.clone(), source: target.source.to_string(), offset: Some(offset), outcome: how.to_string() });
+        self.status.missed = None;
+        self.confirmed = true;
+        self.next_due = now + if offset.abs() > SOON_BEYOND { RETRY_AFTER } else { CHECK_EVERY };
+    }
+}
+
+/// The checks while the machine runs: a thread of PID 1 that looks every
+/// few seconds whether one is due, asks, applies and writes the record. It
+/// reads the operator's servers and the leases' at each check, and the
+/// network's keeper counts a change of the operator's servers as news, so
+/// a setting made with `/network time` is asked within seconds.
+/// `network_events` is the network's count when the boot's request left.
+pub fn keep_checked(status: ClockStatus, kernel: Kernel, built: Option<i64>, network_events: u64) {
+    if kernel == Kernel::Off {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("clock-keeper".into()).spawn(move || {
+        let machine = ThisMachine;
+        let mut keeper = Keeper::new(status, built, Instant::now(), network_events);
+        loop {
+            std::thread::sleep(KEEPER_TICK);
+            let now = Instant::now();
+            if !keeper.due(now, crate::net::events()) {
+                continue;
+            }
+            let (settings, _) = embra_boot::net_settings::read(std::path::Path::new(embra_boot::net_settings::SETTINGS_PATH));
+            let leases = embra_boot::net_lease::read();
+            let Some(targets) = targets(&kernel, &settings.time, &leases).filter(|list| !list.is_empty() && !leases.is_empty()) else {
+                // Nobody to ask, or no address to ask from: the network's
+                // return or other servers bring the next check.
+                keeper.wait(now);
+                continue;
+            };
+            keeper.check(&machine, &targets, &mut |t| ask_within(&t.host, t.port, FETCH_WAIT), now);
+            if let Err(e) = keeper.status().write() {
+                warn!("the clock's record could not be written to {}: {e}", embra_boot::clock::STATUS_PATH);
+            }
+            save_to_state(built);
+        }
+    });
+    if let Err(e) = spawned {
+        warn!("no thread for the clock's keeper ({e}): the clock is not checked again this boot");
+    }
 }
 
 /// The banner's lines about the clock: none on a clock a time server set
@@ -646,6 +934,7 @@ mod tests {
     struct Fake {
         now: Cell<Timestamp>,
         sets: RefCell<Vec<Timestamp>>,
+        slews: RefCell<Vec<f64>>,
         rtc_writes: RefCell<Vec<i64>>,
         rtc: Rtc,
         refuses_set: bool,
@@ -653,8 +942,20 @@ mod tests {
 
     impl Fake {
         fn at(secs: i64) -> Fake {
-            Fake { now: Cell::new(Timestamp { secs, nanos: 0 }), sets: RefCell::new(Vec::new()), rtc_writes: RefCell::new(Vec::new()), rtc: Rtc::Written, refuses_set: false }
+            Fake { now: Cell::new(Timestamp { secs, nanos: 0 }), sets: RefCell::new(Vec::new()), slews: RefCell::new(Vec::new()), rtc_writes: RefCell::new(Vec::new()), rtc: Rtc::Written, refuses_set: false }
         }
+    }
+
+    /// The boot's sync as the kernel line alone decides it: no setting of
+    /// the operator's, no lease.
+    fn sync_at_boot(machine: &impl Machine, server: TimeServer<'_>, floored: Option<Floored>, built: Option<i64>, network_missing: Option<&str>) -> ClockStatus {
+        sync_at_boot_from(machine, targets(&Kernel::from(server), &TimeSetting::Default, &[]).as_deref(), floored, built, network_missing)
+    }
+
+    /// The one server the kernel line's choice comes to: its name for the
+    /// operator, its host and its port.
+    fn target(server: TimeServer<'_>) -> Option<(String, String, u16)> {
+        targets(&Kernel::from(server), &TimeSetting::Default, &[]).and_then(|list| list.into_iter().next()).map(|t| (t.named, t.host, t.port))
     }
 
     impl Machine for Fake {
@@ -672,6 +973,13 @@ mod tests {
         fn write_rtc(&self, unix_secs: i64) -> Rtc {
             self.rtc_writes.borrow_mut().push(unix_secs);
             self.rtc.clone()
+        }
+        fn slew(&self, seconds: f64) -> io::Result<()> {
+            if self.refuses_set {
+                return Err(io::Error::from_raw_os_error(libc::EPERM));
+            }
+            self.slews.borrow_mut().push(seconds);
+            Ok(())
         }
     }
 
@@ -982,10 +1290,10 @@ mod tests {
         let s = fetch("127.0.0.1", good.port(), Duration::from_secs(5)).expect("the answer");
         assert_eq!(s.time.secs, REAL);
         // The kiss server answered its one request and is gone: its port refuses.
-        let reason = fetch("127.0.0.1", kiss.port(), Duration::from_millis(100)).unwrap_err();
+        let reason = fetch("127.0.0.1", kiss.port(), Duration::from_millis(100)).unwrap_err().reason;
         assert!(reason.starts_with(&format!("127.0.0.1:{}: ", kiss.port())), "the address is named with its reason: {reason}");
         // An empty label is no host name: the resolver refuses it without asking anyone.
-        assert!(fetch("bad..name", 123, Duration::from_millis(100)).unwrap_err().starts_with("the name could not be resolved: "));
+        assert!(fetch("bad..name", 123, Duration::from_millis(100)).unwrap_err().reason.starts_with("the name could not be resolved: "));
     }
 
     #[test]
@@ -1099,7 +1407,7 @@ mod tests {
     #[test]
     fn the_banner_names_a_clock_that_is_the_build_time_and_nothing_else() {
         assert!(banner_lines(None).is_empty(), "a development host has no record");
-        let unconfirmed = ClockStatus { floored_from: None, built: Some(BUILT), resumed_from: None, sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: format!("no answer within {}", seconds(FETCH_WAIT)) }, rtc: Rtc::Unchanged };
+        let unconfirmed = ClockStatus { floored_from: None, built: Some(BUILT), resumed_from: None, sync: Sync::Failed { server: "time.cloudflare.com".into(), reason: format!("no answer within {}", seconds(FETCH_WAIT)) }, rtc: Rtc::Unchanged, checked: None, missed: None };
         assert!(banner_lines(Some(&unconfirmed)).is_empty(), "a hardware clock nothing called into question is not a fault");
 
         let guess = ClockStatus { floored_from: Some(WOKE), ..unconfirmed.clone() };
@@ -1165,5 +1473,268 @@ mod tests {
                 || text.split("embra.ntp").skip(1).any(|after| after.lines().take(2).any(|l| l.contains(DEFAULT_TIME_SERVER)));
             assert!(named, "{file} names the default time server where it names embra.ntp");
         }
+    }
+
+    // ── The clock while the machine runs ────────────────────────────────
+
+    fn reading(secs: i64, nanos: u32) -> Sample {
+        Sample { time: Timestamp { secs, nanos }, at: Instant::now(), address: "192.168.1.1:123".parse().unwrap(), stratum: 2, round_trip: Duration::from_millis(4) }
+    }
+
+    fn record(sync: Sync) -> ClockStatus {
+        ClockStatus { floored_from: None, built: Some(BUILT), resumed_from: None, sync, rtc: Rtc::Unchanged, checked: None, missed: None }
+    }
+
+    fn set_at_boot() -> ClockStatus {
+        record(Sync::Synchronized { server: "time.cloudflare.com".into(), address: "162.159.200.1:123".into(), offset: 0.0, stratum: 3 })
+    }
+
+    fn lease_naming(servers: &str) -> Lease {
+        embra_boot::net_lease::parse(&format!("interface=eth0\nip=192.168.1.42\nmask=24\nntp={servers}\nmetric=102\n")).unwrap()
+    }
+
+    #[test]
+    fn a_small_difference_is_slewed_and_a_large_one_stepped() {
+        let m = Fake::at(REAL);
+        let t0 = Instant::now();
+        let mut keeper = Keeper::new(set_at_boot(), Some(BUILT), t0, 0);
+        let server = [Target::of("192.168.1.1", "dhcp")];
+        // A fifth of a second behind: the clock is run a little fast, and
+        // no reading goes backwards.
+        keeper.check(&m, &server, &mut |_| Ok(reading(REAL, 200_000_000)), t0);
+        assert!(m.sets.borrow().is_empty() && m.rtc_writes.borrow().is_empty());
+        assert_eq!(m.slews.borrow().len(), 1);
+        assert!((m.slews.borrow()[0] - 0.2).abs() < 0.01, "{:?}", m.slews.borrow());
+        let checked = keeper.status().checked.clone().unwrap();
+        assert_eq!((checked.server.as_str(), checked.source.as_str(), checked.outcome.as_str()), ("192.168.1.1", "dhcp", "slewed"));
+        // Three seconds behind: stepped, and the hardware clock with it.
+        keeper.check(&m, &server, &mut |_| Ok(reading(REAL + 3, 0)), t0);
+        assert_eq!(m.sets.borrow().len(), 1);
+        assert_eq!(m.sets.borrow()[0].secs, REAL + 3);
+        assert_eq!(*m.rtc_writes.borrow(), [REAL + 3]);
+        assert_eq!(keeper.status().checked.as_ref().unwrap().outcome, "stepped");
+        // Two seconds ahead: stepped backwards, as a clock that was ahead is.
+        keeper.check(&m, &server, &mut |_| Ok(reading(REAL + 1, 0)), t0);
+        assert_eq!(m.sets.borrow().len(), 2);
+        assert!(keeper.status().checked.as_ref().unwrap().offset.unwrap() < -1.9);
+        assert_eq!(m.slews.borrow().len(), 1, "a step is not a slew as well");
+    }
+
+    #[test]
+    fn an_answer_far_from_a_clock_set_this_boot_is_refused_and_recorded() {
+        let m = Fake::at(REAL);
+        let t0 = Instant::now();
+        let mut keeper = Keeper::new(set_at_boot(), Some(BUILT), t0, 0);
+        let server = [Target::of("192.168.1.1", "dhcp")];
+        // Five years on, from one unauthenticated answer: not applied.
+        let five_years = 5 * 365 * 86_400;
+        keeper.check(&m, &server, &mut |_| Ok(reading(REAL + five_years, 0)), t0);
+        assert!(m.sets.borrow().is_empty() && m.slews.borrow().is_empty() && m.rtc_writes.borrow().is_empty());
+        let status = keeper.status();
+        assert!(status.checked.is_none());
+        let missed = status.missed.clone().unwrap();
+        assert!(missed.offset.unwrap() > 157_000_000.0);
+        assert!(missed.outcome.contains("which a time server set this boot; not applied"), "{}", missed.outcome);
+        assert!(status.synchronized(), "the clock the boot set is still the clock");
+        // The same answer a quarter of an hour off is inside the bound.
+        keeper.check(&m, &server, &mut |_| Ok(reading(REAL + 800, 0)), t0);
+        assert_eq!(m.sets.borrow().len(), 1);
+        assert!(keeper.status().missed.is_none(), "an applied answer clears the miss before it");
+    }
+
+    #[test]
+    fn a_boot_without_a_network_takes_its_first_answer_whole() {
+        // The clock is the build time, a guess; the network comes an hour
+        // into the boot and the real time is months on.
+        let m = Fake::at(BUILT + 3600);
+        let t0 = Instant::now();
+        let mut at_boot = record(Sync::Failed { server: "time.cloudflare.com".into(), reason: "no network card has an address yet".into() });
+        at_boot.floored_from = Some(WOKE);
+        let mut keeper = Keeper::new(at_boot, Some(BUILT), t0, 0);
+        assert!(keeper.status().is_a_guess());
+        keeper.check(&m, &[Target::of(DEFAULT_TIME_SERVER, "default")], &mut |_| Ok(reading(REAL, 0)), t0);
+        assert_eq!(m.sets.borrow().len(), 1, "taken whole, however far: nothing had set this clock");
+        assert_eq!(m.sets.borrow()[0].secs, REAL);
+        assert!(keeper.status().synchronized() && !keeper.status().is_a_guess());
+        // From now on the bound holds.
+        keeper.check(&m, &[Target::of(DEFAULT_TIME_SERVER, "default")], &mut |_| Ok(reading(REAL + 86_400, 0)), t0);
+        assert_eq!(m.sets.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_check_leaves_the_last_good_answer_standing() {
+        let m = Fake::at(REAL);
+        let t0 = Instant::now();
+        let mut keeper = Keeper::new(set_at_boot(), Some(BUILT), t0, 0);
+        let server = [Target::of("192.168.1.1", "dhcp")];
+        keeper.check(&m, &server, &mut |_| Ok(reading(REAL, 100_000_000)), t0);
+        keeper.check(&m, &server, &mut |_| Err(Miss::next("no answer within 5 s")), t0);
+        let status = keeper.status();
+        assert!(status.synchronized());
+        assert_eq!(status.checked.as_ref().unwrap().outcome, "slewed", "the last good check is kept");
+        assert_eq!(status.missed.as_ref().unwrap().outcome, "no answer within 5 s");
+        // An answer earlier than the image was built is no answer either.
+        keeper.check(&m, &server, &mut |_| Ok(reading(BUILT - 10, 0)), t0);
+        assert!(keeper.status().missed.as_ref().unwrap().outcome.contains("earlier than this image was built"));
+        assert!(m.sets.borrow().is_empty());
+        // A clock that cannot be set says so and stays a miss.
+        let stubborn = Fake { refuses_set: true, ..Fake::at(REAL) };
+        keeper.check(&stubborn, &server, &mut |_| Ok(reading(REAL + 5, 0)), t0);
+        assert!(keeper.status().missed.as_ref().unwrap().outcome.contains("could not be set"));
+    }
+
+    #[test]
+    fn a_check_is_due_an_hour_after_an_answer_and_fifteen_minutes_after_a_failure() {
+        let m = Fake::at(REAL);
+        let t0 = Instant::now();
+        let minutes = |n: u64| t0 + Duration::from_secs(n * 60);
+        // A boot that set the clock: the next check is an hour on.
+        let mut keeper = Keeper::new(set_at_boot(), Some(BUILT), t0, 7);
+        assert!(!keeper.due(minutes(59), 7));
+        assert!(keeper.due(minutes(60), 7));
+        // A boot that could not: a quarter of an hour.
+        let mut unset = Keeper::new(record(Sync::Failed { server: "s".into(), reason: "r".into() }), Some(BUILT), t0, 7);
+        assert!(!unset.due(minutes(14), 7));
+        assert!(unset.due(minutes(15), 7));
+        // After an answer inside a quarter of a second: an hour again.
+        let server = [Target::of("192.168.1.1", "dhcp")];
+        keeper.check(&m, &server, &mut |_| Ok(reading(REAL, 50_000_000)), minutes(60));
+        assert!(!keeper.due(minutes(119), 7) && keeper.due(minutes(120), 7));
+        // After a check that came to nothing: a quarter of an hour.
+        keeper.check(&m, &server, &mut |_| Err(Miss::next("no answer")), minutes(120));
+        assert!(!keeper.due(minutes(134), 7) && keeper.due(minutes(135), 7));
+        // Nothing to ask from: the same wait.
+        keeper.wait(minutes(135));
+        assert!(!keeper.due(minutes(149), 7) && keeper.due(minutes(150), 7));
+    }
+
+    #[test]
+    fn a_large_difference_brings_the_next_check_sooner() {
+        // A clock that gains a third of a second in the hour is slewed, and
+        // looked at again in a quarter of an hour: held by slews, not steps.
+        let m = Fake::at(REAL);
+        let t0 = Instant::now();
+        let minutes = |n: u64| t0 + Duration::from_secs(n * 60);
+        let mut keeper = Keeper::new(set_at_boot(), Some(BUILT), t0, 0);
+        keeper.check(&m, &[Target::of("192.168.1.1", "dhcp")], &mut |_| Ok(reading(REAL, 300_000_000)), t0);
+        assert_eq!(m.slews.borrow().len(), 1);
+        assert!(!keeper.due(minutes(14), 0) && keeper.due(minutes(15), 0));
+    }
+
+    #[test]
+    fn a_network_that_returns_brings_a_check_at_once() {
+        let t0 = Instant::now();
+        let mut keeper = Keeper::new(set_at_boot(), Some(BUILT), t0, 3);
+        assert!(!keeper.due(t0 + Duration::from_secs(5), 3));
+        // The net keeper counted an arrival or a return.
+        assert!(keeper.due(t0 + Duration::from_secs(10), 4));
+        // Once: the same count is no news.
+        assert!(!keeper.due(t0 + Duration::from_secs(15), 4));
+    }
+
+    #[test]
+    fn the_leases_time_servers_are_asked_before_the_default() {
+        let leases = [lease_naming("192.168.1.1 192.168.1.5 192.168.1.9"), lease_naming("192.168.1.1 10.9.9.9")];
+        let list = targets(&Kernel::Unset, &TimeSetting::Default, &leases).unwrap();
+        assert_eq!(
+            list.iter().map(|t| (t.named.as_str(), t.source)).collect::<Vec<_>>(),
+            [("192.168.1.1", "dhcp"), ("192.168.1.5", "dhcp"), ("time.cloudflare.com", "default")],
+            "two of the leases' servers, each once, then the default"
+        );
+        // No lease names one: the default alone.
+        assert_eq!(targets(&Kernel::Unset, &TimeSetting::Default, &[]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_operators_servers_replace_both_and_off_asks_nobody() {
+        let leases = [lease_naming("192.168.1.1")];
+        let mine = TimeSetting::Servers(vec!["ntp.example.org".into(), "10.0.2.2:11123".into()]);
+        let list = targets(&Kernel::Unset, &mine, &leases).unwrap();
+        assert_eq!(
+            list.iter().map(|t| (t.named.as_str(), t.host.as_str(), t.port, t.source)).collect::<Vec<_>>(),
+            [("ntp.example.org", "ntp.example.org", 123, "operator"), ("10.0.2.2:11123", "10.0.2.2", 11123, "operator")]
+        );
+        assert_eq!(targets(&Kernel::Unset, &TimeSetting::Off, &leases), None);
+        // The kernel line decides for its boot, whatever is stored.
+        assert_eq!(targets(&Kernel::Off, &mine, &leases), None);
+        let line = targets(&Kernel::Named("10.0.2.2".into(), 12300), &TimeSetting::Off, &leases).unwrap();
+        assert_eq!(line.iter().map(|t| (t.named.as_str(), t.source)).collect::<Vec<_>>(), [("10.0.2.2:12300", "kernel line")]);
+    }
+
+    #[test]
+    fn at_boot_a_lease_server_that_is_silent_leaves_the_default_its_turn() {
+        // The lease names a time server that says nothing; the next in the
+        // list answers inside the boot's one wait, and the record names it.
+        let at = |address: SocketAddr, source: &'static str| Target::of(&address.to_string(), source);
+        let silent = server(1, |_| Vec::new());
+        let good = server(1, |nonce| vec![answer(nonce, REAL).to_vec()]);
+        let m = Fake::at(BUILT);
+        let started = Instant::now();
+        let status = sync_at_boot_from(&m, Some(&[at(silent, "dhcp"), at(good, "default")]), None, Some(BUILT), None);
+        assert!(matches!(&status.sync, Sync::Synchronized { server, .. } if *server == good.to_string()), "{:?}", status.sync);
+        assert_eq!(m.sets.borrow().len(), 1);
+        assert!(started.elapsed() >= REPLY_WAIT && started.elapsed() < FETCH_WAIT, "the silent server had its short wait and no more: {:?}", started.elapsed());
+        // Nobody answers: every server is named once, with its reason.
+        let silent = server(1, |_| Vec::new());
+        let closed = {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket.local_addr().unwrap()
+        };
+        let status = sync_at_boot_from(&Fake::at(BUILT), Some(&[at(silent, "dhcp"), at(closed, "default")]), None, Some(BUILT), None);
+        let Sync::Failed { server, reason } = &status.sync else { panic!("{:?}", status.sync) };
+        assert_eq!(*server, format!("{silent}, {closed}"));
+        assert!(reason.starts_with(&format!("{silent}: no answer within 1.5 s; {closed}: ")), "{reason}");
+        assert_eq!(reason.matches("127.0.0.1").count(), 2, "an address is its own name and is said once: {reason}");
+        // An empty list asks nobody, as off does.
+        assert_eq!(sync_at_boot_from(&Fake::at(BUILT), Some(&[]), None, Some(BUILT), None).sync, Sync::Off);
+        assert_eq!(sync_at_boot_from(&Fake::at(BUILT), None, None, Some(BUILT), None).sync, Sync::Off);
+    }
+
+    #[test]
+    fn a_check_nobody_answered_names_every_server_once_and_every_source() {
+        let m = Fake::at(REAL);
+        let t0 = Instant::now();
+        let mut keeper = Keeper::new(set_at_boot(), Some(BUILT), t0, 0);
+        let list = [Target::of("192.168.1.1", "dhcp"), Target::of("192.168.1.5", "dhcp"), Target::of(DEFAULT_TIME_SERVER, "default")];
+        keeper.check(
+            &m,
+            &list,
+            &mut |t| Err(Miss::next(if t.source == "dhcp" { format!("{}:123: no answer within 1.5 s", t.host) } else { "the name could not be resolved: no such name".to_string() })),
+            t0,
+        );
+        let missed = keeper.status().missed.clone().unwrap();
+        assert_eq!(missed.server, "192.168.1.1, 192.168.1.5, time.cloudflare.com");
+        assert_eq!(missed.source, "dhcp, default");
+        assert_eq!(
+            missed.outcome,
+            "192.168.1.1:123: no answer within 1.5 s; 192.168.1.5:123: no answer within 1.5 s; time.cloudflare.com: the name could not be resolved: no such name"
+        );
+        // One server alone needs no name in front of its reason.
+        keeper.check(&m, &list[2..], &mut |_| Err(Miss::next("no answer within 5 s")), t0);
+        assert_eq!(keeper.status().missed.as_ref().unwrap().outcome, "no answer within 5 s");
+    }
+
+    #[test]
+    fn a_kiss_of_death_rests_that_server_for_a_day() {
+        let m = Fake::at(REAL);
+        let t0 = Instant::now();
+        let hours = |n: u64| t0 + Duration::from_secs(n * 3600);
+        let mut keeper = Keeper::new(set_at_boot(), Some(BUILT), t0, 0);
+        let list = [Target::of("192.168.1.1", "dhcp"), Target::of(DEFAULT_TIME_SERVER, "default")];
+        let asked = RefCell::new(Vec::new());
+        let mut ask = |t: &Target| {
+            asked.borrow_mut().push(t.named.clone());
+            if t.source == "dhcp" { Err(Miss { reason: "the server declined the request (kiss code DENY)".into(), stop: true }) } else { Ok(reading(REAL, 10_000_000)) }
+        };
+        keeper.check(&m, &list, &mut ask, t0);
+        assert_eq!(*asked.borrow(), ["192.168.1.1", "time.cloudflare.com"], "the next server is asked in the same check");
+        assert!(keeper.status().checked.is_some());
+        // An hour on, and twenty-three: the server that said stay away is not asked.
+        keeper.check(&m, &list, &mut ask, hours(1));
+        keeper.check(&m, &list, &mut ask, hours(23));
+        assert_eq!(asked.borrow().iter().filter(|n| *n == "192.168.1.1").count(), 1);
+        // A day on it is asked again: months of uptime do not go without it.
+        keeper.check(&m, &list, &mut ask, hours(25));
+        assert_eq!(asked.borrow().iter().filter(|n| *n == "192.168.1.1").count(), 2);
     }
 }
