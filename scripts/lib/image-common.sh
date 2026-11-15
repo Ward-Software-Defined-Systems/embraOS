@@ -205,6 +205,27 @@ clean_buildroot_package() {
     done
 }
 
+# remove_stale_package_dirs <buildroot dir> <package>...: a build directory
+# is named <package>-<recipe version>, and `make <package>-dirclean` knows
+# the version the recipe has now and no other. A directory of one of this
+# tree's own packages that is still there after that dirclean carries a
+# version its recipe had before: a copy of the release directory, gigabytes
+# that no build reads again and none removes. It is removed and named.
+# Called after the dirclean of the same packages, never before it, and
+# never for a package Buildroot compiles: there the directory is the build.
+remove_stale_package_dirs() {
+    local br="$1" pkg d
+    shift
+    for pkg in "$@"; do
+        for d in "$br/output/build/$pkg"-[0-9]*/; do
+            [ -d "$d" ] || continue
+            echo "build directory ${d%/} outlived the dirclean of $pkg (a former version of its recipe names it): removed"
+            rm -rf "${d%/}"
+        done
+    done
+    return 0
+}
+
 # size_to_bytes <genimage size>: 64M, 1024M, 4G → bytes.
 size_to_bytes() {
     local s="$1" n unit

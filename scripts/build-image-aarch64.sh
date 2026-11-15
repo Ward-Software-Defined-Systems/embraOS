@@ -438,6 +438,13 @@ fi
     rm -f output/images/rootfs.squashfs output/images/rootfs.tar output/images/embraos.img \
           output/images/boot.vfat output/images/esp.vfat)
 
+# The packages of the loop above that are this tree's own are copies, each
+# in a directory named after its recipe's version: one a former version left
+# is not reached by the dirclean (remove_stale_package_dirs,
+# scripts/lib/image-common.sh).
+remove_stale_package_dirs "$BUILDROOT_DIR" embrad embra-apid embra-trustd embra-brain embra-console embra-web \
+    wardsondb embra-update embra-rust-toolchain embra-embedding-model
+
 # A package whose patches under buildroot/patches/ changed builds again from
 # its tarball: Buildroot applies patches once, at extraction
 # (clean_packages_with_changed_patches, scripts/lib/image-common.sh).

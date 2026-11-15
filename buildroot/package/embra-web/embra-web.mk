@@ -4,7 +4,9 @@
 #
 ################################################################################
 
-EMBRA_WEB_VERSION = 0.5.0-phase1
+# Not the version of the software: the binary carries the workspace's
+# (Cargo.toml). The value names the build directory and nothing else.
+EMBRA_WEB_VERSION = 1.0
 # The architecture comes from $(EMBRAOS_RUST_TARGET) (external.mk), never from
 # a literal: one tree builds x86_64 and aarch64.
 EMBRA_WEB_SITE = $(BR2_EXTERNAL_EMBRAOS_PATH)/../target/$(EMBRAOS_RUST_TARGET)/release
