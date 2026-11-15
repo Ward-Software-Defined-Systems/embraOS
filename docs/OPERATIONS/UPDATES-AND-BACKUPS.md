@@ -67,7 +67,7 @@ A restore refuses an incomplete entry (a `.partial` directory a crash left, whic
 
 ## Updates
 
-An OS update is a new slot image written into the inactive slot and tried by GRUB; the running slot is untouched and is where GRUB returns if the new release does not come up. The operator decides: `/update apply` in a session, or Update embraOS in the boot menu. The intelligence has no tool for it.
+An OS update is a new slot image written into the inactive slot and tried by GRUB; the running slot is untouched and is where GRUB returns if the new release does not come up. The operator decides: `/update apply` in a session, or Update embraOS in the boot menu. No tool of the intelligence applies an update; it can ask whether one is published (The automatic check, below).
 
 ### What a release publishes
 
@@ -90,6 +90,16 @@ The signature binds the version, the tag, the build id, the architecture, the en
 ### Where the manifest comes from
 
 The default source is the GitHub releases of the public mirror, `https://github.com/Ward-Software-Defined-Systems/embraOS/releases/latest/download` (no API, no token: GitHub answers the fixed name with the latest non-draft, non-prerelease release). `/update source <url>` stores the operator's own base under `/embra/state/update-source` — `https://…`, or `http://` to a private address, such as a GitLab generic package registry behind the operator's CA (the updater trusts the certificate authorities embrad merges for every service: the image's and STATE's drop-ins) — and `/update source reset` returns to the default. The image is always fetched from the same base under the name the manifest gives, never from a URL inside the manifest, so a mirror serves the same signed manifest. `/update --tag <v…>` checks one release's own files on GitHub in place of the latest, and `/update apply --tag <v…>` applies it; with the operator's own source set the command refuses a tag, since the updater reads that source as it is and would check another release than the one named.
+
+### The automatic check
+
+The brain asks the update source by itself whether a newer release is published: a few minutes after boot and once a day, and again about an hour after a check that failed. It is the updater's own check, the request `/update` makes: the manifest and its signature are fetched from the source, the signature is verified, and the release is compared with the running one. Nothing is downloaded or staged and nothing is applied; that stays `/update apply`. The source sees the machine's address and the `embraOS/<version>` user agent, as it does for `/update`.
+
+The last answer is in `system_status`, in its `update` block, and `/status` prints the same: whether the automatic check is on, when the verdict was reached, the verdict (`newer`, `same_build`, `same_version_other_build`, `older`, `mismatch`), the published release, the source, and the newest check when it failed, with its reason. When a newer release is first seen the operator gets one notice in the console, and the intelligence one line in its next turn of each session and in a resume briefing. The answer is kept in memory alone: after a boot the first check sees a release that is still ahead again and says so once more.
+
+`/update auto off` turns the automatic check off, `/update auto on` turns it on and runs a check at once, and `/update auto` says which it is (a file on STATE, `/embra/state/update-auto-check`; on while there is none). On a new machine the first check runs before a session exists in which the command could be typed. The intelligence asks on demand with its `update_check` tool ([TOOL-REFERENCE.md](TOOL-REFERENCE.md)): the same check, run at once, whatever the switch says. The tool takes no input, so nothing of the model's is on the updater's command line, and the source it asks is the one set here or the default.
+
+Validated in a scratch VM under QEMU against the published `v0.24.0-phase2` (2026-11-15): on an image stamped as an older release the check ran by itself three minutes after each of two boots, the notice arrived in the console, `/status` and the tool showed the block, the first turn of the session carried the line and the second did not, a resume briefing after the reboot carried it, `/update auto` turned the check off and on, and a check against an unreachable source left the last verdict in place beside its failure, with the source's credentials left out; on the image under its own stamp the block read `same_version_other_build` and nothing was said. The operator's run is **TBD**.
 
 ### Applying
 
