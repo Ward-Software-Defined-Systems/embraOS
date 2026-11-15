@@ -130,7 +130,7 @@ box(200, 308, 520, 56, "embra-apid", [
 # row C
 box(60, 400, 680, 124, "embra-brain", [
     "headless AI runtime: providers (Anthropic, Gemini,",
-    "Ollama, LM Studio) · 119 tools · sessions · Learning Mode",
+    "Ollama, LM Studio) · 120 tools · sessions · Learning Mode",
     "knowledge graph + in-OS embeddings (tract · bge-small)",
     "proactive: reminders, cron · media (images in and out)",
     "tools write under /embra/workspace only · read everything",

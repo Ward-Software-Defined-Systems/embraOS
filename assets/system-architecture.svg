@@ -65,7 +65,7 @@
 <text x="88" y="419" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">embra-brain</text>
 <text x="728" y="419" font-family="DejaVu Sans Mono, monospace" font-size="10.4" font-weight="normal" fill="#ef4444" text-anchor="end">gRPC :50002</text>
 <text x="72" y="435" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">headless AI runtime: providers (Anthropic, Gemini,</text>
-<text x="72" y="447" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">Ollama, LM Studio) · 119 tools · sessions · Learning Mode</text>
+<text x="72" y="447" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">Ollama, LM Studio) · 120 tools · sessions · Learning Mode</text>
 <text x="72" y="459" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">knowledge graph + in-OS embeddings (tract · bge-small)</text>
 <text x="72" y="471" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">proactive: reminders, cron · media (images in and out)</text>
 <text x="72" y="483" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">tools write under /embra/workspace only · read everything</text>
