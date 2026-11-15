@@ -10,6 +10,14 @@ use crate::provider::gemini::GeminiProvider;
 use crate::provider::{LlmProvider, ProviderKind, ValidationResult};
 use embra_common::proto::brain::*;
 
+/// The phase the running build belongs to: the pre-release part of the
+/// workspace version (`phase2` of `0.24.0-phase2`), which cargo hands the
+/// compiler. It is what `SystemConfig::deployment_mode` says. A version
+/// without that part would leave it empty; the guard
+/// `the_deployment_mode_is_the_phase_the_build_is_versioned_with` is where
+/// that gets decided.
+pub(crate) const DEPLOYMENT_MODE: &str = env!("CARGO_PKG_VERSION_PRE");
+
 /// No `Default`, on purpose: a new field is written at every place a
 /// config is constructed, where the compiler asks for it. A field that old
 /// stored configs lack is optional and carries a serde default; that needs
@@ -19,6 +27,12 @@ pub struct SystemConfig {
     pub name: String,
     pub api_key: String,
     pub timezone: String,
+    /// The phase of the build the config is running under
+    /// (`DEPLOYMENT_MODE`). No code reads it; a reader of the stored
+    /// document does (`get config.system config`). Kept on the running
+    /// build the way `version` is, on load, on save and at every boot:
+    /// it was a literal written at the first boot, and the document of
+    /// every instance said `phase1` whatever build ran.
     pub deployment_mode: String,
     pub created_at: String,
     /// The embraOS build the config is running under
@@ -197,7 +211,7 @@ impl SystemConfig {
             name: "Embra".to_string(),
             api_key,
             timezone,
-            deployment_mode: "phase1".into(),
+            deployment_mode: DEPLOYMENT_MODE.into(),
             created_at: String::new(),
             version: env!("CARGO_PKG_VERSION").into(),
             github_token: None,
@@ -642,8 +656,10 @@ pub async fn save_config(db: &WardsonDbClient, config: &SystemConfig) -> Result<
     if let Some(obj) = doc.as_object_mut() {
         obj.insert("_id".into(), serde_json::json!("config"));
         // F-7: stamp the writing build, so the persisted doc self-heals an
-        // older `version` string on the next save (see load_config).
+        // older `version` string on the next save (see load_config), and
+        // the phase that build belongs to with it.
         obj.insert("version".into(), serde_json::json!(env!("CARGO_PKG_VERSION")));
+        obj.insert("deployment_mode".into(), serde_json::json!(DEPLOYMENT_MODE));
     }
     match db.write("config.system", &doc).await {
         Ok(_) => Ok(()),
@@ -706,6 +722,9 @@ pub async fn load_config(db: &WardsonDbClient) -> Result<SystemConfig> {
     // on; refresh it so a reader of the stored doc never sees a version that
     // disagrees with the running binary.
     config.version = env!("CARGO_PKG_VERSION").into();
+    // The phase is a fact of the build as well: every stored document said
+    // `phase1`, the literal its first boot wrote.
+    config.deployment_mode = DEPLOYMENT_MODE.into();
     Ok(config)
 }
 
@@ -1147,7 +1166,7 @@ pub async fn run_config_wizard_grpc(
         name,
         api_key,
         timezone,
-        deployment_mode: "phase1".into(),
+        deployment_mode: DEPLOYMENT_MODE.into(),
         created_at: chrono::Utc::now().to_rfc3339(),
         version: env!("CARGO_PKG_VERSION").into(),
         github_token: None,
@@ -2067,7 +2086,7 @@ mod redact_tests {
 
 #[cfg(test)]
 mod save_config_tests {
-    use super::{save_config, tests_support::minimal_cfg};
+    use super::{save_config, tests_support::minimal_cfg, SystemConfig, DEPLOYMENT_MODE};
     use crate::db::WardsonDbClient;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2136,11 +2155,51 @@ mod save_config_tests {
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["_id"], "config");
     }
+
+    /// The phase is stamped the same way: the document written carries the
+    /// running build's whatever the struct says.
+    #[tokio::test]
+    async fn a_save_stamps_the_builds_phase_into_deployment_mode() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/config.system")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/config.system/docs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": {"_id": "config"}, "meta": {}})))
+            .mount(&server)
+            .await;
+        let mut cfg = minimal_cfg();
+        cfg.deployment_mode = "the phase of another build".into();
+        save_config(&WardsonDbClient::from_url(&server.uri()), &cfg).await.unwrap();
+        let written = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| !r.body.is_empty())
+            .expect("one document was written");
+        let body: serde_json::Value = serde_json::from_slice(&written.body).unwrap();
+        assert_eq!(body["deployment_mode"], DEPLOYMENT_MODE);
+    }
+
+    /// The value is the pre-release part of the workspace version, the part
+    /// a release is named with (`v0.24.0-phase2`), and a boot without a
+    /// stored configuration carries it. A version without that part leaves
+    /// the value empty, which no document should say: this is where a
+    /// version of that form gets its answer.
+    #[test]
+    fn the_deployment_mode_is_the_phase_the_build_is_versioned_with() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(!DEPLOYMENT_MODE.is_empty(), "the workspace version {version} has no pre-release part: decide what deployment_mode says");
+        assert_eq!(version.split_once('-').map(|(_, phase)| phase), Some(DEPLOYMENT_MODE));
+        let fallback = SystemConfig::boot_fallback("k".into(), "UTC".into());
+        assert_eq!(fallback.deployment_mode, DEPLOYMENT_MODE);
+        assert_eq!(fallback.version, version);
+    }
 }
 
 #[cfg(test)]
 mod load_config_tests {
-    use super::{load_config, tests_support::minimal_cfg};
+    use super::{load_config, tests_support::minimal_cfg, DEPLOYMENT_MODE};
     use crate::db::WardsonDbClient;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2161,6 +2220,25 @@ mod load_config_tests {
         let db = WardsonDbClient::from_url(&server.uri());
         let cfg = load_config(&db).await.unwrap();
         assert_eq!(cfg.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// The phase follows: a stored config that says `phase1`, as the
+    /// document of every instance did, reads as the running build's.
+    #[tokio::test]
+    async fn load_refreshes_a_stale_deployment_mode_to_the_builds_phase() {
+        let stale = "phase1";
+        assert_ne!(DEPLOYMENT_MODE, stale, "the stored value has to differ from the build's for this to prove anything");
+        let mut doc = serde_json::to_value(minimal_cfg()).unwrap();
+        doc["deployment_mode"] = serde_json::json!(stale);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": doc, "meta": {}})))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let cfg = load_config(&db).await.unwrap();
+        assert_eq!(cfg.deployment_mode, DEPLOYMENT_MODE);
     }
 }
 

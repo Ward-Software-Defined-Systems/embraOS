@@ -192,7 +192,8 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     ensure_ttl_policies(db).await;
 
     // The stored configuration's version — every boot (see
-    // ensure_config_version); the one field, patched only when it differs.
+    // ensure_config_version), and the phase that build belongs to; each
+    // patched only when it differs.
     ensure_config_version(db).await;
 
     // Identity-projection reconcile — also every boot, unversioned (the
@@ -562,15 +563,17 @@ async fn ensure_ttl_policies(db: &WardsonDbClient) {
 /// caught up when an operator next changed a setting. This step brings the
 /// document itself current on the first boot of a new build, so a reader
 /// of the document never sees a version that disagrees with the binary.
+/// `deployment_mode`, the phase that build belongs to
+/// (`config::DEPLOYMENT_MODE`), is the second field of the kind: it was a
+/// literal, and a document read `phase1` under a Phase 2 build.
 ///
 /// Every boot, unversioned, for the reason the retention policies are: the
 /// running build is not a fact a one-shot step can record. Idempotent — a
-/// current document is read and left alone, and the patch is the one field.
-/// No document (the first boot, before the wizard) is nothing to refresh;
-/// a failure is logged and never stops the boot, since the configuration in
-/// memory is right regardless.
+/// current document is read and left alone, and one patch carries the
+/// fields that differ and no other. No document (the first boot, before the
+/// wizard) is nothing to refresh; a failure is logged and never stops the
+/// boot, since the configuration in memory is right regardless.
 async fn ensure_config_version(db: &WardsonDbClient) {
-    let running = env!("CARGO_PKG_VERSION");
     let doc = match db.read("config.system", "config").await {
         Ok(doc) => doc,
         Err(e) => {
@@ -585,32 +588,72 @@ async fn ensure_config_version(db: &WardsonDbClient) {
             return;
         }
     };
-    let stored = doc.get("version").and_then(|v| v.as_str()).unwrap_or("");
-    if stored == running {
+    let mut patch = serde_json::Map::new();
+    let mut moved = Vec::new();
+    for (field, running) in [("version", env!("CARGO_PKG_VERSION")), ("deployment_mode", crate::config::DEPLOYMENT_MODE)] {
+        let stored = doc.get(field).and_then(|v| v.as_str()).unwrap_or("");
+        if stored != running {
+            patch.insert(field.to_string(), serde_json::json!(running));
+            moved.push(format!("{field} {stored} → {running}"));
+        }
+    }
+    if patch.is_empty() {
         return;
     }
-    match db
-        .patch_document("config.system", "config", &serde_json::json!({"version": running}))
-        .await
-    {
-        Ok(()) => info!("Config version refreshed: {} → {}", stored, running),
-        Err(e) => warn!("Config version not refreshed (the document keeps {}): {}", stored, e),
+    let moved = moved.join(", ");
+    match db.patch_document("config.system", "config", &serde_json::Value::Object(patch)).await {
+        Ok(()) => info!("Config refreshed to the running build: {}", moved),
+        Err(e) => warn!("Config not refreshed to the running build (the document keeps what it had: {}): {}", moved, e),
     }
 }
 
 #[cfg(test)]
 mod config_version_tests {
     use super::ensure_config_version;
+    use crate::config::DEPLOYMENT_MODE;
     use crate::db::WardsonDbClient;
     use serde_json::json;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn stored(version: &str) -> ResponseTemplate {
+    /// The phase every stored document carried, whatever build ran.
+    const STALE_PHASE: &str = "phase1";
+
+    fn stored(version: &str, phase: &str) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({
             "ok": true, "meta": {},
-            "data": {"_id": "config", "name": "Embra", "version": version}
+            "data": {"_id": "config", "name": "Embra", "version": version, "deployment_mode": phase}
         }))
+    }
+
+    /// One boot of the step against a stored document, with the one patch
+    /// it must send; `None` for a document that must be left alone.
+    async fn run_against(answer: ResponseTemplate, patch: Option<serde_json::Value>) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/config.system/docs/config")).respond_with(answer).mount(&server).await;
+        match patch {
+            Some(body) => {
+                Mock::given(method("PATCH"))
+                    .and(path("/config.system/docs/config"))
+                    .and(body_json(body))
+                    .respond_with(done())
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            None => {
+                Mock::given(method("PATCH"))
+                    .and(path("/config.system/docs/config"))
+                    .respond_with(done())
+                    .expect(0)
+                    .mount(&server)
+                    .await;
+            }
+        }
+        ensure_config_version(&WardsonDbClient::from_url(&server.uri())).await;
+        // A patch with any other body matches no mock: the step logs the
+        // 404 and the expectation of one matching request fails here.
+        server.verify().await;
     }
 
     fn done() -> ResponseTemplate {
@@ -621,41 +664,34 @@ mod config_version_tests {
     /// running build — the one field, exactly once.
     #[tokio::test]
     async fn a_stale_version_is_patched_to_the_running_build() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/config.system/docs/config"))
-            .respond_with(stored("0.5.0-phase1"))
-            .mount(&server)
-            .await;
-        Mock::given(method("PATCH"))
-            .and(path("/config.system/docs/config"))
-            .and(body_json(json!({"version": env!("CARGO_PKG_VERSION")})))
-            .respond_with(done())
-            .expect(1)
-            .mount(&server)
-            .await;
-        ensure_config_version(&WardsonDbClient::from_url(&server.uri())).await;
-        server.verify().await;
+        run_against(stored("0.5.0-phase1", DEPLOYMENT_MODE), Some(json!({"version": env!("CARGO_PKG_VERSION")}))).await;
+    }
+
+    /// The phase is patched the same way: a document that says `phase1`
+    /// under this build gets the build's, and the version it already has
+    /// is not sent again.
+    #[tokio::test]
+    async fn a_stale_deployment_mode_is_patched_to_the_builds_phase() {
+        assert_ne!(DEPLOYMENT_MODE, STALE_PHASE, "the stored value has to differ from the build's for this to prove anything");
+        run_against(stored(env!("CARGO_PKG_VERSION"), STALE_PHASE), Some(json!({"deployment_mode": DEPLOYMENT_MODE}))).await;
+    }
+
+    /// The document of an instance updated from an earlier release is
+    /// behind in both: one patch carries both fields.
+    #[tokio::test]
+    async fn a_document_behind_in_both_fields_is_patched_once_with_both() {
+        run_against(
+            stored("0.23.0-phase1", STALE_PHASE),
+            Some(json!({"version": env!("CARGO_PKG_VERSION"), "deployment_mode": DEPLOYMENT_MODE})),
+        )
+        .await;
     }
 
     /// A current document is left alone, and so is a first boot with none.
     #[tokio::test]
     async fn a_current_or_absent_document_is_not_written() {
-        for answer in [stored(env!("CARGO_PKG_VERSION")), ResponseTemplate::new(404)] {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/config.system/docs/config"))
-                .respond_with(answer)
-                .mount(&server)
-                .await;
-            Mock::given(method("PATCH"))
-                .and(path("/config.system/docs/config"))
-                .respond_with(done())
-                .expect(0)
-                .mount(&server)
-                .await;
-            ensure_config_version(&WardsonDbClient::from_url(&server.uri())).await;
-            server.verify().await;
+        for answer in [stored(env!("CARGO_PKG_VERSION"), DEPLOYMENT_MODE), ResponseTemplate::new(404)] {
+            run_against(answer, None).await;
         }
     }
 }
