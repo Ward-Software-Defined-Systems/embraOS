@@ -703,7 +703,9 @@ pub fn App() -> impl IntoView {
                                 el.click();
                             }
                         }>
-                        "📎 Attach"
+                        // The paperclip in a span of its own: the display
+                        // console has no font that draws it and hides it.
+                        <span class="emoji">"📎"</span>" Attach"
                     </button>
                     <input node_ref=attach_input type="file" accept=ACCEPT multiple
                         style="display:none"

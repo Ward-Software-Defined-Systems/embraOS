@@ -104,7 +104,263 @@
       const a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
       if (a && a.origin !== window.location.origin) e.preventDefault();
     }, true);
+    kioskSheet = embraKioskSheet();
+    // The launcher shows no dialog for a page's alert: the sheet says it.
+    window.alert = function (message) { kioskSheet.open({ title: String(message) }); };
+    // The launcher has no file picker and the display no files of its own:
+    // a picker the page asks for is answered with where files come from.
+    document.addEventListener("click", (e) => {
+      if (e.target && e.target.matches && e.target.matches("input[type=file]")) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        embraKioskNeedsBrowser("attach");
+      }
+    }, true);
     embraKioskMenu();
+    embraKioskSelects();
+  }
+
+  // One panel over a dimmed page, for what the display console has to say:
+  // this console's URL (the menu's last entry), an action that needs a
+  // browser on another machine, and the page's alerts. It holds the
+  // keyboard while it is up (Escape and Enter close it, nothing is typed
+  // into the console or the form behind it) and gives the focus back to
+  // where it was. The URL carries the boot's token: embra-web gives it to
+  // the machine's own browser and to no other (`/api/console-url`), and it
+  // is on the page only while the sheet is up.
+  let kioskSheet = null;
+  function embraKioskSheet() {
+    const bg = document.createElement("div");
+    bg.id = "embra-kiosk-sheet";
+    bg.className = "kiosk-sheet-bg";
+    const box = document.createElement("div");
+    box.className = "kiosk-sheet";
+    box.setAttribute("role", "dialog");
+    bg.appendChild(box);
+    document.body.appendChild(bg);
+    let back = null;
+    const el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    };
+    const isOpen = () => bg.style.display === "flex";
+    const close = () => {
+      bg.style.display = "none";
+      box.textContent = "";
+      const to = back;
+      back = null;
+      if (to && to.isConnected && to !== document.body) {
+        try { to.focus(); return; } catch (e) {}
+      }
+      if (term) try { term.focus(); } catch (e) {}
+    };
+    // { title, text: the paragraphs under it, urls: this console's URL after them }
+    const open = async (what) => {
+      if (!isOpen()) back = document.activeElement;
+      box.textContent = "";
+      box.appendChild(el("b", "ks-title", what.title));
+      for (const line of (what.text || [])) box.appendChild(el("div", "ks-text", line));
+      const rows = what.urls ? el("div", "ks-body", null) : null;
+      if (rows) {
+        box.appendChild(rows);
+        box.appendChild(el("div", "ks-note", "The URL carries this boot\u2019s access token: whoever has it has the console, until the next boot. The browser asks about the certificate once (embraOS-CA)."));
+      }
+      const bye = el("button", "ks-close", "Close");
+      bye.type = "button";
+      bye.addEventListener("click", close);
+      box.appendChild(bye);
+      bg.style.display = "flex";
+      if (!rows) return;
+      try {
+        const resp = await fetch("/api/console-url", { cache: "no-store" });
+        if (!resp.ok) throw new Error("the web console answered " + resp.status);
+        const data = await resp.json();
+        for (const row of (data.urls || [])) {
+          rows.appendChild(el("code", "ks-url", row.url));
+          rows.appendChild(el("div", "ks-where", row.where));
+        }
+      } catch (err) {
+        rows.appendChild(el("div", "ks-where", "The URL could not be read: " + (err && err.message ? err.message : err)));
+      }
+    };
+    bg.addEventListener("mousedown", (e) => { if (e.target === bg) close(); });
+    window.addEventListener("keydown", (e) => {
+      if (!isOpen()) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      if (e.key === "Escape" || e.key === "Enter") close();
+    }, true);
+    return { open, close, isOpen };
+  }
+
+  // What the display console cannot finish and a browser on another machine
+  // can: the machine's display has no file picker, no files of its own and
+  // nowhere to save one. The sheet names the action, says what to do there,
+  // and shows this console's URL, so that nothing the operator presses on
+  // the display does nothing without a word.
+  const KIOSK_NEEDS_BROWSER = {
+    attach: ["Attach a file from a browser on another machine",
+      "The display console has no file picker and no files of its own. Open this console in a browser on another machine and attach the file there: the Attach button, or a drop or a paste on its terminal.",
+      "A file that is already in the workspace is attached from here: /attach and its path."],
+    download: ["Download a file from a browser on another machine",
+      "The display console has nowhere to save a file. Open this console in a browser on another machine and click the same row there."],
+    backup: ["Upload a backup from a browser on another machine",
+      "The display console has no file picker and no files of its own. Open this console in a browser on another machine and upload the backup there: the /backup form, action upload."],
+  };
+  function embraKioskNeedsBrowser(kind, route) {
+    const [title, ...text] = KIOSK_NEEDS_BROWSER[kind];
+    if (route) text.push("The file: " + route);
+    if (kioskSheet) kioskSheet.open({ title, text, urls: true });
+  }
+
+  // The display console's dropdown lists. The launcher draws the list of a
+  // <select> on its Wayland platform alone: on the machine's display a press
+  // on the box opened nothing, and the engine, which took its list for open
+  // from then on, no longer wrote the choice into the box while the arrow
+  // keys went on changing it. So the engine's own answer to that press (and
+  // to Space and Enter on the box) never runs here, and the page draws the
+  // list under the box, for the browser's own element: a pick sets its
+  // value and fires the events a browser's pick fires. While the list is up
+  // it holds the keyboard: the arrows, Home, End and a first letter move the
+  // mark, Enter and Space pick, Escape closes and stops there (the form
+  // stays, and in the console Esc is /stop). A remote browser keeps its own
+  // list and runs none of this.
+  function embraKioskSelects() {
+    const list = document.createElement("div");
+    list.id = "embra-kiosk-select";
+    list.className = "kiosk-select";
+    list.setAttribute("role", "listbox");
+    document.body.appendChild(list);
+    let owner = null, active = -1;
+    const isOpen = () => list.style.display === "block";
+    // A box with a list that drops down: not a list box, which the engine
+    // draws inside the page.
+    const plain = (el) => (el && el.matches && el.matches("select") && !el.multiple && el.size <= 1 ? el : null);
+    const usable = (i) => !!owner && i >= 0 && i < owner.options.length && !owner.options[i].disabled;
+    const mark = (i) => {
+      active = i;
+      Array.from(list.children).forEach((row, n) => row.classList.toggle("active", n === i));
+      if (list.children[i]) list.children[i].scrollIntoView({ block: "nearest" });
+    };
+    // The next choice that can be picked, from `from` in steps of `by`.
+    const step = (from, by) => {
+      for (let i = from + by; owner && i >= 0 && i < owner.options.length; i += by) {
+        if (usable(i)) return i;
+      }
+      return usable(from) ? from : active;
+    };
+    const close = () => {
+      list.style.display = "none";
+      list.textContent = "";
+      owner = null; active = -1;
+    };
+    const open = (sel) => {
+      close();
+      owner = sel;
+      Array.from(sel.options).forEach((o, i) => {
+        const row = document.createElement("div");
+        row.className = o.disabled ? "ks-opt off" : "ks-opt";
+        row.setAttribute("role", "option");
+        row.dataset.i = String(i);
+        row.textContent = o.label;
+        list.appendChild(row);
+      });
+      const r = sel.getBoundingClientRect();
+      list.style.minWidth = r.width + "px";
+      list.style.display = "block";
+      // Under the box, or over it where the display ends first.
+      const h = list.offsetHeight, w = list.offsetWidth;
+      const y = r.bottom + 2 + h <= window.innerHeight ? r.bottom + 2 : Math.max(0, r.top - 2 - h);
+      const x = Math.max(0, Math.min(r.left, window.innerWidth - w - 4));
+      list.style.transform = "translate(" + x + "px," + y + "px)";
+      mark(sel.selectedIndex);
+    };
+    const pick = (i) => {
+      const sel = owner;
+      close();
+      if (!sel || !sel.isConnected) return;
+      if (i >= 0 && i < sel.options.length && !sel.options[i].disabled && sel.selectedIndex !== i) {
+        sel.selectedIndex = i;
+        // The shell's fields are bound to these, as to a browser's own pick.
+        sel.dispatchEvent(new Event("input", { bubbles: true }));
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      try { sel.focus(); } catch (e) {}
+    };
+    const rowOf = (e) => {
+      const row = e.target && e.target.closest ? e.target.closest(".ks-opt") : null;
+      return row && !row.classList.contains("off") ? Number(row.dataset.i) : -1;
+    };
+
+    // A press outside an open list closes it and does nothing else, as with
+    // a browser's own list: the click that follows is not the page's (the
+    // form behind the list stays).
+    let dismissing = false;
+    document.addEventListener("mousedown", (e) => {
+      dismissing = false;
+      if (isOpen() && e.button === 0 && list.contains(e.target)) {
+        e.preventDefault(); // the box keeps the focus; the click picks
+        return;
+      }
+      const was = owner;
+      if (isOpen()) close();
+      const sel = e.button === 0 && e.target && e.target.closest ? plain(e.target.closest("select")) : null;
+      if (!sel) {
+        if (was && e.button === 0) { dismissing = true; e.preventDefault(); }
+        return;
+      }
+      e.preventDefault(); // the engine would ask the launcher for the list
+      if (sel.disabled || sel === was) return;
+      try { sel.focus(); } catch (err) {}
+      open(sel);
+    }, true);
+    document.addEventListener("click", (e) => {
+      if (!dismissing) return;
+      dismissing = false;
+      e.preventDefault(); e.stopImmediatePropagation();
+    }, true);
+    list.addEventListener("mousemove", (e) => {
+      const i = rowOf(e);
+      if (i >= 0 && i !== active) mark(i);
+    });
+    list.addEventListener("click", (e) => {
+      const i = rowOf(e);
+      if (i >= 0) pick(i);
+    });
+    window.addEventListener("keydown", (e) => {
+      if (isOpen()) {
+        if (!owner || !owner.isConnected || e.key === "Tab") { close(); return; }
+        e.preventDefault(); e.stopImmediatePropagation();
+        const k = e.key, n = owner.options.length;
+        if (k === "Escape") close();
+        else if (k === "Enter" || k === " ") pick(active);
+        else if (k === "ArrowDown") mark(step(active, 1));
+        else if (k === "ArrowUp") mark(step(active, -1));
+        else if (k === "Home") mark(step(-1, 1));
+        else if (k === "End") mark(step(n, -1));
+        else if (k.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          // A first letter: the next choice that starts with it, around the list.
+          for (let d = 1; d <= n; d++) {
+            const i = (Math.max(active, 0) + d) % n;
+            if (usable(i) && owner.options[i].label.trim().toLowerCase().startsWith(k.toLowerCase())) { mark(i); break; }
+          }
+        }
+        return;
+      }
+      const sel = plain(e.target);
+      if (!sel || sel.disabled) return;
+      if (e.key === " " || (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp"))) {
+        // A browser opens the list on these.
+        e.preventDefault(); e.stopImmediatePropagation();
+        open(sel);
+      } else if (e.key === "Enter") {
+        // The form's own answer to Enter stands; the engine's, its list, does not.
+        e.preventDefault();
+      }
+    }, true);
+    window.addEventListener("resize", () => { if (isOpen()) close(); });
+    window.addEventListener("wheel", (e) => { if (isOpen() && !list.contains(e.target)) close(); }, { passive: true, capture: true });
+    document.addEventListener("focusin", (e) => { if (isOpen() && e.target !== owner) close(); }, true);
   }
 
   // The display console's own menu, on the right mouse button. The launcher
@@ -134,54 +390,10 @@
     document.body.appendChild(menu);
 
     // This console's URL with the boot's token, for a browser on another
-    // machine. The boot banner printed it once and the display console
-    // covers that copy; embra-web gives it to the machine's own browser and
-    // to no other (`/api/console-url`). It is on the page only while the
-    // sheet is up.
-    const sheet = document.createElement("div");
-    sheet.id = "embra-kiosk-url";
-    sheet.className = "kiosk-sheet-bg";
-    const box = document.createElement("div");
-    box.className = "kiosk-sheet";
-    box.setAttribute("role", "dialog");
-    sheet.appendChild(box);
-    document.body.appendChild(sheet);
-    const sheetOpen = () => sheet.style.display === "flex";
-    const closeSheet = () => {
-      sheet.style.display = "none";
-      box.textContent = "";
-      if (term) try { term.focus(); } catch (e) {}
-    };
-    const el = (tag, cls, text) => {
-      const n = document.createElement(tag);
-      n.className = cls;
-      if (text != null) n.textContent = text;
-      return n;
-    };
-    const showUrl = async () => {
-      box.textContent = "";
-      box.appendChild(el("b", "ks-title", "This console from another machine"));
-      const rows = el("div", "ks-body", null);
-      box.appendChild(rows);
-      box.appendChild(el("div", "ks-note", "The URL carries this boot\u2019s access token: whoever has it has the console, until the next boot. The browser asks about the certificate once (embraOS-CA)."));
-      const bye = el("button", "ks-close", "Close");
-      bye.type = "button";
-      bye.addEventListener("click", closeSheet);
-      box.appendChild(bye);
-      sheet.style.display = "flex";
-      try {
-        const resp = await fetch("/api/console-url", { cache: "no-store" });
-        if (!resp.ok) throw new Error("the web console answered " + resp.status);
-        const data = await resp.json();
-        for (const row of (data.urls || [])) {
-          rows.appendChild(el("code", "ks-url", row.url));
-          rows.appendChild(el("div", "ks-where", row.where));
-        }
-      } catch (err) {
-        rows.appendChild(el("div", "ks-where", "The URL could not be read: " + (err && err.message ? err.message : err)));
-      }
-    };
-    sheet.addEventListener("mousedown", (e) => { if (e.target === sheet) closeSheet(); });
+    // machine: the boot banner printed it once and the display console
+    // covers that copy. The sheet shows it (`embraKioskSheet`).
+    const sheetOpen = () => kioskSheet.isOpen();
+    const showUrl = () => kioskSheet.open({ title: "This console from another machine", urls: true });
 
     // What the menu was opened on: the text selected then, and the page's
     // text field under the pointer (xterm's own textarea is the terminal).
@@ -246,7 +458,8 @@
     });
 
     // Anything else closes the menu: a press elsewhere, the wheel, a new
-    // size, and Escape, which stops here (in the console Esc is /stop).
+    // size, and Escape, which stops here (in the console Esc is /stop). The
+    // sheet's keys are its own.
     document.addEventListener("mousedown", (e) => {
       if (open() && !menu.contains(e.target)) close();
     }, true);
@@ -256,11 +469,6 @@
       if (open() && e.key === "Escape") {
         e.preventDefault(); e.stopImmediatePropagation();
         close();
-      } else if (sheetOpen()) {
-        // The sheet holds the keyboard: Escape closes it, nothing is typed
-        // into the console behind it.
-        e.preventDefault(); e.stopImmediatePropagation();
-        if (e.key === "Escape") closeSheet();
       }
     }, true);
   }
@@ -269,9 +477,11 @@
     if (term) return; // once
     // The display console (cog on the machine's own display, `?kiosk=1`):
     // the launcher draws no pointer on a display without a cursor plane,
-    // so the page draws one; a download has nowhere to go there; the page
-    // never navigates away; the cursor does not blink (every blink is a
-    // repaint through software rendering).
+    // so the page draws one, and the list of a dropdown with it; a download
+    // has nowhere to go there and a file nowhere to come from, which the
+    // page says with this console's URL; the page never navigates away; the
+    // cursor does not blink (every blink is a repaint through software
+    // rendering).
     const kiosk = /(?:^\?|&)kiosk=1(?:&|$)/.test(window.location.search);
     window.embraKiosk = kiosk;
     if (kiosk) embraKioskSetup();
@@ -337,9 +547,13 @@
     // provider underlines the route and a click fetches it as a download —
     // same origin, so the `download` attribute is honoured.
     // Both routes are ASCII (percent-encoded), so column equals index.
-    const embraDownload = (url) => {
+    // On the display console a file has nowhere to go: the row the operator
+    // pressed (`asked`) is answered on the sheet, with this console's URL;
+    // an offer that arrives by itself is a line, which takes no key away.
+    const embraDownload = (url, asked) => {
       if (kiosk) {
-        term.write("\r\n\x1b[2m[embra-web] downloads are for a remote browser: " + url + "\x1b[0m\r\n");
+        if (asked) embraKioskNeedsBrowser("download", url);
+        else term.write("\r\n\x1b[2m[embra-web] a file is downloaded from a browser on another machine (the right mouse button shows this console's URL): " + url + "\x1b[0m\r\n");
         return;
       }
       const a = document.createElement("a");
@@ -371,7 +585,7 @@
             links.push({
               text: url,
               range: { start: { x: m.index + 1, y }, end: { x: m.index + url.length, y } },
-              activate: (_e, u) => embraDownload(u),
+              activate: (_e, u) => embraDownload(u, true),
             });
           }
           cb(links.length ? links : undefined);
@@ -562,7 +776,7 @@
 
   window.embraBackupUploadAllowed = function () {
     if (window.embraKiosk) {
-      if (term) term.write("\r\n\x1b[2m[embra-web] a backup is uploaded from a remote browser: its /backup form, action upload\x1b[0m\r\n");
+      embraKioskNeedsBrowser("backup");
       return false;
     }
     return !backupXhr;

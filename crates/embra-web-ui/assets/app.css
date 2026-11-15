@@ -1000,6 +1000,27 @@ body.kiosk .mobile-toggle { display: none; }
 .kiosk-menu button:disabled { color: var(--txt-dim); opacity: .6; }
 .kiosk-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
 
+/* Its dropdowns (`embraKioskSelects`, embra-term.js). The display's engine
+   paints a light button of its own over a styled <select> and keeps the
+   page's text on it, and its launcher draws no list for one: the box is left
+   to the page (no appearance of the engine's, the arrow drawn here) and the
+   list is the page's, under the box, flat like the menu. A remote browser
+   keeps its own box and its own list. */
+body.kiosk select { -webkit-appearance: none; appearance: none; padding-right: 32px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--txt-dim) 50%),
+    linear-gradient(135deg, var(--txt-dim) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50%;
+  background-size: 5px 5px; background-repeat: no-repeat; }
+.kiosk-select { position: fixed; left: 0; top: 0; z-index: 2147481000; display: none;
+  max-height: 60vh; overflow-y: auto; padding: 4px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 8px; }
+.kiosk-select .ks-opt { padding: 8px 12px; font-size: var(--text-sm); color: var(--txt);
+  border-radius: 5px; white-space: nowrap; cursor: default; }
+.kiosk-select .ks-opt.active { background: var(--accent); color: #1a0e06; }
+.kiosk-select .ks-opt.off { color: var(--txt-dim); opacity: .6; }
+/* The Attach button's paperclip: the display has no font that draws it. */
+body.kiosk .emoji { display: none; }
+
 /* A backup's upload (embra-term.js `embraBackupCard`): the page's own card
    in the lower right corner, over the terminal and under the modals, with
    the progress and then the machine's answer. */
@@ -1017,15 +1038,18 @@ body.kiosk .mobile-toggle { display: none; }
   font-size: var(--text-sm); color: #1a0e06; background: var(--accent); border: 0;
   border-radius: 6px; cursor: pointer; }
 
-/* The console's URL over the page (the menu's last entry): one panel on a
-   dimmed page, the URL in the terminal's face and large enough to be read
-   off the display and typed on another machine. */
+/* What the display console has to say, over the page (`embraKioskSheet`):
+   this console's URL (the menu's last entry), an action that needs a browser
+   on another machine, an alert. One panel on a dimmed page, the URL in the
+   terminal's face and large enough to be read off the display and typed on
+   another machine. */
 .kiosk-sheet-bg { position: fixed; inset: 0; z-index: 2147482000; display: none;
   align-items: center; justify-content: center; background: rgba(8, 5, 3, .8); }
 .kiosk-sheet { width: min(980px, 92vw); padding: 22px 24px; display: flex;
   flex-direction: column; gap: 14px; background: var(--panel-2);
   border: 1px solid var(--line); border-radius: 10px; }
 .kiosk-sheet .ks-title { font-size: var(--text-lg); color: var(--txt); }
+.kiosk-sheet .ks-text { font-size: var(--text-md); color: var(--txt); overflow-wrap: anywhere; }
 .kiosk-sheet .ks-body { display: flex; flex-direction: column; gap: 4px; }
 .kiosk-sheet .ks-url { margin-top: 8px; font-size: 18px; color: var(--accent-2);
   font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; overflow-wrap: anywhere; }
