@@ -3,8 +3,8 @@
 //! environment block on the EFI System Partition, the A/B state it carries,
 //! the release stamp a slot ships with, the boot console a message for the
 //! operator goes to (the serial line and the display both) and a prompt reads
-//! from, the network lease embrad records and the console URLs that follow
-//! from it, what embrad made of the clock at boot (and the date arithmetic that
+//! from, the network cards of the machine, the lease embrad records and the
+//! console URLs that follow from it, what embrad made of the clock at boot (and the date arithmetic that
 //! reads the release stamp's build time), and what an installer needs: the
 //! layout, the medium, the disks. No runtime
 //! and no dependency but `libc`: embra-init runs it from the initramfs,
@@ -19,6 +19,7 @@ pub mod grubenv;
 pub mod layout;
 pub mod loopdev;
 pub mod media;
+pub mod net;
 pub mod net_lease;
 pub mod partitions;
 pub mod release;
