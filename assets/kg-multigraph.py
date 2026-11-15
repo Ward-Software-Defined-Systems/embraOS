@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw assets/kg-multigraph.png and .svg: the knowledge graph as it is in Phase 1.
+"""Draw assets/kg-multigraph.png and .svg: the knowledge graph in one figure.
 
 The figure is drawn with pycairo (Ubuntu: python3-cairo), so it renders on a
 build host without a browser. Run from the repository root:
@@ -394,7 +394,7 @@ def draw(ctx):
     ctx.line_to(W, 584)
     ctx.stroke()
     text(ctx, 40, 610, "Ward Software Defined Systems LLC · wsds.io", 12, (0.23, 0.23, 0.29))
-    text(ctx, W - 40, 610, "Phase 1 · WardSONDB · Rust · tract + bge-small-en-v1.5", 11,
+    text(ctx, W - 40, 610, "WardSONDB · Rust · tract + bge-small-en-v1.5", 11,
          (0.29, 0.23, 0.16), spacing=0.5, align="right")
 
 
