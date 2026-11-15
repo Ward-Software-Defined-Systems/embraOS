@@ -152,9 +152,12 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // first tool ever REMOVED — the count fell, 116 → 115. `file_offer`
 // (2026-10-08) hands the operator a workspace file as a download: 116;
 // `reminder_list` the same day: 117. `knowledge_restore` (2026-10-30), the
-// dump and the removal records back into the graph: 119.
+// dump and the removal records back into the graph: 119. System went 3 → 4
+// with `update_check` (2026-11-15): the OS has an updater now, and the tool
+// runs its check, the signed manifest at the update source against the
+// running release; it applies nothing: 120.
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
-    ("system", "System", 3),
+    ("system", "System", 4),
     ("memory_knowledge", "Memory & Knowledge", 7),
     ("self_awareness", "Self-Awareness", 5),
     ("time_context", "Time & Context", 3),

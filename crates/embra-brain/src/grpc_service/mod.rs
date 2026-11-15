@@ -18,6 +18,9 @@ pub(crate) use provider_setup::*;
 use slash::*;
 pub(crate) use turn::*;
 pub(crate) use update::SetupCommands;
+// The updater as the brain runs it: the operator's commands here, and the
+// update check the brain keeps (`update_check`).
+pub(crate) use update::{run_updater, update_running, UPDATER};
 
 use crate::activity;
 

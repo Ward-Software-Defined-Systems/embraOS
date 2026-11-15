@@ -254,6 +254,11 @@ pub struct SystemStatus {
     /// and whether requests go through it; omitted while none is stored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_gateway: Option<crate::config::ProviderGateway>,
+    /// The brain's update check (`update_check`): whether a newer release
+    /// is published, as the updater last answered, and whether the brain
+    /// asks by itself; omitted on a machine without the updater.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<crate::update_check::UpdateStatus>,
     pub embedding: EmbeddingHealth,
 }
 
@@ -341,6 +346,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
         },
         provider: crate::provider::health::latest().map(ProviderStatus::from),
         provider_gateway: cfg.ok().and_then(|c| c.provider_gateway),
+        update: crate::update_check::status_for_report(),
         embedding: EmbeddingHealth {
             failures_write: failures.write,
             failures_query: failures.query,
@@ -643,6 +649,24 @@ pub struct SystemStatusArgs {}
 impl SystemStatusArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         let status = system_status(ctx.db).await;
+        Ok(serde_json::to_string_pretty(&status).unwrap_or_default())
+    }
+}
+
+// The updater's check, run now: the one way the model reaches the updater.
+// It takes nothing, so nothing of the model's is on the updater's command
+// line, and it applies nothing. A plain comment: a doc comment on an args
+// struct is the schema's description, which the model is sent.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "update_check",
+    description = "Ask the update source now whether a newer embraOS release is published: the updater verifies the signed release manifest there and compares it with the release this machine runs. Returns the verdict, the published version, when it was checked and whether the daily automatic check is on. Read-only: nothing is downloaded or staged, and only the operator applies a release, with /update apply."
+)]
+pub struct UpdateCheckArgs {}
+
+impl UpdateCheckArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let status = crate::update_check::check_for_tool().await;
         Ok(serde_json::to_string_pretty(&status).unwrap_or_default())
     }
 }
@@ -990,6 +1014,7 @@ mod native_args_tests {
             },
             provider: None,
             provider_gateway: None,
+            update: None,
             embedding: EmbeddingHealth { failures_write: 0, failures_query: 0, last_failure: None },
         };
         let v = serde_json::to_value(&s).unwrap();
@@ -1211,6 +1236,7 @@ mod slot_report_tests {
             wardsondb: WardsondbSection { healthy: true, collections: vec![], storage_poisoned: None, lifetime: None, memory_collections: vec![] },
             provider: None,
             provider_gateway: None,
+            update: None,
             embedding: EmbeddingHealth { failures_write: 0, failures_query: 0, last_failure: None },
         };
         let json = serde_json::to_value(&s).unwrap();

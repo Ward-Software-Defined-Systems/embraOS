@@ -119,7 +119,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// The OS's updater; the brain runs it as a child for the operator's commands.
-pub(super) const UPDATER: &str = "/usr/bin/embra-update";
+pub(crate) const UPDATER: &str = "/usr/bin/embra-update";
 /// What a session schedules for the next boot (embrad reads and removes it
 /// before the services start): a snapshot or a restore. On STATE, where the
 /// tools cannot write.
@@ -208,7 +208,7 @@ pub(super) async fn write_marker(job: &Scheduled) -> Result<(), String> {
 }
 
 /// What a run of the updater came to.
-pub(super) struct UpdaterRun {
+pub(crate) struct UpdaterRun {
     pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
@@ -221,7 +221,7 @@ impl UpdaterRun {
     }
 }
 
-pub(super) async fn run_updater(args: &[&str]) -> Result<UpdaterRun, String> {
+pub(crate) async fn run_updater(args: &[&str]) -> Result<UpdaterRun, String> {
     let mut cmd = crate::tools::subprocess(UPDATER);
     cmd.args(args).stdin(std::process::Stdio::null());
     let out = tokio::time::timeout(UPDATER_TIMEOUT, cmd.output())
@@ -747,7 +747,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Guardian). `/reboot` refuses while it is set.
 static UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-pub(super) fn update_running() -> bool {
+pub(crate) fn update_running() -> bool {
     UPDATE_RUNNING.load(Ordering::SeqCst)
 }
 
@@ -793,7 +793,34 @@ pub(super) fn source_action(arg: &str) -> SourceAction {
     SourceAction::Refused(format!("not a source URL: {v} (https://…, or http:// to a private address, or reset)"))
 }
 
-const UPDATE_USAGE: &str = "Usage: /update [--tag <v…>] | apply [--tag <v…>] [--allow-downgrade] | status | rollback | source [<url>|reset]\n  /update checks the release published at the source against this one (the manifest's signature is verified first); apply writes the release into the inactive slot, verifies it and stages it for the next boot — /reboot now boots it, and GRUB falls back to this slot if it does not come up; --tag names one release of a GitHub releases source in place of the latest; --allow-downgrade applies a release older than this one, or another build of this version, which apply refuses without it; status shows both slots; rollback makes the other slot the default again; source shows, sets or resets the operator's own source (the default is the GitHub releases of the public mirror).";
+const UPDATE_USAGE: &str = "Usage: /update [--tag <v…>] | apply [--tag <v…>] [--allow-downgrade] | status | rollback | source [<url>|reset] | auto [on|off]\n  /update checks the release published at the source against this one (the manifest's signature is verified first); apply writes the release into the inactive slot, verifies it and stages it for the next boot — /reboot now boots it, and GRUB falls back to this slot if it does not come up; --tag names one release of a GitHub releases source in place of the latest; --allow-downgrade applies a release older than this one, or another build of this version, which apply refuses without it; status shows both slots; rollback makes the other slot the default again; source shows, sets or resets the operator's own source (the default is the GitHub releases of the public mirror); auto shows, or turns on or off, the check the brain runs by itself a few minutes after boot and once a day (on unless turned off).";
+
+/// What `/update auto <value>` does; pure.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum AutoAction {
+    Show,
+    On,
+    Off,
+    Refused(String),
+}
+
+pub(super) fn auto_action(arg: &str) -> AutoAction {
+    match arg.trim() {
+        "" => AutoAction::Show,
+        "on" => AutoAction::On,
+        "off" => AutoAction::Off,
+        other => AutoAction::Refused(format!("/update auto takes on or off, not {other:?}.")),
+    }
+}
+
+/// What the automatic check is, in the operator's words, for the state it is in.
+pub(super) fn auto_shown(on: bool) -> String {
+    if on {
+        "The automatic update check is on: a few minutes after boot and once a day the brain asks the update source whether a newer release is published (the release manifest and its signature, the request /update makes). It tells you once when one is, and the intelligence's status shows the answer. Nothing is downloaded or staged; /update apply does that. /update auto off turns it off.".to_string()
+    } else {
+        "The automatic update check is off: nothing asks the update source unless you run /update or the intelligence its update_check tool. /update auto on turns it on.".to_string()
+    }
+}
 
 /// What `/update` and `/update apply` hand on to the updater beyond the
 /// command itself.
@@ -916,6 +943,12 @@ pub(super) async fn handle_update_command(args: &str, tx: &mpsc::Sender<Result<C
             let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
             match run_updater(&argv).await {
                 Ok(run) => {
+                    // The brain's own answer (`system_status`) follows what the
+                    // operator is shown: its next check runs now. Not while
+                    // the automatic check is off, where nothing asks unasked.
+                    if crate::update_check::automatic() {
+                        crate::update_check::check_soon();
+                    }
                     let mut text = run.stdout.trim().to_string();
                     match run.code {
                         Some(0) => {
@@ -1045,6 +1078,21 @@ pub(super) async fn handle_update_command(args: &str, tx: &mpsc::Sender<Result<C
             }
             SourceAction::Refused(why) => send(why, SystemMessageType::Error).await,
         },
+        "auto" => match auto_action(rest) {
+            AutoAction::Show => send(auto_shown(crate::update_check::automatic()), SystemMessageType::Info).await,
+            AutoAction::On => match crate::update_check::set_automatic(true).await {
+                Ok(()) => {
+                    crate::update_check::check_soon();
+                    send("The automatic update check is on; a check runs now, and /status shows its answer.".to_string(), SystemMessageType::Info).await
+                }
+                Err(e) => send(format!("The automatic update check could not be turned on: {e}"), SystemMessageType::Error).await,
+            },
+            AutoAction::Off => match crate::update_check::set_automatic(false).await {
+                Ok(()) => send("The automatic update check is off. /update still checks when you ask, and so does the intelligence's update_check tool.".to_string(), SystemMessageType::Info).await,
+                Err(e) => send(format!("The automatic update check could not be turned off: {e}"), SystemMessageType::Error).await,
+            },
+            AutoAction::Refused(why) => send(why, SystemMessageType::Error).await,
+        },
         _ => send(UPDATE_USAGE.to_string(), SystemMessageType::Error).await,
     }
 }
@@ -1113,6 +1161,20 @@ mod update_tests {
         // The suffix is the updater's own: `source::resolve` strips it for a tag.
         let updater = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../embra-update/src/source.rs")).expect("the updater's source rule");
         assert!(updater.contains(&format!("strip_suffix(\"{GITHUB_LATEST_SUFFIX}\")")), "the updater rewrites another base for a tag now");
+    }
+
+    #[test]
+    fn the_automatic_check_is_shown_turned_on_or_off_and_any_other_word_is_refused() {
+        assert_eq!(auto_action(""), AutoAction::Show);
+        assert_eq!(auto_action(" on "), AutoAction::On);
+        assert_eq!(auto_action("off"), AutoAction::Off);
+        assert!(matches!(auto_action("daily"), AutoAction::Refused(m) if m.contains("on or off") && m.contains("daily")));
+        assert!(matches!(auto_action("on now"), AutoAction::Refused(_)));
+        // Each state says what it is and how to leave it; neither says a release is applied by itself.
+        let (on, off) = (auto_shown(true), auto_shown(false));
+        assert!(on.starts_with("The automatic update check is on") && on.contains("/update auto off") && on.contains("Nothing is downloaded or staged"), "{on}");
+        assert!(off.starts_with("The automatic update check is off") && off.contains("/update auto on") && off.contains("update_check"), "{off}");
+        assert!(UPDATE_USAGE.contains("| auto [on|off]") && UPDATE_USAGE.contains("on unless turned off"));
     }
 
     #[test]

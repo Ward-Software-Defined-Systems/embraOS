@@ -30,11 +30,14 @@ pub(crate) struct EventsDigest {
     /// Cron runs recorded after the watermark: command, when it started,
     /// whether the dispatch failed, a preview of the result; newest first.
     pub cron_runs: Vec<(String, DateTime<Utc>, bool, String)>,
+    /// A newer embraOS release first seen after the watermark, as the
+    /// brain's update check words it (`update_check::seen_since`).
+    pub os_update: Option<String>,
 }
 
 impl EventsDigest {
     fn is_empty(&self) -> bool {
-        self.reminders.is_empty() && self.cron_runs.is_empty()
+        self.reminders.is_empty() && self.cron_runs.is_empty() && self.os_update.is_none()
     }
 }
 
@@ -118,6 +121,7 @@ pub(crate) async fn gather(db: &WardsonDbClient, since: DateTime<Utc>) -> Events
     EventsDigest {
         reminders: reminders_fired(&reminders, since),
         cron_runs: runs_since(&runs, since),
+        os_update: crate::update_check::seen_since(since),
     }
 }
 
@@ -166,6 +170,9 @@ pub(crate) fn render(digest: &EventsDigest, since: DateTime<Utc>, tz: &str) -> O
             })
             .collect();
         section("Cron results (latest first):", items, digest.cron_runs.len());
+    }
+    if let Some(line) = &digest.os_update {
+        section("A newer embraOS release:", vec![line.clone()], 1);
     }
     out.push_str("</events_since_last_turn>");
     Some(out)
@@ -246,6 +253,7 @@ mod tests {
             cron_runs: (1..=7)
                 .map(|i| (format!("job{i}"), t("2026-10-08T12:10:00Z"), i == 3, format!("result {i}")))
                 .collect(),
+            os_update: None,
         };
         let block = render(&digest, t(SINCE), "America/Los_Angeles").unwrap();
         assert!(block.starts_with("<events_since_last_turn since=\"2026-10-08 05:00 PDT\">\n"), "{block}");
@@ -255,5 +263,17 @@ mod tests {
         assert!(block.contains("- job5 at 2026-10-08 05:10 PDT: ok — result 5\n- and 2 more\n"), "{block}");
         assert!(!block.contains("job6"), "{block}");
         assert!(block.ends_with("</events_since_last_turn>"), "{block}");
+        assert!(!block.contains("embraOS release"), "{block}");
+    }
+
+    /// A release the update check first saw after the watermark is a
+    /// section of its own, and enough for a block by itself.
+    #[test]
+    fn a_newer_release_seen_since_the_watermark_is_its_own_section() {
+        let line = "embraOS 0.25.0-phase2 is published; this machine runs 0.24.0-phase2. Only the operator applies it (/update apply).";
+        let digest = EventsDigest { os_update: Some(line.to_string()), ..Default::default() };
+        let block = render(&digest, t(SINCE), "UTC").unwrap();
+        assert!(block.contains(&format!("A newer embraOS release:\n- {line}\n</events_since_last_turn>")), "{block}");
+        assert!(!block.contains("Reminders that fired") && !block.contains("Cron results"), "{block}");
     }
 }

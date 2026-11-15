@@ -211,6 +211,29 @@ pub fn start_proactive_engine(
         }
     });
 
+    // The OS's update check (`update_check`): a few minutes after boot and
+    // once a day while the automatic check is on, a failed one again after
+    // an hour. The operator is told once when a newer release is first
+    // seen, whichever check saw it, this loop's or the tool's.
+    let tx_update = tx.clone();
+    supervise("update", move || {
+        let tx_update = tx_update.clone();
+        async move {
+            tokio::time::sleep(crate::update_check::FIRST_CHECK_AFTER).await;
+
+            loop {
+                crate::update_check::tick().await;
+                if let Some(text) = crate::update_check::take_notice() {
+                    push_notification(&tx_update, Notification::new(Priority::Normal, text));
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(crate::update_check::TICK) => {}
+                    _ = crate::update_check::woken() => {}
+                }
+            }
+        }
+    });
+
     // Cron checks every 15 seconds. The report of a run is handed over
     // without waiting: this loop is what RUNS the jobs, and waiting for room
     // in the channel would stop every job behind the one being reported.

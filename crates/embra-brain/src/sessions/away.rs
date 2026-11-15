@@ -36,6 +36,9 @@ pub(crate) struct AwayDigest {
     pub crons_ran: Vec<CronRan>,
     /// Reminders that fired: message and when they were due.
     pub reminders_fired: Vec<(String, DateTime<Utc>)>,
+    /// A newer embraOS release first seen in the absence, as the brain's
+    /// update check words it (`update_check::seen_since`).
+    pub os_update: Option<String>,
 }
 
 impl AwayDigest {
@@ -45,6 +48,7 @@ impl AwayDigest {
             && self.sessions_deleted.is_empty()
             && self.crons_ran.is_empty()
             && self.reminders_fired.is_empty()
+            && self.os_update.is_none()
     }
 }
 
@@ -229,6 +233,7 @@ pub(crate) async fn gather(
         sessions_deleted,
         crons_ran: crons_ran_since(&crons, since, &latest_results(&runs)),
         reminders_fired: reminders_fired_since(&reminders, since, now),
+        os_update: crate::update_check::seen_since(since),
     }
 }
 
@@ -296,6 +301,9 @@ pub(crate) fn render(digest: &AwayDigest, since: DateTime<Utc>, tz: &str) -> Opt
             .map(|(message, due)| format!("{message} (due {})", at(*due)))
             .collect();
         section("Reminders that fired:".to_string(), items, digest.reminders_fired.len());
+    }
+    if let Some(line) = &digest.os_update {
+        section("A newer embraOS release:".to_string(), vec![line.clone()], 1);
     }
     out.push_str("</while_away>");
     Some(out)
@@ -426,6 +434,7 @@ mod tests {
             sessions_deleted: vec!["gone-now".into()],
             crons_ran: vec![CronRan { command: "time".into(), schedule: "every 5m".into(), last_run: t("2026-09-29T14:55:00Z"), result: None }],
             reminders_fired: vec![("call back".into(), t("2026-09-29T13:00:00Z"))],
+            os_update: Some("embraOS 0.25.0-phase2 is published; this machine runs 0.24.0-phase2. Only the operator applies it (/update apply).".into()),
         };
         let block = render(&digest, t(SINCE), "America/Los_Angeles").unwrap();
         assert!(block.starts_with("<while_away since=\"2026-09-29 05:00 PDT\">"), "{block}");
@@ -436,6 +445,7 @@ mod tests {
         assert!(block.contains("Sessions deleted:\n- gone-now\n"), "{block}");
         assert!(block.contains("- time (every 5m), last run 2026-09-29 07:55 PDT\n"), "{block}");
         assert!(block.contains("- call back (due 2026-09-29 06:00 PDT)\n"), "{block}");
+        assert!(block.contains("A newer embraOS release:\n- embraOS 0.25.0-phase2 is published; this machine runs 0.24.0-phase2. Only the operator applies it (/update apply).\n</while_away>"), "{block}");
         assert!(block.ends_with("</while_away>"), "{block}");
     }
 

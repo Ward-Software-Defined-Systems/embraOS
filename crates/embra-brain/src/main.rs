@@ -32,6 +32,7 @@ mod media;
 mod embedding;
 mod net;
 mod secrets;
+mod update_check;
 
 use grpc_service::BrainGrpcService;
 
