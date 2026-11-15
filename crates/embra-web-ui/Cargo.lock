@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "embra-web-ui"
-version = "0.5.0-phase1"
+version = "0.0.0"
 dependencies = [
  "console_error_panic_hook",
  "embra-tools-core",

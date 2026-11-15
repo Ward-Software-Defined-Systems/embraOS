@@ -1,6 +1,7 @@
+# No `version`: the crate is never published and shows none (cargo records
+# 0.0.0 in the lock). The release a console names is the workspace's.
 [package]
 name = "embra-web-ui"
-version = "0.5.0-phase1"
 edition = "2024"
 license-file = "../../LICENSE"
 description = "embraOS web console frontend (Leptos CSR + xterm.js)"
