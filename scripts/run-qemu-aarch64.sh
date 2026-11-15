@@ -26,8 +26,8 @@
 #                                   NVMe or virtio-scsi
 # An image named *.qcow2 is opened as qcow2 (a disk the installer wrote).
 # The clock's knob, which reaches the kernel line:
-#   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks at
-#                                   boot (time.cloudflare.com without it); off asks none
+#   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks in
+#                                   this boot (time.cloudflare.com without it); off asks none
 #
 # macOS runs this file with its own /bin/bash, 3.2: an array that may be empty
 # is expanded as ${A[@]+"${A[@]}"}, because that shell takes "${A[@]}" of an

@@ -28,8 +28,8 @@
 #   EMBRA_DHCP_START=<address>  the first address QEMU's DHCP server leases
 #       (10.0.2.200 shows the banner's second URL on the leased address).
 # The clock's knob, which reaches the kernel line:
-#   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks at
-#       boot (time.cloudflare.com without it); off asks none
+#   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks in
+#       this boot (time.cloudflare.com without it); off asks none
 # The display console's knobs. They reach the kernel line, and act on a VM
 # that has the display (EMBRA_VNC=1, which EMBRA_KIOSK=1 implies):
 #   EMBRA_KIOSK=0|1             embra.kiosk: the display console off, or on; the OS's default is on with a display
