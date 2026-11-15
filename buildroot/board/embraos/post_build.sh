@@ -166,6 +166,15 @@ install -D -m 0644 "${REPO_ROOT}/scripts/update-signing.pub" "${TARGET_DIR}/usr/
 # script keeps for each card (rootfs_overlay/usr/share/embra/udhcpc.script).
 rm -f "${TARGET_DIR}/etc/resolv.conf"
 ln -s /embra/ephemeral/resolv.conf "${TARGET_DIR}/etc/resolv.conf"
+
+# The machine's name: /etc/hostname and /etc/hosts are links into the
+# ephemeral tmpfs as well. embrad names the machine (the operator's name,
+# the one a DHCP server assigned, or embraos: crates/embrad/src/net.rs),
+# sets the kernel's hostname and writes both files before any service
+# starts. Buildroot's own two files say "buildroot" and nothing reads them.
+rm -f "${TARGET_DIR}/etc/hostname" "${TARGET_DIR}/etc/hosts"
+ln -s /embra/ephemeral/hostname "${TARGET_DIR}/etc/hostname"
+ln -s /embra/ephemeral/hosts "${TARGET_DIR}/etc/hosts"
 [ -x "${TARGET_DIR}/usr/share/embra/udhcpc.script" ] \
     || { echo "ERROR: the overlay's /usr/share/embra/udhcpc.script is missing or not executable" >&2; exit 1; }
 

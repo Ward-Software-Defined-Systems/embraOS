@@ -13,7 +13,10 @@
 //! waits ten seconds for one at most. A keeper then looks every two seconds:
 //! a card that appears gets its client, a card that goes loses it, a link
 //! that returns is asked again, and the resolver file follows the card with
-//! the best route. The keeper is a plain thread, not a task of the runtime:
+//! the best route. The operator's settings (`/network`, the file on STATE)
+//! are read at boot and whenever they change: a card with an address of its
+//! own gets it and no client, and the machine takes its name from them, from
+//! a lease, or `embraos`. The keeper is a plain thread, not a task of the runtime:
 //! a maintenance boot does its job and restarts before the runtime exists,
 //! and needs a late lease and the resolver file all the same.
 //!
@@ -22,11 +25,13 @@
 //! a DHCP server sends for as long as the machine runs: nothing here indexes
 //! or unwraps.
 
+use std::net::Ipv4Addr;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use embra_boot::net::{self as cards, Card};
 use embra_boot::net_lease::{self, CardStatus, Lease, Mode};
+use embra_boot::net_settings::{Settings, StaticCard};
 use tracing::{info, warn};
 
 /// How long the boot waits for a first address. A DHCP server on the
@@ -89,6 +94,16 @@ pub(crate) trait Host {
     fn leases(&mut self) -> Vec<Lease>;
     /// A card's record and addresses are removed.
     fn forget(&mut self, card: &str);
+    /// The operator's settings, when they changed since this was last asked
+    /// (the first time: as they stand).
+    fn settings(&mut self) -> Option<Settings>;
+    /// Whether the address already answers on the card's network.
+    fn in_use(&mut self, card: &str, ip: Ipv4Addr) -> bool;
+    /// The address, the route and the record of a card the operator gave an
+    /// address. The error is a sentence for the card's status.
+    fn apply_static(&mut self, card: &Card, setting: &StaticCard) -> Result<(), String>;
+    /// The machine's name: the kernel's and the files that carry it.
+    fn set_hostname(&mut self, name: &str);
     fn write_resolver(&mut self, text: &str);
     fn write_status(&mut self, text: &str);
 }
@@ -120,14 +135,23 @@ struct Slot {
     lease: Option<Lease>,
     /// Since when this card has been asking (for the log's "after").
     asking_since: Instant,
+    /// The address the operator gave this card, once it was acted on: such
+    /// a card has no client.
+    fixed: Option<StaticCard>,
+    /// What went wrong the last time this card was set up.
+    note: Option<String>,
 }
 
 /// The cards and what embrad last wrote about them.
 pub(crate) struct Net {
-    hostname: String,
+    /// The name the machine has when nobody gave it one.
+    default_name: String,
+    settings: Settings,
     slots: Vec<Slot>,
     resolver: Option<String>,
     status: Option<String>,
+    /// The name the machine was last given.
+    named: Option<String>,
 }
 
 fn same_card(a: &Card, b: &Card) -> bool {
@@ -137,12 +161,23 @@ fn same_card(a: &Card, b: &Card) -> bool {
 
 impl Net {
     pub(crate) fn new(hostname: &str) -> Self {
-        Net { hostname: hostname.to_string(), slots: Vec::new(), resolver: None, status: None }
+        Net { default_name: hostname.to_string(), settings: Settings::default(), slots: Vec::new(), resolver: None, status: None, named: None }
     }
 
-    /// One look: the cards that went and came, each client and link, the
-    /// records, the resolver file, the status.
+    /// The name a DHCP request carries: the operator's, or the default. A
+    /// name a lease assigned is not sent back: the client takes its options
+    /// when it starts, and a restart would cost a second lease at every boot.
+    fn request_name(&self) -> String {
+        self.settings.hostname.clone().unwrap_or_else(|| self.default_name.clone())
+    }
+
+    /// One look: the settings, the cards that went and came, each card's
+    /// address or client and its link, the records, the resolver file, the
+    /// machine's name, the status.
     pub(crate) fn tick(&mut self, host: &mut dyn Host, now: Instant) -> Summary {
+        if let Some(settings) = host.settings() {
+            self.settings = settings;
+        }
         let seen = host.cards();
 
         // The cards that went.
@@ -160,31 +195,70 @@ impl Net {
         }
         self.slots = kept;
 
-        // The cards that came.
+        // The cards that came: up, and nothing more yet. What a card gets
+        // (the operator's address, or a client) is decided below, where a
+        // changed setting is acted on too.
         for card in &seen {
             if self.slots.iter().any(|s| same_card(card, &s.card)) {
                 continue;
             }
-            info!("{}: a {} card ({}); asking for a DHCP lease", card.name, card.kind.as_str(), card.mac);
+            info!("{}: a {} card ({})", card.name, card.kind.as_str(), card.mac);
             if !host.raise(&card.name) {
                 warn!("{}: the interface could not be brought up", card.name);
             }
-            let client = host.start_client(card, &self.hostname);
-            self.slots.push(Slot { card: card.clone(), client, started: Some(now), link: None, down_since: None, lease: None, asking_since: now });
+            self.slots.push(Slot { card: card.clone(), client: None, started: None, link: None, down_since: None, lease: None, asking_since: now, fixed: None, note: None });
         }
 
-        // Each card's client and link.
+        // Each card: its address or its client, and its link.
+        let request_name = self.request_name();
         for slot in self.slots.iter_mut() {
-            if let Some(pid) = slot.client
-                && host.client_gone(pid)
-            {
-                warn!("{}: the DHCP client exited; it is started again", slot.card.name);
-                slot.client = None;
+            let wanted = self.settings.static_for(&slot.card.mac).cloned();
+            if wanted != slot.fixed {
+                // The setting changed: whatever the card had goes first. A
+                // client that is stopped runs no `deconfig`, so the card is
+                // cleared here.
+                if let Some(pid) = slot.client.take() {
+                    host.stop_client(pid);
+                }
+                if slot.fixed.is_some() || slot.lease.is_some() {
+                    host.forget(&slot.card.name);
+                }
+                slot.note = None;
+                if let Some(setting) = &wanted {
+                    if host.in_use(&slot.card.name, setting.ip) {
+                        warn!("{}: {} already answers on this network; the address is not taken", slot.card.name, setting.ip);
+                        slot.note = Some(format!("{} already answers on this network; the address was not taken", setting.ip));
+                    } else {
+                        match host.apply_static(&slot.card, setting) {
+                            Ok(()) => info!("{}: the address {}/{} the operator set", slot.card.name, setting.ip, setting.prefix),
+                            Err(reason) => {
+                                warn!("{}: {reason}", slot.card.name);
+                                slot.note = Some(reason);
+                            }
+                        }
+                    }
+                } else if slot.fixed.is_some() {
+                    info!("{}: back to DHCP", slot.card.name);
+                }
+                slot.fixed = wanted;
+                slot.started = None;
+                slot.asking_since = now;
             }
-            let rested = slot.started.is_none_or(|t| now.saturating_duration_since(t) >= RESTART_PAUSE);
-            if slot.client.is_none() && rested {
-                slot.client = host.start_client(&slot.card, &self.hostname);
-                slot.started = Some(now);
+            if slot.fixed.is_none() {
+                if let Some(pid) = slot.client
+                    && host.client_gone(pid)
+                {
+                    warn!("{}: the DHCP client exited; it is started again", slot.card.name);
+                    slot.client = None;
+                }
+                let rested = slot.started.is_none_or(|t| now.saturating_duration_since(t) >= RESTART_PAUSE);
+                if slot.client.is_none() && rested {
+                    if slot.started.is_none() {
+                        info!("{}: asking for a DHCP lease", slot.card.name);
+                    }
+                    slot.client = host.start_client(&slot.card, &request_name);
+                    slot.started = Some(now);
+                }
             }
             let link = host.carrier(&slot.card.name);
             let was_up = slot.link == Some(true);
@@ -220,7 +294,7 @@ impl Net {
                         now.saturating_duration_since(slot.asking_since).as_secs_f32()
                     ),
                     (None, Some(_)) => {
-                        info!("{}: its address is gone; DHCP is asked again", slot.card.name);
+                        info!("{}: its address is gone", slot.card.name);
                         slot.asking_since = now;
                     }
                     (None, None) => {}
@@ -238,6 +312,20 @@ impl Net {
             self.resolver = Some(resolver);
         }
 
+        // The machine's name: the operator's, else the one a DHCP server
+        // assigned (the card with the best route first), else the default.
+        let name = self
+            .settings
+            .hostname
+            .clone()
+            .or_else(|| leases.iter().find_map(|l| l.hostname.clone()))
+            .unwrap_or_else(|| self.default_name.clone());
+        if self.named.as_deref() != Some(name.as_str()) {
+            info!("the machine's name: {name}");
+            host.set_hostname(&name);
+            self.named = Some(name);
+        }
+
         let status = net_lease::status_text(
             &self
                 .slots
@@ -247,8 +335,8 @@ impl Net {
                     kind: s.card.kind,
                     mac: s.card.mac.clone(),
                     link: s.link,
-                    mode: Mode::Dhcp,
-                    note: s.client.is_none().then(|| "the DHCP client is not running".to_string()),
+                    mode: if s.fixed.is_some() { Mode::Static } else { Mode::Dhcp },
+                    note: s.note.clone().or_else(|| (s.fixed.is_none() && s.client.is_none()).then(|| "the DHCP client is not running".to_string())),
                 })
                 .collect::<Vec<_>>(),
         );
@@ -338,6 +426,11 @@ mod this_machine {
     const UDHCPC: &str = "/sbin/udhcpc";
     const LEASE_SCRIPT: &str = "/usr/share/embra/udhcpc.script";
     const IP: &str = "/sbin/ip";
+    const ARPING: &str = "/usr/sbin/arping";
+    /// The machine's name as files: `/etc/hostname` and `/etc/hosts` on the
+    /// read-only root are links to these (`post_build.sh`).
+    const HOSTNAME_FILE: &str = "/embra/ephemeral/hostname";
+    const HOSTS_FILE: &str = "/embra/ephemeral/hosts";
 
     pub(super) struct Clock;
 
@@ -350,8 +443,14 @@ mod this_machine {
         }
     }
 
+    /// What tells one state of the settings file from another: its inode
+    /// (the brain writes a new file and renames it), its time and its size.
+    type Stamp = Option<(u64, Option<std::time::SystemTime>, u64)>;
+
     pub(super) struct ThisMachine {
         children: BTreeMap<u32, Child>,
+        /// The settings file as it was when it was last read.
+        settings_seen: Option<Stamp>,
     }
 
     impl ThisMachine {
@@ -359,12 +458,19 @@ mod this_machine {
             if let Err(e) = std::fs::create_dir_all(net_lease::NET_DIR) {
                 warn!("{} could not be made: {e}", net_lease::NET_DIR);
             }
-            ThisMachine { children: BTreeMap::new() }
+            ThisMachine { children: BTreeMap::new(), settings_seen: None }
         }
 
         fn drop_child(&mut self, pid: u32) {
             self.children.remove(&pid);
             helpers().retain(|p| *p != pid);
+        }
+
+        /// A short command, waited for with the helpers' lock held: its exit
+        /// is this function's to collect, not the reaper's.
+        fn run(&self, program: &str, args: &[&str]) -> Option<i32> {
+            let _list = helpers();
+            Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().ok().and_then(|s| s.code())
         }
 
         fn signal(&self, pid: u32, signal: libc::c_int) {
@@ -497,10 +603,67 @@ mod this_machine {
         fn forget(&mut self, card: &str) {
             let _ = std::fs::remove_file(net_lease::lease_path(Path::new(net_lease::NET_DIR), card));
             // A stopped client runs no `deconfig`, so the card is cleared
-            // here. With the helpers' lock held: this child's exit is this
-            // function's to collect, not the reaper's.
-            let _list = helpers();
-            let _ = Command::new(IP).args(["-4", "addr", "flush", "dev", card]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            // here; its routes go with its addresses.
+            let _ = self.run(IP, &["-4", "addr", "flush", "dev", card]);
+        }
+
+        fn settings(&mut self) -> Option<Settings> {
+            use std::os::unix::fs::MetadataExt;
+            let path = Path::new(embra_boot::net_settings::SETTINGS_PATH);
+            let stamp: Stamp = std::fs::metadata(path).ok().map(|m| (m.ino(), m.modified().ok(), m.len()));
+            if self.settings_seen.as_ref() == Some(&stamp) {
+                return None;
+            }
+            self.settings_seen = Some(stamp);
+            let (settings, refused) = embra_boot::net_settings::read(path);
+            for line in refused {
+                warn!("{}: {line}", embra_boot::net_settings::SETTINGS_PATH);
+            }
+            Some(settings)
+        }
+
+        fn in_use(&mut self, card: &str, ip: Ipv4Addr) -> bool {
+            // Duplicate address detection: two probes, one second. BusyBox's
+            // arping exits with 1 when the address answered.
+            self.run(ARPING, &["-D", "-q", "-c", "2", "-w", "1", "-I", card, &ip.to_string()]) == Some(1)
+        }
+
+        fn apply_static(&mut self, card: &Card, setting: &StaticCard) -> Result<(), String> {
+            let address = format!("{}/{}", setting.ip, setting.prefix);
+            if self.run(IP, &["addr", "add", &address, "dev", &card.name]) != Some(0) {
+                return Err(format!("the address {address} could not be set"));
+            }
+            let metric = cards::route_metric(card);
+            if let Some(gateway) = setting.gateway
+                && self.run(IP, &["route", "replace", "default", "via", &gateway.to_string(), "dev", &card.name, "metric", &metric.to_string()]) != Some(0)
+            {
+                return Err(format!("the address {address} is set, the route through {gateway} could not be"));
+            }
+            let record = Lease {
+                interface: card.name.clone(),
+                ip: setting.ip.to_string(),
+                prefix: setting.prefix.to_string(),
+                router: setting.gateway.map(|g| g.to_string()),
+                dns: setting.dns.iter().map(|d| d.to_string()).collect(),
+                hostname: None,
+                domain: None,
+                ntp: Vec::new(),
+                metric,
+                source: net_lease::Source::Static,
+            };
+            write_whole(&net_lease::lease_path(Path::new(net_lease::NET_DIR), &card.name), &record.to_text());
+            Ok(())
+        }
+
+        fn set_hostname(&mut self, name: &str) {
+            // SAFETY: sethostname(2) with a pointer to `name`'s bytes and
+            // their length; it copies them and needs no terminator.
+            let set = unsafe { libc::sethostname(name.as_ptr() as *const libc::c_char, name.len()) };
+            if set != 0 {
+                warn!("the hostname {name} could not be set: {}", std::io::Error::last_os_error());
+            }
+            write_whole(Path::new(HOSTNAME_FILE), &format!("{name}\n"));
+            write_whole(Path::new(HOSTS_FILE), &format!("127.0.0.1\tlocalhost\n127.0.1.1\t{name}\n"));
         }
 
         fn write_resolver(&mut self, text: &str) {
@@ -546,6 +709,12 @@ mod tests {
         raised: Vec<String>,
         resolver: Vec<String>,
         status: Vec<String>,
+        /// The settings the next look finds changed.
+        new_settings: Option<Settings>,
+        /// Addresses that answer on the network already.
+        answering: Vec<Ipv4Addr>,
+        applied: Vec<(String, StaticCard)>,
+        names: Vec<String>,
     }
 
     impl Fake {
@@ -603,12 +772,41 @@ mod tests {
             self.forgotten.push(card.to_string());
             self.leases.retain(|l| l.interface != card);
         }
+        fn settings(&mut self) -> Option<Settings> {
+            self.new_settings.take()
+        }
+        fn in_use(&mut self, _card: &str, ip: Ipv4Addr) -> bool {
+            self.answering.contains(&ip)
+        }
+        fn apply_static(&mut self, card: &Card, setting: &StaticCard) -> Result<(), String> {
+            self.applied.push((card.name.clone(), setting.clone()));
+            self.leases.push(
+                net_lease::parse(&format!(
+                    "interface={}\nip={}\nmask={}\nrouter={}\ndns={}\nmetric={}\nsource=static\n",
+                    card.name,
+                    setting.ip,
+                    setting.prefix,
+                    setting.gateway.map(|g| g.to_string()).unwrap_or_default(),
+                    setting.dns.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(" "),
+                    cards::route_metric(card)
+                ))
+                .unwrap(),
+            );
+            Ok(())
+        }
+        fn set_hostname(&mut self, name: &str) {
+            self.names.push(name.to_string());
+        }
         fn write_resolver(&mut self, text: &str) {
             self.resolver.push(text.to_string());
         }
         fn write_status(&mut self, text: &str) {
             self.status.push(text.to_string());
         }
+    }
+
+    fn fixed(mac: &str, address: &str, gateway: Option<&str>, dns: &[&str]) -> StaticCard {
+        StaticCard::new(mac, address, gateway, dns).unwrap()
     }
 
     /// A clock that moves only when it is slept on.
@@ -793,6 +991,125 @@ mod tests {
         host.leases.push(lease("eth9", "10.9.9.9", "10.9.9.1", 1));
         assert_eq!(net.tick(&mut host, t + KEEPER_TICK * 3).leases.len(), 2);
         assert_eq!(host.resolver.last().map(String::as_str), Some("nameserver 192.168.1.1\n"));
+    }
+
+    #[test]
+    fn a_card_with_an_address_of_its_own_gets_it_and_no_client() {
+        // A network without DHCP: the operator gave the card its address.
+        let mut settings = Settings::default();
+        settings.set_static(fixed("52:54:00:00:00:02", "192.168.1.50/24", Some("192.168.1.1"), &["192.168.1.1"]));
+        let mut host = Fake { cards: vec![card("eth0", 2), card("eth1", 3)], new_settings: Some(settings), ..Fake::default() };
+        let mut net = Net::new("embraos");
+        let mut pace = Stepped::new();
+        let summary = boot(&mut net, &mut host, &mut pace);
+        // The boot goes on at once: the address is the operator's, not a wait.
+        assert_eq!(pace.slept, Duration::ZERO);
+        assert_eq!(summary.leases.iter().map(|l| (l.interface.as_str(), l.ip.as_str())).collect::<Vec<_>>(), [("eth0", "192.168.1.50")]);
+        assert_eq!(host.applied.len(), 1);
+        // No DHCP client on that card; the other card asks as ever.
+        assert_eq!(host.started.iter().map(|(c, _, _)| c.as_str()).collect::<Vec<_>>(), ["eth1"]);
+        assert_eq!(host.resolver.last().map(String::as_str), Some("nameserver 192.168.1.1\n"));
+        let status = net_lease::parse_status(host.status.last().unwrap());
+        assert_eq!(status.iter().map(|c| (c.name.as_str(), c.mode)).collect::<Vec<_>>(), [("eth0", Mode::Static), ("eth1", Mode::Dhcp)]);
+    }
+
+    #[test]
+    fn a_setting_made_later_replaces_the_client_and_one_taken_away_brings_it_back() {
+        let mut host = Fake { cards: vec![card("eth0", 2)], leases: vec![lease("eth0", "192.168.1.42", "192.168.1.1", 102)], new_settings: Some(Settings::default()), ..Fake::default() };
+        let mut net = Net::new("embraos");
+        let t = Instant::now();
+        net.tick(&mut host, t);
+        let client = host.client_of("eth0").unwrap();
+        // `/network static eth0 …`: the keeper finds the file changed.
+        let mut settings = Settings::default();
+        settings.set_static(fixed("52:54:00:00:00:02", "10.20.0.5/24", None, &[]));
+        host.new_settings = Some(settings.clone());
+        let summary = net.tick(&mut host, t + KEEPER_TICK);
+        assert_eq!(host.stopped, [client], "the client is stopped");
+        assert_eq!(host.forgotten, ["eth0"], "and the card cleared: a stopped client runs no deconfig");
+        assert_eq!(summary.leases.iter().map(|l| l.ip.as_str()).collect::<Vec<_>>(), ["10.20.0.5"]);
+        // Nothing changed: nothing is done again.
+        net.tick(&mut host, t + KEEPER_TICK * 2);
+        assert_eq!((host.applied.len(), host.started.len()), (1, 1));
+        // Another address for the same card replaces the first.
+        settings.set_static(fixed("52:54:00:00:00:02", "10.20.0.6/24", None, &[]));
+        host.new_settings = Some(settings);
+        let summary = net.tick(&mut host, t + KEEPER_TICK * 3);
+        assert_eq!(summary.leases.iter().map(|l| l.ip.as_str()).collect::<Vec<_>>(), ["10.20.0.6"]);
+        assert_eq!(host.forgotten.len(), 2);
+        // `/network dhcp eth0`: the address goes and a client asks again.
+        host.new_settings = Some(Settings::default());
+        let summary = net.tick(&mut host, t + KEEPER_TICK * 4);
+        assert!(summary.leases.is_empty());
+        assert_eq!(host.forgotten.len(), 3);
+        assert_eq!(host.started.len(), 2);
+    }
+
+    #[test]
+    fn an_address_that_answers_already_is_not_taken_and_the_status_says_so() {
+        let mut settings = Settings::default();
+        settings.set_static(fixed("52:54:00:00:00:02", "192.168.1.50/24", None, &[]));
+        let mut host = Fake { cards: vec![card("eth0", 2)], new_settings: Some(settings), answering: vec!["192.168.1.50".parse().unwrap()], ..Fake::default() };
+        let mut net = Net::new("embraos");
+        let t = Instant::now();
+        let summary = net.tick(&mut host, t);
+        assert!(summary.leases.is_empty());
+        assert!(host.applied.is_empty());
+        assert!(host.started.is_empty(), "nor is DHCP asked on a card the operator configured");
+        let status = net_lease::parse_status(host.status.last().unwrap());
+        assert_eq!(status[0].note.as_deref(), Some("192.168.1.50 already answers on this network; the address was not taken"));
+        // It is not tried again at every look.
+        host.answering.clear();
+        net.tick(&mut host, t + KEEPER_TICK);
+        assert!(host.applied.is_empty());
+    }
+
+    #[test]
+    fn the_machines_name_is_the_operators_then_a_leases_then_embraos() {
+        let mut host = Fake { cards: vec![card("eth0", 2)], new_settings: Some(Settings::default()), ..Fake::default() };
+        let mut net = Net::new("embraos");
+        let t = Instant::now();
+        net.tick(&mut host, t);
+        assert_eq!(host.names, ["embraos"]);
+        // The DHCP server assigns a name: the machine takes it.
+        let mut assigned = lease("eth0", "192.168.1.42", "192.168.1.1", 102);
+        assigned.hostname = Some("node-7".into());
+        host.leases.push(assigned);
+        net.tick(&mut host, t + KEEPER_TICK);
+        assert_eq!(host.names, ["embraos", "node-7"]);
+        // Nothing changed: the name is not set again.
+        net.tick(&mut host, t + KEEPER_TICK * 2);
+        assert_eq!(host.names.len(), 2);
+        // The operator's name wins over the lease's.
+        host.new_settings = Some(Settings { hostname: Some("axiom".into()), statics: Vec::new() });
+        net.tick(&mut host, t + KEEPER_TICK * 3);
+        assert_eq!(host.names.last().map(String::as_str), Some("axiom"));
+        // And taken away, the lease's is back.
+        host.new_settings = Some(Settings::default());
+        net.tick(&mut host, t + KEEPER_TICK * 4);
+        assert_eq!(host.names.last().map(String::as_str), Some("node-7"));
+    }
+
+    #[test]
+    fn a_dhcp_request_carries_the_operators_name_or_embraos_and_never_a_leases() {
+        let mut assigned = lease("eth0", "192.168.1.42", "192.168.1.1", 102);
+        assigned.hostname = Some("node-7".into());
+        let mut host = Fake { cards: vec![card("eth0", 2)], leases: vec![assigned], new_settings: Some(Settings::default()), ..Fake::default() };
+        let mut net = Net::new("embraos");
+        let t = Instant::now();
+        net.tick(&mut host, t);
+        // The client that exits is started again under the default name,
+        // though the machine is called node-7 by now: a name a lease
+        // assigned is not sent back.
+        let first = host.client_of("eth0").unwrap();
+        host.exited.push(first);
+        net.tick(&mut host, t + Duration::from_secs(6));
+        assert_eq!(host.started.iter().map(|(_, name, _)| name.as_str()).collect::<Vec<_>>(), ["embraos", "embraos"]);
+        // With a name of the operator's, a card that appears asks under it.
+        host.new_settings = Some(Settings { hostname: Some("axiom".into()), statics: Vec::new() });
+        host.cards.push(card("eth1", 3));
+        net.tick(&mut host, t + Duration::from_secs(8));
+        assert_eq!(host.started.last().map(|(c, name, _)| (c.as_str(), name.as_str())), Some(("eth1", "axiom")));
     }
 
     #[test]
