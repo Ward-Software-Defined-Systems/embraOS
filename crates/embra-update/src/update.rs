@@ -23,6 +23,8 @@ pub struct Checked {
     pub manifest: Manifest,
     pub verdict: Verdict,
     pub source: Source,
+    /// The release this machine runs, as the verdict compared it.
+    pub release: Release,
 }
 
 pub fn keys() -> Vec<[u8; 32]> {
@@ -62,11 +64,58 @@ pub fn check(source_flag: Option<&str>, tag: Option<&str>, out: &mut impl Write)
     if !manifest.notes_url.is_empty() {
         let _ = writeln!(out, "notes: {}", manifest.notes_url);
     }
-    Ok(Checked { manifest, verdict, source })
+    Ok(Checked { manifest, verdict, source, release })
+}
+
+/// The check as one object, the form the brain reads (`check --json`): the
+/// verdict by a word, the release this machine runs, the one the source
+/// publishes, and the source without any credentials it carries. It exists
+/// only for a manifest whose signature was verified: a check that fails
+/// before that prints no object, and its reason is the last stderr line.
+pub fn check_json(checked: &Checked) -> serde_json::Value {
+    let (verdict, reason) = match &checked.verdict {
+        Verdict::Newer => ("newer", None),
+        Verdict::SameBuild => ("same_build", None),
+        Verdict::SameVersionOtherBuild => ("same_version_other_build", None),
+        Verdict::Older => ("older", None),
+        Verdict::Mismatch(why) => ("mismatch", Some(why.as_str())),
+    };
+    serde_json::json!({
+        "verdict": verdict,
+        "reason": reason,
+        "running": {
+            "version": checked.release.version,
+            "build_id": checked.release.build_id,
+            "arch": checked.release.arch,
+            "engine": checked.release.engine,
+        },
+        "available": {
+            "version": checked.manifest.version,
+            "build_id": checked.manifest.build_id,
+            "built": checked.manifest.built,
+            "notes_url": checked.manifest.notes_url,
+        },
+        "source": checked.source.shown(),
+    })
 }
 
 /// `check` as a command: the verdict and the next action, and its exit code.
-pub fn check_command(source_flag: Option<&str>, tag: Option<&str>, out: &mut impl Write) -> Outcome {
+/// With `json` the object is all that is printed, under the same exit codes:
+/// 0 for a newer release, 3 for nothing to do, 2 for a release that is not
+/// this machine's.
+pub fn check_command(source_flag: Option<&str>, tag: Option<&str>, json: bool, out: &mut impl Write) -> Outcome {
+    if json {
+        let checked = match check(source_flag, tag, &mut std::io::sink()) {
+            Ok(c) => c,
+            Err(o) => return o,
+        };
+        let _ = writeln!(out, "{}", check_json(&checked));
+        return match checked.verdict {
+            Verdict::Newer => Outcome::Done,
+            Verdict::Mismatch(why) => Outcome::Refused(format!("refused: {why}")),
+            Verdict::SameBuild | Verdict::SameVersionOtherBuild | Verdict::Older => Outcome::Nothing(String::new()),
+        };
+    }
     let checked = match check(source_flag, tag, out) {
         Ok(c) => c,
         Err(o) => return o,
@@ -274,5 +323,59 @@ pub fn rollback_command(out: &mut impl Write) -> Outcome {
         }
         Ok(Err(e)) => Outcome::Failed(format!("grubenv could not be written: {e}")),
         Err(e) => Outcome::Failed(format!("the ESP could not be written: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::test_support::{key_pair, sample, sign_b64};
+
+    fn checked(running: (&str, &str), published: (&str, &str), base: &str) -> Checked {
+        let (kp, public) = key_pair();
+        let bytes = sample(published.0, published.1, "x86_64", "fjall").into_bytes();
+        let manifest = manifest::verify(&bytes, &sign_b64(&kp, &bytes), &[public]).unwrap();
+        let release = Release::parse(&format!("VERSION={}\nBUILD_ID={}\nARCH=x86_64\nENGINE=fjall\nBUILT=now\n", running.0, running.1)).unwrap();
+        let verdict = manifest::compare(&release, None, &manifest);
+        Checked { manifest, verdict, source: Source { base: base.to_string() }, release }
+    }
+
+    /// The brain reads this object and nothing else of a check: each verdict
+    /// has its word, and both releases are named by version and build.
+    #[test]
+    fn the_object_names_the_verdict_by_a_word_and_both_releases() {
+        let base = "https://github.com/Ward-Software-Defined-Systems/embraOS/releases/latest/download";
+        let newer = check_json(&checked(("0.24.0-phase2", "aaa"), ("0.25.0-phase2", "bbb"), base));
+        assert_eq!(newer["verdict"], "newer");
+        assert_eq!(newer["reason"], serde_json::Value::Null);
+        assert_eq!(newer["running"], serde_json::json!({"version": "0.24.0-phase2", "build_id": "aaa", "arch": "x86_64", "engine": "fjall"}));
+        assert_eq!(newer["available"]["version"], "0.25.0-phase2");
+        assert_eq!(newer["available"]["build_id"], "bbb");
+        assert_eq!(newer["available"]["built"], "2026-11-05T10:12:00Z");
+        assert_eq!(newer["available"]["notes_url"], "https://example/notes");
+        assert_eq!(newer["source"], base);
+        for (running, published, word) in [
+            (("0.25.0-phase2", "bbb"), ("0.25.0-phase2", "bbb"), "same_build"),
+            (("0.25.0-phase2", "ccc"), ("0.25.0-phase2", "bbb"), "same_version_other_build"),
+            (("0.26.0-phase2", "ddd"), ("0.25.0-phase2", "bbb"), "older"),
+        ] {
+            assert_eq!(check_json(&checked(running, published, base))["verdict"], word, "{running:?} against {published:?}");
+        }
+        // A release for another machine: the word, and why.
+        let mut other = checked(("0.24.0-phase2", "aaa"), ("0.25.0-phase2", "bbb"), base);
+        other.verdict = manifest::compare(&Release::parse("VERSION=0.24.0-phase2\nBUILD_ID=aaa\nARCH=aarch64\nENGINE=fjall\nBUILT=now\n").unwrap(), None, &other.manifest);
+        let object = check_json(&other);
+        assert_eq!(object["verdict"], "mismatch");
+        assert!(object["reason"].as_str().unwrap().contains("aarch64"), "{object}");
+    }
+
+    /// The object goes to the model through the brain's status and its tool:
+    /// an operator's own source may carry credentials before its host, and
+    /// none of them is in it.
+    #[test]
+    fn the_object_shows_the_source_without_its_credentials() {
+        let object = check_json(&checked(("0.24.0-phase2", "aaa"), ("0.25.0-phase2", "bbb"), "https://deploy:s3cret@mirror.example:8443/embraos/latest"));
+        assert_eq!(object["source"], "https://mirror.example:8443/embraos/latest");
+        assert!(!object.to_string().contains("s3cret"), "{object}");
     }
 }

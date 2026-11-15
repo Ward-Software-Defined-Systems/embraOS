@@ -2,7 +2,10 @@
 //! DATA and their restore; the signed release checked, written into the
 //! inactive slot and staged for GRUB; the status and the rollback. Run by
 //! embrad in a maintenance boot from the GRUB menu and by the brain for the
-//! operator's slash commands; never a tool of the model.
+//! operator's slash commands; never a tool of the model, with one exception
+//! that changes nothing: the brain runs `check --json` by itself, once a day
+//! and for the `update_check` tool, always with that command line and no
+//! word of the model's on it.
 //!
 //! Exit codes, read by both callers: 0 done; 1 failed, the last stderr line
 //! is the reason; 2 refused by a precondition, nothing was changed; 3 nothing
@@ -66,7 +69,10 @@ fn main() -> ExitCode {
             ExitCode::from(EXIT_REFUSED)
         }
         Ok(Outcome::Nothing(msg)) => {
-            op.line(&msg);
+            // `check --json` has said all of it in its object.
+            if !msg.is_empty() {
+                op.line(&msg);
+            }
             ExitCode::from(EXIT_NOTHING)
         }
         Ok(Outcome::Failed(msg)) => {
@@ -168,7 +174,7 @@ fn run(cmd: Command, op: &mut console::Operator) -> anyhow::Result<Outcome> {
             import::ImportOutcome::Imported(_) => Ok(Outcome::Done),
             import::ImportOutcome::Refused(msg) => Ok(Outcome::Refused(msg)),
         },
-        Command::Check { source, tag } => Ok(update::check_command(source.as_deref(), tag.as_deref(), op)),
+        Command::Check { source, tag, json } => Ok(update::check_command(source.as_deref(), tag.as_deref(), json, op)),
         Command::Apply { source, tag, yes, console, allow_downgrade } => {
             Ok(update::apply_command(source.as_deref(), tag.as_deref(), yes, console, allow_downgrade, op))
         }

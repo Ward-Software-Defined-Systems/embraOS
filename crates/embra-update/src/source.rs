@@ -67,6 +67,20 @@ impl Source {
     pub fn rootfs_url(&self, file: &str) -> String {
         format!("{}/{file}", self.base)
     }
+
+    /// The base as it is shown to anyone but the operator who set it:
+    /// without the credentials a source of the operator's own may carry
+    /// before its host (`https://user:secret@host/…`).
+    pub fn shown(&self) -> String {
+        let Some((scheme, rest)) = self.base.split_once("://") else {
+            return self.base.clone();
+        };
+        let authority = rest.split('/').next().unwrap_or("");
+        match authority.rfind('@') {
+            Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+            None => self.base.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +106,18 @@ mod tests {
         assert_eq!(resolve(Some("https://mirror.example/x/"), None, &file).unwrap().base, "https://mirror.example/x");
         assert!(resolve(None, Some("../x"), none).is_err());
         std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn a_source_is_shown_without_the_credentials_before_its_host() {
+        let shown = |base: &str| Source { base: base.to_string() }.shown();
+        assert_eq!(shown(DEFAULT_SOURCE), DEFAULT_SOURCE);
+        assert_eq!(shown("https://user:secret@mirror.example/embraos"), "https://mirror.example/embraos");
+        assert_eq!(shown("https://token@mirror.example:8443/x"), "https://mirror.example:8443/x");
+        assert_eq!(shown("http://10.0.0.5:8080/u"), "http://10.0.0.5:8080/u");
+        // An at sign in the path is the path's own.
+        assert_eq!(shown("https://mirror.example/a@b/latest"), "https://mirror.example/a@b/latest");
+        assert_eq!(shown("https://u:p@mirror.example/a@b"), "https://mirror.example/a@b");
     }
 
     #[test]

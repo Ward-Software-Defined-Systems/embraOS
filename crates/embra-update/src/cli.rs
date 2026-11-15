@@ -8,7 +8,7 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
   list [--names]                                                 the backups, newest first
   delete <name>                                                  remove one backup
   import <name>                                                  check a backup's archive read from standard input and keep it as <name> (the web console's upload)
-  check [--source <url>] [--tag <v…>]                            the release at the source against this one
+  check [--source <url>] [--tag <v…>] [--json]                   the release at the source against this one (--json: one object, the brain's form)
   apply [--yes] [--console] [--allow-downgrade] [--source <url>] [--tag <v…>]   write the release into the inactive slot and stage it
   status                                                         the booted, active and pending slots and what each holds
   rollback                                                       make the other slot the default again
@@ -25,7 +25,7 @@ pub enum Command {
     List { names_only: bool },
     Delete { name: String },
     Import { name: String },
-    Check { source: Option<String>, tag: Option<String> },
+    Check { source: Option<String>, tag: Option<String>, json: bool },
     Apply { source: Option<String>, tag: Option<String>, yes: bool, console: bool, allow_downgrade: bool },
     Status,
     Rollback,
@@ -81,6 +81,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut source: Option<String> = None;
     let mut tag: Option<String> = None;
     let mut allow_downgrade = false;
+    let mut json = false;
     let mut media: Option<String> = None;
     let mut disk: Option<String> = None;
     let mut upgrade = false;
@@ -102,6 +103,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--source" => source = Some(value("--source")?),
             "--tag" => tag = Some(value("--tag")?),
             "--allow-downgrade" => allow_downgrade = true,
+            "--json" => json = true,
             "--media" => media = Some(value("--media")?),
             "--disk" => disk = Some(value("--disk")?),
             "--upgrade" => upgrade = true,
@@ -152,7 +154,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Import { name })
         }
-        "check" => Ok(Command::Check { source, tag }),
+        "check" => Ok(Command::Check { source, tag, json }),
         "apply" => Ok(Command::Apply { source, tag, yes, console, allow_downgrade }),
         "status" => Ok(Command::Status),
         "rollback" => Ok(Command::Rollback),
@@ -206,7 +208,8 @@ mod tests {
         assert!(p("import a b").unwrap_err().contains("not a name for a backup"));
         assert!(p("import ../etc").unwrap_err().contains("not a name for a backup"));
         assert!(!p("import mine").unwrap().console());
-        assert_eq!(p("check --source https://m/x --tag v1.2.3"), Ok(Command::Check { source: Some("https://m/x".into()), tag: Some("v1.2.3".into()) }));
+        assert_eq!(p("check --source https://m/x --tag v1.2.3"), Ok(Command::Check { source: Some("https://m/x".into()), tag: Some("v1.2.3".into()), json: false }));
+        assert_eq!(p("check --json"), Ok(Command::Check { source: None, tag: None, json: true }));
         assert_eq!(p("apply --yes --allow-downgrade"), Ok(Command::Apply { source: None, tag: None, yes: true, console: false, allow_downgrade: true }));
         assert_eq!(p("status"), Ok(Command::Status));
         assert!(p("snapshot --console").unwrap().console() && p("apply --console").unwrap().console() && !p("status").unwrap().console());
