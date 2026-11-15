@@ -50,7 +50,7 @@ pub(crate) async fn run_until(
                 break;
             }
             _ = recv_or_pending(&mut sigchld) => {
-                reap_orphans(&supervisor.child_pids());
+                reap(supervisor.child_pids());
             }
             _ = health_tick.tick() => {
                 tokio::select! {
@@ -60,7 +60,7 @@ pub(crate) async fn run_until(
                     }
                     _ = reconcile_once(supervisor) => {}
                 }
-                reap_orphans(&supervisor.child_pids());
+                reap(supervisor.child_pids());
             }
         }
     }
@@ -82,6 +82,17 @@ async fn reconcile_once(supervisor: &mut Supervisor) {
             }
         }
     }
+}
+
+/// One sweep of the reaper with the services' pids and the helpers' (the
+/// DHCP clients, `net.rs`) left alone, under the helpers' lock: a helper is
+/// started with that lock held, so its exit cannot be taken between its
+/// start and its registration.
+fn reap(mut owned: Vec<u32>) -> usize {
+    crate::net::with_helpers(|helpers| {
+        owned.extend_from_slice(helpers);
+        reap_orphans(&owned)
+    })
 }
 
 /// Reaps the children of this process that are not supervised services:
@@ -166,5 +177,25 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(reap_orphans(&[pid]), 0, "the supervised exit is not taken");
         assert!(kept.wait().unwrap().success(), "and is still there to collect");
+    }
+
+    /// A DHCP client is no service of the supervisor's, and its exit is its
+    /// owner's to collect all the same: its pid is on the helpers' list
+    /// (`net.rs`), which every sweep leaves alone.
+    #[test]
+    fn the_reaper_leaves_a_registered_helper_to_its_owner() {
+        let _children = crate::supervisor::test_support::CHILDREN.blocking_lock();
+        let mut helper = std::process::Command::new("true").spawn().unwrap();
+        let pid = helper.id();
+        crate::net::helpers().push(pid);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(reap(Vec::new()), 0, "the helper's exit is not taken");
+        assert!(helper.wait().unwrap().success(), "and is still there for its owner");
+        crate::net::helpers().retain(|p| *p != pid);
+        // Off the list, an exited child is anybody's: the sweep takes it.
+        let stray = std::process::Command::new("true").spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(reap(Vec::new()), 1, "a child nobody owns is reaped");
+        drop(stray);
     }
 }

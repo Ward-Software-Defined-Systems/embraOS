@@ -1,13 +1,20 @@
 #!/bin/sh
-# embraOS's lease script for BusyBox udhcpc (embrad starts the client at
-# boot: crates/embrad/src/mount.rs, bring_up_network). The root filesystem
-# is read-only, so the resolver and the lease go to the ephemeral tmpfs:
-# /etc/resolv.conf is a link to /embra/ephemeral/resolv.conf, and embrad
-# reads /embra/ephemeral/net-lease for the boot banner. udhcpc calls this
-# with the event in $1 and the lease in its environment (interface, ip,
-# mask = the prefix length, subnet, router, dns).
+# embraOS's lease script for BusyBox udhcpc. embrad starts one client a
+# network card (crates/embrad/src/net.rs) and hands each the metric of its
+# card's default route in EMBRA_METRIC. udhcpc calls this with the event in
+# $1 and the lease in its environment (interface, ip, mask = the prefix
+# length, router, dns, hostname, domain, ntpsrv).
+#
+# The script does what must happen at the event: the address, the default
+# route, and the card's record, /embra/ephemeral/net/<card>.lease, which
+# embrad reads (crates/embra-boot/src/net_lease.rs). embrad writes the
+# resolver file from the records, since two cards may hold a lease and the
+# file is one card's. The root filesystem is read-only; all of this is on
+# the ephemeral tmpfs.
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
-EPHEMERAL=/embra/ephemeral
+NET=/embra/ephemeral/net
+record="$NET/$interface.lease"
+metric="${EMBRA_METRIC:-1000}"
 
 apply_lease() {
     # The address, once: a renewal of the same lease leaves the interface
@@ -16,39 +23,42 @@ apply_lease() {
         ip -4 addr flush dev "$interface" 2>/dev/null
         ip addr add "${ip}/${mask}" dev "$interface"
     fi
+    # The default route with this card's metric: the lowest one carries the
+    # traffic, and every card keeps a route of its own.
     if [ -n "$router" ]; then
         for gw in $router; do
-            ip route replace default via "$gw" dev "$interface" && break
+            ip route replace default via "$gw" dev "$interface" metric "$metric" && break
         done
     fi
-    : > "$EPHEMERAL/resolv.conf.tmp"
-    for d in $dns; do
-        echo "nameserver $d" >> "$EPHEMERAL/resolv.conf.tmp"
-    done
-    if [ -s "$EPHEMERAL/resolv.conf.tmp" ]; then
-        mv -f "$EPHEMERAL/resolv.conf.tmp" "$EPHEMERAL/resolv.conf"
-    else
-        rm -f "$EPHEMERAL/resolv.conf.tmp"
-    fi
-    # The lease file last, whole: embrad waits for it at boot.
+    # The record last, whole: embrad waits for it at boot.
+    mkdir -p "$NET"
     {
         echo "interface=$interface"
         echo "ip=$ip"
         echo "mask=$mask"
         echo "router=$router"
         echo "dns=$dns"
+        echo "hostname=$hostname"
+        echo "domain=$domain"
+        echo "ntp=$ntpsrv"
+        echo "metric=$metric"
         echo "source=dhcp"
-    } > "$EPHEMERAL/net-lease.tmp"
-    mv -f "$EPHEMERAL/net-lease.tmp" "$EPHEMERAL/net-lease"
+    } > "$record.tmp"
+    mv -f "$record.tmp" "$record"
 }
 
 case "$1" in
     bound|renew)
         apply_lease
         ;;
-    deconfig|leasefail|nak)
-        # At the client's start, and when a lease is lost or refused: the
-        # address stays as it is; embrad decides on the fallback at boot.
+    deconfig)
+        # At the client's start, on a release, when a lease is lost and
+        # after a refusal: the card has no address of the client's now.
+        ip -4 addr flush dev "$interface" 2>/dev/null
+        rm -f "$record" "$record.tmp"
+        ;;
+    leasefail|nak)
+        # No answer this round, or a refusal: the client asks again.
         ;;
 esac
 exit 0

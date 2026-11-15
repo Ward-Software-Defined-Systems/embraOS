@@ -4,12 +4,14 @@
 //! 1. Install the panic hook (PID 1 only); a clock earlier than the image's
 //!    build time resumes from the last time this machine saved, or from the
 //!    build time (PID 1 only, `clock.rs`)
-//! 2. Mount pseudo-filesystems, bring the network up
+//! 2. Mount pseudo-filesystems
 //! 3. Verify partition mounts
 //! 4. Scrub the environment the kernel handed over (PID 1 only), read the
 //!    kernel line once, set the environment every service inherits (one
-//!    thread, no runtime yet); then the time from a time server (PID 1
-//!    only), before anything dates a file or a certificate
+//!    thread, no runtime yet); then the network: every card asked for a
+//!    lease, a wait for a first address, a thread that keeps the cards from
+//!    then on (PID 1 only, `net.rs`); then the time from a time server (PID
+//!    1 only), before anything dates a file or a certificate
 //! 5. A maintenance mode (`embra.mode=`) runs its job and reboots; a job a
 //!    session scheduled (`/embra/state/next-boot`) runs first; otherwise
 //!    start services in dependency order
@@ -33,11 +35,10 @@ mod console;
 mod modes;
 mod mount;
 mod reconcile;
+mod net;
 mod supervisor;
 
 use anyhow::Result;
-// The lease record lives in the boot contract: embra-web reads it too.
-use embra_boot::net_lease;
 use embra_boot::{BootMode, Cmdline, Release};
 use tracing::{error, info, warn};
 
@@ -76,6 +77,13 @@ fn main() -> Result<()> {
         Err(e) => return Err(e),
     };
 
+    // Step 4.2: the network. Every card the kernel has is brought up and
+    // asked for a lease, and the boot waits for a first address on any of
+    // them, ten seconds at most; a keeper thread then follows the cards for
+    // the life of the boot, in a maintenance boot too (`net.rs`). After the
+    // environment is set, since a thread starts here. PID 1 only.
+    let network = if pid == 1 { net::bring_up() } else { net::Summary::default() };
+
     // The boot mode: a menu entry's job, or the services. An unknown value
     // is a normal boot under an error line, never a halt.
     let mode = match cmdline.mode() {
@@ -94,8 +102,7 @@ fn main() -> Result<()> {
     // outcome is the record the banner and the brain read. The environment
     // is set by now, so the thread the lookup runs on meets no `set_var`.
     if pid == 1 {
-        let carrier = std::fs::read_to_string("/sys/class/net/eth0/carrier").ok();
-        let missing = clock::network_missing(std::path::Path::new(net_lease::LEASE_PATH).exists(), carrier.as_deref());
+        let missing = clock::network_missing(network.cards, network.leases.len(), network.any_link);
         let status = clock::sync_at_boot(&clock::ThisMachine, cmdline.time_server(), floored, built, missing);
         if let Err(e) = status.write() {
             warn!("the clock's record could not be written to {}: {e}", embra_boot::clock::STATUS_PATH);

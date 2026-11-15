@@ -526,17 +526,17 @@ fn fetch_within(host: &str, port: u16, wait: Duration) -> Result<Sample, String>
     }
 }
 
-/// Why the network cannot carry the request, before it is tried: no
-/// interface came up (no lease record exists), or the interface has no
-/// link. `None` when the request is worth its wait.
-pub fn network_missing(lease_recorded: bool, carrier: Option<&str>) -> Option<&'static str> {
-    if !lease_recorded {
-        return Some("no network interface came up");
+/// Why the network cannot carry the request, before it is tried: the
+/// machine has no network card, none of its cards has a link, or none has an
+/// address yet (`net::Summary`). `None` when the request is worth its wait.
+pub fn network_missing(cards: usize, addresses: usize, any_link: bool) -> Option<&'static str> {
+    if cards == 0 {
+        return Some("no network card was found");
     }
-    match carrier.map(str::trim) {
-        Some("0") => Some("the network interface has no link"),
-        _ => None,
+    if addresses == 0 {
+        return Some(if any_link { "no network card has an address yet" } else { "no network card has a link" });
     }
+    None
 }
 
 /// How the kernel line's choice is named in a line for the operator, and
@@ -1075,10 +1075,11 @@ mod tests {
         assert_eq!(status.sync, Sync::Failed { server: "10.0.2.2:12300".into(), reason: "the network interface has no link".into() }, "a port of its own is named with the host");
         assert!(started.elapsed() < Duration::from_secs(1), "nothing was asked: {:?}", started.elapsed());
 
-        assert_eq!(network_missing(false, None), Some("no network interface came up"));
-        assert_eq!(network_missing(true, Some("0\n")), Some("the network interface has no link"));
-        assert_eq!(network_missing(true, Some("1\n")), None);
-        assert_eq!(network_missing(true, None), None, "a link that cannot be read is tried");
+        assert_eq!(network_missing(0, 0, false), Some("no network card was found"));
+        assert_eq!(network_missing(2, 0, false), Some("no network card has a link"));
+        assert_eq!(network_missing(2, 0, true), Some("no network card has an address yet"));
+        assert_eq!(network_missing(2, 1, true), None);
+        assert_eq!(network_missing(1, 1, false), None, "an address on a card whose link cannot be read is tried");
         assert_eq!(target(TimeServer::Default), Some(("time.cloudflare.com".into(), "time.cloudflare.com".into(), 123)));
         assert_eq!(target(TimeServer::Named { host: "ntp.example.org", port: 123 }), Some(("ntp.example.org".into(), "ntp.example.org".into(), 123)));
         assert_eq!(target(TimeServer::Off), None);

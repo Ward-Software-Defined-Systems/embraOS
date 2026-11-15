@@ -14,7 +14,8 @@
 //! it. Nothing here is logged.
 //!
 //! The URLs are the banner's (`embra_boot::net_lease::console_urls`), read
-//! from the lease as it stands at the request.
+//! from the cards' records as they stand at the request: a lease that came
+//! after the banner was printed is in the menu all the same.
 
 use std::net::IpAddr;
 
@@ -22,7 +23,7 @@ use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use embra_boot::net_lease::{self, Lease};
+use embra_boot::net_lease::{self, Lease, Source};
 use serde_json::{Value, json};
 
 use crate::server::Peer;
@@ -38,17 +39,18 @@ fn on_this_machine(peer: IpAddr) -> bool {
 }
 
 /// The banner's URLs, each with where it works, in the banner's order.
-fn named_urls(token: &str, lease: &Lease) -> Value {
-    let urls = net_lease::console_urls(token, lease);
-    let mut rows = Vec::with_capacity(urls.len());
-    for (i, url) in urls.iter().enumerate() {
-        let place = if i == 0 {
-            "from the host of a QEMU VM, through its port forward".to_string()
-        } else {
-            format!("on the network, at the address DHCP leased to this machine ({}/{})", lease.ip, lease.prefix)
-        };
-        rows.push(json!({ "url": url, "where": place }));
-    }
+fn named_urls(token: &str, leases: &[Lease]) -> Value {
+    let rows: Vec<Value> = net_lease::console_urls(token, leases)
+        .iter()
+        .map(|u| {
+            let place = match u.lease {
+                None => "from the host of a QEMU VM, through its port forward".to_string(),
+                Some(l) if l.source == Source::Static => format!("on the network, at the address set for {} ({}/{})", l.interface, l.ip, l.prefix),
+                Some(l) => format!("on the network, at the address DHCP leased to this machine ({}/{})", l.ip, l.prefix),
+            };
+            json!({ "url": u.url, "where": place })
+        })
+        .collect();
     json!({ "urls": rows })
 }
 
@@ -113,15 +115,21 @@ mod tests {
     /// own.
     #[test]
     fn the_urls_are_the_banners_each_with_where_it_works() {
-        let fallback = named_urls(T, &Lease::static_fallback());
-        assert_eq!(fallback["urls"].as_array().unwrap().len(), 1);
-        assert_eq!(fallback["urls"][0]["url"], format!("https://localhost:3345/embraOS?token={T}"));
-        assert!(fallback["urls"][0]["where"].as_str().unwrap().contains("port forward"));
+        // No address on a network: the forwarded one alone.
+        let alone = named_urls(T, &[]);
+        assert_eq!(alone["urls"].as_array().unwrap().len(), 1);
+        assert_eq!(alone["urls"][0]["url"], format!("https://localhost:3345/embraOS?token={T}"));
+        assert!(alone["urls"][0]["where"].as_str().unwrap().contains("port forward"));
 
-        let leased = net_lease::parse("ip=192.168.1.42\nmask=24\nrouter=192.168.1.1\ndns=192.168.1.1\nsource=dhcp\n").unwrap();
-        let rows = named_urls(T, &leased);
+        let leases = [
+            net_lease::parse("interface=eth0\nip=10.20.0.5\nmask=24\nmetric=102\nsource=static\n").unwrap(),
+            net_lease::parse("interface=eth1\nip=192.168.1.42\nmask=24\nrouter=192.168.1.1\ndns=192.168.1.1\nmetric=103\nsource=dhcp\n").unwrap(),
+        ];
+        let rows = named_urls(T, &leases);
         let urls: Vec<&str> = rows["urls"].as_array().unwrap().iter().map(|r| r["url"].as_str().unwrap()).collect();
-        assert_eq!(urls, net_lease::console_urls(T, &leased).iter().map(String::as_str).collect::<Vec<_>>());
-        assert_eq!(rows["urls"][1]["where"], "on the network, at the address DHCP leased to this machine (192.168.1.42/24)");
+        assert_eq!(urls, net_lease::console_urls(T, &leases).iter().map(|u| u.url.as_str()).collect::<Vec<_>>());
+        assert_eq!(urls.len(), 3, "a row for every address");
+        assert_eq!(rows["urls"][1]["where"], "on the network, at the address set for eth0 (10.20.0.5/24)");
+        assert_eq!(rows["urls"][2]["where"], "on the network, at the address DHCP leased to this machine (192.168.1.42/24)");
     }
 }

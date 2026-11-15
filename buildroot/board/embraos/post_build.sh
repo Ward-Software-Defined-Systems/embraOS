@@ -161,9 +161,9 @@ printf 'set slot_version="%s (%s, %s)"\n' "$VERSION" "$BUILD_ID" "${BUILT%%T*}" 
 install -D -m 0644 "${REPO_ROOT}/scripts/update-signing.pub" "${TARGET_DIR}/usr/share/embra/update-signing.pub"
 
 # The resolver: /etc/resolv.conf on the read-only root is a link into the
-# ephemeral tmpfs, where embrad writes the static default (QEMU's 10.0.2.3)
-# at boot and the udhcpc lease script (rootfs_overlay/usr/share/embra/
-# udhcpc.script, embrad's bring_up_network) the servers a DHCP lease names.
+# ephemeral tmpfs, where embrad writes the resolvers of the card with the
+# best route (crates/embrad/src/net.rs), from the records the udhcpc lease
+# script keeps for each card (rootfs_overlay/usr/share/embra/udhcpc.script).
 rm -f "${TARGET_DIR}/etc/resolv.conf"
 ln -s /embra/ephemeral/resolv.conf "${TARGET_DIR}/etc/resolv.conf"
 [ -x "${TARGET_DIR}/usr/share/embra/udhcpc.script" ] \
@@ -225,9 +225,10 @@ rm -f "${TARGET_DIR}/usr/sbin/sshd" \
       "${TARGET_DIR}/etc/ssh/sshd_config"
 
 # udev's files, for a build that carries it (eudev comes with the display
-# console's input): its network-naming rule would rename eth0, which embrad's
-# bring_up_network names, and its init scripts are for SysV init, which this
-# image has not. Removed on every build, whether or not eudev is built.
+# console's input): its network-naming rule would rename a card after embrad
+# has started a DHCP client on it under the kernel's name (crates/embrad/src/
+# net.rs), and its init scripts are for SysV init, which this image has not.
+# Removed on every build, whether or not eudev is built.
 rm -f "${TARGET_DIR}/lib/udev/rules.d/80-net-name-slot.rules" \
       "${TARGET_DIR}/etc/init.d/S10udevd" \
       "${TARGET_DIR}/etc/init.d/S30dbus"

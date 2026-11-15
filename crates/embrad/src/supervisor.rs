@@ -531,16 +531,16 @@ impl Supervisor {
                     let _ = writeln!(b);
                     let _ = writeln!(b,
                         "\x1b[1;32m  \u{2713} embraOS boot complete \u{2014} web console is ready\x1b[0m");
-                    let lease = crate::net_lease::read();
-                    let urls = crate::net_lease::console_urls(self.web_token.as_deref().unwrap_or(""), &lease);
-                    let _ = writeln!(b,
-                        "    \x1b[1;36m{}\x1b[0m  \x1b[2m(QEMU hostfwd; accept the embraOS-CA cert)\x1b[0m", urls[0]);
-                    if let Some(leased) = urls.get(1) {
-                        // A lease of this machine's own: a bridged network, a
-                        // real host. QEMU's user network leases 10.0.2.15,
-                        // which no line names (unreachable from outside).
-                        let _ = writeln!(b,
-                            "    \x1b[1;36m{leased}\x1b[0m  \x1b[2m(the address DHCP leased to this machine, {}/{})\x1b[0m", lease.ip, lease.prefix);
+                    // One line an address: the forwarded one always, then
+                    // every address this machine holds on a network (a
+                    // lease on a bridged network or a real host, an address
+                    // the operator set). QEMU's user network leases
+                    // 10.0.2.15, which no line names (unreachable from
+                    // outside).
+                    let leases = embra_boot::net_lease::read();
+                    let urls = embra_boot::net_lease::console_urls(self.web_token.as_deref().unwrap_or(""), &leases);
+                    for line in banner_url_lines(&urls, leases.is_empty()) {
+                        let _ = writeln!(b, "{line}");
                     }
                     // Printed here and nowhere else, except where the display
                     // console runs: its menu shows the URL again (embra-web's
@@ -1010,6 +1010,28 @@ pub(crate) fn is_http_200(response: &str) -> bool {
 /// console then inherits as before.
 /// The display console's launcher: cog on its DRM platform.
 const KIOSK_BIN: &str = "/usr/bin/cog";
+/// The banner's lines for the console's URLs: the forwarded one, then one
+/// for every address on a network with how the machine came by it; and a
+/// line that says so when it holds no address at all.
+fn banner_url_lines(urls: &[embra_boot::net_lease::ConsoleUrl<'_>], no_address: bool) -> Vec<String> {
+    use embra_boot::net_lease::Source;
+    let mut lines: Vec<String> = urls
+        .iter()
+        .map(|u| {
+            let place = match u.lease {
+                None => "QEMU hostfwd; accept the embraOS-CA cert".to_string(),
+                Some(l) if l.source == Source::Static => format!("the address set for {}, {}/{}", l.interface, l.ip, l.prefix),
+                Some(l) => format!("the address DHCP leased to this machine, {}/{} on {}", l.ip, l.prefix, l.interface),
+            };
+            format!("    \x1b[1;36m{}\x1b[0m  \x1b[2m({place})\x1b[0m", u.url)
+        })
+        .collect();
+    if no_address {
+        lines.push("    \x1b[2m(no address on a network yet; DHCP is still being asked on every card)\x1b[0m".to_string());
+    }
+    lines
+}
+
 /// udev, for libinput's device enumeration under the display console.
 const UDEVD_BIN: &str = "/sbin/udevd";
 /// The display console's writable home, on the ephemeral tmpfs (the root
@@ -1198,7 +1220,7 @@ fn prepare_kiosk_dirs() {
 
 /// udev, once it runs, is told about the input devices devtmpfs created
 /// before it (`udevadm trigger`, the input subsystem alone: no network
-/// rule may rename eth0), and waited for; libinput enumerates what udev has
+/// rule may rename a card), and waited for; libinput enumerates what udev has
 /// tagged. Best effort, ten seconds at most each.
 async fn seed_udev() {
     let Some(udevadm) = ["/sbin/udevadm", "/bin/udevadm", "/usr/bin/udevadm"]
@@ -1534,10 +1556,30 @@ mod web_token_tests {
     #[test]
     fn the_console_url_carries_the_token() {
         // The banner's first line is the console through QEMU's port forward
-        // with this boot's token; the lease decides whether a second follows
+        // with this boot's token; the records decide what follows
         // (`net_lease::console_urls`).
-        let urls = crate::net_lease::console_urls("0123456789abcdef0123456789abcdef", &crate::net_lease::Lease::static_fallback());
-        assert_eq!(urls, vec!["https://localhost:3345/embraOS?token=0123456789abcdef0123456789abcdef".to_string()]);
+        let token = "0123456789abcdef0123456789abcdef";
+        let urls = embra_boot::net_lease::console_urls(token, &[]);
+        assert_eq!(urls.iter().map(|u| u.url.as_str()).collect::<Vec<_>>(), ["https://localhost:3345/embraOS?token=0123456789abcdef0123456789abcdef"]);
+        // A machine without an address says so under its one line.
+        let lines = super::banner_url_lines(&urls, true);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("https://localhost:3345/embraOS?token=0123456789abcdef0123456789abcdef") && lines[0].contains("QEMU hostfwd"));
+        assert!(lines[1].contains("no address on a network yet"));
+    }
+
+    #[test]
+    fn the_banner_has_a_line_for_every_address_and_says_how_it_came() {
+        use embra_boot::net_lease::parse;
+        let token = "0123456789abcdef0123456789abcdef";
+        let leases = [
+            parse("interface=eth0\nip=10.20.0.5\nmask=24\nmetric=102\nsource=static\n").unwrap(),
+            parse("interface=eth1\nip=192.168.1.42\nmask=24\nrouter=192.168.1.1\nmetric=103\nsource=dhcp\n").unwrap(),
+        ];
+        let lines = super::banner_url_lines(&embra_boot::net_lease::console_urls(token, &leases), false);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("https://10.20.0.5:3345/embraOS?token=") && lines[1].contains("the address set for eth0, 10.20.0.5/24"));
+        assert!(lines[2].contains("https://192.168.1.42:3345/embraOS?token=") && lines[2].contains("the address DHCP leased to this machine, 192.168.1.42/24 on eth1"));
     }
 }
 
