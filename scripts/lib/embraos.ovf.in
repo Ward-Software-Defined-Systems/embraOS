@@ -41,7 +41,7 @@
     <Disk ovf:diskId="vmdisk1" ovf:fileRef="file1" ovf:capacity="@CAPACITY@" ovf:capacityAllocationUnits="byte" ovf:populatedSize="@DISK_FILE_SIZE@" ovf:format="http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized"/>
   </DiskSection>
   <NetworkSection>
-    <Info>One network: DHCP first, then the static fallback</Info>
+    <Info>One network: embraOS asks a DHCP lease on it</Info>
     <Network ovf:name="VM Network">
       <Description>The adapter embraOS asks a DHCP lease on</Description>
     </Network>
