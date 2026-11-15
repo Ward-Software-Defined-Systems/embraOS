@@ -21,6 +21,7 @@ pub mod loopdev;
 pub mod media;
 pub mod net;
 pub mod net_lease;
+pub mod net_settings;
 pub mod partitions;
 pub mod release;
 pub mod slot;
