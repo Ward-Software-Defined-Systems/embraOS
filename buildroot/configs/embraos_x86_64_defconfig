@@ -113,6 +113,19 @@ BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
 BR2_PACKAGE_DOSFSTOOLS=y
 BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
 
+# Wi-Fi: the supplicant (nl80211, WPA2 and WPA3 personal, its control
+# socket for the brain's scan; no wpa_cli, no D-Bus), the regulatory
+# database cfg80211 loads as firmware, and the tool that switches a USB
+# adapter out of its driver-disk mode, with the data that names the
+# adapters it knows. embrad runs all three (crates/embrad/src/wifi.rs);
+# post_build.sh removes what the recipes install beside the programs.
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_WPA_SUPPLICANT_WPA3=y
+BR2_PACKAGE_WPA_SUPPLICANT_CTRL_IFACE=y
+BR2_PACKAGE_WIRELESS_REGDB=y
+BR2_PACKAGE_USB_MODESWITCH=y
+BR2_PACKAGE_USB_MODESWITCH_DATA=y
 # embraOS packages
 BR2_PACKAGE_EMBRAD=y
 BR2_PACKAGE_EMBRA_APID=y
@@ -145,8 +158,8 @@ BR2_PACKAGE_EMBRA_INTEL_MICROCODE=y
 # The display console (Phase 2): the web console rendered on the machine's
 # display by WPE WebKit through cog's DRM platform, drawn in software (Mesa's
 # kms_swrast/llvmpipe on LLVM), input through libinput over eudev, which
-# embrad starts (no hardware database, no module loading: this image loads no
-# modules). No compositor: cog's Wayland platform needs a DRM render node,
+# embrad starts (no hardware database, no module loading: the wireless drivers, the
+# only modules of this image, are loaded by embrad). No compositor: cog's Wayland platform needs a DRM render node,
 # and the displays this image boots on (simpledrm, bochs, hyperv_drm) have
 # none, so cage and cog's Wayland platform could never show a frame. The C++
 # toolchain is for this stack and for sgdisk; switching it on rebuilds the

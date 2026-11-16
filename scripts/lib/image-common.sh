@@ -338,10 +338,11 @@ assert_target_is_clean() {
 # kernel, the initramfs, the release stamp, GRUB's slot line, exactly those
 # under /boot, a squashfs that fits its slot and is xz). Takes the Rust triple
 # of the build.
-# assert_kernel_fragments_applied <triple>: every `CONFIG_X=y` line of the
-# kernel fragments this architecture merges (board/embraos/linux.fragment for
-# both, linux-<arch>.fragment beside it where one exists) is `=y` in the
-# built configuration, and every `# CONFIG_X is not set` line is unset. The
+# assert_kernel_fragments_applied <triple>: every `CONFIG_X=y` and
+# `CONFIG_X=m` line of the kernel fragments this architecture merges
+# (board/embraos/linux.fragment for both, linux-<arch>.fragment beside it
+# where one exists) stands as written in the built configuration, and every
+# `# CONFIG_X is not set` line is unset. The
 # merge drops a symbol whose dependency the base config lacks with one notice
 # in a long log; this reads the result back. A dropped symbol is a missing
 # subsystem line in the fragment (a driver is never built in above its
@@ -355,10 +356,10 @@ assert_kernel_fragments_applied() {
     for f in $fragments; do
         while IFS= read -r line; do
             case "$line" in
-                CONFIG_*=y)
+                CONFIG_*=y|CONFIG_*=m)
                     count=$((count + 1))
                     if ! grep -q -x "$line" "$config"; then
-                        # What the built configuration says instead: =m, unset, or nothing at all.
+                        # What the built configuration says instead: =y or =m, unset, or nothing at all.
                         state="$(grep -E "^(# )?${line%%=*}[ =]" "$config" | head -n1 | sed -e 's/.*=//' -e 's/# .* is not set/unset/' || true)"
                         missing="$missing ${line%%=*}(${state:-absent})"
                     fi
@@ -373,16 +374,26 @@ assert_kernel_fragments_applied() {
     done
     [ -z "$missing" ] || reject_image "kernel fragment symbols not applied in the built configuration (a dependency the base config lacks: name the subsystem in the fragment):${missing}"
     echo "kernel fragments applied: $count symbols of ${fragments// / + } are in the built configuration"
-    # x86_64 loads no modules: the ten the base config built as modules are
-    # built in by the fragments, so lib/modules holds the kernel's metadata
-    # and nothing else. (The arm64 base config keeps its modules, which
-    # nothing loads: 1383 of them, 71 MB under lib/modules, on the Apple
-    # Silicon build of 2026-11-09.)
+    # The modules. The wireless drivers and the 802.11 stack under them are
+    # modules on both architectures, the only ones the OS loads (embrad, from
+    # /usr/share/embra/wireless.alias). On x86_64 nothing else may be one:
+    # the ten the base config built as modules are built in by the fragments,
+    # so every module in the rootfs is part of that stack or something it
+    # depends on (modules.dep, followed to its end). The arm64 base config
+    # keeps its own modules, which nothing loads (1383 of them, 71 MB under
+    # lib/modules, on the Apple Silicon build of 2026-11-09).
+    local moddir="$BUILDROOT_DIR/output/target/lib/modules/$LINUX_KERNEL_VERSION" wireless
+    # shellcheck source=/dev/null
+    . buildroot/board/embraos/wireless.sh
+    wireless="$(embraos_wireless_modules "$moddir" | wc -l)"
+    [ "$wireless" -gt 0 ] || reject_image "the rootfs carries no wireless driver module under lib/modules/$LINUX_KERNEL_VERSION (the Wi-Fi block of board/embraos/linux.fragment)"
     if [ "$arch" = "x86_64" ]; then
-        local kos
-        kos="$(find "$BUILDROOT_DIR/output/target/lib/modules" -name '*.ko*' 2>/dev/null | sed "s|$BUILDROOT_DIR/output/target||" | sort | tr '\n' ' ')"
-        [ -z "$kos" ] || reject_image "the x86_64 rootfs carries kernel modules nothing loads: ${kos% } (a base-config module the fragments do not build in)"
-        echo "kernel modules: none on x86_64 (lib/modules holds the metadata alone)"
+        local others
+        others="$(embraos_modules_outside_wireless "$moddir" | tr '\n' ' ')"
+        [ -z "$others" ] || reject_image "the x86_64 rootfs carries kernel modules that are no wireless driver and nothing one depends on: ${others% } (a base-config module the fragments do not build in; nothing loads it)"
+        echo "kernel modules: $(find "$moddir" -name '*.ko' | wc -l) on x86_64, each a wireless driver or something one depends on ($wireless drivers)"
+    else
+        echo "kernel modules: $wireless wireless drivers among the base configuration's modules"
     fi
 }
 

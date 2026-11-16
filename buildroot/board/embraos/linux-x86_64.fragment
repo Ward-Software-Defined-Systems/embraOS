@@ -43,7 +43,8 @@ CONFIG_PINCTRL_BAYTRAIL=y
 CONFIG_PINCTRL_CHERRYVIEW=y
 CONFIG_PINCTRL_AMD=y
 # Temperatures: the CPU sensors of Intel and AMD, and the package thermal
-# driver the base config builds as a module (this image loads none).
+# driver the base config builds as a module (this image loads wireless
+# drivers alone).
 CONFIG_SENSORS_CORETEMP=y
 CONFIG_SENSORS_K10TEMP=y
 CONFIG_X86_PKG_TEMP_THERMAL=y

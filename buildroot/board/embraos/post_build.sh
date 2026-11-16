@@ -167,6 +167,55 @@ install -D -m 0644 "${REPO_ROOT}/scripts/update-signing.pub" "${TARGET_DIR}/usr/
 rm -f "${TARGET_DIR}/etc/resolv.conf"
 ln -s /embra/ephemeral/resolv.conf "${TARGET_DIR}/etc/resolv.conf"
 
+# Wi-Fi (wireless.sh has the functions and the reasons). The wireless
+# drivers are modules, and embrad loads the one a card asks for from this
+# list: the lines of modules.alias whose module is a wireless driver, and
+# no other. Their firmware: Buildroot's package installs what its own lists
+# name, which leaves out ath11k whole and a third of iwlwifi; the rest comes
+# from the same linux-firmware tree, with the tree's links. The table that
+# follows fails the build on a driver none of whose firmware names is
+# served: its card would be found and never come up.
+. "${BOARD_DIR}/wireless.sh"
+WL_MODDIR="$(ls -d "${TARGET_DIR}"/lib/modules/*/ 2>/dev/null | head -n1)"
+[ -n "$WL_MODDIR" ] || { echo "ERROR: no module tree under ${TARGET_DIR}/lib/modules" >&2; exit 1; }
+WL_ALIAS="${TARGET_DIR}/usr/share/embra/wireless.alias"
+embraos_wireless_alias "$WL_MODDIR" "$WL_ALIAS"
+[ -s "$WL_ALIAS" ] || {
+    echo "ERROR: /usr/share/embra/wireless.alias is empty: the kernel built no wireless driver as a module (board/embraos/linux.fragment, the Wi-Fi block)" >&2
+    exit 1
+}
+embraos_wireless_firmware "$FW_SRC" "${TARGET_DIR}/lib/firmware" "$WL_MODDIR"
+WL_TABLE="$(embraos_wireless_firmware_table "${TARGET_DIR}/lib/firmware" "$WL_MODDIR")" || {
+    echo "$WL_TABLE" | tail -n1 >&2
+    echo "ERROR: a wireless driver has none of the firmware it names under /lib/firmware (the line above; linux-firmware's tree is ${FW_SRC})" >&2
+    exit 1
+}
+echo "post_build.sh: Wi-Fi: $(wc -l < "$WL_ALIAS") device patterns of $(awk '{print $3}' "$WL_ALIAS" | LC_ALL=C sort -u | wc -l) drivers in /usr/share/embra/wireless.alias; firmware is served for each of the $(echo "$WL_TABLE" | wc -l) modules that name any"
+# The supplicant, the regulatory database and the mode-switch tool are
+# packages of both defconfigs.
+for f in usr/sbin/wpa_supplicant usr/sbin/usb_modeswitch lib/firmware/regulatory.db lib/firmware/regulatory.db.p7s; do
+    [ -e "${TARGET_DIR}/$f" ] || {
+        echo "ERROR: /$f is missing from the root filesystem (BR2_PACKAGE_WPA_SUPPLICANT, BR2_PACKAGE_USB_MODESWITCH or BR2_PACKAGE_WIRELESS_REGDB in the defconfig)" >&2
+        exit 1
+    }
+done
+[ -d "${TARGET_DIR}/usr/share/usb_modeswitch" ] || { echo "ERROR: /usr/share/usb_modeswitch is missing (BR2_PACKAGE_USB_MODESWITCH_DATA)" >&2; exit 1; }
+# What the two recipes install beside the programs, and nothing here uses.
+# The supplicant's example configuration joins any open network; embrad
+# renders the configuration it runs with (crates/embra-boot/src/wifi.rs),
+# and no file of that name may be there for a supplicant started by hand to
+# find. Its two ifupdown hooks have no ifupdown to call them. The
+# mode-switch tool's udev rule, its dispatcher and the Tcl shell the
+# dispatcher is written for: embrad calls the tool itself, with the data
+# file of the device (crates/embrad/src/wifi.rs), whether udev runs or not.
+rm -f "${TARGET_DIR}/etc/wpa_supplicant.conf" \
+      "${TARGET_DIR}/etc/network/if-up.d/wpasupplicant" "${TARGET_DIR}/etc/network/if-down.d/wpasupplicant" \
+      "${TARGET_DIR}/lib/udev/rules.d/40-usb_modeswitch.rules" "${TARGET_DIR}/lib/udev/usb_modeswitch" \
+      "${TARGET_DIR}/usr/sbin/usb_modeswitch_dispatcher" "${TARGET_DIR}/etc/usb_modeswitch.conf" \
+      "${TARGET_DIR}/usr/bin/jimsh"
+rm -f "${TARGET_DIR}"/usr/lib/libjim.so*
+rm -rf "${TARGET_DIR}/etc/usb_modeswitch.d" "${TARGET_DIR}/var/lib/usb_modeswitch"
+
 # The machine's name: /etc/hostname and /etc/hosts are links into the
 # ephemeral tmpfs as well. embrad names the machine (the operator's name,
 # the one a DHCP server assigned, or embraos: crates/embrad/src/net.rs),

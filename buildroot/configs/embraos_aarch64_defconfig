@@ -142,6 +142,19 @@ BR2_PACKAGE_COG_PROGRAMS_HOME_URI=""
 # BR2_PACKAGE_COG_PLATFORM_FDO is not set
 BR2_PACKAGE_COG_PLATFORM_DRM=y
 
+# Wi-Fi: the supplicant (nl80211, WPA2 and WPA3 personal, its control
+# socket for the brain's scan; no wpa_cli, no D-Bus), the regulatory
+# database cfg80211 loads as firmware, and the tool that switches a USB
+# adapter out of its driver-disk mode, with the data that names the
+# adapters it knows. embrad runs all three (crates/embrad/src/wifi.rs);
+# post_build.sh removes what the recipes install beside the programs.
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_WPA_SUPPLICANT_WPA3=y
+BR2_PACKAGE_WPA_SUPPLICANT_CTRL_IFACE=y
+BR2_PACKAGE_WIRELESS_REGDB=y
+BR2_PACKAGE_USB_MODESWITCH=y
+BR2_PACKAGE_USB_MODESWITCH_DATA=y
 # embraOS packages
 BR2_PACKAGE_EMBRAD=y
 BR2_PACKAGE_EMBRA_APID=y

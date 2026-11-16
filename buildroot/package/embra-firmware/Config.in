@@ -1,5 +1,7 @@
 # Every family of linux-firmware in one symbol (Phase 2 wave 6, William's
-# decision of 2026-11-08: the broad set, S1). The image loads no modules and
+# decision of 2026-11-08: the broad set, S1). Every driver but the wireless
+# ones is built in (those are modules embrad loads, and post_build.sh
+# completes their firmware from the same tree: board/embraos/wireless.sh), and
 # a built-in driver asks for its blobs at probe or at open, so the blobs of
 # every wired NIC, HBA, GPU and platform device the kernel fragments build
 # are on the rootfs; post_build.sh copies the ones the mandatory drivers

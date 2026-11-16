@@ -92,8 +92,9 @@ CONFIG_NFT_LIMIT=y
 CONFIG_NFT_REJECT=y
 CONFIG_NFT_NAT=y
 # The packet filter's helpers, built in rather than as the modules the x86
-# base config makes of them: this image loads no modules (the x86 rootfs
-# carries none; the read-back assert in scripts/lib/image-common.sh checks
+# base config makes of them: this image loads no module but a wireless
+# driver (the Wi-Fi block at the end of this file; the x86 rootfs carries no
+# other, and the read-back assert in scripts/lib/image-common.sh checks
 # every line of this file against the built configuration).
 CONFIG_NETFILTER_XT_MARK=y
 CONFIG_NETFILTER_XT_TARGET_LOG=y
@@ -192,3 +193,118 @@ CONFIG_FONT_TER16x32=y
 # the driver prefers; Joliet is not needed.
 CONFIG_ISO9660_FS=y
 CONFIG_BLK_DEV_SR=y
+# Wi-Fi. The 802.11 stack and the drivers of the card families linux-firmware
+# serves are MODULES, the first this image loads. Every Wi-Fi driver asks for
+# its firmware when it probes, and a driver that is built in probes before
+# the root filesystem and its /lib/firmware are there; the files it wants
+# cannot be named ahead of time either (iwlwifi asks for a range of versions,
+# ath11k and brcmfmac for names made from the board, ath12k declares none).
+# So embrad loads the driver a card needs once the root filesystem is
+# mounted (crates/embrad/src/wifi.rs, from /usr/share/embra/wireless.alias,
+# which post_build.sh writes from modules.alias: wireless drivers and no
+# other), the firmware is read from /lib/firmware like any file, and
+# cfg80211 finds the regulatory database the same way. On x86_64 these are
+# the only modules in the image (assert_kernel_fragments_applied).
+# embra.wifi=0 on the kernel line loads none of them for that boot.
+CONFIG_CFG80211=m
+CONFIG_MAC80211=m
+# Intel: AC 7260 to AX211, BE200 and BE201 (iwlmvm, iwlmld), the 5000 and
+# 6000 series (iwldvm).
+CONFIG_IWLWIFI=m
+CONFIG_IWLDVM=m
+CONFIG_IWLMVM=m
+CONFIG_IWLMLD=m
+# Realtek: rtw88 (8822, 8821, 8723, 8812, 8814 on PCIe, USB and SDIO), rtw89
+# (8851, 8852, 8922), rtl8xxxu (the 8188 and 8192 USB dongles), rtlwifi (the
+# older PCIe cards and two USB ones).
+CONFIG_RTW88=m
+CONFIG_RTW88_8822BE=m
+CONFIG_RTW88_8822CE=m
+CONFIG_RTW88_8723DE=m
+CONFIG_RTW88_8821CE=m
+CONFIG_RTW88_8814AE=m
+CONFIG_RTW88_8822BU=m
+CONFIG_RTW88_8822CU=m
+CONFIG_RTW88_8723DU=m
+CONFIG_RTW88_8821CU=m
+CONFIG_RTW88_8821AU=m
+CONFIG_RTW88_8812AU=m
+CONFIG_RTW88_8814AU=m
+CONFIG_RTW88_8723CS=m
+CONFIG_RTW88_8723DS=m
+CONFIG_RTW88_8821CS=m
+CONFIG_RTW88_8822BS=m
+CONFIG_RTW88_8822CS=m
+CONFIG_RTW89=m
+CONFIG_RTW89_8851BE=m
+CONFIG_RTW89_8852AE=m
+CONFIG_RTW89_8852BE=m
+CONFIG_RTW89_8852BTE=m
+CONFIG_RTW89_8852CE=m
+CONFIG_RTW89_8922AE=m
+CONFIG_RTW89_8851BU=m
+CONFIG_RTW89_8852BU=m
+CONFIG_RTL8XXXU=m
+CONFIG_RTL8XXXU_UNTESTED=y
+CONFIG_RTL_CARDS=m
+CONFIG_RTL8192CE=m
+CONFIG_RTL8192SE=m
+CONFIG_RTL8192DE=m
+CONFIG_RTL8723AE=m
+CONFIG_RTL8723BE=m
+CONFIG_RTL8188EE=m
+CONFIG_RTL8192EE=m
+CONFIG_RTL8821AE=m
+CONFIG_RTL8192CU=m
+CONFIG_RTL8192DU=m
+# Qualcomm Atheros: ath9k (AR9xxx on PCIe, and the USB dongles through
+# ath9k_htc), ath10k (QCA6174, QCA9377), ath11k (QCA6390, WCN6855), ath12k
+# (WCN7850).
+CONFIG_ATH9K=m
+CONFIG_ATH9K_PCI=y
+CONFIG_ATH9K_HTC=m
+CONFIG_ATH10K=m
+CONFIG_ATH10K_PCI=m
+CONFIG_ATH11K=m
+CONFIG_ATH11K_PCI=m
+CONFIG_ATH12K=m
+# MediaTek and Ralink: MT7921 and MT7922, MT7925, MT7615 and MT7663, the
+# MT76x0, MT76x2 and MT7601 dongles, and the RT2800 family.
+CONFIG_MT7921E=m
+CONFIG_MT7921U=m
+CONFIG_MT7921S=m
+CONFIG_MT7925E=m
+CONFIG_MT7925U=m
+CONFIG_MT7615E=m
+CONFIG_MT7663U=m
+CONFIG_MT76x0U=m
+CONFIG_MT76x0E=m
+CONFIG_MT76x2U=m
+CONFIG_MT76x2E=m
+CONFIG_MT7601U=m
+CONFIG_RT2X00=m
+CONFIG_RT2800USB=m
+CONFIG_RT2800USB_RT33XX=y
+CONFIG_RT2800USB_RT35XX=y
+CONFIG_RT2800USB_RT3573=y
+CONFIG_RT2800USB_RT53XX=y
+CONFIG_RT2800USB_RT55XX=y
+CONFIG_RT2800USB_UNKNOWN=y
+CONFIG_RT2800PCI=m
+CONFIG_RT2800PCI_RT33XX=y
+CONFIG_RT2800PCI_RT35XX=y
+CONFIG_RT2800PCI_RT53XX=y
+CONFIG_RT2800PCI_RT3290=y
+# Broadcom FullMAC (BCM43xx) on PCIe, USB and SDIO.
+CONFIG_BRCMFMAC=m
+CONFIG_BRCMFMAC_PCIE=y
+CONFIG_BRCMFMAC_USB=y
+CONFIG_BRCMFMAC_SDIO=y
+# Built in, because no line of modules.dep leads to them from a driver: the
+# transport ath11k and ath12k talk to their firmware over (QRTR is a socket
+# family, and its MHI side sits on a bus embrad does not scan), and Michael
+# MIC, which TKIP asks for by name.
+CONFIG_MHI_BUS=y
+CONFIG_QRTR=y
+CONFIG_QRTR_MHI=y
+CONFIG_CRYPTO_MICHAEL_MIC=y
