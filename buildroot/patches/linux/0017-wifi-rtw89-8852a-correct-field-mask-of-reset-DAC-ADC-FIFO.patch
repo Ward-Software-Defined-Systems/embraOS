@@ -1,0 +1,47 @@
+From 2a2aae3655343b753dfef86b341be99f7273f2ba Mon Sep 17 00:00:00 2001
+From: Ping-Ke Shih <pkshih@realtek.com>
+Date: Thu, 20 Nov 2025 11:10:43 +0800
+Subject: [PATCH] wifi: rtw89: 8852a: correct field mask of reset DAC/ADC FIFO
+
+The field mask should be bits 16-31, but suddenly use wrong bits 24-31,
+rarely causing a little performance degraded if DAC/DAC FIFO stays on
+an unexpected state.
+
+Found this by Geert who works on bit field functions.
+
+Reported-by: Geert Uytterhoeven <geert@linux-m68k.org>
+Closes: https://lore.kernel.org/linux-wireless/CAMuHMdVt+5yOA6tuasX4KQgZud5wtRwu0A15UkEfQJbcd_xvVw@mail.gmail.com/
+Cc: Geert Uytterhoeven <geert@linux-m68k.org>
+Signed-off-by: Ping-Ke Shih <pkshih@realtek.com>
+Link: https://patch.msgid.link/20251120031044.12493-2-pkshih@realtek.com
+Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=2a2aae3655343b753dfef86b341be99f7273f2ba
+---
+ drivers/net/wireless/realtek/rtw89/rtw8852a_rfk.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/wireless/realtek/rtw89/rtw8852a_rfk.c b/drivers/net/wireless/realtek/rtw89/rtw8852a_rfk.c
+index e74257d19412e7..4633994133185e 100644
+--- a/drivers/net/wireless/realtek/rtw89/rtw8852a_rfk.c
++++ b/drivers/net/wireless/realtek/rtw89/rtw8852a_rfk.c
+@@ -756,8 +756,8 @@ static void _iqk_rxk_setting(struct rtw89_dev *rtwdev, u8 path)
+ 	rtw89_phy_write32_mask(rtwdev, R_ANAPAR, B_ANAPAR_FLTRST, 0x1);
+ 	rtw89_phy_write32_mask(rtwdev, R_ANAPAR_PW15, B_ANAPAR_PW15_H2, 0x0);
+ 	udelay(1);
+-	rtw89_phy_write32_mask(rtwdev, R_ADC_FIFO, B_ADC_FIFO_RST, 0x0303);
+-	rtw89_phy_write32_mask(rtwdev, R_ADC_FIFO, B_ADC_FIFO_RST, 0x0000);
++	rtw89_phy_write32_mask(rtwdev, R_ADC_FIFO, B_ADC_FIFO_RXK, 0x0303);
++	rtw89_phy_write32_mask(rtwdev, R_ADC_FIFO, B_ADC_FIFO_RXK, 0x0000);
+ 
+ 	switch (iqk_info->iqk_band[path]) {
+ 	case RTW89_BAND_2G:
+@@ -1239,8 +1239,8 @@ static void _iqk_txk_setting(struct rtw89_dev *rtwdev, u8 path)
+ 	udelay(1);
+ 	rtw89_phy_write32_mask(rtwdev, R_ANAPAR, B_ANAPAR_15, 0x0041);
+ 	udelay(1);
+-	rtw89_phy_write32_mask(rtwdev, R_ADC_FIFO, B_ADC_FIFO_RST, 0x0303);
+-	rtw89_phy_write32_mask(rtwdev, R_ADC_FIFO, B_ADC_FIFO_RST, 0x0000);
++	rtw89_phy_write32_mask(rtwdev, R_ADC_FIFO, B_ADC_FIFO_RXK, 0x0303);
++	rtw89_phy_write32_mask(rtwdev, R_ADC_FIFO, B_ADC_FIFO_RXK, 0x0000);
+ 	switch (iqk_info->iqk_band[path]) {
+ 	case RTW89_BAND_2G:
+ 		rtw89_write_rf(rtwdev, path, RR_XALNA2, RR_XALNA2_SW, 0x00);

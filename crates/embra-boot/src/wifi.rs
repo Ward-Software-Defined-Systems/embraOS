@@ -602,6 +602,37 @@ mod tests {
         assert!(parse_scan_results("").is_empty());
     }
 
+    /// The kernel is built with the patches of `buildroot/patches/linux`.
+    /// Each is one upstream commit and says which: a line of the pinned
+    /// kernel that has taken a commit since drops its patch, and nobody can
+    /// tell which that is from a patch that does not name it.
+    #[test]
+    fn every_kernel_patch_is_an_upstream_commit_that_names_itself() {
+        let tree = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../buildroot");
+        let mut names: Vec<String> = std::fs::read_dir(tree.join("patches/linux")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert!(!names.is_empty());
+        let mut driver_file_added = false;
+        for (n, name) in names.iter().enumerate() {
+            // Buildroot applies `*.patch` in the order of their names.
+            assert!(name.starts_with(&format!("{:04}-", n + 1)) && name.ends_with(".patch"), "{name}: the patches are numbered without a gap, and nothing else is in the directory");
+            let text = std::fs::read_to_string(tree.join("patches/linux").join(name)).unwrap();
+            let commit = text.strip_prefix("From ").and_then(|rest| rest.get(..40)).unwrap_or_default();
+            assert!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()), "{name}: its first line names the commit it is");
+            assert!(
+                text.contains(&format!("\nUpstream: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id={commit}\n")),
+                "{name}: an Upstream line with the commit of its first line"
+            );
+            assert!(text.contains("\nSigned-off-by: "), "{name}: the upstream sign-offs are kept");
+            driver_file_added |= text.contains("\n+++ b/drivers/net/wireless/realtek/rtw89/rtw8852au.c\n");
+        }
+        // The driver these patches bring is asked for in the fragment, and
+        // the image build reads every line of the fragment back: a kernel
+        // built without the patches has no such symbol and stops the build.
+        let fragment = std::fs::read_to_string(tree.join("board/embraos/linux.fragment")).unwrap();
+        assert_eq!(driver_file_added, fragment.lines().any(|l| l == "CONFIG_RTW89_8852AU=m"), "the driver's patch and its line in the fragment come and go together");
+    }
+
     #[test]
     fn the_status_and_the_signal_are_read_from_the_supplicants_answers() {
         let joined = parse_status("bssid=02:00:00:00:01:00\nfreq=2412\nssid=caf\\xc3\\xa9\nid=0\nmode=station\nwifi_generation=4\npairwise_cipher=CCMP\ngroup_cipher=CCMP\nkey_mgmt=WPA2-PSK\nwpa_state=COMPLETED\nip_address=192.168.1.42\naddress=02:00:00:00:00:00\n");

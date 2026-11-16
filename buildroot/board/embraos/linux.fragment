@@ -244,6 +244,17 @@ CONFIG_RTW89_8852CE=m
 CONFIG_RTW89_8922AE=m
 CONFIG_RTW89_8851BU=m
 CONFIG_RTW89_8852BU=m
+# The RTL8852A over USB (the AX1800 adapters). Its driver came to the kernel
+# with 6.19, and this symbol with it: buildroot/patches/linux carries the
+# eighteen upstream commits onto the pinned 6.18, each naming its own
+# (the driver and what it rests on in rtw89's USB code, and the id of one
+# adapter that came with 7.0). Two more of that series are in 6.18.60
+# already, and two, the transmit-status handling for USB, do not apply to
+# it and are left out; the chips 6.18 drives over USB run without them too.
+# The line is read back like every line here, so a kernel built without the
+# patches stops the image build. A kernel pin that moves to a line with the
+# driver drops the patches and keeps this line.
+CONFIG_RTW89_8852AU=m
 CONFIG_RTL8XXXU=m
 CONFIG_RTL8XXXU_UNTESTED=y
 CONFIG_RTL_CARDS=m
