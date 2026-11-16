@@ -36,6 +36,7 @@ mod modes;
 mod mount;
 mod reconcile;
 mod net;
+mod wifi;
 mod supervisor;
 
 use anyhow::Result;
@@ -82,7 +83,10 @@ fn main() -> Result<()> {
     // them, ten seconds at most; a keeper thread then follows the cards for
     // the life of the boot, in a maintenance boot too (`net.rs`). After the
     // environment is set, since a thread starts here. PID 1 only.
-    let network = if pid == 1 { net::bring_up() } else { net::Summary::default() };
+    // The driver of a Wi-Fi card is loaded here too, and a stored Wi-Fi
+    // network is waited for a little longer (`wifi.rs`); `embra.wifi=0`
+    // loads no wireless driver.
+    let network = if pid == 1 { net::bring_up(cmdline.wifi()) } else { net::Summary::default() };
 
     // The boot mode: a menu entry's job, or the services. An unknown value
     // is a normal boot under an error line, never a halt.
