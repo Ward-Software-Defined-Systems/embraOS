@@ -138,14 +138,42 @@ fi
 # A USB device of this host handed to the VM, by the two hexadecimal ids
 # lsusb shows for it: a Wi-Fi adapter, the one kind of network card QEMU
 # does not emulate. QEMU needs write access to the device's node under
-# /dev/bus/usb, and this host must not be using the adapter itself.
+# /dev/bus/usb, and this host must not be using the adapter itself. QEMU
+# says nothing when no device has the ids or when it may not open the node:
+# it starts, and the VM has no adapter. On a Linux host the device is
+# therefore looked for here first, and a node this user may not write stops
+# the launcher with the udev rule that hands it over.
 USB_HOST_ARGS=()
 if [ -n "${EMBRA_USB_HOST:-}" ]; then
     if ! [[ "$EMBRA_USB_HOST" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
         echo "ERROR: EMBRA_USB_HOST must be <vendor>:<product> as lsusb shows them (0bda:c811), got '$EMBRA_USB_HOST'" >&2; exit 2
     fi
-    USB_HOST_ARGS=(-device qemu-xhci,id=xhci-host -device "usb-host,bus=xhci-host.0,vendorid=0x${EMBRA_USB_HOST%%:*},productid=0x${EMBRA_USB_HOST##*:}")
-    echo "  USB: this host's device $EMBRA_USB_HOST is handed to the VM (EMBRA_USB_HOST)"
+    USB_VENDOR="$(printf '%s' "${EMBRA_USB_HOST%%:*}" | tr 'A-F' 'a-f')"
+    USB_PRODUCT="$(printf '%s' "${EMBRA_USB_HOST##*:}" | tr 'A-F' 'a-f')"
+    if [ -d /sys/bus/usb/devices ]; then
+        USB_NODE=""
+        for usb_dev in /sys/bus/usb/devices/*; do
+            [ -r "$usb_dev/idVendor" ] && [ -r "$usb_dev/idProduct" ] || continue
+            if [ "$(cat "$usb_dev/idVendor")" = "$USB_VENDOR" ] && [ "$(cat "$usb_dev/idProduct")" = "$USB_PRODUCT" ]; then
+                USB_NODE="$(printf '/dev/bus/usb/%03d/%03d' "$(cat "$usb_dev/busnum")" "$(cat "$usb_dev/devnum")")"
+                break
+            fi
+        done
+        if [ -z "$USB_NODE" ]; then
+            echo "ERROR: no USB device $USB_VENDOR:$USB_PRODUCT is on this host (EMBRA_USB_HOST; lsusb shows what is)." >&2
+            echo "       An adapter that shows itself as a disk first has other ids until this host has switched it (usb_modeswitch)." >&2
+            exit 2
+        fi
+        if ! [ -r "$USB_NODE" ] || ! [ -w "$USB_NODE" ]; then
+            echo "ERROR: $USB_NODE, the USB device $USB_VENDOR:$USB_PRODUCT, is not writable for $(id -un): QEMU would start without it and say nothing." >&2
+            echo "       A udev rule hands the node to this user, now and each time the device is plugged in:" >&2
+            echo "         echo 'SUBSYSTEM==\"usb\", ATTR{idVendor}==\"$USB_VENDOR\", ATTR{idProduct}==\"$USB_PRODUCT\", OWNER=\"$(id -un)\"' | sudo tee /etc/udev/rules.d/70-embraos-usb-host.rules" >&2
+            echo "         sudo udevadm control --reload && sudo udevadm trigger --action=change --attr-match=idVendor=$USB_VENDOR --attr-match=idProduct=$USB_PRODUCT" >&2
+            exit 2
+        fi
+    fi
+    USB_HOST_ARGS=(-device qemu-xhci,id=xhci-host -device "usb-host,bus=xhci-host.0,vendorid=0x$USB_VENDOR,productid=0x$USB_PRODUCT")
+    echo "  USB: this host's device $USB_VENDOR:$USB_PRODUCT is handed to the VM (EMBRA_USB_HOST)"
 fi
 
 # find_firmware: FW_CODE and FW_VARS for the UEFI path. The virt machine
