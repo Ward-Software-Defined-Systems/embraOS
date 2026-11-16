@@ -22,7 +22,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable, closed with `v0.23.0-phase1` (2026-11-01). Phase 2 — In progress, first released as `v0.24.0-phase2` (2026-11-13; the working branch is `phase2`): the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, DHCP, the drivers of the hypervisors and of wired hardware with their firmware and microcode, the web console on the machine's display with keyboard and mouse, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
+**Current Status:** Phase 1 — Stable, closed with `v0.23.0-phase1` (2026-11-01). Phase 2 — In progress, first released as `v0.24.0-phase2` (2026-11-13; the working branch is `phase2`): the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, the network on every card (DHCP or a static address, Wi-Fi, a hostname, a clock checked while the OS runs), the drivers of the hypervisors, of wired hardware and of the common Wi-Fi card families with their firmware and microcode, the web console on the machine's display with keyboard and mouse, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
 > **Supported platforms.** embraOS boots on UEFI firmware with Secure Boot off, on x86_64
 > and aarch64: from the disk image, from the same disk converted for a hypervisor, or
@@ -31,7 +31,8 @@
 > (the VHDX and the ISO); VMware Fusion on Apple Silicon (the ISO); Parallels Desktop 26.5
 > on an Intel Mac (the machine it imports and the ISO); and bare metal on one machine so
 > far, a YouYeeToo X1 single-board computer installed from the ISO. The drivers of wired
-> hardware with their firmware and the CPU microcode are in the image. The latest release,
+> hardware and of the common Wi-Fi card families, with their firmware, and the CPU
+> microcode are in the image. The latest release,
 > `v0.24.0-phase2`, publishes the installer ISOs (x86_64 and aarch64, one per storage
 > engine); the disk image and the hypervisor conversions come from a build. What each
 > surface has been validated on, and what is still TBD, is in
@@ -211,6 +212,8 @@ The runtime services that implement those layers:
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
 | `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools (both authoring paths replicant-checked; intelligence proposals also operator-approved); capability-broker host imports. |
 | `embra-update` | — | The OS's backups, updates and installs: snapshots and restores of STATE and DATA, the signed release fetched, verified and written into the inactive slot, the installer of the ISO, and DATA grown to the disk's end. Run by `embrad` in the maintenance boots, before a trial boot's services and at every normal boot, and by the brain for `/backup` and `/update`. |
+
+embrad also keeps helper processes that are no services of this table: one `udhcpc` for each card on DHCP and one `wpa_supplicant` for each Wi-Fi card, started and stopped as the cards come and go.
 
 Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database, vendored into this workspace at `crates/wardsondb` as a deliberate in-tree fork (the upstream project continues independently). Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 120 tools work identically across every backend.
 
