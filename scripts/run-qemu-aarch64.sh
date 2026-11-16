@@ -24,6 +24,8 @@
 #                                   on xHCI (the hybrid GPT path)
 #   EMBRA_DISK_IF=virtio|nvme|scsi  the disk's bus, with the medium or without: virtio-blk (default),
 #                                   NVMe or virtio-scsi
+#   EMBRA_USB_HOST=<vendor>:<product>   a USB device of this host handed to the VM, by the ids lsusb
+#                                   shows (a Wi-Fi adapter: 0bda:c811)
 # An image named *.qcow2 is opened as qcow2 (a disk the installer wrote).
 # The clock's knob, which reaches the kernel line:
 #   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks in
@@ -131,6 +133,19 @@ if [ -n "${EMBRA_DHCP_START:-}" ]; then
     fi
     NIC="$NIC,dhcpstart=$EMBRA_DHCP_START"
     echo "  DHCP: QEMU leases from $EMBRA_DHCP_START (EMBRA_DHCP_START)"
+fi
+
+# A USB device of this host handed to the VM, by the two hexadecimal ids
+# lsusb shows for it: a Wi-Fi adapter, the one kind of network card QEMU
+# does not emulate. QEMU needs write access to the device's node under
+# /dev/bus/usb, and this host must not be using the adapter itself.
+USB_HOST_ARGS=()
+if [ -n "${EMBRA_USB_HOST:-}" ]; then
+    if ! [[ "$EMBRA_USB_HOST" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+        echo "ERROR: EMBRA_USB_HOST must be <vendor>:<product> as lsusb shows them (0bda:c811), got '$EMBRA_USB_HOST'" >&2; exit 2
+    fi
+    USB_HOST_ARGS=(-device qemu-xhci,id=xhci-host -device "usb-host,bus=xhci-host.0,vendorid=0x${EMBRA_USB_HOST%%:*},productid=0x${EMBRA_USB_HOST##*:}")
+    echo "  USB: this host's device $EMBRA_USB_HOST is handed to the VM (EMBRA_USB_HOST)"
 fi
 
 # find_firmware: FW_CODE and FW_VARS for the UEFI path. The virt machine
@@ -261,6 +276,7 @@ if [ "$EMBRA_BOOT" = "direct" ]; then
         -initrd "$INITRD" \
         -append "console=ttyAMA0 ro quiet embra.slot=a $WEB_CMDLINE $KNOBS" \
         -nographic \
+        ${USB_HOST_ARGS[@]+"${USB_HOST_ARGS[@]}"} \
         -serial mon:stdio \
         -nic "$NIC" \
         -no-reboot
@@ -290,5 +306,6 @@ qemu-system-aarch64 \
     ${MEDIA_ARGS[@]+"${MEDIA_ARGS[@]}"} \
     -smbios "type=11,value=${SMBIOS_VALUE}" \
     -nographic \
+    ${USB_HOST_ARGS[@]+"${USB_HOST_ARGS[@]}"} \
     -serial mon:stdio \
     -nic "$NIC"

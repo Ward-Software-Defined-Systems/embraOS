@@ -27,6 +27,8 @@
 #   EMBRA_DISK_IF=virtio|ahci   the target disk's bus (virtio)
 #   EMBRA_DHCP_START=<address>  the first address QEMU's DHCP server leases
 #       (10.0.2.200 shows the banner's second URL on the leased address).
+#   EMBRA_USB_HOST=<vendor>:<product>   a USB device of this host handed to the
+#       VM, by the ids lsusb shows (a Wi-Fi adapter: 0bda:c811)
 # The clock's knob, which reaches the kernel line:
 #   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks in
 #       this boot (time.cloudflare.com without it); off asks none
@@ -158,6 +160,19 @@ if [ -n "${EMBRA_DHCP_START:-}" ]; then
     fi
     NIC="$NIC,dhcpstart=$EMBRA_DHCP_START"
     echo "  DHCP: QEMU leases from $EMBRA_DHCP_START (EMBRA_DHCP_START)"
+fi
+
+# A USB device of this host handed to the VM, by the two hexadecimal ids
+# lsusb shows for it: a Wi-Fi adapter, the one kind of network card QEMU
+# does not emulate. QEMU needs write access to the device's node under
+# /dev/bus/usb, and this host must not be using the adapter itself.
+USB_HOST_ARGS=()
+if [ -n "${EMBRA_USB_HOST:-}" ]; then
+    if ! [[ "$EMBRA_USB_HOST" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+        echo "ERROR: EMBRA_USB_HOST must be <vendor>:<product> as lsusb shows them (0bda:c811), got '$EMBRA_USB_HOST'" >&2; exit 2
+    fi
+    USB_HOST_ARGS=(-device qemu-xhci,id=xhci-host -device "usb-host,bus=xhci-host.0,vendorid=0x${EMBRA_USB_HOST%%:*},productid=0x${EMBRA_USB_HOST##*:}")
+    echo "  USB: this host's device $EMBRA_USB_HOST is handed to the VM (EMBRA_USB_HOST)"
 fi
 
 # The display: none (the serial line on this terminal), or a VNC server on
@@ -299,6 +314,7 @@ if [ "$EMBRA_BOOT" = "direct" ]; then
         -initrd "$INITRD" \
         -append "console=ttyS0 ro quiet embra.slot=a $WEB_CMDLINE $KNOBS" \
         "${DISPLAY_ARGS[@]}" \
+        ${USB_HOST_ARGS[@]+"${USB_HOST_ARGS[@]}"} \
         -serial mon:stdio \
         -nic "$NIC" \
         -no-reboot
@@ -332,5 +348,6 @@ qemu-system-x86_64 \
     ${MEDIA_ARGS[@]+"${MEDIA_ARGS[@]}"} \
     -smbios "type=11,value=${SMBIOS_VALUE}" \
     "${DISPLAY_ARGS[@]}" \
+    ${USB_HOST_ARGS[@]+"${USB_HOST_ARGS[@]}"} \
     -serial mon:stdio \
     -nic "$NIC"
