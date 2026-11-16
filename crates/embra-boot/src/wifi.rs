@@ -748,6 +748,9 @@ mod tests {
         module("kernel/drivers/net/wireless/realtek/rtw88/rtw88_8821cu.ko", "firmware=rtw88/rtw8821c_fw.bin");
         module("kernel/drivers/net/wireless/mediatek/mt76/mt76x2-common.ko", "firmware=mt7662.bin");
         module("kernel/drivers/net/wireless/ath/ath12k/ath12k.ko", "license=Dual");
+        // A driver that declares its file without a directory and asks for
+        // it inside one (rsi): Buildroot's package has installed the file.
+        module("kernel/drivers/net/wireless/rsi/rsi_usb.ko", "firmware=rs9113_wlan_qspi.rps");
         module("kernel/net/wireless/cfg80211.ko", "firmware=regulatory.db");
         module("kernel/net/mac80211/mac80211.ko", "");
         module("kernel/lib/crypto/libarc4.ko", "");
@@ -810,11 +813,12 @@ mod tests {
         std::fs::write(tree.join("WHENCE"), "File: intel/iwlwifi/iwlwifi-cc-a0-77.ucode\nLink: iwlwifi-cc-a0-77.ucode -> intel/iwlwifi/iwlwifi-cc-a0-77.ucode\nLink: missing.bin -> nowhere/missing.bin\n").unwrap();
         // What Buildroot's own package had installed: an older version of
         // one device's file, at the top, where older trees keep them.
-        std::fs::create_dir_all(&fw).unwrap();
+        std::fs::create_dir_all(fw.join("rsi")).unwrap();
         std::fs::write(fw.join("iwlwifi-ty-a0-gf-a0-59.ucode"), "fw").unwrap();
+        std::fs::write(fw.join("rsi/rs9113_wlan_qspi.rps"), "fw").unwrap();
         let (code, table, _) = run(&[os("embraos_wireless_firmware_table"), fw.as_os_str(), modules.as_os_str()]);
         assert_eq!(code, Some(1), "before the completion: {table}");
-        assert!(table.starts_with("iwlwifi 1/3\n") && table.ends_with("no firmware for: mt76x2-common rtw88_8821cu\n"), "{table}");
+        assert!(table.starts_with("iwlwifi 1/3\n") && table.contains("\nrsi_usb 1/1\n") && table.ends_with("no firmware for: mt76x2-common rtw88_8821cu\n"), "{table}");
         let (code, _, err) = run(&[os("embraos_wireless_firmware"), tree.as_os_str(), fw.as_os_str(), modules.as_os_str()]);
         assert_eq!(code, Some(0), "{err}");
         assert!(fw.join("intel/iwlwifi/iwlwifi-so-a0-gf-a0-89.ucode").is_file() && fw.join("rtw88/rtw8821c_fw.bin").is_file() && fw.join("mt7662.bin").is_file());
@@ -823,9 +827,18 @@ mod tests {
         let (code, table, _) = run(&[os("embraos_wireless_firmware_table"), fw.as_os_str(), modules.as_os_str()]);
         assert_eq!(
             (code, table.as_str()),
-            (Some(0), "iwlwifi 3/3\nmt76x2-common 1/1\nrtw88_8821cu 1/1\n"),
-            "the newest name of a device is served by an older version of that device's file, in the directory (so) or at the top (ty); ath12k names nothing and has no line"
+            (Some(0), "iwlwifi 3/3\nmt76x2-common 1/1\nrtw88_8821cu 1/1\nrsi_usb 1/1\n"),
+            "the newest name of a device is served by an older version of that device's file, in the directory (so) or at the top (ty); rsi's file is where its driver asks for it; ath12k names nothing and has no line"
         );
+        // Only a driver known to ask inside a directory is served from one:
+        // another module's bare name that happens to be in some directory is
+        // not, and a driver with none of its firmware stops the build.
+        module("kernel/drivers/net/wireless/odd/odd.ko", "firmware=unlisted.bin");
+        std::fs::create_dir_all(fw.join("somewhere")).unwrap();
+        std::fs::write(fw.join("somewhere/unlisted.bin"), "fw").unwrap();
+        let (code, table, _) = run(&[os("embraos_wireless_firmware_table"), fw.as_os_str(), modules.as_os_str()]);
+        assert_eq!(code, Some(1), "{table}");
+        assert!(table.contains("\nodd 0/1\n") && table.ends_with("\nrsi_usb 1/1\nno firmware for: odd\n"), "{table}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

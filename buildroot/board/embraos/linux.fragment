@@ -244,6 +244,13 @@ CONFIG_RTW89_8852CE=m
 CONFIG_RTW89_8922AE=m
 CONFIG_RTW89_8851BU=m
 CONFIG_RTW89_8852BU=m
+# An SoC's own radio that the arm64 base configuration turns on (Qualcomm's
+# WCN36xx): its device sits on no bus embrad looks at, so nothing in this
+# image would load its driver, and its firmware is named by the board's
+# device tree, not by the one name its module declares, so the build could
+# not vouch for it (the firmware table refuses a driver none of whose
+# names is served, and linux-firmware has no file of that name).
+# CONFIG_WCN36XX is not set
 # The RTL8852A over USB (the AX1800 adapters). Its driver came to the kernel
 # with 6.19, and this symbol with it: buildroot/patches/linux carries the
 # eighteen upstream commits onto the pinned 6.18, each naming its own

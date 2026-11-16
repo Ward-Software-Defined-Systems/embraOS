@@ -380,8 +380,10 @@ assert_kernel_fragments_applied() {
     # the ten the base config built as modules are built in by the fragments,
     # so every module in the rootfs is part of that stack or something it
     # depends on (modules.dep, followed to its end). The arm64 base config
-    # keeps its own modules, which nothing loads (1383 of them, 71 MB under
-    # lib/modules, on the Apple Silicon build of 2026-11-09).
+    # keeps its own modules (1383 of them, 71 MB under lib/modules, on the
+    # Apple Silicon build of 2026-11-09). Its own wireless drivers are on
+    # embrad's list like the fragment's, and the build holds them to their
+    # firmware the same way; nothing loads the others.
     local moddir="$BUILDROOT_DIR/output/target/lib/modules/$LINUX_KERNEL_VERSION" wireless
     # shellcheck source=/dev/null
     . buildroot/board/embraos/wireless.sh

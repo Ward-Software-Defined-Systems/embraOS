@@ -25,6 +25,15 @@ EMBRAOS_WIRELESS_ROOTS="kernel/drivers/net/wireless/ kernel/net/wireless/ kernel
 # set a card will ask for.
 EMBRAOS_WIRELESS_FIRMWARE_DIRS="intel/iwlwifi ath9k_htc ath10k ath11k ath12k rtlwifi rtw88 rtw89 brcm cypress"
 
+# A firmware name a module declares that is not the name its driver asks the
+# kernel for, as `declared=asked`. rsi (a driver of the arm64 base
+# configuration) declares its file without a directory and asks for it
+# inside rsi/ (rsi_91x_hal.c), where linux-firmware has it. Without this the
+# table below would report the driver as having none of its firmware and
+# stop the aarch64 build. One pair a driver that is known to do so: a bare
+# name that merely happens to be in some directory is not served.
+EMBRAOS_FIRMWARE_ASKED_AS="rs9113_wlan_qspi.rps=rsi/rs9113_wlan_qspi.rps"
+
 # embraos_wireless_modules <module tree>: the wireless drivers' modules by
 # the names modules.alias gives them (underscores), one a line.
 embraos_wireless_modules() {
@@ -127,7 +136,10 @@ embraos_wireless_firmware() {
 # the driver then asks for the versions below it, so any version of that
 # device's file serves.
 embraos_firmware_name_present() {
-    local fw="${1%/}" name="$2" stem
+    local fw="${1%/}" name="$2" stem pair
+    for pair in $EMBRAOS_FIRMWARE_ASKED_AS; do
+        [ "${pair%%=*}" = "$name" ] && name="${pair#*=}"
+    done
     case "$name" in
         *'*'*|*'?'*)
             compgen -G "$fw/$name" > /dev/null && return 0
