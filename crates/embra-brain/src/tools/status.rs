@@ -654,7 +654,7 @@ fn get_memory_usage_mb() -> Option<u64> {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "system_status",
-    description = "Report system status: version, uptime, soul status, memory usage, and a `wardsondb` section nesting health, collections, storage_poisoned, and lifetime counters (requests/inserts/queries/deletes — all wardsondb-scoped, NOT global OS counters)."
+    description = "Report system status: version, the running kernel, uptime, soul status, memory usage, a `search_window_saturated` flag, an `embedding` block (embedding failures since boot), and a `wardsondb` section nesting health, collections, storage_poisoned, and lifetime counters (requests/inserts/queries/deletes — all wardsondb-scoped, NOT global OS counters). Also, each when the OS has it: `slot` (the two OS slots: the one booted, a staged update with its tries left, the booted build), `clock` (whether a time server set the clock this boot and whether it is known to be behind), `network` (the machine's name, each card with its link and address, the Wi-Fi network a card is on, the resolvers), `update` (the last update check: whether a newer release is published; update_check asks now), `provider` (the active LLM provider's last endpoint probe) and `provider_gateway` (its URL and whether requests go through it). Read-only; the operator changes the network with /network."
 )]
 pub struct SystemStatusArgs {}
 
