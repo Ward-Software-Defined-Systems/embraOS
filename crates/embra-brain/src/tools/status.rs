@@ -262,8 +262,9 @@ pub struct SystemStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update: Option<crate::update_check::UpdateStatus>,
     /// The network as embrad keeps it (`/network` shows the same): the
-    /// machine's name, each card with its link and address, the resolvers;
-    /// omitted on a machine without embrad's status.
+    /// machine's name, each card with its link, its address and, for a
+    /// Wi-Fi card, the name of the network it is on, the resolvers; omitted
+    /// on a machine without embrad's status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<crate::network::NetworkReport>,
     pub embedding: EmbeddingHealth,
@@ -354,7 +355,9 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
         provider: crate::provider::health::latest().map(ProviderStatus::from),
         provider_gateway: cfg.ok().and_then(|c| c.provider_gateway),
         update: crate::update_check::status_for_report(),
-        network: crate::network::report(&crate::network::NetEnv::in_force()),
+        // Off the runtime's threads: a Wi-Fi card's supplicant is asked
+        // on a socket which network the card is on.
+        network: tokio::task::spawn_blocking(|| crate::network::report(&crate::network::NetEnv::in_force())).await.ok().flatten(),
         embedding: EmbeddingHealth {
             failures_write: failures.write,
             failures_query: failures.query,

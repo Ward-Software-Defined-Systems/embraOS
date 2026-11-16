@@ -477,12 +477,20 @@ pub struct CardReport {
     /// `address/prefix`, when the card holds one.
     pub address: Option<String>,
     pub gateway: Option<String>,
+    /// The name of the Wi-Fi network a Wi-Fi card is on, as its supplicant
+    /// says it now (`/network wifi` shows the same name); absent on a wired
+    /// card and on a card that is on no network. Never a passphrase, and
+    /// no network that is merely stored or in range.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wifi_network: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
 /// The report, on a machine whose embrad wrote its status; `None` elsewhere
-/// (a development host, an embrad from before).
+/// (a development host, an embrad from before). It asks a Wi-Fi card's
+/// supplicant which network the card is on, on a socket and for a second at
+/// most: a caller on the runtime runs it on the blocking pool.
 pub(crate) fn report(env: &NetEnv) -> Option<NetworkReport> {
     if !Path::new(&env.net_dir).join(net_lease::STATUS_FILE).exists() {
         return None;
@@ -499,6 +507,7 @@ pub(crate) fn report(env: &NetEnv) -> Option<NetworkReport> {
                 mode: if s.mode == Mode::Static { "static" } else { "dhcp" },
                 address: lease.map(|l| format!("{}/{}", l.ip, l.prefix)),
                 gateway: lease.and_then(|l| l.router.clone()),
+                wifi_network: (s.kind == cards::Kind::Wifi).then(|| crate::network_wifi::joined_network(env, &s.name)).flatten(),
                 note: s.note,
                 name: s.name,
             }

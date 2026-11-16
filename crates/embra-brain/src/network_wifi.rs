@@ -5,7 +5,9 @@
 //! `embra_boot::wifi`); embrad sees the file change, renders the
 //! supplicant's configuration and has it read. What is in range and what a
 //! card is on are asked of the supplicant's control socket, a datagram
-//! socket a card under `/embra/ephemeral/net/wpa`.
+//! socket a card under `/embra/ephemeral/net/wpa`. `system_status` asks the
+//! same socket one thing, the name of the network a card is on
+//! ([`joined_network`]): the intelligence is shown that name and no other.
 //!
 //! A passphrase is typed as the command's last argument, after `--key`, and
 //! runs to the end of the line: the consoles mask it while it is typed and
@@ -34,6 +36,10 @@ pub(crate) const USAGE: &str = "Usage: /network wifi | /network wifi join <name>
 
 /// How long one answer of the supplicant is waited for.
 const ANSWER_WAIT: Duration = Duration::from_secs(3);
+/// How long `system_status` waits for a card's supplicant to say what the
+/// card is on. The tool is called often, by the model: a supplicant that
+/// does not answer costs it this much and no more.
+const STATUS_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -182,8 +188,12 @@ impl Ctrl {
     /// One command and its answer. What the supplicant says of its own
     /// accord meanwhile (an event: it starts with `<`) is not the answer.
     fn request(&self, command: &str) -> std::io::Result<String> {
+        self.request_within(command, ANSWER_WAIT)
+    }
+
+    fn request_within(&self, command: &str, wait: Duration) -> std::io::Result<String> {
         self.socket.send(command.as_bytes())?;
-        let until = Instant::now() + ANSWER_WAIT;
+        let until = Instant::now() + wait;
         loop {
             let said = self.receive(until)?;
             if !said.starts_with('<') {
@@ -221,6 +231,22 @@ impl Drop for Ctrl {
             let _ = self.socket.send(b"DETACH");
         }
         let _ = std::fs::remove_file(&self.own);
+    }
+}
+
+/// The Wi-Fi network a card is on, by the name `/network wifi` shows, as the
+/// card's supplicant says it now: what `system_status` shows the
+/// intelligence. `None` for a card that is on no network, for one that is
+/// still joining, and for a supplicant that is not there or does not answer
+/// within [`STATUS_WAIT`]. One question, `STATUS`: no scan is started, and
+/// the answer carries no passphrase and no network that is merely stored
+/// or in range.
+pub(crate) fn joined_network(env: &NetEnv, card: &str) -> Option<String> {
+    let ctrl = Ctrl::open(&env.wifi_ctrl, card).ok()?;
+    let link = wifi::parse_status(&ctrl.request_within("STATUS", STATUS_WAIT).ok()?);
+    match (link.joined(), link.ssid) {
+        (true, Some(ssid)) => Some(wifi::ssid_shown(&ssid)),
+        _ => None,
     }
 }
 
@@ -437,8 +463,13 @@ mod tests {
         env.wifi_ctrl = root.join("net").join("wpa");
         env.wifi_logs = root.join("net").join("wpa-log");
         // The stand-in machine's own kernel line (none until a test writes
-        // one), never the test host's.
+        // one), name, resolvers and settings, never the test host's.
         env.cmdline = root.join("cmdline");
+        env.hostname = root.join("hostname");
+        env.resolv = root.join("resolv.conf");
+        env.settings = root.join("state").join("network").join("settings");
+        env.clock = root.join("clock-status");
+        env.pki = root.join("state").join("pki");
         env.scan_wait = Duration::from_millis(20);
         std::fs::create_dir_all(&env.wifi_ctrl).unwrap();
         std::fs::create_dir_all(&env.wifi_logs).unwrap();
@@ -535,6 +566,112 @@ mod tests {
         let shown = answer("", &env).text;
         assert!(shown.contains("  Card: none. embra.wifi=0 is on this boot's kernel line: no wireless driver is loaded") && !shown.contains("is loaded when it appears"), "{shown}");
         assert!(shown.contains("  Stored: Home (open)\n"), "the stored networks are kept and shown: {shown}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// embrad's status for a machine with a wired card and a Wi-Fi card.
+    fn two_cards(env: &NetEnv) {
+        use embra_boot::net_lease::{self, CardStatus, Mode};
+        std::fs::create_dir_all(&env.net_dir).unwrap();
+        let cards = [
+            CardStatus { name: "eth0".into(), kind: Kind::Wired, mac: "52:54:00:aa:00:01".into(), link: Some(true), mode: Mode::Dhcp, note: None },
+            CardStatus { name: "wlan0".into(), kind: Kind::Wifi, mac: "02:00:00:00:00:00".into(), link: Some(true), mode: Mode::Dhcp, note: None },
+        ];
+        std::fs::write(env.net_dir.join(net_lease::STATUS_FILE), net_lease::status_text(&cards)).unwrap();
+    }
+
+    fn networks_of(report: &crate::network::NetworkReport) -> Vec<(&str, Option<&str>)> {
+        report.cards.iter().map(|c| (c.name.as_str(), c.wifi_network.as_deref())).collect()
+    }
+
+    #[test]
+    fn the_status_names_the_network_a_card_is_on_and_no_other() {
+        let (root, env) = machine("status-on", true);
+        two_cards(&env);
+        // Two networks are stored, one with a passphrase; a third is in
+        // range. The card is on the first.
+        assert!(!answer("join Home Net --key correct horse battery", &env).refused);
+        assert!(!answer("join Guest --open", &env).refused);
+        let asked = supplicant(&env, &[
+            ("STATUS", "bssid=02:00:00:00:01:00\nfreq=2412\nssid=Home Net\nid=0\nmode=station\nkey_mgmt=WPA2-PSK\nwpa_state=COMPLETED\nip_address=192.168.7.20\n"),
+            ("SCAN_RESULTS", "bssid / frequency / signal level / flags / ssid\n02:00:00:00:01:00\t2412\t-47\t[WPA2-PSK-CCMP][ESS]\tHome Net\n02:00:00:00:03:00\t2437\t-70\t[WPA2-PSK-CCMP][ESS]\tNext Door\n"),
+        ], None);
+        // A socket by the wired card's name: a wired card has no supplicant,
+        // and none is asked for one.
+        let wired = UnixDatagram::bind(env.wifi_ctrl.join("eth0")).unwrap();
+        wired.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        let started = Instant::now();
+        let report = crate::network::report(&env).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        assert!(wired.recv(&mut [0u8; 32]).is_err(), "nothing is asked on a wired card's name");
+        assert_eq!(networks_of(&report), [("eth0", None), ("wlan0", Some("Home Net"))]);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains(r#""wifi_network":"Home Net""#), "{json}");
+        assert_eq!(json.matches("wifi_network").count(), 1, "a wired card has no such field: {json}");
+        for kept_back in ["correct horse", "Guest", "Next Door", "WPA2", "02:00:00:00:01:00"] {
+            assert!(!json.contains(kept_back), "{kept_back} is not the status tool's to show: {json}");
+        }
+        assert_eq!(asked.try_iter().collect::<Vec<String>>(), ["STATUS"], "one question, and no scan is started for it");
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // A name that is no plain text is shown as /network wifi shows it.
+        let (root, env) = machine("status-name", true);
+        two_cards(&env);
+        let _asked = supplicant(&env, &[("STATUS", "ssid=caf\\xc3\\xa9 \\\"2\\\"\nwpa_state=COMPLETED\n")], None);
+        assert_eq!(networks_of(&crate::network::report(&env).unwrap()), [("eth0", None), ("wlan0", Some("café \"2\""))]);
+        std::fs::remove_dir_all(&root).unwrap();
+        let (root, env) = machine("status-bytes", true);
+        two_cards(&env);
+        let _asked = supplicant(&env, &[("STATUS", "ssid=\\xff\\x00\\x1b[2J\nwpa_state=COMPLETED\n")], None);
+        assert_eq!(networks_of(&crate::network::report(&env).unwrap()), [("eth0", None), ("wlan0", Some("hex:ff001b5b324a"))], "never a control character");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_card_that_is_on_no_network_has_no_name_in_the_status() {
+        // Still joining: the supplicant names the network it is trying.
+        let (root, env) = machine("status-joining", true);
+        two_cards(&env);
+        let _asked = supplicant(&env, &[("STATUS", "ssid=Home Net\nwpa_state=4WAY_HANDSHAKE\n")], None);
+        assert_eq!(networks_of(&crate::network::report(&env).unwrap()), [("eth0", None), ("wlan0", None)]);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // Scanning, with nothing to name.
+        let (root, env) = machine("status-scanning", true);
+        two_cards(&env);
+        let _asked = supplicant(&env, &[("STATUS", "wpa_state=SCANNING\naddress=02:00:00:00:00:00\n")], None);
+        let report = crate::network::report(&env).unwrap();
+        assert_eq!(networks_of(&report), [("eth0", None), ("wlan0", None)]);
+        assert!(!serde_json::to_string(&report).unwrap().contains("wifi_network"));
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // No supplicant on the card (embrad has not started one, or
+        // embra.wifi=0): no name, and no wait.
+        let (root, env) = machine("status-none", true);
+        two_cards(&env);
+        let started = Instant::now();
+        assert_eq!(networks_of(&crate::network::report(&env).unwrap()), [("eth0", None), ("wlan0", None)]);
+        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_supplicant_that_does_not_answer_holds_the_status_a_second_and_no_longer() {
+        let (root, env) = machine("status-silent", true);
+        two_cards(&env);
+        // A socket on the card's name that takes the question and says nothing.
+        let silent = UnixDatagram::bind(env.wifi_ctrl.join("wlan0")).unwrap();
+        let started = Instant::now();
+        let report = crate::network::report(&env).unwrap();
+        let took = started.elapsed();
+        assert_eq!(networks_of(&report), [("eth0", None), ("wlan0", None)]);
+        assert!(took >= Duration::from_millis(900) && took < Duration::from_millis(2500), "the status tool's wait, not the command's three seconds: {took:?}");
+        let mut buf = [0u8; 32];
+        silent.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        assert_eq!(silent.recv(&mut buf).map(|n| buf[..n].to_vec()).unwrap(), b"STATUS".to_vec(), "the question did arrive");
+        // The brain's own socket is gone again.
+        let left: Vec<String> = std::fs::read_dir(env.wifi_ctrl.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("wpa-client")).collect();
+        assert!(left.is_empty(), "{left:?}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
