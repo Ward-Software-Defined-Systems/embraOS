@@ -343,8 +343,8 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > embra-guardian-v1. Needs `xz` + `sha256sum` on PATH — `brew install xz
 > coreutils` + the gnubin PATH from step 1 satisfies both. First build needs
 > network for this. The toolchain is the largest item in the image: about
-> 320 MiB of a root filesystem of about 813 MiB, as compressed in the SquashFS (the firmware for bare metal is about 270 MiB of that and the display console's stack about 90 MiB)
-> (measured on the x86_64 Linux build, 2026-11-08).
+> 320 MiB of a root filesystem of about 880 MiB, as compressed in the SquashFS (the firmware, the Wi-Fi cards' included, is about 310 MiB of that and the display console's stack about 90 MiB)
+> (measured on the x86_64 Linux build, 2026-11-15; the display console's stack 2026-11-08).
 > The pin moves with its hash lines in `scripts/rust-toolchain.sha256`
 > ([QUICK-START.md](QUICK-START.md)); `RUST_TOOLCHAIN_VERSION` alone stops the
 > build at the download check. An image with a different
