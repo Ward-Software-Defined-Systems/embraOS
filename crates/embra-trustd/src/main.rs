@@ -80,7 +80,11 @@ impl TrustService for TrustServiceImpl {
         request: Request<GenerateCertRequest>,
     ) -> Result<Response<GenerateCertResponse>, Status> {
         let req = request.into_inner();
-        let seen = (self.seen)();
+        // On the blocking pool: the machine's addresses are read under the
+        // kernel's network lock, which a card's starting driver holds for
+        // seconds, and this is one of the runtime's own threads.
+        let look = self.seen.clone();
+        let seen = tokio::task::spawn_blocking(move || look()).await.map_err(|e| Status::internal(format!("The machine's names could not be read: {e}")))?;
         let mut pki = self.pki.write().await;
         // The operator's name for the machine is a name the CA signs from
         // here on: its certificate is issued again when it does not admit it.

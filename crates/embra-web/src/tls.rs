@@ -97,6 +97,15 @@ fn this_machine() -> LeafNames {
     names::leaf_names(&CaSet::Unconstrained, names::hostname().as_deref(), &names::addresses())
 }
 
+/// [`this_machine`], asked on the blocking pool: the list of addresses
+/// waits for the kernel's network lock, which a card's starting driver
+/// holds for seconds, and a look that stood still on one of the runtime's
+/// own threads would hold up the connections that thread serves. `None`
+/// when the look could not be made.
+async fn look_at_this_machine() -> Option<LeafNames> {
+    tokio::task::spawn_blocking(this_machine).await.ok()
+}
+
 /// Why a new certificate is asked for now, if it is: the names changed,
 /// the clock was set, or the certificate ends within [`RENEW_BEFORE`].
 fn due(view: &LeafNames, wall: i64, steady_elapsed: Duration, last: &Asked) -> Option<&'static str> {
@@ -170,7 +179,7 @@ async fn ask(client: &mut TrustServiceClient<Channel>) -> anyhow::Result<(Certif
 /// to keep it so.
 pub async fn acquire(trust_addr: &str) -> anyhow::Result<(ServerConfig, Arc<Leaf>, Asked)> {
     let mut client = connect_trust(trust_addr).await?;
-    let view = this_machine();
+    let view = look_at_this_machine().await.context("the machine's names could not be read")?;
     let (key, expires_at) = ask(&mut client).await?;
     let leaf = Leaf::new(key);
     Ok((server_config(leaf.clone())?, leaf, Asked::at(view, expires_at)))
@@ -185,7 +194,7 @@ pub async fn keep_current(trust_addr: String, leaf: Arc<Leaf>, mut last: Asked) 
     let mut wait_until: Option<Instant> = None;
     loop {
         tokio::time::sleep(LOOK_EVERY).await;
-        let view = this_machine();
+        let Some(view) = look_at_this_machine().await else { continue };
         let Some(why) = due(&view, wall_now(), last.steady.elapsed(), &last) else { continue };
         if wait_until.is_some_and(|t| Instant::now() < t) {
             continue;
