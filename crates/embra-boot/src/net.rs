@@ -90,17 +90,38 @@ pub fn cards(root: &Path) -> Vec<Card> {
     cards
 }
 
-/// Whether the card has a link: `Some(true)` with a carrier, `Some(false)`
-/// without one, `None` when the kernel does not say (the file cannot be read
-/// while the interface is down).
+/// The flag of an interface that is up (`IFF_UP`), as `flags` shows it.
+const IFF_UP: u64 = 0x1;
+
+/// Whether the card has a link: `Some(true)` with one, `Some(false)`
+/// without, `None` when the card is not there to say.
+///
+/// Read from `operstate` and `flags`, which the kernel hands out without its
+/// network lock. The `carrier` file waits for that lock, and the lock is
+/// held for as long as a card's driver takes to start: a USB Wi-Fi adapter
+/// has its whole chip written over the bus then, which is seconds on a
+/// machine and half a minute through a hypervisor's USB. A reader of
+/// `carrier` stands still for that long, whichever card it asks about; PID 1
+/// reads here at every look.
+///
+/// `up` is a link that carries traffic (on a Wi-Fi card: joined, and its
+/// keys set). `unknown` is what a driver that never reports a link leaves:
+/// such a card has a link once it is up, and none while it is still being
+/// brought up. Every other word (`down`, `dormant`, `lowerlayerdown`,
+/// `notpresent`, `testing`) is no link.
 pub fn carrier(root: &Path, name: &str) -> Option<bool> {
     if !card_name_ok(name) {
         return None;
     }
-    match read_trimmed(&root.join(name).join("carrier")).as_deref() {
-        Some("1") => Some(true),
-        Some("0") => Some(false),
-        _ => None,
+    let dir = root.join(name);
+    match read_trimmed(&dir.join("operstate")).as_deref() {
+        None => None,
+        Some("up") => Some(true),
+        Some("unknown") => {
+            let flags = read_trimmed(&dir.join("flags")).and_then(|f| u64::from_str_radix(f.trim_start_matches("0x"), 16).ok());
+            Some(flags.is_some_and(|f| f & IFF_UP != 0))
+        }
+        Some(_) => Some(false),
     }
 }
 
@@ -227,13 +248,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_link_is_read_from_the_carrier_and_an_unreadable_one_is_unknown() {
+    fn the_link_is_read_from_the_operstate_and_never_from_the_file_that_waits_for_the_lock() {
         let root = scratch("carrier");
         interface(&root, "eth0", "1", 2, true, false);
-        assert_eq!(carrier(&root, "eth0"), None, "no file: the interface is down");
+        assert_eq!(carrier(&root, "eth0"), None, "no operstate: the card is not there to say");
+        // The file that waits for the kernel's network lock is never the
+        // answer: it says a link here, and every state below says its own.
         std::fs::write(root.join("eth0/carrier"), "1\n").unwrap();
+        assert_eq!(carrier(&root, "eth0"), None);
+        for (state, link) in [("up", true), ("down", false), ("dormant", false), ("lowerlayerdown", false), ("notpresent", false), ("testing", false)] {
+            std::fs::write(root.join("eth0/operstate"), format!("{state}\n")).unwrap();
+            assert_eq!(carrier(&root, "eth0"), Some(link), "{state}");
+        }
+        // A driver that never reports: a link once the card is up, none
+        // while it is being brought up (its flags lack the one for up).
+        std::fs::write(root.join("eth0/operstate"), "unknown\n").unwrap();
+        assert_eq!(carrier(&root, "eth0"), Some(false), "no flags to read: not up");
+        std::fs::write(root.join("eth0/flags"), "0x1002\n").unwrap();
+        assert_eq!(carrier(&root, "eth0"), Some(false), "being brought up");
+        std::fs::write(root.join("eth0/flags"), "0x1003\n").unwrap();
         assert_eq!(carrier(&root, "eth0"), Some(true));
-        std::fs::write(root.join("eth0/carrier"), "0\n").unwrap();
+        std::fs::write(root.join("eth0/flags"), "9\n").unwrap();
+        assert_eq!(carrier(&root, "eth0"), Some(true), "a hexadecimal number with or without its prefix");
+        std::fs::write(root.join("eth0/flags"), "what\n").unwrap();
         assert_eq!(carrier(&root, "eth0"), Some(false));
         assert_eq!(carrier(&root, "../eth0"), None);
         std::fs::remove_dir_all(&root).unwrap();

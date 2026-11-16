@@ -179,6 +179,12 @@ pub fn hostname() -> Option<String> {
 
 /// Every address an interface of this machine holds, as the kernel lists
 /// them. Empty when the list cannot be had.
+///
+/// This can stand still for seconds: the list of interfaces is read under
+/// the kernel's network lock (`RTM_GETLINK`'s dump, kernel 6.18), which is
+/// held for as long as a card's driver takes to start, and a USB Wi-Fi
+/// adapter takes seconds. A caller on an async runtime asks on the
+/// blocking pool.
 #[cfg(target_os = "linux")]
 pub fn addresses() -> Vec<IpAddr> {
     let mut out = Vec::new();
