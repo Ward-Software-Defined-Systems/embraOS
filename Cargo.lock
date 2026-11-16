@@ -1539,10 +1539,12 @@ name = "embra-trustd"
 version = "0.24.0-phase2"
 dependencies = [
  "anyhow",
+ "embra-boot",
  "embra-common",
  "rcgen",
  "reqwest",
  "rustls",
+ "rustls-pki-types",
  "serde_json",
  "sha2",
  "time",

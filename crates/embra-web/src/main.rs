@@ -16,6 +16,7 @@ mod api_tools;
 mod arbiter;
 mod assets;
 mod backups;
+mod ca;
 mod chat_bridge;
 mod files;
 mod media;
@@ -66,9 +67,12 @@ async fn main() -> anyhow::Result<()> {
         "embra-web starting"
     );
 
-    // Serving cert from trustd (retries through its warm-up window).
-    let server_config = tls::acquire_server_config(&cfg.trust_addr).await?;
+    // Serving cert from trustd (retries through its warm-up window). It
+    // names this machine, so it is asked for again when the machine's name
+    // or addresses change, after the clock was set and before it ends.
+    let (server_config, leaf, asked) = tls::acquire(&cfg.trust_addr).await?;
     tracing::info!("obtained serving cert from embra-trustd");
+    tokio::spawn(tls::keep_current(cfg.trust_addr.clone(), leaf, asked));
 
     // This boot's access token (`access.rs`): embrad's, or one of our own
     // on the host. In the OS it is never logged; the boot banner shows it.
@@ -101,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
         backups_root: Arc::from(std::path::Path::new(backups::BACKUPS_ROOT)),
         updater: Arc::from(std::path::Path::new(backups::UPDATER)),
         backup_upload: Arc::new(tokio::sync::Mutex::new(())),
+        trust_addr: cfg.trust_addr.clone(),
     };
 
     server::serve(&cfg, state, server_config).await

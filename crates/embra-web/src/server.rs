@@ -23,6 +23,7 @@ use tokio_rustls::server::TlsStream;
 use crate::access;
 use crate::api_tools::api_tools_list;
 use crate::assets::static_handler;
+use crate::ca::api_ca_cert;
 use crate::config::WebConfig;
 use crate::console_url::api_console_url;
 use crate::media::{MEDIA_BODY_LIMIT, api_media_get, api_media_put};
@@ -165,6 +166,8 @@ pub async fn serve(
         // The console's URLs with the token, for the display console's
         // menu: answered to this machine's own browser alone.
         .route("/api/console-url", get(api_console_url))
+        // The CA certificate, for a browser to import once (`ca.rs`).
+        .route("/api/ca.crt", get(api_ca_cert))
         .fallback(static_handler)
         // The gate (`access.rs`) over every route and the fallback: the
         // boot's token in the query once, the cookie after, 401 otherwise.

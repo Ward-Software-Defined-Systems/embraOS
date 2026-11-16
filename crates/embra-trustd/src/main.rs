@@ -12,15 +12,36 @@ use embra_common::proto::trust::trust_service_server::{TrustService, TrustServic
 use embra_common::proto::trust::*;
 use embra_common::proto::common;
 
+use embra_boot::names::{self, LeafNames};
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::info;
 
+/// What trustd reads of the machine when it mints: the kernel's name for
+/// it, the addresses its cards hold, and the name the operator stored
+/// (`/network hostname`).
+#[derive(Clone, Debug, Default)]
+struct Seen {
+    hostname: Option<String>,
+    addresses: Vec<IpAddr>,
+    operator: Option<String>,
+}
+
+impl Seen {
+    fn now() -> Seen {
+        let (settings, _) = embra_boot::net_settings::read(std::path::Path::new(embra_boot::net_settings::SETTINGS_PATH));
+        Seen { hostname: names::hostname(), addresses: names::addresses(), operator: settings.hostname }
+    }
+}
+
 struct TrustServiceImpl {
     verifier: Arc<SoulVerifier>,
     pki: Arc<RwLock<PKIManager>>,
     start_time: std::time::Instant,
+    /// The machine as it is at a request: [`Seen::now`], or a test's own.
+    seen: Arc<dyn Fn() -> Seen + Send + Sync>,
 }
 
 #[tonic::async_trait]
@@ -59,24 +80,31 @@ impl TrustService for TrustServiceImpl {
         request: Request<GenerateCertRequest>,
     ) -> Result<Response<GenerateCertResponse>, Status> {
         let req = request.into_inner();
-        permitted(&req).map_err(Status::invalid_argument)?;
-        let pki = self.pki.read().await;
+        let seen = (self.seen)();
+        let mut pki = self.pki.write().await;
+        // The operator's name for the machine is a name the CA signs from
+        // here on: its certificate is issued again when it does not admit it.
+        pki.admit(seen.operator.as_deref())
+            .map_err(|e| Status::internal(format!("The CA certificate could not be issued again: {e}")))?;
+        let own = names::leaf_names(pki.set(), seen.hostname.as_deref(), &seen.addresses);
+        let (dns, ips) = requested(&req, &own).map_err(Status::invalid_argument)?;
 
         let (is_server, is_client) = usages_for(req.role());
 
-        let (cert_pem, key_pem) = pki.generate_service_cert(
-            &req.common_name,
-            &req.san_dns,
-            &req.san_ip,
-            is_server,
-            is_client,
-        ).map_err(|e| Status::internal(format!("Certificate generation failed: {}", e)))?;
+        let minted = pki
+            .generate_service_cert(&req.common_name, &dns, &ips, is_server, is_client)
+            .map_err(|e| Status::internal(format!("Certificate generation failed: {}", e)))?;
+        info!(
+            "A certificate for {}: {}",
+            req.common_name,
+            dns.iter().cloned().chain(ips.iter().map(|ip| ip.to_string())).collect::<Vec<_>>().join(" ")
+        );
 
         Ok(Response::new(GenerateCertResponse {
-            cert_pem,
-            key_pem,
-            serial: String::new(),
-            expires_at: String::new(),
+            cert_pem: minted.cert_pem,
+            key_pem: minted.key_pem,
+            serial: minted.serial,
+            expires_at: minted.expires_at.to_string(),
         }))
     }
 
@@ -159,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize PKI
     let mut pki = PKIManager::new(config.pki_dir());
-    pki.init()?;
+    pki.init(Seen::now().operator.as_deref())?;
     let pki = Arc::new(RwLock::new(pki));
 
     // Initialize soul verifier
@@ -172,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
         verifier,
         pki,
         start_time: std::time::Instant::now(),
+        seen: Arc::new(Seen::now),
     };
 
     let addr = format!("{}:{}", config.bind, config.port).parse()?;
@@ -234,28 +263,44 @@ mod role_tests {
     }
 }
 /// The gate of `GenerateCertificate` (#10): a certificate is minted for the
-/// OS's own service identities (`pki::SERVICE_COMMON_NAMES`,
-/// `SERVICE_DNS_NAMES`, `SERVICE_IPS`) and for nothing a request names
-/// outside them. The port is unauthenticated by the Phase-1 posture, so
-/// the request's list is never the list of what the CA signs; the first
-/// name outside the set is named in the refusal.
-fn permitted(req: &GenerateCertRequest) -> Result<(), String> {
+/// OS's own service identities (`pki::SERVICE_COMMON_NAMES`) and carries
+/// this machine's own names (`own`: `localhost`, its name when the CA
+/// admits it, the loopback addresses and the private addresses its cards
+/// hold). A request without names gets them all, which is what embra-web
+/// sends: the list is then read in one place, and a name that changed
+/// between two readings cannot fail the request of a service the boot
+/// cannot do without. A request that lists names gets those, and the first
+/// one the machine does not hold is named in the refusal. The port is
+/// unauthenticated by the Phase-1 posture, so the request's list is never
+/// the list of what the CA signs.
+fn requested(req: &GenerateCertRequest, own: &LeafNames) -> Result<(Vec<String>, Vec<IpAddr>), String> {
     let cn = req.common_name.as_str();
-    if !pki::SERVICE_COMMON_NAMES.contains(&cn) && !pki::SERVICE_DNS_NAMES.contains(&cn) {
+    if !pki::SERVICE_COMMON_NAMES.contains(&cn) {
         return Err(format!("common name {cn:?} is not a service identity of this OS"));
     }
-    if let Some(dns) = req.san_dns.iter().find(|d| !pki::SERVICE_DNS_NAMES.contains(&d.as_str())) {
-        return Err(format!("DNS name {dns:?} is not a service identity of this OS"));
+    if req.san_dns.is_empty() && req.san_ip.is_empty() {
+        return Ok((own.dns.clone(), own.ips.clone()));
     }
-    if let Some(ip) = req.san_ip.iter().find(|i| !pki::SERVICE_IPS.contains(&i.as_str())) {
-        return Err(format!("address {ip:?} is not a service identity of this OS"));
+    if let Some(dns) = req.san_dns.iter().find(|d| !own.dns.iter().any(|have| have.eq_ignore_ascii_case(d))) {
+        return Err(format!("DNS name {dns:?} is not a name of this machine"));
     }
-    Ok(())
+    let mut ips = Vec::with_capacity(req.san_ip.len());
+    for text in &req.san_ip {
+        match text.parse::<IpAddr>() {
+            Ok(ip) if own.ips.contains(&ip) => ips.push(ip),
+            _ => return Err(format!("address {text:?} is not an address this machine holds")),
+        }
+    }
+    Ok((req.san_dns.clone(), ips))
 }
 
 #[cfg(test)]
 mod minting_gate_tests {
     use super::*;
+    use embra_boot::names::CaSet;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
     fn request(cn: &str, dns: &[&str], ips: &[&str]) -> GenerateCertRequest {
         GenerateCertRequest {
@@ -266,46 +311,111 @@ mod minting_gate_tests {
         }
     }
 
-    /// The request embra-web sends passes; a common name, a DNS name or an
-    /// address outside the service set is refused, naming it, before the
-    /// CA signs anything — on the pure gate and through the RPC (#10).
-    #[tokio::test]
-    async fn a_name_outside_the_service_set_is_refused_before_minting() {
-        let web = request("embra-web", &["localhost", "buildroot", "embraos"], &["127.0.0.1", "10.0.2.15"]);
-        assert_eq!(permitted(&web), Ok(()));
-        assert_eq!(permitted(&request("localhost", &[], &[])), Ok(()), "a service name as the CN");
-        let cases = [
-            (request("evil.example", &["localhost"], &[]), "common name \"evil.example\""),
-            (request("embra-web", &["localhost", "evil.example"], &[]), "DNS name \"evil.example\""),
-            (request("embra-web", &[], &["192.168.1.9"]), "address \"192.168.1.9\""),
-            (request("embra-web", &["sub.localhost"], &[]), "DNS name \"sub.localhost\""),
-        ];
-        for (req, named) in cases {
-            let err = permitted(&req).expect_err(named);
-            assert!(err.starts_with(named), "{err}");
-        }
+    fn seen(hostname: Option<&str>, operator: Option<&str>, addresses: &[&str]) -> Seen {
+        Seen { hostname: hostname.map(str::to_string), operator: operator.map(str::to_string), addresses: addresses.iter().map(|a| a.parse().unwrap()).collect() }
+    }
 
-        let dir = std::env::temp_dir().join(format!("embra-trustd-gate-{}", std::process::id()));
+    /// The service over a fresh CA in a directory of the test's own, on a
+    /// machine that is what `machine` says.
+    fn service_on(tag: &str, machine: Seen) -> (TrustServiceImpl, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("embra-trustd-gate-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut pki = PKIManager::new(dir.clone());
-        pki.init().expect("a fresh CA");
+        pki.init(None).expect("a fresh CA");
         let service = TrustServiceImpl {
             verifier: Arc::new(SoulVerifier::new("http://127.0.0.1:1".to_string(), dir.join("soul.sha256"))),
             pki: Arc::new(RwLock::new(pki)),
             start_time: std::time::Instant::now(),
+            seen: Arc::new(move || machine.clone()),
         };
-        let minted = service
-            .generate_certificate(Request::new(web))
-            .await
-            .expect("the web console's request is minted")
-            .into_inner();
-        assert!(String::from_utf8_lossy(&minted.cert_pem).contains("BEGIN CERTIFICATE"));
-        let refused = service
-            .generate_certificate(Request::new(request("embra-web", &["evil.example"], &[])))
-            .await
-            .expect_err("a name outside the set");
+        (service, dir)
+    }
+
+    /// Whether `name` verifies on `leaf` for a browser that imported `ca`.
+    fn verifies(ca_pem: &[u8], leaf_pem: &[u8], name: &str) -> bool {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from_pem_slice(ca_pem).unwrap()).unwrap();
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let browser = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider).build().unwrap();
+        let leaf = CertificateDer::from_pem_slice(leaf_pem).unwrap();
+        browser.verify_server_cert(&leaf, &[], &ServerName::try_from(name.to_string()).unwrap(), &[], UnixTime::now()).is_ok()
+    }
+
+    /// embra-web's request names nothing: trustd reads the machine and the
+    /// certificate carries `localhost`, the machine's name, the loopback
+    /// addresses and the private addresses its cards hold, under a CA that
+    /// was issued again for the operator's name. A public address the
+    /// machine holds is on no certificate.
+    #[tokio::test]
+    async fn this_machines_names_are_filled_in_by_trustd() {
+        let (service, dir) = service_on("filled", seen(Some("axiom"), Some("axiom"), &["127.0.0.1", "192.168.1.42", "203.0.113.7", "fe80::5054:ff:fe12:3456"]));
+        let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let minted = service.generate_certificate(Request::new(request("embra-web", &[], &[]))).await.expect("the web console's request is minted").into_inner();
+        let ca = service.pki.read().await.ca_cert_pem().unwrap();
+        for held in ["localhost", "axiom", "127.0.0.1", "::1", "192.168.1.42"] {
+            assert!(verifies(&ca, &minted.cert_pem, held), "{held}");
+        }
+        for not_named in ["203.0.113.7", "fe80::5054:ff:fe12:3456", "embraos", "buildroot", "10.0.2.15"] {
+            assert!(!verifies(&ca, &minted.cert_pem, not_named), "{not_named}");
+        }
+        // The CA admits the operator's name from this request on, and says so in its record.
+        assert_eq!(CaSet::read(&dir), Some(CaSet::Private { hostname: Some("axiom".into()) }));
+        // When it ends and which one it is.
+        let ends: i64 = minted.expires_at.parse().expect("seconds after the epoch");
+        assert!((ends - before - 365 * 86_400).abs() < 60, "{ends}");
+        assert_eq!(minted.serial.len(), 32);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A name a DHCP server assigned is the machine's name and is not on
+        // the certificate: the CA was not made with it and is not issued
+        // again for a name that changes with the network.
+        let (service, dir) = service_on("assigned", seen(Some("node-7"), None, &["10.0.2.15"]));
+        let first_ca = service.pki.read().await.ca_cert_pem().unwrap();
+        let minted = service.generate_certificate(Request::new(request("embra-web", &[], &[]))).await.unwrap().into_inner();
+        assert_eq!(service.pki.read().await.ca_cert_pem().unwrap(), first_ca, "the CA stays as it is");
+        assert!(verifies(&first_ca, &minted.cert_pem, "localhost") && verifies(&first_ca, &minted.cert_pem, "10.0.2.15"));
+        assert!(!verifies(&first_ca, &minted.cert_pem, "node-7"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The default name is admitted by every CA made here.
+        let (service, dir) = service_on("default", seen(Some("embraos"), None, &[]));
+        let minted = service.generate_certificate(Request::new(request("embra-web", &[], &[]))).await.unwrap().into_inner();
+        let ca = service.pki.read().await.ca_cert_pem().unwrap();
+        assert!(verifies(&ca, &minted.cert_pem, "embraos") && verifies(&ca, &minted.cert_pem, "127.0.0.1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A request that lists names is held to the machine's own: a common
+    /// name, a DNS name or an address the machine does not hold is refused,
+    /// naming it, before the CA signs anything — on the pure gate and
+    /// through the RPC (#10).
+    #[tokio::test]
+    async fn a_listed_name_the_machine_does_not_hold_is_refused() {
+        let own = names::leaf_names(&CaSet::Private { hostname: None }, Some("embraos"), &["10.0.2.15".parse().unwrap()]);
+        let listed = requested(&request("embra-web", &["localhost", "EmbraOS"], &["127.0.0.1", "10.0.2.15"]), &own).expect("names the machine holds");
+        assert_eq!(listed.0, ["localhost", "EmbraOS"]);
+        assert_eq!(listed.1, ["127.0.0.1".parse::<IpAddr>().unwrap(), "10.0.2.15".parse().unwrap()]);
+        assert_eq!(requested(&request("embra-web", &[], &[]), &own), Ok((own.dns.clone(), own.ips.clone())), "no list: the machine's own");
+        let cases = [
+            (request("evil.example", &["localhost"], &[]), "common name \"evil.example\""),
+            (request("localhost", &[], &[]), "common name \"localhost\""),
+            (request("embra-web", &["localhost", "evil.example"], &[]), "DNS name \"evil.example\""),
+            (request("embra-web", &["buildroot"], &[]), "DNS name \"buildroot\""),
+            (request("embra-web", &[], &["192.168.1.9"]), "address \"192.168.1.9\""),
+            (request("embra-web", &[], &["not an address"]), "address \"not an address\""),
+            (request("embra-web", &["sub.localhost"], &[]), "DNS name \"sub.localhost\""),
+        ];
+        for (req, named) in cases {
+            let err = requested(&req, &own).expect_err(named);
+            assert!(err.starts_with(named), "{err}");
+        }
+
+        let (service, dir) = service_on("refused", seen(Some("embraos"), None, &["10.0.2.15"]));
+        let refused = service.generate_certificate(Request::new(request("embra-web", &["evil.example"], &[]))).await.expect_err("a name outside the machine's own");
         assert_eq!(refused.code(), tonic::Code::InvalidArgument);
         assert!(refused.message().contains("\"evil.example\""), "{}", refused.message());
+        let held = service.generate_certificate(Request::new(request("embra-web", &["localhost"], &["10.0.2.15"]))).await.expect("names the machine holds").into_inner();
+        assert!(String::from_utf8_lossy(&held.cert_pem).contains("BEGIN CERTIFICATE"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

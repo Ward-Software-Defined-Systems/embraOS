@@ -44,6 +44,9 @@ pub struct AppState {
     /// Held by the one backup upload that runs: a second one is told so,
     /// and two never take DATA's room between them.
     pub backup_upload: Arc<tokio::sync::Mutex<()>>,
+    /// The trust service's gRPC endpoint: `GET /api/ca.crt` asks it for
+    /// the CA certificate (`ca.rs`). Nothing listens there in a test.
+    pub trust_addr: String,
 }
 
 impl AppState {
@@ -64,6 +67,7 @@ impl AppState {
             backups_root: Arc::from(std::env::temp_dir().as_path()),
             updater: Arc::from(std::path::Path::new("/nonexistent/embra-update")),
             backup_upload: Arc::new(tokio::sync::Mutex::new(())),
+            trust_addr: "http://127.0.0.1:1".to_string(),
         };
         (state, input_rx)
     }

@@ -571,7 +571,9 @@
       });
     } catch (e) { console.warn("embra-web: download handler unavailable", e); }
     try {
-      const LINK = /\/api\/(files|media|backups)\/[^\s]+/g;
+      // A download row: a file, a media item, a backup, or the CA
+      // certificate a browser imports once (`/api/ca.crt`, from `/network`).
+      const LINK = /\/api\/(?:(?:files|media|backups)\/[^\s]+|ca\.crt\b)/g;
       term.registerLinkProvider({
         provideLinks(y, cb) {
           const line = term.buffer.active.getLine(y - 1);
