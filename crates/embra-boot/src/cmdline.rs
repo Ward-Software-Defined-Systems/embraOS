@@ -291,6 +291,21 @@ impl Cmdline {
         kiosk
     }
 
+    /// `embra.wifi=0`: no wireless driver is loaded in this boot, the way
+    /// out when one misbehaves on some card. The last `1` or `0` wins, any
+    /// other value is ignored, and without one the drivers are loaded.
+    pub fn wifi(&self) -> bool {
+        let mut wifi = true;
+        for t in &self.tokens {
+            match t.as_str() {
+                "embra.wifi=1" => wifi = true,
+                "embra.wifi=0" => wifi = false,
+                _ => {}
+            }
+        }
+        wifi
+    }
+
     /// `embra.kbd=<layout>`, the display console's keyboard layout; the
     /// last non-empty value.
     pub fn keyboard_layout(&self) -> Option<&str> {
@@ -365,6 +380,15 @@ pub fn display_console(web: bool, kiosk: Option<bool>, display_present: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embra_wifi_0_loads_no_wireless_driver_and_the_last_word_wins() {
+        assert!(Cmdline::parse("console=ttyS0 quiet").wifi(), "without the knob the drivers are loaded");
+        assert!(!Cmdline::parse("embra.wifi=0").wifi());
+        assert!(Cmdline::parse("embra.wifi=0 embra.wifi=1").wifi());
+        assert!(!Cmdline::parse("embra.wifi=1 quiet embra.wifi=0").wifi());
+        assert!(Cmdline::parse("embra.wifi=no embra.wifi=").wifi(), "any other value is ignored");
+    }
 
     #[test]
     fn embra_slot_and_embra_mode_take_the_last_occurrence_and_refuse_an_unknown_value() {

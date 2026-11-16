@@ -27,6 +27,7 @@ pub mod partitions;
 pub mod release;
 pub mod slot;
 pub mod vt;
+pub mod wifi;
 pub mod state;
 pub mod status;
 

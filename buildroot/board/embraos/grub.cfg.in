@@ -220,6 +220,7 @@ submenu "Diagnostics" --id diagnostics {
         echo "  embra.kbd=<layout>          the display console's keyboard layout (us)"
         echo "  embra.kioskmode=<W>x<H>     the display console's video mode (1920x1080 where the display offers it); native = the display's own"
         echo "  embra.ntp=<host>|off        the time server of this boot (else the DHCP lease's, then time.cloudflare.com); off asks none"
+        echo "  embra.wifi=0                no Wi-Fi driver is loaded in this boot"
         echo "  embra.mode=update|backup|restore   a maintenance boot instead of the services"
         echo "Press any key to return"
         sleep --interruptible 60
