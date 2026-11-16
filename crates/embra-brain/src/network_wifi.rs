@@ -35,7 +35,8 @@ pub(crate) const USAGE: &str = "Usage: /network wifi | /network wifi join <name>
   /network wifi country <CC>        The regulatory domain, two letters (US, DE, JP): which channels the card may use.";
 
 /// How long one answer of the supplicant is waited for.
-const ANSWER_WAIT: Duration = Duration::from_secs(3);
+/// How long a question waits for room in the supplicant's queue.
+const SEND_WAIT: Duration = Duration::from_secs(1);
 /// How long `system_status` waits for a card's supplicant to say what the
 /// card is on. The tool is called often, by the model: a supplicant that
 /// does not answer costs it this much and no more.
@@ -159,18 +160,40 @@ pub(crate) fn parse(rest: &str) -> Action {
 struct Ctrl {
     socket: UnixDatagram,
     own: PathBuf,
+    /// How long one question waits for its answer.
+    answer_wait: Duration,
     /// The supplicant sends us its events (`ATTACH`): it is told to stop.
     attached: bool,
+    /// A question went unanswered. The protocol numbers no answer, so one
+    /// that comes late would be read as the answer to the next question
+    /// (seen with a radio that took half a minute to start a scan: the
+    /// scan's `OK` was read as the list of networks, and the list as the
+    /// card's state). Nothing more is asked on this socket.
+    silent: bool,
+}
+
+/// What became of the scan a card was asked for.
+enum Scan {
+    /// It ended within the wait: the networks it found.
+    Ended(String),
+    /// It was asked for and has not ended yet.
+    Running,
+    /// It could not be asked for.
+    NotAsked,
 }
 
 impl Ctrl {
-    fn open(ctrl_dir: &Path, card: &str) -> std::io::Result<Ctrl> {
+    fn open(ctrl_dir: &Path, card: &str, answer_wait: Duration) -> std::io::Result<Ctrl> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let own = ctrl_dir.with_file_name(format!("wpa-client-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_file(&own);
         let socket = UnixDatagram::bind(&own)?;
-        let ctrl = Ctrl { socket, own, attached: false };
+        let ctrl = Ctrl { socket, own, answer_wait, attached: false, silent: false };
         ctrl.socket.connect(ctrl_dir.join(card))?;
+        // A supplicant that reads nothing (it is inside a long call into
+        // the kernel) fills its queue; a question must not wait for room
+        // in it without end.
+        ctrl.socket.set_write_timeout(Some(SEND_WAIT))?;
         Ok(ctrl)
     }
 
@@ -187,41 +210,55 @@ impl Ctrl {
 
     /// One command and its answer. What the supplicant says of its own
     /// accord meanwhile (an event: it starts with `<`) is not the answer.
-    fn request(&self, command: &str) -> std::io::Result<String> {
-        self.request_within(command, ANSWER_WAIT)
+    fn request(&mut self, command: &str) -> std::io::Result<String> {
+        self.request_within(command, self.answer_wait)
     }
 
-    fn request_within(&self, command: &str, wait: Duration) -> std::io::Result<String> {
-        self.socket.send(command.as_bytes())?;
-        let until = Instant::now() + wait;
-        loop {
-            let said = self.receive(until)?;
-            if !said.starts_with('<') {
-                return Ok(said);
-            }
+    fn request_within(&mut self, command: &str, wait: Duration) -> std::io::Result<String> {
+        if self.silent {
+            return Err(std::io::ErrorKind::TimedOut.into());
         }
-    }
-
-    /// The networks in range: a scan is asked for and its end waited for,
-    /// `wait` at most (a scan of every band takes a few seconds, and a card
-    /// that is already scanning answers busy and ends its own), then the
-    /// results are read. The supplicant announces a scan's end as an
-    /// event, so its events are taken for that long.
-    fn scan(&mut self, wait: Duration) -> Option<String> {
-        self.attached = self.request("ATTACH").is_ok_and(|a| a.starts_with("OK"));
-        let asked = self.request("SCAN").is_ok_and(|a| a.starts_with("OK") || a.starts_with("FAIL-BUSY"));
-        if asked && self.attached {
+        let answer = self.socket.send(command.as_bytes()).and_then(|_| {
             let until = Instant::now() + wait;
-            while let Ok(said) = self.receive(until) {
-                if said.contains("CTRL-EVENT-SCAN-RESULTS") || said.contains("CTRL-EVENT-SCAN-FAILED") {
-                    break;
+            loop {
+                let said = self.receive(until)?;
+                if !said.starts_with('<') {
+                    return Ok(said);
                 }
             }
+        });
+        self.silent = answer.is_err();
+        answer
+    }
+
+    /// A scan is asked for and its end waited for, `wait` at most (a scan
+    /// of every band takes a few seconds, and a card that is already
+    /// scanning answers busy and ends its own); the supplicant announces a
+    /// scan's end as an event, so its events are taken for that long. The
+    /// networks are read once it has ended, and not before: a radio that
+    /// was idle starts again for a scan, inside the supplicant's call into
+    /// the kernel, and the supplicant answers nothing until that is done.
+    fn scan(&mut self, wait: Duration) -> Scan {
+        self.attached = self.request("ATTACH").is_ok_and(|a| a.starts_with("OK"));
+        if !self.attached || !self.request("SCAN").is_ok_and(|a| a.starts_with("OK") || a.starts_with("FAIL-BUSY")) {
+            return Scan::NotAsked;
         }
-        if self.attached {
-            self.attached = !self.request("DETACH").is_ok_and(|a| a.starts_with("OK"));
+        let until = Instant::now() + wait;
+        let mut ended = false;
+        while let Ok(said) = self.receive(until) {
+            if said.contains("CTRL-EVENT-SCAN-RESULTS") || said.contains("CTRL-EVENT-SCAN-FAILED") {
+                ended = true;
+                break;
+            }
         }
-        self.request("SCAN_RESULTS").ok()
+        if !ended {
+            return Scan::Running;
+        }
+        self.attached = !self.request("DETACH").is_ok_and(|a| a.starts_with("OK"));
+        match self.request("SCAN_RESULTS") {
+            Ok(found) => Scan::Ended(found),
+            Err(_) => Scan::Running,
+        }
     }
 }
 
@@ -242,8 +279,8 @@ impl Drop for Ctrl {
 /// the answer carries no passphrase and no network that is merely stored
 /// or in range.
 pub(crate) fn joined_network(env: &NetEnv, card: &str) -> Option<String> {
-    let ctrl = Ctrl::open(&env.wifi_ctrl, card).ok()?;
-    let link = wifi::parse_status(&ctrl.request_within("STATUS", STATUS_WAIT).ok()?);
+    let mut ctrl = Ctrl::open(&env.wifi_ctrl, card, STATUS_WAIT).ok()?;
+    let link = wifi::parse_status(&ctrl.request("STATUS").ok()?);
     match (link.joined(), link.ssid) {
         (true, Some(ssid)) => Some(wifi::ssid_shown(&ssid)),
         _ => None,
@@ -278,19 +315,28 @@ fn show(env: &NetEnv) -> Reply {
         });
     }
     let mut in_range: Vec<wifi::Seen> = Vec::new();
+    // The cards whose scan ended within the wait, and those whose scan was
+    // asked for and still runs.
+    let (mut scanned, mut scanning) = (0usize, 0usize);
     for card in &radios {
-        let mut ctrl = Ctrl::open(&env.wifi_ctrl, &card.name).ok();
-        // The scan first: what the card is on is asked after it, as it
-        // stands when the answer is written.
-        let found = ctrl.as_mut().and_then(|c| c.scan(env.scan_wait));
-        let status = ctrl.as_ref().map(|c| c.request("STATUS"));
+        let mut ctrl = Ctrl::open(&env.wifi_ctrl, &card.name, env.answer_wait).ok();
+        // What the card is on and what the scan before found are asked
+        // first, while the supplicant answers; the scan after them. A radio
+        // that was idle is started again for a scan inside the supplicant's
+        // call into the kernel, and the supplicant answers nothing until
+        // that is done: seconds on a USB adapter.
+        let status = ctrl.as_mut().map(|c| c.request("STATUS"));
         let line = match &status {
-            None | Some(Err(_)) => "its supplicant does not answer (embrad starts it within a few seconds of the card's appearance)".to_string(),
+            None => "not ready yet: its radio is starting, and its supplicant answers once the card is up; ask again in a moment".to_string(),
+            Some(Err(_)) => format!(
+                "its radio is busy: the supplicant gave no answer within {} s (a radio that was idle takes seconds to come up or to start a scan); ask again in a moment",
+                env.answer_wait.as_secs().max(1)
+            ),
             Some(Ok(answer)) => {
                 let link = wifi::parse_status(answer);
                 match (&link.ssid, link.joined()) {
                     (Some(ssid), true) => {
-                        let signal = ctrl.as_ref().and_then(|c| c.request("SIGNAL_POLL").ok()).and_then(|a| wifi::parse_signal(&a));
+                        let signal = ctrl.as_mut().and_then(|c| c.request("SIGNAL_POLL").ok()).and_then(|a| wifi::parse_signal(&a));
                         let how = link.key_mgmt.as_deref().map(|k| format!(" ({k})")).unwrap_or_default();
                         match signal {
                             Some(dbm) => format!("on {}{how}, signal {}", wifi::ssid_shown(ssid), wifi::signal_words(dbm)),
@@ -311,6 +357,18 @@ fn show(env: &NetEnv) -> Reply {
                 wifi::ssid_shown(&ssid)
             ));
         }
+        let before = ctrl.as_mut().and_then(|c| c.request("SCAN_RESULTS").ok());
+        let found = match ctrl.as_mut().map(|c| c.scan(env.scan_wait)) {
+            Some(Scan::Ended(found)) => {
+                scanned += 1;
+                Some(found)
+            }
+            Some(Scan::Running) => {
+                scanning += 1;
+                before
+            }
+            Some(Scan::NotAsked) | None => before,
+        };
         if let Some(answer) = found {
             for seen in wifi::parse_scan_results(&answer) {
                 match in_range.iter_mut().find(|s| s.ssid == seen.ssid) {
@@ -331,10 +389,17 @@ fn show(env: &NetEnv) -> Reply {
     });
     if !radios.is_empty() {
         in_range.sort_by(|a, b| b.signal.cmp(&a.signal).then_with(|| a.ssid.cmp(&b.ssid)));
+        let all_scanned = scanned == radios.len();
         if in_range.is_empty() {
-            text.push_str("  In range: nothing was found by this scan\n");
+            text.push_str(if all_scanned {
+                "  In range: nothing was found by this scan\n"
+            } else if scanning > 0 {
+                "  In range: the scan has not ended yet (a radio that was idle takes seconds to start one); ask again in a moment\n"
+            } else {
+                "  In range: no scan could be asked for: the card is not ready yet\n"
+            });
         } else {
-            text.push_str("  In range:\n");
+            text.push_str(if all_scanned { "  In range:\n" } else { "  In range, as the scan before found (a new scan has not ended yet; ask again for it):\n" });
             let width = in_range.iter().map(|s| wifi::ssid_shown(&s.ssid).chars().count()).max().unwrap_or(0).min(40);
             for seen in &in_range {
                 let name = wifi::ssid_shown(&seen.ssid);
@@ -504,7 +569,9 @@ mod tests {
                 let command = String::from_utf8_lossy(&buf[..n]).into_owned();
                 let answer = match command.as_str() {
                     "ATTACH" | "DETACH" => "OK\n",
-                    "SCAN_RESULTS" if !scanned.load(Ordering::SeqCst) => "bssid / frequency / signal level / flags / ssid\n",
+                    // Until its scan has ended: what the scan before found
+                    // (`BEFORE`), or nothing.
+                    "SCAN_RESULTS" if !scanned.load(Ordering::SeqCst) => answers.iter().find(|(c, _)| *c == "BEFORE").map(|(_, a)| *a).unwrap_or("bssid / frequency / signal level / flags / ssid\n"),
                     other => answers.iter().find(|(c, _)| *c == other).map(|(_, a)| *a).unwrap_or("UNKNOWN COMMAND\n"),
                 };
                 let Some(path) = from.as_pathname().map(Path::to_path_buf) else { continue };
@@ -567,6 +634,31 @@ mod tests {
         assert!(shown.contains("  Card: none. embra.wifi=0 is on this boot's kernel line: no wireless driver is loaded") && !shown.contains("is loaded when it appears"), "{shown}");
         assert!(shown.contains("  Stored: Home (open)\n"), "the stored networks are kept and shown: {shown}");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A stand-in supplicant that is inside a long call into the kernel:
+    /// it reads nothing for `busy`, then answers every question that has
+    /// queued up, in the order they came.
+    fn busy_supplicant(env: &NetEnv, answers: &'static [(&'static str, &'static str)], busy: Duration) -> std::sync::mpsc::Receiver<String> {
+        let socket = UnixDatagram::bind(env.wifi_ctrl.join("wlan0")).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(busy);
+            let mut buf = [0u8; 256];
+            while let Ok((n, from)) = socket.recv_from(&mut buf) {
+                let command = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let answer = match command.as_str() {
+                    "ATTACH" | "DETACH" => "OK\n",
+                    other => answers.iter().find(|(c, _)| *c == other).map(|(_, a)| *a).unwrap_or("UNKNOWN COMMAND\n"),
+                };
+                if let Some(path) = from.as_pathname() {
+                    let _ = socket.send_to(answer.as_bytes(), path);
+                }
+                let _ = tx.send(command);
+            }
+        });
+        rx
     }
 
     /// embrad's status for a machine with a wired card and a Wi-Fi card.
@@ -698,7 +790,7 @@ mod tests {
         );
         assert!(!shown.contains("correct horse"));
         let commands: Vec<String> = asked.try_iter().collect();
-        assert_eq!(commands, ["ATTACH", "SCAN", "DETACH", "SCAN_RESULTS", "STATUS", "SIGNAL_POLL"], "the scan and its end first, then what the card is on");
+        assert_eq!(commands, ["STATUS", "SIGNAL_POLL", "SCAN_RESULTS", "ATTACH", "SCAN", "DETACH", "SCAN_RESULTS"], "what the card is on and what it knows first, then the scan, its end, and what it found");
         // No socket of the brain's own is left beside the control directory.
         let left: Vec<String> = std::fs::read_dir(env.wifi_ctrl.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("wpa-client")).collect();
         assert!(left.is_empty(), "{left:?}");
@@ -711,16 +803,133 @@ mod tests {
         // Nothing listens on the control socket yet.
         assert!(!answer("join Home Net --key wrong passphrase", &env).refused);
         let shown = answer("", &env).text;
-        assert!(shown.contains("  wlan0 (02:00:00:00:00:00): its supplicant does not answer (embrad starts it within a few seconds of the card's appearance)\n"), "{shown}");
-        assert!(shown.contains("  In range: nothing was found by this scan\n"));
+        assert!(shown.contains("  wlan0 (02:00:00:00:00:00): not ready yet: its radio is starting, and its supplicant answers once the card is up; ask again in a moment\n"), "{shown}");
+        assert!(shown.contains("  In range: no scan could be asked for: the card is not ready yet\n"), "{shown}");
         // The supplicant is there, not on a network, and its log says why.
-        // This supplicant never announces a scan's end: the results are read after the wait all the same.
+        // This supplicant never announces a scan's end: what it had before
+        // the scan was asked for is shown, as that.
         let _asked = supplicant(&env, &[("SCAN", "OK\n"), ("STATUS", "wpa_state=SCANNING\naddress=02:00:00:00:00:00\n"), ("SCAN_RESULTS", "bssid / frequency / signal level / flags / ssid\n02:00:00:00:04:00\t2462\t-80\t[ESS]\tguest\n")], None);
         std::fs::write(env.wifi_logs.join("wlan0.log"), "wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"Home Net\" auth_failures=1 duration=10 reason=WRONG_KEY\n").unwrap();
         let shown = answer("", &env).text;
         assert!(shown.contains("  wlan0 (02:00:00:00:00:00): on no network yet (scanning)\n           Home Net refused the passphrase that is stored for it: /network wifi join Home Net --key <passphrase> stores another\n"), "{shown}");
-        assert!(shown.contains("  In range:\n    guest  weak, -80 dBm  open\n"), "{shown}");
+        assert!(shown.contains("  In range, as the scan before found (a new scan has not ended yet; ask again for it):\n    guest  weak, -80 dBm  open\n"), "{shown}");
         assert!(!shown.contains("wrong passphrase"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    const HEADER: &str = "bssid / frequency / signal level / flags / ssid\n";
+
+    #[test]
+    fn a_radio_that_is_busy_is_said_so_and_a_late_answer_is_never_read_as_another_questions() {
+        let (root, mut env) = machine("busy", true);
+        env.answer_wait = Duration::from_millis(100);
+        // The card is on a network, and its supplicant is inside a long
+        // call into the kernel (a radio that was idle is started again for
+        // a scan): nothing is read for a while, then every question that
+        // queued up is answered, in order.
+        let asked = busy_supplicant(
+            &env,
+            &[
+                ("STATUS", "ssid=Home Net\nkey_mgmt=WPA2-PSK\nwpa_state=COMPLETED\n"),
+                ("SIGNAL_POLL", "RSSI=-50\n"),
+                ("SCAN", "OK\n"),
+                ("SCAN_RESULTS", "bssid / frequency / signal level / flags / ssid\n02:00:00:00:01:00\t2412\t-50\t[WPA2-PSK-CCMP][ESS]\tHome Net\n"),
+            ],
+            Duration::from_millis(500),
+        );
+        let started = Instant::now();
+        let shown = answer("", &env).text;
+        let took = started.elapsed();
+        assert!(
+            shown.contains("  wlan0 (02:00:00:00:00:00): its radio is busy: the supplicant gave no answer within 1 s (a radio that was idle takes seconds to come up or to start a scan); ask again in a moment\n"),
+            "{shown}"
+        );
+        assert!(shown.contains("  In range: no scan could be asked for: the card is not ready yet\n"), "{shown}");
+        assert!(took >= Duration::from_millis(100) && took < Duration::from_millis(400), "one question's wait, and no other question after it: {took:?}");
+        // The answers come, late: none of them was read as the answer to a
+        // later question, because no later question was asked.
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(asked.try_iter().collect::<Vec<String>>(), ["STATUS"]);
+        // The supplicant answers again: the card's line and its list are its own.
+        let shown = answer("", &env).text;
+        assert!(shown.contains("  wlan0 (02:00:00:00:00:00): on Home Net (WPA2-PSK), signal strong, -50 dBm\n"), "{shown}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_scan_that_outlasts_the_wait_shows_what_the_scan_before_found_and_says_so() {
+        let (root, mut env) = machine("slow-scan", true);
+        env.scan_wait = Duration::from_millis(100);
+        let asked = supplicant(
+            &env,
+            &[
+                ("SCAN", "OK\n"),
+                ("STATUS", "wpa_state=INACTIVE\n"),
+                ("BEFORE", "bssid / frequency / signal level / flags / ssid\n02:00:00:00:07:00\t2437\t-61\t[WPA2-PSK-CCMP][ESS]\tEarlier\n"),
+                ("SCAN_RESULTS", "bssid / frequency / signal level / flags / ssid\n02:00:00:00:08:00\t5180\t-44\t[WPA2-SAE-CCMP][ESS]\tFresh\n"),
+            ],
+            Some(Duration::from_millis(600)),
+        );
+        let shown = answer("", &env).text;
+        assert!(shown.contains("  wlan0 (02:00:00:00:00:00): on no network: none is stored\n"), "the card's own line is asked before the scan: {shown}");
+        assert!(shown.contains("  In range, as the scan before found (a new scan has not ended yet; ask again for it):\n    Earlier  good, -61 dBm  WPA2\n"), "{shown}");
+        assert!(!shown.contains("Fresh"), "{shown}");
+        let commands: Vec<String> = asked.try_iter().collect();
+        assert_eq!(commands.get(..4), Some(&["STATUS".to_string(), "SCAN_RESULTS".to_string(), "ATTACH".to_string(), "SCAN".to_string()][..]), "nothing is asked of a supplicant whose scan has not ended: {commands:?}");
+        // Asked again once that scan has ended: what it found is what the
+        // card knows now.
+        std::thread::sleep(Duration::from_millis(800));
+        let shown = answer("", &env).text;
+        assert!(shown.contains("    Fresh  strong, -44 dBm  WPA3\n") && !shown.contains("Earlier"), "{shown}");
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // Nothing from before: the answer says the scan runs, and not that
+        // nothing is in range.
+        let (root, mut env) = machine("slow-first-scan", true);
+        env.scan_wait = Duration::from_millis(100);
+        let _asked = supplicant(&env, &[("SCAN", "OK\n"), ("STATUS", "wpa_state=INACTIVE\n"), ("SCAN_RESULTS", HEADER)], Some(Duration::from_millis(600)));
+        let shown = answer("", &env).text;
+        assert!(shown.contains("  In range: the scan has not ended yet (a radio that was idle takes seconds to start one); ask again in a moment\n"), "{shown}");
+        assert!(!shown.contains("nothing was found"), "{shown}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_question_does_not_wait_without_end_for_room_in_a_supplicants_queue() {
+        let (root, env) = machine("queue", true);
+        // A supplicant that reads nothing, and its queue filled to the
+        // brim. One sender is stopped by its own allowance before the
+        // queue is full, so senders are added until a new one finds no
+        // room for its first question.
+        let silent = UnixDatagram::bind(env.wifi_ctrl.join("wlan0")).unwrap();
+        let mut fillers = Vec::new();
+        let mut queued = 0u32;
+        loop {
+            let filler = UnixDatagram::unbound().unwrap();
+            filler.set_nonblocking(true).unwrap();
+            let mut sent = 0u32;
+            while filler.send_to(b"STATUS", env.wifi_ctrl.join("wlan0")).is_ok() {
+                sent += 1;
+            }
+            queued += sent;
+            fillers.push(filler);
+            if sent == 0 {
+                break;
+            }
+            assert!(fillers.len() < 256, "the queue never filled ({queued} questions)");
+        }
+        // The status tool's question finds no room. It gives up after the
+        // wait for room; on a thread, so that a question that waits without
+        // end fails this test and does not hang it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let _ = tx.send(joined_network(&env, "wlan0"));
+        });
+        let answer = rx.recv_timeout(Duration::from_secs(5));
+        assert_eq!(answer, Ok(None), "after {:?} with {queued} questions queued", started.elapsed());
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        drop((silent, fillers));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
