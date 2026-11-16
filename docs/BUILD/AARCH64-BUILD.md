@@ -246,7 +246,8 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 > Apple's vmnet framework wants an entitlement Homebrew's QEMU lacks. There are no
 > port forwards in that mode; the banner's second URL, on the leased address, is the
 > one to open, from this Mac or from another machine on the LAN (the certificate
-> names `localhost`, so the browser warns about the name once).
+> names that address; the browser warns about the machine's own CA until its
+> certificate is imported once, `/api/ca.crt`: QUICK-START.md, Network and display).
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM provider
 + credentials, timezone), then Learning Mode forms and seals the soul.

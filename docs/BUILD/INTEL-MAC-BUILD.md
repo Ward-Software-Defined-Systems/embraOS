@@ -268,7 +268,8 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > Apple's vmnet framework wants an entitlement Homebrew's QEMU lacks. There are no
 > port forwards in that mode; the banner's second URL, on the leased address, is the
 > one to open, from this Mac or from another machine on the LAN (the certificate
-> names `localhost`, so the browser warns about the name once). The same recipe
+> names that address; the browser warns about the machine's own CA until its
+> certificate is imported once, `/api/ca.crt`: QUICK-START.md, Network and display). The same recipe
 > for Apple Silicon, with `-device virtio-gpu-pci` and a USB keyboard beside the
 > tablet, is in [AARCH64-BUILD.md](AARCH64-BUILD.md).
 
