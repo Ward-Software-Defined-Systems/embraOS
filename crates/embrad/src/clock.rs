@@ -505,7 +505,14 @@ fn exchange(address: SocketAddr, wait: Duration, nonce: u64) -> Result<Sample, M
                     Err(refusal) => return Err(Miss::next(refusal.to_string())),
                 }
             }
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => return Err(no_answer()),
+            // None of these is the wait's end: the deadline above says
+            // that. A signal that reaches this thread ends a receive that
+            // has a timeout, with a handler or without one, and the kernel
+            // never restarts it (signal(7)); a child of PID 1 that exits is
+            // enough to wake a thread. And a receive that was woken so near
+            // its end reports its timeout a fraction of a millisecond early
+            // (199.3 ms of 200 on Linux 6.8).
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => continue,
             // A port nobody listens on answers with an ICMP error.
             Err(e) => return Err(Miss::next(e.to_string())),
         }
@@ -1284,6 +1291,101 @@ mod tests {
         };
         let miss = exchange(closed, Duration::from_secs(5), nonce()).unwrap_err();
         assert!(!miss.stop && !miss.reason.contains("no answer within"), "the refusal, not the wait: {miss:?}");
+    }
+
+    /// A signal for a test to send to one of its own threads: a real-time
+    /// signal nothing else in the process uses, with a handler that does
+    /// nothing (without one its default action ends the process). The
+    /// handler asks for an interrupted call to be restarted, as the
+    /// runtime's own handlers do: a receive that has a timeout is not.
+    fn test_signal() -> libc::c_int {
+        extern "C" fn nothing(_: libc::c_int) {}
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        let signal = libc::SIGRTMIN() + 7;
+        INSTALLED.call_once(|| {
+            // SAFETY: a zeroed sigaction with an empty mask and a handler
+            // that touches nothing, for a signal no other code here uses.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = nothing as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                action.sa_flags = libc::SA_RESTART;
+                libc::sigemptyset(&mut action.sa_mask);
+                assert_eq!(libc::sigaction(signal, &action, std::ptr::null_mut()), 0);
+            }
+        });
+        signal
+    }
+
+    /// How long [`under_signals`] goes on sending.
+    const SIGNALS_FOR: Duration = Duration::from_secs(12);
+
+    /// Runs `call` on a thread of its own and sends that thread a signal
+    /// every `gap` until it has returned, counting them in `sent`. The
+    /// call's answer, and whether it came while the signals still did.
+    fn under_signals<T: Send + 'static>(sent: &std::sync::atomic::AtomicU32, gap: Duration, call: impl FnOnce() -> T + Send + 'static) -> (T, bool) {
+        use std::os::unix::thread::JoinHandleExt;
+        use std::sync::atomic::Ordering;
+        let signal = test_signal();
+        let thread = std::thread::spawn(call);
+        let until = Instant::now() + SIGNALS_FOR;
+        while !thread.is_finished() && Instant::now() < until {
+            std::thread::sleep(gap);
+            // SAFETY: the handle is held until the join below, so the id
+            // names this thread, running or ended.
+            if !thread.is_finished() && unsafe { libc::pthread_kill(thread.as_pthread_t(), signal) } == 0 {
+                sent.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let in_time = thread.is_finished();
+        (thread.join().expect("the call"), in_time)
+    }
+
+    /// A signal that reaches the thread inside an exchange ends its
+    /// receive and not the exchange. An answer that comes after the thread
+    /// was interrupted is taken. Against a silent server the wait is the
+    /// whole of what was asked and ends while the signals still come: a
+    /// receive that a signal woke near its end reports its timeout early,
+    /// which is not the wait's end either.
+    #[test]
+    fn a_signal_during_the_wait_is_not_the_end_of_an_exchange() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        // A server that answers once three signals have been sent to the
+        // thread that waits for it (ten seconds at most, so a failure
+        // leaves no thread behind).
+        let sent = Arc::new(AtomicU32::new(0));
+        let late = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = late.local_addr().unwrap();
+        let seen = sent.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 128];
+            let Ok((_, from)) = late.recv_from(&mut buf) else { return };
+            let echoed = u64::from_be_bytes(buf[40..48].try_into().unwrap());
+            for _ in 0..2000 {
+                if seen.load(Ordering::SeqCst) >= 3 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = late.send_to(&answer(echoed, REAL), from);
+        });
+        let (sample, _) = under_signals(&sent, Duration::from_millis(30), move || exchange(address, Duration::from_secs(60), nonce()));
+        assert_eq!(sample.expect("the answer, after the signals").time.secs, REAL);
+        assert!(sent.load(Ordering::SeqCst) >= 3, "the answer was held back until three signals were sent");
+
+        // A silent server and a signal every tenth of a millisecond, twelve
+        // short waits over: in most of them a receive is woken in the
+        // wait's last millisecond.
+        for round in 0..12 {
+            let silent = server(1, |_| Vec::new());
+            let sent = AtomicU32::new(0);
+            let started = Instant::now();
+            let (miss, in_time) = under_signals(&sent, Duration::from_micros(100), move || exchange(silent, Duration::from_millis(25), nonce()).unwrap_err());
+            let took = started.elapsed();
+            assert_eq!(miss, Miss { reason: "no answer within 0.025 s".into(), stop: false }, "round {round}");
+            assert!(took >= Duration::from_millis(25), "round {round}: the whole wait, after {} signals: {took:?}", sent.load(Ordering::SeqCst));
+            assert!(in_time, "round {round}: the wait ended while the signals still came");
+        }
     }
 
     #[test]
