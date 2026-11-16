@@ -469,7 +469,7 @@ pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockSt
         Some(c) => {
             let asked = match &c.sync {
                 Sync::Failed { server, reason } => format!("no time came from {server} ({reason})"),
-                Sync::Off => "embra.ntp=off asks no time server".to_string(),
+                Sync::Off => "no time server is asked (embra.ntp=off, or /network time off)".to_string(),
                 Sync::Synchronized { .. } => String::new(),
             };
             match (c.floored_from, c.resumed_from) {
@@ -893,7 +893,7 @@ mod tests {
         assert!(h.contains(": either the clock is behind or the certificate is dated in the future, and nothing confirmed the clock. At boot no time came from time.cloudflare.com (no answer within 5 s)."), "{h}");
         assert!(h.ends_with(FIX), "{h}");
         let h = date_hint(expired, Some(&off), 0);
-        assert!(h.contains(": either the certificate has expired or the clock is ahead, and nothing confirmed the clock. At boot embra.ntp=off asks no time server."), "{h}");
+        assert!(h.contains(": either the certificate has expired or the clock is ahead, and nothing confirmed the clock. At boot no time server is asked (embra.ntp=off, or /network time off)."), "{h}");
         // No record (a development host): the same verdict without a reason, and the clock read now when rustls gave no time.
         assert_eq!(
             date_hint(DateRefusal::NotYet { at: None, bound: None }, None, 1_794_452_922),

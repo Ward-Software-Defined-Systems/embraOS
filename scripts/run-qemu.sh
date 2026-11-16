@@ -31,7 +31,7 @@
 #       VM, by the ids lsusb shows (a Wi-Fi adapter: 0bda:c811)
 # The clock's knob, which reaches the kernel line:
 #   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks in
-#       this boot (time.cloudflare.com without it); off asks none
+#       this boot (else /network time's, the DHCP lease's, then time.cloudflare.com); off asks none
 # The display console's knobs. They reach the kernel line, and act on a VM
 # that has the display (EMBRA_VNC=1, which EMBRA_KIOSK=1 implies):
 #   EMBRA_KIOSK=0|1             embra.kiosk: the display console off, or on; the OS's default is on with a display

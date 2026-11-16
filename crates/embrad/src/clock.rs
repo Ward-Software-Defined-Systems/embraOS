@@ -1,4 +1,4 @@
-//! The clock at boot.
+//! The clock: at boot, and while the machine runs.
 //!
 //! The kernel takes the time from the machine's hardware clock (the CMOS
 //! clock on x86, read as UTC; a hypervisor's own on a VM), and until this
@@ -7,7 +7,7 @@
 //! rig of 2026-11-11 — every certificate is then "not valid yet", and a
 //! first boot dates the OS's own certificate authority from that clock.
 //!
-//! Two steps, both before any service:
+//! Two steps before any service, and a third beside the services:
 //!
 //! 1. The floor ([`apply_floor`], first thing in `main`). A clock earlier
 //!    than the image's build time (`BUILT` in `/etc/embraos-release`) has
@@ -17,20 +17,31 @@
 //!    on both consoles; it makes the clock sane, not right.
 //! 2. The fetch ([`sync_at_boot`], after the network is up and before a
 //!    maintenance job, the database and the trust service, which makes the
-//!    CA on a first boot). One SNTP exchange (RFC 4330) with
-//!    [`DEFAULT_TIME_SERVER`], or with `embra.ntp=<host>[:<port>]`;
-//!    `embra.ntp=off` asks nobody. The boot waits [`FETCH_WAIT`] at most. An
+//!    CA on a first boot). An SNTP exchange (RFC 4330) with the servers
+//!    [`targets`] names, in order: the kernel line's
+//!    (`embra.ntp=<host>[:<port>]`, for that boot; `embra.ntp=off` asks
+//!    nobody), else the operator's (`/network time`, which can be `off`
+//!    too), else two of the time servers the DHCP leases name and then
+//!    [`DEFAULT_TIME_SERVER`]. The boot waits [`FETCH_WAIT`] at most. An
 //!    answer sets the clock, and the hardware clock when that was a second
 //!    or more off, so the next boot starts right without a network.
+//! 3. The checks while the services run ([`keep_checked`], a thread of its
+//!    own): the same servers are asked again every hour, a quarter of an
+//!    hour after a check that came to nothing or an answer more than a
+//!    quarter of a second off, and at once when the network tells of a new
+//!    address, a link that returned or other servers. Less than half a
+//!    second is slewed, so no timestamp steps backwards; more is stepped,
+//!    and the hardware clock written. Once a time server has set the clock
+//!    in a boot, an answer more than a quarter of an hour away from it is
+//!    recorded and not applied; a boot that got no answer takes its first
+//!    one whole.
 //!
 //! The outcome is `/run/embra/clock-status` (`embra_boot::clock`): the
 //! banner names a clock that step 1 moved and no time server confirmed
 //! ([`banner_lines`]), and the brain reads the record for a certificate
 //! date error's hint.
 //!
-//! The clock is set at boot and at no other time: nothing here sets it
-//! while the services run, so no timestamp they write ever steps
-//! backwards. What does run beside them is the save ([`keep_saved`]): the
+//! What also runs beside the services is the save ([`keep_saved`]): the
 //! clock written to STATE every [`SAVE_EVERY`] and once more at a restart,
 //! so that a board whose clock battery is dead and which boots without a
 //! network starts where it left off, behind by as long as it was off, and
@@ -912,7 +923,8 @@ pub fn banner_lines(status: Option<&ClockStatus>) -> Vec<String> {
     let was = status.floored_from.map(format_utc).unwrap_or_default();
     let why = match &status.sync {
         Sync::Failed { server, reason } => format!("no time came from {server} ({reason})"),
-        Sync::Off => "embra.ntp=off asks no time server".to_string(),
+        // The kernel line or the operator's setting: the record does not say which.
+        Sync::Off => "no time server is asked (embra.ntp=off, or /network time off)".to_string(),
         Sync::Synchronized { .. } => return Vec::new(),
     };
     let clock = match (status.resumed_from, status.built) {
@@ -1422,7 +1434,7 @@ mod tests {
             "Certificates are checked against it, and one that begins later is refused. Set the date in the firmware setup (in UTC), or boot on a network where a time server answers (embra.ntp=<host>)."
         );
         let off = ClockStatus { sync: Sync::Off, ..guess };
-        assert!(banner_lines(Some(&off))[0].ends_with("and embra.ntp=off asks no time server."));
+        assert!(banner_lines(Some(&off))[0].ends_with("and no time server is asked (embra.ntp=off, or /network time off)."));
     }
 
     #[test]
