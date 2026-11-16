@@ -19,6 +19,7 @@ pub mod grubenv;
 pub mod layout;
 pub mod loopdev;
 pub mod media;
+pub mod names;
 pub mod net;
 pub mod net_lease;
 pub mod net_settings;

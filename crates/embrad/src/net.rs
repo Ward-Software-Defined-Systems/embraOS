@@ -51,8 +51,9 @@ pub(crate) const KEEPER_TICK: Duration = Duration::from_secs(2);
 const SHORT_BREAK: Duration = Duration::from_secs(10);
 /// A client that exited is not started again sooner than this.
 const RESTART_PAUSE: Duration = Duration::from_secs(5);
-/// The name every DHCP request carries.
-pub(crate) const DEFAULT_HOSTNAME: &str = "embraos";
+/// The machine's name when nobody gave it one, which a DHCP request then
+/// carries; the certificate authority admits it by the same constant.
+pub(crate) use embra_boot::names::DEFAULT_HOSTNAME;
 
 /// The helpers embrad starts beside its services: a DHCP client a card. The
 /// reaper (`reconcile::reap_orphans`) takes every exited child that is not
