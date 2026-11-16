@@ -159,8 +159,9 @@ pub struct EmbeddingHealth {
 }
 
 /// The A/B slots as embrad published them at boot (`/run/embra/boot-status`;
-/// `embra_boot::BootStatus`): absent on a boot without a slot (the
-/// direct-kernel path, a development host).
+/// `embra_boot::BootStatus`): absent without that file (a development
+/// host). embrad writes it at every boot, so a boot without a slot (the
+/// direct-kernel path) has the block with `booted: null`.
 #[derive(Debug, Serialize)]
 pub struct SlotReport {
     pub booted: Option<String>,
@@ -230,7 +231,7 @@ pub fn clock_report() -> Option<ClockReport> {
 #[derive(Debug, Serialize)]
 pub struct SystemStatus {
     pub version: String,
-    /// The A/B slots (`slot_report`); omitted on a boot without a slot.
+    /// The A/B slots (`slot_report`); omitted without embrad's status file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot: Option<SlotReport>,
     /// What set the clock and what the last check came to (`clock_report`);

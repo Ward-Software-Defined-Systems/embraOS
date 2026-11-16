@@ -32,6 +32,8 @@ WardSONDB is a core OS service. If it fails, the brain can't read state and the 
 
 **2026-10-03.** Two of the three mitigations exist. Crash recovery is the storage engine's — fjall or rocksdb, chosen when the image is built (`--storage-engine`) — and `embrad` restarts the database with backoff under a burst budget (`crates/embrad/src/supervisor.rs`). Snapshot restore is `scripts/embraos-backup.sh` (`backup`, `restore`, `list`, `verify` of STATE and DATA), a file-level copy taken from the host with the VM stopped. There is still no replica, and no design for one.
 
+**2026-11-15.** The OS now takes and restores its own snapshots as well: `/backup` on a running machine, and the boot menu's Restore entry ([UPDATES-AND-BACKUPS.md](OPERATIONS/UPDATES-AND-BACKUPS.md)). The host script stays for an image that is not running. There is still no replica.
+
 **2026-10-24.** The brain's side of a database that is away: its client has a connect timeout and a read-idle timeout (`788a412`), and a read that fails is reported as a failure — an Error frame at a turn, an attach or a `/switch`, a tool reply that says the read failed — never as empty state (`f2e44b9`, `4edd79b`, `af1c8fd`). The brain stays up and says so. The replica is still undesigned.
 
 ## Bare metal vs K8s isolation parity
@@ -75,7 +77,7 @@ Opened 2026-11-05, with DHCP, as "the certificate on a leased address"; the addr
 
 ## The clock: an unauthenticated answer
 
-embrad sets the clock at boot and checks it while the OS runs: a hardware clock that reads earlier than the image's build time is set to it, and a time server is asked by SNTP, before any service starts and every hour after (`crates/embrad/src/clock.rs`; [QUICK-START.md](BUILD/QUICK-START.md), The clock). Three things are open.
+embrad sets the clock at boot and checks it while the OS runs: a hardware clock that reads earlier than the image's build time is moved forward (to the last time the machine saved, or to the build time), and a time server is asked by SNTP, before any service starts and every hour after (`crates/embrad/src/clock.rs`; [QUICK-START.md](BUILD/QUICK-START.md), The clock). Three things are open.
 
 - **The answer is not authenticated.** embrad ties an answer to its request with a random value the server returns, which stops a forger off the path, and refuses a time earlier than the image's build time. A host on the path can still forge a later time. On a running machine one bound holds: once a time server has set the clock in a boot, an answer more than fifteen minutes away from it is recorded and not applied. A boot's first answer is taken whole. NTS (RFC 8915) would authenticate the answer; it is not implemented.
 - **The source.** The default is one name, `time.cloudflare.com` (`DEFAULT_TIME_SERVER`), asked after the time servers a DHCP lease names; the operator's own (`/network time`) replace both. The NTP Pool's zone names are not used: its rules for vendors forbid them as the default of a distributed system without a vendor zone, and embraOS has none; with one, the default becomes that zone. A DHCP server is believed about its time servers as it is about its router: a host that answers DHCP on a network is on the path already.

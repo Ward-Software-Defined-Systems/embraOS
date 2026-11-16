@@ -423,8 +423,8 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
 - **Step 4 — Buildroot.** Linux-only. Clones Buildroot (into an existing-but-empty
   `buildroot-src` too — the named-volume mountpoint case), ensures it is at
   `$BUILDROOT_VERSION` (default `2026.02.1`) via the safe-switch, dircleans the embraOS
-  + upstream packages, configures `embraos_aarch64_defconfig`, stages the pinned kernel
-  tarball (Step 4a, verified against `scripts/linux-kernel.sha256`), and builds the kernel
+  + upstream packages, stages the pinned kernel tarball (Step 4a, verified against
+  `scripts/linux-kernel.sha256`), configures `embraos_aarch64_defconfig`, and builds the kernel
   (`Image`, installed into the rootfs at `/boot`) + GRUB (`BOOTAA64.EFI`) + SquashFS
   rootfs + `embraos.img`. On macOS the Docker pass mounts the
   named volume `embraos-br-aarch64` at `buildroot-src`, keeping the tree and all build
@@ -604,7 +604,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
 | Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi, on Hyper-V and, but for the pointer and a click, on Parallels Desktop) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page at 800x600, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
-| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` alone, read back the same way; the wireless drivers as modules beside the arm64 base configuration's own, which nothing loads (1383 of them, 71 MB uncompressed under `/lib/modules`, on the 2026-11-09 build, before the wireless drivers) |
+| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` alone, read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (1383 of them, 71 MB uncompressed under `/lib/modules`, on the 2026-11-09 build, before the wireless drivers). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others. The image has not been built since the wireless drivers, their firmware and the three packages joined the tree: **TBD** until run |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors (validated under QEMU, on ESXi, on Hyper-V and on Parallels Desktop) | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)); validated on Apple Silicon under QEMU and under VMware Fusion (2026-11-11) |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
 | Pre-wave-6 tree | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
