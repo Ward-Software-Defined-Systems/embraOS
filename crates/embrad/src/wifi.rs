@@ -210,8 +210,12 @@ impl Keeper {
                     self.loaded_any = true;
                 }
                 (Errand::Load { module, modalias }, false) => warn!("the Wi-Fi driver {module} could not be loaded for {modalias}"),
-                (Errand::Switch { ids, place }, true) => info!("USB device {ids} at {place}: switched to its working mode"),
-                (Errand::Switch { ids, place }, false) => warn!("USB device {ids} at {place}: the mode switch failed; it stays what it shows itself as"),
+                // The tool exits well when it has sent the switch, and also
+                // when it found nothing to send it to: whether the adapter
+                // left its driver-disk mode shows as a new device at a
+                // later look, not here.
+                (Errand::Switch { ids, place }, true) => info!("USB device {ids} at {place}: the mode-switch tool has run; an adapter that left its driver-disk mode comes back as another device"),
+                (Errand::Switch { ids, place }, false) => warn!("USB device {ids} at {place}: the mode-switch tool failed; the device stays what it shows itself as"),
             }
         }
         // A USB adapter that shows itself as a driver disk has no Wi-Fi
