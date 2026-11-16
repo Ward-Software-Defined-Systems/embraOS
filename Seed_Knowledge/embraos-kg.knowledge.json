@@ -111,7 +111,7 @@
       "id": "seed_kg_orphan_sweep",
       "kind": "semantic",
       "category": "fact",
-      "content": "knowledge_sweep_orphans removes edges whose endpoints no longer resolve, and deletes nothing else: a node that no memory entry points at is healed or adopted (it gets its entry back), never deleted, and a real run writes a record of what it removed, which knowledge_restore reads. It is cleanup for dangling references after deletions, never density management.",
+      "content": "knowledge_sweep_orphans removes edges whose endpoints no longer resolve, and deletes nothing else: a node that no memory entry points at is healed (its unpromoted entry is pointed at it again), adopted (an entry is written back for it) or, when its entry already has another node, reported as a pair for knowledge_merge; it is never deleted. A real run writes a record of the edges it removed, which knowledge_restore reads. It is cleanup for dangling references after deletions, never density management.",
       "tags": ["curation", "edges", "maintenance"]
     },
     {
