@@ -272,8 +272,13 @@ mod tests {
     async fn a_read_past_its_timeout_is_stopped_at_its_next_checkpoint() {
         let stopped = Arc::new(AtomicBool::new(false));
         let seen_by_read = stopped.clone();
-        let started = Instant::now();
-        let result = with_query_timeout(1, move || {
+        // The stand-in's other way out. Dropping the test's runtime waits
+        // for a read that is still running, so a read that nothing stops
+        // would turn a failure of this test into a run that never ends:
+        // the test tells the read to end before it asserts anything.
+        let given_up = Arc::new(AtomicBool::new(false));
+        let told_to_end = given_up.clone();
+        let read = with_query_timeout(1, move || {
             let mut seen = 0u64;
             loop {
                 if let Err(e) = cancel::checkpoint(&mut seen) {
@@ -285,20 +290,26 @@ mod tests {
                 // a yield takes milliseconds, and a thousand of them between
                 // two looks carried the read past the wait below.
                 if seen.is_multiple_of(cancel::CHECK_EVERY) {
+                    if told_to_end.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
                     std::thread::yield_now();
                 }
             }
-        })
-        .await;
-        assert!(
-            matches!(result, Err(AppError::QueryTimeout(1))),
-            "{result:?}"
-        );
-        assert!(started.elapsed() < Duration::from_secs(5));
+        });
+        // Five seconds for the answer, where the timeout is one: a client
+        // that is never answered fails the test too.
+        let result = tokio::time::timeout(Duration::from_secs(5), read).await;
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
+        while result.is_ok() && !stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(stopped.load(Ordering::SeqCst), "the abandoned read stopped");
+        let was_stopped = stopped.load(Ordering::SeqCst);
+        given_up.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(result, Ok(Err(AppError::QueryTimeout(1)))),
+            "{result:?}"
+        );
+        assert!(was_stopped, "the abandoned read stopped");
     }
 }
