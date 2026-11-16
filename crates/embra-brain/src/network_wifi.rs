@@ -188,6 +188,13 @@ enum Scan {
     NotAsked,
 }
 
+/// A timed call on the control socket came back with nothing, and not
+/// because of the other side: it was interrupted, or its timeout was
+/// reported. The caller's deadline decides whether the wait goes on.
+fn waits_on(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted)
+}
+
 impl Ctrl {
     fn open(ctrl_dir: &Path, card: &str, answer_wait: Duration) -> std::io::Result<Ctrl> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -196,22 +203,50 @@ impl Ctrl {
         let socket = UnixDatagram::bind(&own)?;
         let ctrl = Ctrl { socket, own, answer_wait, attached: false, silent: false };
         ctrl.socket.connect(ctrl_dir.join(card))?;
-        // A supplicant that reads nothing (it is inside a long call into
-        // the kernel) fills its queue; a question must not wait for room
-        // in it without end.
-        ctrl.socket.set_write_timeout(Some(SEND_WAIT))?;
         Ok(ctrl)
     }
 
-    fn receive(&self, until: Instant) -> std::io::Result<String> {
-        let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(std::io::ErrorKind::TimedOut.into());
+    /// One datagram to the supplicant. A supplicant that reads nothing (it
+    /// is inside a long call into the kernel) fills its queue, and a
+    /// question must not wait for room in it without end: [`SEND_WAIT`] in
+    /// all, which the deadline says and nothing else. A signal that reaches
+    /// this thread ends a send or a receive that has a timeout, with a
+    /// handler or without one, and the kernel never restarts it
+    /// (signal(7)); and a receive that was woken so near its end reports
+    /// its timeout a fraction of a millisecond early. Either way the wait
+    /// goes on for what is left of it.
+    fn send(&self, command: &[u8]) -> std::io::Result<()> {
+        let until = Instant::now() + SEND_WAIT;
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            self.socket.set_write_timeout(Some(left))?;
+            match self.socket.send(command) {
+                Ok(_) => return Ok(()),
+                Err(e) if waits_on(&e) => continue,
+                Err(e) => return Err(e),
+            }
         }
-        self.socket.set_read_timeout(Some(left))?;
+    }
+
+    /// What the supplicant says next, `until` at the latest; the wait ends
+    /// as in [`Ctrl::send`].
+    fn receive(&self, until: Instant) -> std::io::Result<String> {
         let mut buf = vec![0u8; 16 * 1024];
-        let n = self.socket.recv(&mut buf)?;
-        Ok(String::from_utf8_lossy(buf.get(..n).unwrap_or(&[])).into_owned())
+        loop {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+            self.socket.set_read_timeout(Some(left))?;
+            match self.socket.recv(&mut buf) {
+                Ok(n) => return Ok(String::from_utf8_lossy(buf.get(..n).unwrap_or(&[])).into_owned()),
+                Err(e) if waits_on(&e) => continue,
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// One command and its answer. What the supplicant says of its own
@@ -224,7 +259,7 @@ impl Ctrl {
         if self.silent {
             return Err(std::io::ErrorKind::TimedOut.into());
         }
-        let answer = self.socket.send(command.as_bytes()).and_then(|_| {
+        let answer = self.send(command.as_bytes()).and_then(|_| {
             let until = Instant::now() + wait;
             loop {
                 let said = self.receive(until)?;
@@ -297,7 +332,7 @@ impl Ctrl {
 impl Drop for Ctrl {
     fn drop(&mut self) {
         if self.attached {
-            let _ = self.socket.send(b"DETACH");
+            let _ = self.send(b"DETACH");
         }
         let _ = std::fs::remove_file(&self.own);
     }
@@ -611,6 +646,20 @@ mod tests {
         command.split(" MASK=").next().unwrap_or(command).to_string()
     }
 
+    /// A stand-in's next question, `None` once its socket's wait has run
+    /// out. A wait that a signal interrupted is not its end: the stand-in's
+    /// socket has a timeout as the brain's has, and a stand-in that left
+    /// would fail its test.
+    fn next_question(socket: &UnixDatagram, buf: &mut [u8]) -> Option<(usize, std::os::unix::net::SocketAddr)> {
+        loop {
+            match socket.recv_from(buf) {
+                Ok(question) => return Some(question),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            }
+        }
+    }
+
     /// A stand-in supplicant on wlan0's control socket. It answers from
     /// `answers` and takes `ATTACH` and `DETACH`. With `scan_ends`, a
     /// `SCAN` runs for that long, as the supplicant's does: an event at its
@@ -626,7 +675,7 @@ mod tests {
         let scanned = Arc::new(AtomicBool::new(scan_ends.is_none()));
         std::thread::spawn(move || {
             let mut buf = [0u8; 256];
-            while let Ok((n, from)) = socket.recv_from(&mut buf) {
+            while let Some((n, from)) = next_question(&socket, &mut buf) {
                 let command = String::from_utf8_lossy(&buf[..n]).into_owned();
                 let table = |key: &str| answers.iter().find(|(c, _)| *c == key).map(|(_, a)| *a);
                 let answer = match command.as_str() {
@@ -711,7 +760,7 @@ mod tests {
         std::thread::spawn(move || {
             std::thread::sleep(busy);
             let mut buf = [0u8; 256];
-            while let Ok((n, from)) = socket.recv_from(&mut buf) {
+            while let Some((n, from)) = next_question(&socket, &mut buf) {
                 let command = String::from_utf8_lossy(&buf[..n]).into_owned();
                 let table = |key: &str| answers.iter().find(|(c, _)| *c == key).map(|(_, a)| *a);
                 let answer = match command.as_str() {
@@ -990,13 +1039,12 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    #[test]
-    fn a_question_does_not_wait_without_end_for_room_in_a_supplicants_queue() {
-        let (root, env) = machine("queue", true);
-        // A supplicant that reads nothing, and its queue filled to the
-        // brim. One sender is stopped by its own allowance before the
-        // queue is full, so senders are added until a new one finds no
-        // room for its first question.
+    /// A supplicant on wlan0 that reads nothing, and its queue filled to
+    /// the brim. One sender is stopped by its own allowance before the
+    /// queue is full, so senders are added until a new one finds no room
+    /// for its first question. The supplicant's socket, the senders' (kept
+    /// open by the test) and how many questions queued.
+    fn full_queue(env: &NetEnv) -> (UnixDatagram, Vec<UnixDatagram>, u32) {
         let silent = UnixDatagram::bind(env.wifi_ctrl.join("wlan0")).unwrap();
         let mut fillers = Vec::new();
         let mut queued = 0u32;
@@ -1014,6 +1062,13 @@ mod tests {
             }
             assert!(fillers.len() < 256, "the queue never filled ({queued} questions)");
         }
+        (silent, fillers, queued)
+    }
+
+    #[test]
+    fn a_question_does_not_wait_without_end_for_room_in_a_supplicants_queue() {
+        let (root, env) = machine("queue", true);
+        let (silent, fillers, queued) = full_queue(&env);
         // The status tool's question finds no room. It gives up after the
         // wait for room; on a thread, so that a question that waits without
         // end fails this test and does not hang it.
@@ -1025,6 +1080,133 @@ mod tests {
         let answer = rx.recv_timeout(Duration::from_secs(5));
         assert_eq!(answer, Ok(None), "after {:?} with {queued} questions queued", started.elapsed());
         assert!(started.elapsed() >= Duration::from_millis(900));
+        drop((silent, fillers));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A signal for a test to send to one of its own threads: a real-time
+    /// signal nothing else in the process uses, with a handler that does
+    /// nothing (without one its default action ends the process). The
+    /// handler asks for an interrupted call to be restarted, as the
+    /// runtime's own handlers do: a send or a receive that has a timeout
+    /// is not.
+    fn test_signal() -> libc::c_int {
+        extern "C" fn nothing(_: libc::c_int) {}
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        let signal = libc::SIGRTMIN() + 7;
+        INSTALLED.call_once(|| {
+            // SAFETY: a zeroed sigaction with an empty mask and a handler
+            // that touches nothing, for a signal no other code here uses.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = nothing as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                action.sa_flags = libc::SA_RESTART;
+                libc::sigemptyset(&mut action.sa_mask);
+                assert_eq!(libc::sigaction(signal, &action, std::ptr::null_mut()), 0);
+            }
+        });
+        signal
+    }
+
+    /// How long [`under_signals`] goes on sending.
+    const SIGNALS_FOR: Duration = Duration::from_secs(12);
+
+    /// Runs `call` on a thread of its own and sends that thread a signal
+    /// every `gap` until it has returned, counting them in `sent`. The
+    /// call's answer, and whether it came while the signals still did.
+    fn under_signals<T: Send + 'static>(sent: &std::sync::atomic::AtomicU32, gap: Duration, call: impl FnOnce() -> T + Send + 'static) -> (T, bool) {
+        use std::os::unix::thread::JoinHandleExt;
+        let signal = test_signal();
+        let thread = std::thread::spawn(call);
+        let until = Instant::now() + SIGNALS_FOR;
+        while !thread.is_finished() && Instant::now() < until {
+            std::thread::sleep(gap);
+            // SAFETY: the handle is held until the join below, so the id
+            // names this thread, running or ended.
+            if !thread.is_finished() && unsafe { libc::pthread_kill(thread.as_pthread_t(), signal) } == 0 {
+                sent.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let in_time = thread.is_finished();
+        (thread.join().expect("the call"), in_time)
+    }
+
+    /// One question on wlan0's control socket, on the thread that calls.
+    fn ask(ctrl_dir: &Path, wait: Duration) -> Result<String, std::io::ErrorKind> {
+        Ctrl::open(ctrl_dir, "wlan0", wait).and_then(|mut ctrl| ctrl.request("STATUS")).map_err(|e| e.kind())
+    }
+
+    /// A signal that reaches the thread inside a question ends its receive
+    /// and not the question. An answer that comes after the thread was
+    /// interrupted is taken. A supplicant that says nothing is waited for
+    /// the whole of the wait, which ends while the signals still come: a
+    /// receive that a signal woke near its end reports its timeout early,
+    /// which is not the wait's end either.
+    #[test]
+    fn a_signal_during_the_wait_is_not_the_end_of_a_question() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU32;
+        // A supplicant that answers once three signals have been sent to
+        // the thread that asked (ten seconds at most, so a failure leaves
+        // no thread behind).
+        let (root, env) = machine("signals", true);
+        let socket = UnixDatagram::bind(env.wifi_ctrl.join("wlan0")).unwrap();
+        let sent = Arc::new(AtomicU32::new(0));
+        let seen = sent.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            let Some((_, from)) = next_question(&socket, &mut buf) else { return };
+            for _ in 0..2000 {
+                if seen.load(Ordering::SeqCst) >= 3 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if let Some(path) = from.as_pathname() {
+                let _ = socket.send_to(b"ssid=Home Net\nwpa_state=COMPLETED\n", path);
+            }
+        });
+        let ctrl_dir = env.wifi_ctrl.clone();
+        let (answer, _) = under_signals(&sent, Duration::from_millis(30), move || ask(&ctrl_dir, Duration::from_secs(60)));
+        assert_eq!(answer, Ok("ssid=Home Net\nwpa_state=COMPLETED\n".to_string()));
+        assert!(sent.load(Ordering::SeqCst) >= 3, "the answer was held back until three signals were sent");
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // A supplicant that takes the questions and says nothing, and a
+        // signal every tenth of a millisecond, twelve short waits over: in
+        // most of them a receive is woken in the wait's last millisecond.
+        let (root, env) = machine("signals-silent", true);
+        let silent = UnixDatagram::bind(env.wifi_ctrl.join("wlan0")).unwrap();
+        for round in 0..12 {
+            let sent = AtomicU32::new(0);
+            let ctrl_dir = env.wifi_ctrl.clone();
+            let started = Instant::now();
+            let (answer, in_time) = under_signals(&sent, Duration::from_micros(100), move || ask(&ctrl_dir, Duration::from_millis(25)));
+            let took = started.elapsed();
+            assert_eq!(answer, Err(std::io::ErrorKind::TimedOut), "round {round}: the deadline's word, and no other");
+            assert!(took >= Duration::from_millis(25), "round {round}: the whole wait, after {} signals: {took:?}", sent.load(Ordering::SeqCst));
+            assert!(in_time, "round {round}: the wait ended while the signals still came");
+        }
+        drop(silent);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The wait for room in a supplicant's queue is a send that has a
+    /// timeout: under a signal every tenth of a millisecond it is the whole
+    /// of [`SEND_WAIT`], and it ends while the signals still come.
+    #[test]
+    fn a_signal_does_not_cut_short_the_wait_for_room_in_a_supplicants_queue() {
+        use std::sync::atomic::AtomicU32;
+        let (root, env) = machine("signals-queue", true);
+        let (silent, fillers, queued) = full_queue(&env);
+        let sent = AtomicU32::new(0);
+        let ctrl_dir = env.wifi_ctrl.clone();
+        let started = Instant::now();
+        let (answer, in_time) = under_signals(&sent, Duration::from_micros(100), move || ask(&ctrl_dir, Duration::from_secs(60)));
+        let took = started.elapsed();
+        assert_eq!(answer, Err(std::io::ErrorKind::TimedOut), "no room within the wait, with {queued} questions queued");
+        assert!(took >= SEND_WAIT, "the whole wait, after {} signals: {took:?}", sent.load(Ordering::SeqCst));
+        assert!(in_time, "the wait ended while the signals still came");
         drop((silent, fillers));
         std::fs::remove_dir_all(&root).unwrap();
     }
