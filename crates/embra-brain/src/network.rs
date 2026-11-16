@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
+use embra_boot::names::{self, CaSet};
 use embra_boot::net::{self as cards, Card};
 use embra_boot::net_lease::{self, CardStatus, Lease, Mode, Source};
 use embra_boot::net_settings::{self, Settings, StaticCard, TimeSetting};
@@ -67,6 +68,9 @@ pub(crate) struct NetEnv {
     pub(crate) clock: PathBuf,
     /// The kernel line: its `embra.ntp=` decides the time servers of its boot.
     pub(crate) cmdline: PathBuf,
+    /// Where the trust service keeps the certificate authority, with the
+    /// record of what it may sign.
+    pub(crate) pki: PathBuf,
 }
 
 impl NetEnv {
@@ -79,6 +83,7 @@ impl NetEnv {
             hostname: PathBuf::from("/proc/sys/kernel/hostname"),
             clock: PathBuf::from(embra_boot::clock::STATUS_PATH),
             cmdline: PathBuf::from("/proc/cmdline"),
+            pki: PathBuf::from(names::PKI_DIR),
         }
     }
 
@@ -173,6 +178,42 @@ fn name_words(env: &NetEnv, settings: &Settings, leases: &[Lease]) -> String {
     }
 }
 
+/// The web console's certificate: the names it carries, by the rule the
+/// trust service mints with (`names::leaf_names`), and where its CA is had.
+/// A browser that imported the CA opens the console without a warning at
+/// each of the names.
+fn certificate_lines(env: &NetEnv, leases: &[Lease]) -> String {
+    let hostname = env.kernel_hostname();
+    let addresses: Vec<std::net::IpAddr> = leases.iter().filter_map(|l| l.ip.parse().ok()).collect();
+    let mut out = String::new();
+    match CaSet::read(&env.pki) {
+        Some(set) => {
+            let carried = names::leaf_names(&set, hostname.as_deref(), &addresses);
+            out.push_str(&format!("  Certificate: the web console's names are {}\n", carried.listed().join(", ")));
+            if let Some(name) = hostname.as_deref().filter(|n| cards::hostname_ok(n) && !set.admits_name(n)) {
+                out.push_str(&format!(
+                    "             {name} is not among them: a DHCP server assigned it. /network hostname {name} makes it this machine's own name and the certificate's.\n"
+                ));
+            }
+        }
+        None => out.push_str("  Certificate: the trust service has not recorded what its CA signs\n"),
+    }
+    out.push_str("  Its CA, imported into a browser once, ends the browser's warning at those names: /api/ca.crt (a download in the web console)\n");
+    out
+}
+
+/// What a name the operator sets means for the certificate: it is on the
+/// certificate within seconds, and a CA that does not admit it yet is
+/// issued again, which a browser that imported it has to learn.
+fn certificate_after_naming(env: &NetEnv, name: &str) -> &'static str {
+    match CaSet::read(&env.pki) {
+        Some(set) if !set.admits_name(name) => {
+            " The web console's certificate names it within a few seconds; its CA is issued again to admit the name, so a browser that imported the CA imports it once more (/api/ca.crt)."
+        }
+        _ => " The web console's certificate names it within a few seconds.",
+    }
+}
+
 /// What this boot's kernel line says about the time servers, as it is
 /// written there: `off`, or a server. `None` without the knob.
 fn kernel_time_knob(env: &NetEnv) -> Option<String> {
@@ -259,6 +300,7 @@ fn show(env: &NetEnv) -> Reply {
     let resolvers = env.resolvers();
     text.push_str(&format!("  Resolvers: {}\n", if resolvers.is_empty() { "none".to_string() } else { resolvers.join(" ") }));
     text.push_str(&time_lines(env, &settings, &leases));
+    text.push_str(&certificate_lines(env, &leases));
     for line in refused {
         text.push_str(&format!("  A line of the settings file was not accepted: {line}\n"));
     }
@@ -381,7 +423,10 @@ pub(crate) fn answer(args: &str, env: &NetEnv) -> Reply {
             store(
                 env,
                 &settings,
-                format!("Stored: the machine is named {name}.\nembrad sets it within a few seconds. A DHCP server is told the name when a card next starts asking: at the next boot at the latest."),
+                format!(
+                    "Stored: the machine is named {name}.\nembrad sets it within a few seconds. A DHCP server is told the name when a card next starts asking: at the next boot at the latest.{}",
+                    certificate_after_naming(env, &name)
+                ),
             )
         }
     }
@@ -466,6 +511,7 @@ mod tests {
             hostname: root.join("hostname"),
             clock: root.join("clock-status"),
             cmdline: root.join("cmdline"),
+            pki: root.join("state").join("pki"),
         };
         (root, env)
     }
@@ -604,6 +650,37 @@ mod tests {
         }
         std::fs::write(&env.clock, "sync=synchronized\nserver=192.168.1.1\naddress=192.168.1.1:123\noffset=0.012\nstratum=2\nrtc=unchanged\n").unwrap();
         assert!(answer("", &env).text.contains("  Clock: set from 192.168.1.1 (192.168.1.1:123) at boot, corrected by +0.012 s\n"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_certificates_names_are_shown_with_where_its_ca_is_had() {
+        let (root, env) = machine("certificate");
+        let ca_line = "  Its CA, imported into a browser once, ends the browser's warning at those names: /api/ca.crt (a download in the web console)\n";
+        // Before the trust service has written its record.
+        assert!(answer("", &env).text.contains(&format!("  Certificate: the trust service has not recorded what its CA signs\n{ca_line}")));
+        // A CA made here, a lease, the default name.
+        std::fs::create_dir_all(&env.pki).unwrap();
+        std::fs::write(env.pki.join(names::CA_NAMES_FILE), "set=private.v1\n").unwrap();
+        std::fs::write(&env.hostname, "embraos\n").unwrap();
+        std::fs::write(net_lease::lease_path(&env.net_dir, "eth0"), "interface=eth0\nip=192.168.1.42\nmask=24\nmetric=102\nsource=dhcp\n").unwrap();
+        assert!(answer("", &env).text.contains(&format!("  Certificate: the web console's names are localhost, embraos, 127.0.0.1, ::1, 192.168.1.42\n{ca_line}")));
+        // A name a DHCP server assigned is the machine's and is not on the certificate; the way to put it there is said.
+        std::fs::write(&env.hostname, "node-7\n").unwrap();
+        let shown = answer("", &env).text;
+        assert!(shown.contains("  Certificate: the web console's names are localhost, 127.0.0.1, ::1, 192.168.1.42\n             node-7 is not among them: a DHCP server assigned it. /network hostname node-7 makes it this machine's own name and the certificate's.\n"), "{shown}");
+        // Setting it says what happens to the CA, when the CA has to change.
+        let stored = answer("hostname node-7", &env).text;
+        assert!(stored.ends_with("its CA is issued again to admit the name, so a browser that imported the CA imports it once more (/api/ca.crt)."), "{stored}");
+        // The trust service issued it again: the name is on the certificate, and setting it again changes no CA.
+        std::fs::write(env.pki.join(names::CA_NAMES_FILE), "set=private.v1\nhostname=node-7\n").unwrap();
+        assert!(answer("", &env).text.contains("  Certificate: the web console's names are localhost, node-7, 127.0.0.1, ::1, 192.168.1.42\n  Its CA"));
+        assert!(answer("hostname node-7", &env).text.ends_with("The web console's certificate names it within a few seconds."));
+        // A CA from before the limits admits any name, and a public address is on no certificate.
+        std::fs::write(env.pki.join(names::CA_NAMES_FILE), "set=none\n").unwrap();
+        std::fs::write(net_lease::lease_path(&env.net_dir, "eth1"), "interface=eth1\nip=203.0.113.7\nmask=24\nmetric=103\nsource=dhcp\n").unwrap();
+        assert!(answer("", &env).text.contains("  Certificate: the web console's names are localhost, node-7, 127.0.0.1, ::1, 192.168.1.42\n  Its CA"));
+        assert!(answer("hostname axiom", &env).text.ends_with("The web console's certificate names it within a few seconds."));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
