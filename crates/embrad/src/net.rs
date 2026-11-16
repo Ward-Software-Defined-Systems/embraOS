@@ -13,7 +13,10 @@
 //! waits ten seconds for one at most. A keeper then looks every two seconds:
 //! a card that appears gets its client, a card that goes loses it, a link
 //! that returns is asked again, and the resolver file follows the card with
-//! the best route. The operator's settings (`/network`, the file on STATE)
+//! the best route. A Wi-Fi card comes after the wired ones and is brought
+//! up by its supplicant (`wifi.rs`): no look waits for a radio, whose
+//! driver takes seconds to load and to start and holds the kernel's network
+//! lock while it starts. The operator's settings (`/network`, the file on STATE)
 //! are read at boot and whenever they change: a card with an address of its
 //! own gets it and no client, and the machine takes its name from them, from
 //! a lease, or `embraos`. The keeper is a plain thread, not a task of the runtime:
@@ -46,6 +49,15 @@ pub(crate) const CARD_WAIT: Duration = Duration::from_secs(5);
 /// wired card has a link. A driver's load, the scan, the join and the lease
 /// take longer than a cable's lease.
 pub(crate) const WIFI_WAIT: Duration = Duration::from_secs(25);
+/// How long a wired card with a link is given to get its first address
+/// before a Wi-Fi card is brought up: a radio's start holds the kernel's
+/// network lock, and no address is set on any card meanwhile. Its address
+/// ends the wait at once.
+pub(crate) const WIRED_FIRST: Duration = Duration::from_secs(5);
+/// How long a wired card without a link is given for one to come up (a
+/// cable's negotiation takes a second or two) before it is taken to have
+/// none and a Wi-Fi card is brought up.
+pub(crate) const LINK_GRACE: Duration = Duration::from_secs(3);
 /// How often the boot looks while it waits.
 const BOOT_TICK: Duration = Duration::from_millis(100);
 /// How often the keeper looks.
@@ -95,9 +107,12 @@ pub(crate) fn with_helpers<R>(sweep: impl FnOnce(&[u32]) -> R) -> R {
 pub(crate) trait Host: crate::wifi::Radio {
     /// The cards the kernel has now.
     fn cards(&mut self) -> Vec<Card>;
-    /// Whether the card has a link.
+    /// Whether the card has a link, as the kernel says it without its
+    /// network lock (`embra_boot::net::carrier`): a look never stands
+    /// still behind a card whose driver is starting.
     fn carrier(&mut self, card: &str) -> Option<bool>;
-    /// The interface up (the DHCP client does not raise it).
+    /// The interface up (the DHCP client does not raise it). For a wired
+    /// card: a Wi-Fi card is brought up by its supplicant.
     fn raise(&mut self, card: &str) -> bool;
     /// A DHCP client on the card; its pid.
     fn start_client(&mut self, card: &Card, hostname: &str) -> Option<u32>;
@@ -224,9 +239,9 @@ impl Net {
             }
             self.settings = settings;
         }
-        // The driver a Wi-Fi card needs, before the cards are counted: the
-        // card is there a moment after its driver.
-        self.wifi.load_drivers(&mut *host);
+        // The driver a Wi-Fi card needs: its load is started here and not
+        // waited for, and the card is counted at the look after it is there.
+        self.wifi.load_drivers(&mut *host, now);
         let seen = host.cards();
 
         // The cards that went.
@@ -252,16 +267,15 @@ impl Net {
                 continue;
             }
             info!("{}: a {} card ({})", card.name, card.kind.as_str(), card.mac);
-            if !host.raise(&card.name) {
+            // A Wi-Fi card is brought up by its supplicant, in the
+            // supplicant's own process: that runs the driver's start, which
+            // on a USB adapter writes the chip over the bus and takes
+            // seconds. This look, PID 1's own at boot, waits for no radio.
+            if card.kind != Kind::Wifi && !host.raise(&card.name) {
                 warn!("{}: the interface could not be brought up", card.name);
             }
             self.slots.push(Slot { card: card.clone(), client: None, started: None, link: None, down_since: None, lease: None, asking_since: now, fixed: None, note: None });
         }
-
-        // A supplicant on every Wi-Fi card, with the networks the operator
-        // stored. A card that has joined one is then a card like any other.
-        let radios: Vec<&str> = self.slots.iter().filter(|s| s.card.kind == Kind::Wifi).map(|s| s.card.name.as_str()).collect();
-        self.wifi.keep_supplicants(&mut *host, &radios, now);
 
         // Each card: its address or its client, and its link.
         let request_name = self.request_name();
@@ -370,6 +384,21 @@ impl Net {
                 slot.lease = current;
             }
         }
+
+        // A supplicant on every Wi-Fi card, with the networks the operator
+        // stored. A card that has joined one is then a card like any other.
+        // The supplicant brings its card up, and for as long as the radio
+        // takes to start the kernel sets no address on any card: so the
+        // wired cards go first, with their links and records as this look
+        // found them. No supplicant is started while a wired card without
+        // an address is in its first seconds: [`WIRED_FIRST`] with a link,
+        // [`LINK_GRACE`] while its link may still be coming up.
+        let wired_first = self.slots.iter().any(|s| {
+            let asking = now.saturating_duration_since(s.asking_since);
+            s.card.kind != Kind::Wifi && s.fixed.is_none() && s.lease.is_none() && asking < if s.link == Some(true) { WIRED_FIRST } else { LINK_GRACE }
+        });
+        let radios: Vec<&str> = self.slots.iter().filter(|s| s.card.kind == Kind::Wifi).map(|s| s.card.name.as_str()).collect();
+        self.wifi.keep_supplicants(&mut *host, &radios, now, wired_first);
 
         // The resolver file follows the card with the best route.
         let resolver = net_lease::resolv_text(&leases);
@@ -519,9 +548,6 @@ mod this_machine {
     const MODPROBE: &str = "/sbin/modprobe";
     const USB_MODESWITCH: &str = "/usr/sbin/usb_modeswitch";
     const MODESWITCH_DATA: &str = "/usr/share/usb_modeswitch";
-    /// How long a driver is given to load, and a mode switch to finish,
-    /// before the look goes on without waiting for it.
-    const HELPER_WAIT: Duration = Duration::from_secs(15);
     /// The machine's name as files: `/etc/hostname` and `/etc/hosts` on the
     /// read-only root are links to these (`post_build.sh`).
     const HOSTNAME_FILE: &str = "/embra/ephemeral/hostname";
@@ -570,40 +596,18 @@ mod this_machine {
             Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().ok().and_then(|s| s.code())
         }
 
-        /// A command that may take seconds (a driver's load), waited for
-        /// without the helpers' lock: its pid is on the list, so the reaper
-        /// leaves it, and the list is free meanwhile. One that does not
-        /// finish in time stays on the list and is collected at a later
-        /// look (`client_gone`); nothing is killed, since a module's load
-        /// cannot be interrupted.
-        fn run_within(&mut self, program: &str, args: &[&std::ffi::OsStr], wait: Duration) -> Option<i32> {
-            let child = {
-                let mut list = helpers();
-                let child = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
-                list.push(child.id());
-                child
-            };
+        /// A command that may take seconds (a driver's load, a mode
+        /// switch), started and not waited for. Its pid goes on the helpers'
+        /// list, so the reaper leaves it; `helper_done` collects it at a
+        /// later look. Nothing is killed: a module's load cannot be
+        /// interrupted.
+        fn start_helper(&mut self, program: &str, args: &[&std::ffi::OsStr]) -> Option<u32> {
+            let mut list = helpers();
+            let child = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
             let pid = child.id();
+            list.push(pid);
             self.children.insert(pid, child);
-            let started = Instant::now();
-            loop {
-                let state = self.children.get_mut(&pid).map(|c| c.try_wait());
-                match state {
-                    Some(Ok(Some(status))) => {
-                        self.drop_child(pid);
-                        return status.code();
-                    }
-                    Some(Ok(None)) if started.elapsed() < wait => std::thread::sleep(Duration::from_millis(50)),
-                    Some(Ok(None)) => {
-                        warn!("{program} did not finish within {} s; it is left to finish", wait.as_secs());
-                        return None;
-                    }
-                    Some(Err(_)) | None => {
-                        self.drop_child(pid);
-                        return None;
-                    }
-                }
-            }
+            Some(pid)
         }
 
         fn signal(&self, pid: u32, signal: libc::c_int) {
@@ -633,15 +637,6 @@ mod this_machine {
 
     impl crate::wifi::Radio for ThisMachine {
         fn modaliases(&mut self) -> Vec<String> {
-            // A command that outlived its wait at an earlier look is
-            // collected here, once it has exited.
-            let pids: Vec<u32> = self.children.keys().copied().collect();
-            for pid in pids {
-                let exited = self.children.get_mut(&pid).is_some_and(|c| !matches!(c.try_wait(), Ok(None)));
-                if exited {
-                    self.drop_child(pid);
-                }
-            }
             let mut found = Vec::new();
             for bus in ["pci", "usb", "sdio"] {
                 let Ok(devices) = std::fs::read_dir(format!("/sys/bus/{bus}/devices")) else { continue };
@@ -667,8 +662,24 @@ mod this_machine {
             unsafe { libc::fnmatch(pattern.as_ptr(), modalias.as_ptr(), 0) == 0 }
         }
 
-        fn load_module(&mut self, module: &str) -> bool {
-            self.run_within(MODPROBE, &[module.as_ref()], HELPER_WAIT) == Some(0)
+        fn start_load(&mut self, module: &str) -> Option<u32> {
+            self.start_helper(MODPROBE, &[module.as_ref()])
+        }
+
+        fn helper_done(&mut self, pid: u32) -> Option<bool> {
+            let Some(child) = self.children.get_mut(&pid) else { return Some(false) };
+            match child.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => {
+                    self.drop_child(pid);
+                    Some(status.success())
+                }
+                // No longer this process's to wait for.
+                Err(_) => {
+                    self.drop_child(pid);
+                    Some(false)
+                }
+            }
         }
 
         fn usb_devices(&mut self) -> Vec<(String, String)> {
@@ -690,9 +701,9 @@ mod this_machine {
             file.is_file().then_some(file)
         }
 
-        fn switch_mode(&mut self, ids: &str, file: &Path) -> bool {
-            let Some((vendor, product)) = ids.split_once(':') else { return false };
-            self.run_within(USB_MODESWITCH, &["-v".as_ref(), vendor.as_ref(), "-p".as_ref(), product.as_ref(), "-c".as_ref(), file.as_os_str()], HELPER_WAIT) == Some(0)
+        fn start_switch(&mut self, ids: &str, file: &Path) -> Option<u32> {
+            let (vendor, product) = ids.split_once(':')?;
+            self.start_helper(USB_MODESWITCH, &["-v".as_ref(), vendor.as_ref(), "-p".as_ref(), product.as_ref(), "-c".as_ref(), file.as_os_str()])
         }
 
         fn stored_wifi(&mut self) -> Option<embra_boot::wifi::Wifi> {
@@ -1302,11 +1313,18 @@ mod tests {
     #[test]
     fn a_wifi_card_gets_a_supplicant_and_then_a_dhcp_client_like_any_card() {
         let mut host = Fake { cards: vec![card("eth0", 2), radio("wlan0", 3)], new_wifi: Some(embra_boot::wifi::Wifi::default()), ..Fake::default() };
+        host.link("eth0", Some(false));
         let mut net = Net::new("embraos");
-        let t = Instant::now();
+        let t = Instant::now() - Duration::from_secs(4);
+        net.tick(&mut host, t);
+        assert_eq!(host.raised, ["eth0"], "a Wi-Fi card is brought up by its supplicant: no look waits for a radio's start");
+        assert_eq!(host.started.iter().map(|(c, _, _)| c.as_str()).collect::<Vec<_>>(), ["eth0", "wlan0"], "a DHCP client on both");
+        assert!(host.supplicants.is_empty(), "the cable may still be coming up");
+        // The cable has no link after its seconds: the radio's turn.
+        let t = t + LINK_GRACE;
         net.tick(&mut host, t);
         assert_eq!(host.supplicants, ["wlan0"], "the Wi-Fi card alone");
-        assert_eq!(host.started.iter().map(|(c, _, _)| c.as_str()).collect::<Vec<_>>(), ["eth0", "wlan0"], "a DHCP client on both");
+        assert_eq!(host.raised, ["eth0"]);
         // Nothing is stored yet: the card's line says what to do.
         let status = net_lease::parse_status(host.status.last().unwrap());
         assert!(status.iter().find(|s| s.name == "wlan0").unwrap().note.as_deref().unwrap().starts_with("no Wi-Fi network is stored"));
@@ -1323,6 +1341,64 @@ mod tests {
         host.cards.pop();
         net.tick(&mut host, t + Duration::from_secs(10));
         assert_eq!(host.forgotten, ["wlan0"]);
+    }
+
+    #[test]
+    fn the_wired_cards_go_first_and_a_wifi_card_is_brought_up_after_them() {
+        let supplicants_at = |host: &mut Fake, net: &mut Net, at: Instant| {
+            net.tick(host, at);
+            host.supplicants.len()
+        };
+        let t = Instant::now() - Duration::from_secs(60);
+        // A cable with a link and no address yet: the radio waits for the
+        // lease, since its start would hold the lease's address back.
+        let mut host = Fake { cards: vec![card("eth0", 2), radio("wlan0", 3)], new_wifi: Some(stored_network()), ..Fake::default() };
+        host.link("eth0", Some(true));
+        let mut net = Net::new("embraos");
+        assert_eq!(supplicants_at(&mut host, &mut net, t), 0);
+        assert_eq!(supplicants_at(&mut host, &mut net, t + Duration::from_secs(2)), 0);
+        host.leases = vec![lease("eth0", "10.0.2.15", "10.0.2.3", 102)];
+        assert_eq!(supplicants_at(&mut host, &mut net, t + Duration::from_millis(2100)), 1, "in the look that finds the address");
+        // No DHCP server answers the cable: the radio's turn comes all the same.
+        let mut host = Fake { cards: vec![card("eth0", 2), radio("wlan0", 3)], new_wifi: Some(stored_network()), ..Fake::default() };
+        host.link("eth0", Some(true));
+        let mut net = Net::new("embraos");
+        assert_eq!(supplicants_at(&mut host, &mut net, t), 0);
+        assert_eq!(supplicants_at(&mut host, &mut net, t + WIRED_FIRST - Duration::from_millis(100)), 0);
+        assert_eq!(supplicants_at(&mut host, &mut net, t + WIRED_FIRST), 1);
+        // No cable: the link is given its seconds to come up, and no more.
+        let mut host = Fake { cards: vec![card("eth0", 2), radio("wlan0", 3)], new_wifi: Some(stored_network()), ..Fake::default() };
+        host.link("eth0", Some(false));
+        let mut net = Net::new("embraos");
+        assert_eq!(supplicants_at(&mut host, &mut net, t), 0);
+        assert_eq!(supplicants_at(&mut host, &mut net, t + LINK_GRACE - Duration::from_millis(100)), 0);
+        assert_eq!(supplicants_at(&mut host, &mut net, t + LINK_GRACE), 1);
+        // A cable with the operator's address has it from the first look.
+        let mut host = Fake { cards: vec![card("eth0", 2), radio("wlan0", 3)], new_wifi: Some(stored_network()), ..Fake::default() };
+        host.link("eth0", Some(true));
+        host.new_settings = Some(Settings { statics: vec![fixed("52:54:00:00:00:02", "192.168.1.50/24", Some("192.168.1.1"), &[])], ..Settings::default() });
+        let mut net = Net::new("embraos");
+        assert_eq!(supplicants_at(&mut host, &mut net, t), 1);
+        assert_eq!(host.applied.len(), 1);
+        // The operator's address could not be taken (it answers already):
+        // the cable asks for nothing, and nothing is waited for.
+        let mut host = Fake { cards: vec![card("eth0", 2), radio("wlan0", 3)], new_wifi: Some(stored_network()), ..Fake::default() };
+        host.link("eth0", Some(true));
+        host.answering.push("192.168.1.50".parse().unwrap());
+        host.new_settings = Some(Settings { statics: vec![fixed("52:54:00:00:00:02", "192.168.1.50/24", Some("192.168.1.1"), &[])], ..Settings::default() });
+        let mut net = Net::new("embraos");
+        assert_eq!(supplicants_at(&mut host, &mut net, t), 1);
+        assert!(host.applied.is_empty() && host.leases.is_empty());
+        // No wired card at all: nothing to go first.
+        let mut host = Fake { cards: vec![radio("wlan0", 2)], new_wifi: Some(stored_network()), ..Fake::default() };
+        let mut net = Net::new("embraos");
+        assert_eq!(supplicants_at(&mut host, &mut net, t), 1);
+        assert!(host.raised.is_empty(), "the supplicant raises it");
+        // A cable plugged into a machine whose radio runs changes nothing for the radio.
+        host.cards.push(card("eth0", 3));
+        host.link("eth0", Some(true));
+        assert_eq!(supplicants_at(&mut host, &mut net, t + Duration::from_secs(30)), 1);
+        assert!(host.stopped.is_empty());
     }
 
     #[test]
