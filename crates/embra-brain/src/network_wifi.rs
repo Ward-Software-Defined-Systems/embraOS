@@ -243,7 +243,13 @@ fn show(env: &NetEnv) -> Reply {
     let radios: Vec<_> = cards::cards(&env.sys).into_iter().filter(|c| c.kind == Kind::Wifi).collect();
     let mut text = String::from("Wi-Fi\n");
     if radios.is_empty() {
-        text.push_str("  Card: none. The kernel shows no Wi-Fi card; the driver of one that is plugged in is loaded when it appears (embra.wifi=0 on the kernel line loads none).\n");
+        // This boot's kernel line decides whether embrad loads a driver at
+        // all: with embra.wifi=0 a card that is plugged in stays without one.
+        let drivers = embra_boot::Cmdline::parse(&std::fs::read_to_string(&env.cmdline).unwrap_or_default()).wifi();
+        text.push_str(match drivers {
+            true => "  Card: none. The kernel shows no Wi-Fi card; the driver of one that is plugged in is loaded when it appears (embra.wifi=0 on the kernel line loads none).\n",
+            false => "  Card: none. embra.wifi=0 is on this boot's kernel line: no wireless driver is loaded, for a card that is plugged in now either. A boot without it loads them.\n",
+        });
     }
     let mut in_range: Vec<wifi::Seen> = Vec::new();
     for card in &radios {
@@ -430,6 +436,9 @@ mod tests {
         env.wifi = root.join("state").join("network").join("wifi");
         env.wifi_ctrl = root.join("net").join("wpa");
         env.wifi_logs = root.join("net").join("wpa-log");
+        // The stand-in machine's own kernel line (none until a test writes
+        // one), never the test host's.
+        env.cmdline = root.join("cmdline");
         env.scan_wait = Duration::from_millis(20);
         std::fs::create_dir_all(&env.wifi_ctrl).unwrap();
         std::fs::create_dir_all(&env.wifi_logs).unwrap();
@@ -519,7 +528,13 @@ mod tests {
         let (root, env) = machine("no-card", false);
         assert!(answer("join Home --open", &env).text.ends_with("No Wi-Fi card is here now: the network is joined when one appears."));
         let shown = answer("", &env).text;
-        assert!(shown.contains("  Card: none.") && shown.contains("  Stored: Home (open)\n") && !shown.contains("In range"), "{shown}");
+        assert!(shown.contains("  Card: none. The kernel shows no Wi-Fi card; the driver of one that is plugged in is loaded when it appears") && shown.contains("  Stored: Home (open)\n") && !shown.contains("In range"), "{shown}");
+        // With embra.wifi=0 on this boot's kernel line no driver is loaded,
+        // and the answer does not promise one.
+        std::fs::write(&env.cmdline, "console=ttyS0 embra.wifi=0 embra.slot=a\n").unwrap();
+        let shown = answer("", &env).text;
+        assert!(shown.contains("  Card: none. embra.wifi=0 is on this boot's kernel line: no wireless driver is loaded") && !shown.contains("is loaded when it appears"), "{shown}");
+        assert!(shown.contains("  Stored: Home (open)\n"), "the stored networks are kept and shown: {shown}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
