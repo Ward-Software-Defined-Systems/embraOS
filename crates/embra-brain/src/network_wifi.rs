@@ -5,7 +5,9 @@
 //! `embra_boot::wifi`); embrad sees the file change, renders the
 //! supplicant's configuration and has it read. What is in range and what a
 //! card is on are asked of the supplicant's control socket, a datagram
-//! socket a card under `/embra/ephemeral/net/wpa`. `system_status` asks the
+//! socket a card under `/embra/ephemeral/net/wpa`. The access points are
+//! read a page at a time (`BSS RANGE=`): one answer of the supplicant holds
+//! 4096 bytes, and the list in one answer (`SCAN_RESULTS`) is cut there. `system_status` asks the
 //! same socket one thing, the name of the network a card is on
 //! ([`joined_network`]): the intelligence is shown that name and no other.
 //!
@@ -172,10 +174,14 @@ struct Ctrl {
     silent: bool,
 }
 
+/// The most pages of the supplicant's table that are read: its table holds
+/// 200 access points at most (`bss_max_count`), six pages or so.
+const PAGES_MAX: usize = 32;
+
 /// What became of the scan a card was asked for.
 enum Scan {
-    /// It ended within the wait: the networks it found.
-    Ended(String),
+    /// It ended within the wait: the access points the card knows now.
+    Ended(Vec<wifi::Seen>),
     /// It was asked for and has not ended yet.
     Running,
     /// It could not be asked for.
@@ -255,10 +261,36 @@ impl Ctrl {
             return Scan::Running;
         }
         self.attached = !self.request("DETACH").is_ok_and(|a| a.starts_with("OK"));
-        match self.request("SCAN_RESULTS") {
-            Ok(found) => Scan::Ended(found),
-            Err(_) => Scan::Running,
+        match self.access_points() {
+            Some(found) => Scan::Ended(found),
+            None => Scan::Running,
         }
+    }
+
+    /// Every access point in the supplicant's table, read a page at a time
+    /// (`embra_boot::wifi::parse_bss_page`): one answer holds 4096 bytes,
+    /// some forty of them, and `SCAN_RESULTS` stops there without a word.
+    /// `None` when the first page did not come; a later page that does not
+    /// come leaves what was read.
+    fn access_points(&mut self) -> Option<Vec<wifi::Seen>> {
+        let mut all = Vec::new();
+        let mut from = 0u32;
+        for page in 0..PAGES_MAX {
+            let answer = match self.request(&format!("BSS RANGE={from}- MASK={}", wifi::BSS_MASK)) {
+                Ok(answer) => answer,
+                Err(_) if page == 0 => return None,
+                Err(_) => break,
+            };
+            let read = wifi::parse_bss_page(&answer);
+            // Nothing at or after that id: the table's end was the page before.
+            let Some(last) = read.last_id else { break };
+            all.extend(read.seen);
+            if read.end {
+                break;
+            }
+            from = last.saturating_add(1);
+        }
+        Some(all)
     }
 }
 
@@ -357,7 +389,7 @@ fn show(env: &NetEnv) -> Reply {
                 wifi::ssid_shown(&ssid)
             ));
         }
-        let before = ctrl.as_mut().and_then(|c| c.request("SCAN_RESULTS").ok());
+        let before = ctrl.as_mut().and_then(|c| c.access_points());
         let found = match ctrl.as_mut().map(|c| c.scan(env.scan_wait)) {
             Some(Scan::Ended(found)) => {
                 scanned += 1;
@@ -369,8 +401,9 @@ fn show(env: &NetEnv) -> Reply {
             }
             Some(Scan::NotAsked) | None => before,
         };
-        if let Some(answer) = found {
-            for seen in wifi::parse_scan_results(&answer) {
+        if let Some(found) = found {
+            // One line a name: the strongest of the access points that carry it.
+            for seen in found {
                 match in_range.iter_mut().find(|s| s.ssid == seen.ssid) {
                     Some(known) if known.signal >= seen.signal => {}
                     Some(known) => *known = seen,
@@ -550,6 +583,34 @@ mod tests {
         (root, env)
     }
 
+    /// What the supplicant answers to `BSS RANGE=<from>- MASK=…`, for a
+    /// table given as `SCAN_RESULTS` prints one (a header, then `bssid \t
+    /// frequency \t signal \t flags \t name` an access point; the id is
+    /// the row's number): the entries from that id on, as many as fit whole
+    /// in 4096 bytes, and `####` in place of the last entry's `====` when
+    /// the table ends with it.
+    fn bss_page(table: &str, command: &str) -> String {
+        let from: u32 = command.strip_prefix("BSS RANGE=").and_then(|r| r.split('-').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
+        let rows: Vec<&str> = table.lines().skip(1).collect();
+        let mut answer = String::new();
+        for (id, row) in rows.iter().enumerate().skip(from as usize) {
+            let fields: Vec<&str> = row.splitn(5, '\t').collect();
+            let [bssid, freq, level, flags, name] = fields[..] else { continue };
+            let end = if id + 1 == rows.len() { "####" } else { "====" };
+            let entry = format!("id={id}\nbssid={bssid}\nfreq={freq}\nlevel={level}\nflags={flags}\nssid={name}\n{end}\n");
+            if answer.len() + entry.len() > 4096 {
+                break;
+            }
+            answer.push_str(&entry);
+        }
+        answer
+    }
+
+    /// A question as a test names it: a page of the table without its mask.
+    fn named(command: &str) -> String {
+        command.split(" MASK=").next().unwrap_or(command).to_string()
+    }
+
     /// A stand-in supplicant on wlan0's control socket. It answers from
     /// `answers` and takes `ATTACH` and `DETACH`. With `scan_ends`, a
     /// `SCAN` runs for that long, as the supplicant's does: an event at its
@@ -567,16 +628,20 @@ mod tests {
             let mut buf = [0u8; 256];
             while let Ok((n, from)) = socket.recv_from(&mut buf) {
                 let command = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let table = |key: &str| answers.iter().find(|(c, _)| *c == key).map(|(_, a)| *a);
                 let answer = match command.as_str() {
-                    "ATTACH" | "DETACH" => "OK\n",
-                    // Until its scan has ended: what the scan before found
-                    // (`BEFORE`), or nothing.
-                    "SCAN_RESULTS" if !scanned.load(Ordering::SeqCst) => answers.iter().find(|(c, _)| *c == "BEFORE").map(|(_, a)| *a).unwrap_or("bssid / frequency / signal level / flags / ssid\n"),
-                    other => answers.iter().find(|(c, _)| *c == other).map(|(_, a)| *a).unwrap_or("UNKNOWN COMMAND\n"),
+                    "ATTACH" | "DETACH" => "OK\n".to_string(),
+                    // Its table, a page at a time. Until its scan has ended:
+                    // what the scan before found (`BEFORE`), or nothing.
+                    page if page.starts_with("BSS RANGE=") => {
+                        let known = if scanned.load(Ordering::SeqCst) { table("SCAN_RESULTS") } else { table("BEFORE") };
+                        bss_page(known.unwrap_or(""), page)
+                    }
+                    other => table(other).unwrap_or("UNKNOWN COMMAND\n").to_string(),
                 };
                 let Some(path) = from.as_pathname().map(Path::to_path_buf) else { continue };
                 let _ = socket.send_to(answer.as_bytes(), &path);
-                let _ = tx.send(command.clone());
+                let _ = tx.send(named(&command));
                 if command == "SCAN" && let Some(after) = scan_ends {
                     let (events, scanned) = (socket.try_clone().unwrap(), scanned.clone());
                     std::thread::spawn(move || {
@@ -648,14 +713,16 @@ mod tests {
             let mut buf = [0u8; 256];
             while let Ok((n, from)) = socket.recv_from(&mut buf) {
                 let command = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let table = |key: &str| answers.iter().find(|(c, _)| *c == key).map(|(_, a)| *a);
                 let answer = match command.as_str() {
-                    "ATTACH" | "DETACH" => "OK\n",
-                    other => answers.iter().find(|(c, _)| *c == other).map(|(_, a)| *a).unwrap_or("UNKNOWN COMMAND\n"),
+                    "ATTACH" | "DETACH" => "OK\n".to_string(),
+                    page if page.starts_with("BSS RANGE=") => bss_page(table("SCAN_RESULTS").unwrap_or(""), page),
+                    other => table(other).unwrap_or("UNKNOWN COMMAND\n").to_string(),
                 };
                 if let Some(path) = from.as_pathname() {
                     let _ = socket.send_to(answer.as_bytes(), path);
                 }
-                let _ = tx.send(command);
+                let _ = tx.send(named(&command));
             }
         });
         rx
@@ -790,7 +857,7 @@ mod tests {
         );
         assert!(!shown.contains("correct horse"));
         let commands: Vec<String> = asked.try_iter().collect();
-        assert_eq!(commands, ["STATUS", "SIGNAL_POLL", "SCAN_RESULTS", "ATTACH", "SCAN", "DETACH", "SCAN_RESULTS"], "what the card is on and what it knows first, then the scan, its end, and what it found");
+        assert_eq!(commands, ["STATUS", "SIGNAL_POLL", "BSS RANGE=0-", "ATTACH", "SCAN", "DETACH", "BSS RANGE=0-"], "what the card is on and what it knows first, then the scan, its end, and what it found");
         // No socket of the brain's own is left beside the control directory.
         let left: Vec<String> = std::fs::read_dir(env.wifi_ctrl.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("wpa-client")).collect();
         assert!(left.is_empty(), "{left:?}");
@@ -875,7 +942,7 @@ mod tests {
         assert!(shown.contains("  In range, as the scan before found (a new scan has not ended yet; ask again for it):\n    Earlier  good, -61 dBm  WPA2\n"), "{shown}");
         assert!(!shown.contains("Fresh"), "{shown}");
         let commands: Vec<String> = asked.try_iter().collect();
-        assert_eq!(commands.get(..4), Some(&["STATUS".to_string(), "SCAN_RESULTS".to_string(), "ATTACH".to_string(), "SCAN".to_string()][..]), "nothing is asked of a supplicant whose scan has not ended: {commands:?}");
+        assert_eq!(commands.get(..4), Some(&["STATUS".to_string(), "BSS RANGE=0-".to_string(), "ATTACH".to_string(), "SCAN".to_string()][..]), "nothing is asked of a supplicant whose scan has not ended: {commands:?}");
         // Asked again once that scan has ended: what it found is what the
         // card knows now.
         std::thread::sleep(Duration::from_millis(800));
@@ -891,6 +958,35 @@ mod tests {
         let shown = answer("", &env).text;
         assert!(shown.contains("  In range: the scan has not ended yet (a radio that was idle takes seconds to start one); ask again in a moment\n"), "{shown}");
         assert!(!shown.contains("nothing was found"), "{shown}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_list_longer_than_one_answer_of_the_supplicant_is_read_to_its_end() {
+        let (root, mut env) = machine("pages", true);
+        env.scan_wait = Duration::from_secs(10);
+        // A site with 150 access points, each a name of its own, the
+        // weakest first: more than three of the supplicant's answers hold.
+        let mut table = String::from(HEADER);
+        for n in 0..150 {
+            table.push_str(&format!("02:00:00:00:{:02x}:{:02x}\t{}\t-{}\t[WPA2-PSK+SAE-CCMP][WPS][ESS]\tsite network {n:03}\n", n / 256, n % 256, 2412 + 5 * (n % 11), 95 - n / 2));
+        }
+        let table: &'static str = Box::leak(table.into_boxed_str());
+        let answers: &'static [(&'static str, &'static str)] = Box::leak(vec![("SCAN", "OK\n"), ("STATUS", "wpa_state=INACTIVE\n"), ("SCAN_RESULTS", table)].into_boxed_slice());
+        assert!(bss_page(table, "BSS RANGE=0-").len() <= 4096 && !bss_page(table, "BSS RANGE=0-").contains("####"), "the stand-in's first answer is full and is not the table's end");
+        let asked = supplicant(&env, answers, Some(Duration::from_millis(50)));
+        let shown = answer("", &env).text;
+        let listed: Vec<&str> = shown.lines().filter(|l| l.starts_with("    site network ")).collect();
+        assert_eq!(listed.len(), 150, "every access point of the table, not the first answer's: {shown}");
+        let names: std::collections::BTreeSet<&str> = listed.iter().filter_map(|l| l.get(4..20)).collect();
+        assert_eq!(names.len(), 150, "each name once");
+        assert!(names.contains("site network 000") && names.contains("site network 149"), "the first found and the last found");
+        let signals: Vec<i32> = listed.iter().filter_map(|l| l.split(", ").nth(1)?.split(" dBm").next()?.parse().ok()).collect();
+        assert!(signals.len() == 150 && signals.windows(2).all(|w| w[0] >= w[1]) && signals[0] == -21 && signals[149] == -95, "the strongest first: {signals:?}");
+        let pages = asked.try_iter().filter(|c| c.starts_with("BSS RANGE=")).collect::<Vec<String>>();
+        // Before the scan the table is empty (one question); after it, a
+        // page at a time, each from the id after the last one read.
+        assert_eq!(pages, ["BSS RANGE=0-", "BSS RANGE=0-", "BSS RANGE=36-", "BSS RANGE=72-", "BSS RANGE=108-", "BSS RANGE=143-"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

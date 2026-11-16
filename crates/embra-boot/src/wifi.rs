@@ -317,7 +317,7 @@ pub fn ssid_typed(text: &str) -> Option<Vec<u8>> {
     ssid_ok(&ssid).then_some(ssid)
 }
 
-/// A network in range, as one line of `SCAN_RESULTS` gives it.
+/// An access point in range, as the supplicant's table has it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Seen {
     pub ssid: Vec<u8>,
@@ -327,29 +327,66 @@ pub struct Seen {
     pub flags: String,
 }
 
-/// `SCAN_RESULTS`: a header line, then `bssid \t frequency \t signal \t
-/// flags \t ssid` a network. One entry a name, the strongest signal; a
-/// network that announces no name is left out. Strongest first.
-pub fn parse_scan_results(text: &str) -> Vec<Seen> {
-    let mut seen: Vec<Seen> = Vec::new();
+/// The fields `BSS RANGE=` is asked for, as its `MASK=`: an entry's id, its
+/// address, frequency, signal, flags and name, each on a line of its own,
+/// and the line that ends an entry. Bits 0, 1, 2, 7, 11, 12 and 17 of
+/// wpa_supplicant's `WPA_BSS_MASK_*` (`wpa_ctrl.h`, 2.11).
+pub const BSS_MASK: &str = "21887";
+
+/// One answer to `BSS RANGE=<id>- MASK=`[`BSS_MASK`]: the access points it
+/// holds, the highest id among its entries, and whether the supplicant's
+/// table ends with them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct BssPage {
+    pub seen: Vec<Seen>,
+    pub last_id: Option<u32>,
+    pub end: bool,
+}
+
+/// An answer of the supplicant holds 4096 bytes at most, some forty access
+/// points, and `BSS RANGE=` stops at the last entry that fits whole: the
+/// table is read a page at a time, each asked for from the id after the
+/// last one read. (`SCAN_RESULTS` has the same limit and no way on from
+/// there. On a site with fifty-eight access points its answer was at the
+/// limit: a denser one would have lost the ones found last, without a
+/// word.) An entry ends with `====`, the table's last with `####`. An entry
+/// without a name, or with a name no network can have, counts for its id
+/// and is left out; the caller keeps one entry a name.
+pub fn parse_bss_page(text: &str) -> BssPage {
+    /// The lines of one entry, as far as they have been read.
+    #[derive(Default)]
+    struct Entry<'a> {
+        id: Option<u32>,
+        freq: Option<u32>,
+        signal: Option<i32>,
+        flags: Option<&'a str>,
+        name: Option<&'a str>,
+    }
+    let mut page = BssPage::default();
+    let mut entry = Entry::default();
     for line in text.lines() {
-        let mut fields = line.splitn(5, '\t');
-        let (Some(_bssid), Some(freq), Some(signal), Some(flags), Some(name)) = (fields.next(), fields.next(), fields.next(), fields.next(), fields.next()) else {
-            continue;
-        };
-        let (Ok(freq), Ok(signal)) = (freq.parse::<u32>(), signal.parse::<i32>()) else { continue };
-        let ssid = ssid_from_txt(name);
-        if !ssid_ok(&ssid) || ssid.iter().all(|b| *b == 0) {
+        if line != "====" && line != "####" {
+            match line.split_once('=') {
+                Some(("id", v)) => entry.id = v.parse().ok(),
+                Some(("freq", v)) => entry.freq = v.parse().ok(),
+                Some(("level", v)) => entry.signal = v.parse().ok(),
+                Some(("flags", v)) => entry.flags = Some(v),
+                Some(("ssid", v)) => entry.name = Some(v),
+                _ => {}
+            }
             continue;
         }
-        match seen.iter_mut().find(|s| s.ssid == ssid) {
-            Some(known) if known.signal >= signal => {}
-            Some(known) => *known = Seen { ssid, signal, freq, flags: flags.to_string() },
-            None => seen.push(Seen { ssid, signal, freq, flags: flags.to_string() }),
+        page.end |= line == "####";
+        let Entry { id, freq, signal, flags, name } = std::mem::take(&mut entry);
+        let Some(id) = id else { continue };
+        page.last_id = Some(page.last_id.map_or(id, |last| last.max(id)));
+        let (Some(freq), Some(signal), Some(name)) = (freq, signal, name) else { continue };
+        let ssid = ssid_from_txt(name);
+        if ssid_ok(&ssid) && !ssid.iter().all(|b| *b == 0) {
+            page.seen.push(Seen { ssid, signal, freq, flags: flags.unwrap_or_default().to_string() });
         }
     }
-    seen.sort_by(|a, b| b.signal.cmp(&a.signal).then_with(|| a.ssid.cmp(&b.ssid)));
-    seen
+    page
 }
 
 /// What a network asks of a machine that joins it, from its flags
@@ -578,28 +615,52 @@ mod tests {
     }
 
     #[test]
-    fn the_scan_reply_is_read_into_names_signals_and_security() {
-        let reply = "bssid / frequency / signal level / flags / ssid\n\
-                     02:00:00:00:01:00\t2412\t-41\t[WPA2-PSK-CCMP][ESS]\tHome Net\n\
-                     02:00:00:00:02:00\t5180\t-63\t[WPA2-PSK+SAE-CCMP][ESS]\tHome Net\n\
-                     02:00:00:00:03:00\t2437\t-70\t[WPA2-SAE-CCMP][ESS]\tcaf\\xc3\\xa9\n\
-                     02:00:00:00:04:00\t2462\t-80\t[ESS]\tguest\n\
-                     02:00:00:00:05:00\t2462\t-82\t[WPA2-EAP-CCMP][ESS]\tcorp\n\
-                     02:00:00:00:06:00\t2462\t-50\t[WPA2-PSK-CCMP][ESS]\t\n\
-                     02:00:00:00:07:00\t2462\t-51\t[WPA2-PSK-CCMP][ESS]\t\\x00\\x00\\x00\n\
-                     not a line\n";
-        let seen = parse_scan_results(reply);
-        assert_eq!(seen.iter().map(|s| (ssid_shown(&s.ssid), s.signal, security_words(&s.flags))).collect::<Vec<_>>(), [
-            ("Home Net".to_string(), -41, "WPA2"),
-            ("café".to_string(), -70, "WPA3"),
-            ("guest".to_string(), -80, "open"),
-            ("corp".to_string(), -82, "802.1X (a company network: not supported)"),
+    fn a_page_of_the_supplicants_table_is_read_into_names_signals_and_security() {
+        // Seven entries as `BSS RANGE=0- MASK=21887` prints them; the last
+        // of the table ends with `####`.
+        let entry = |id: u32, freq: u32, level: i32, flags: &str, name: &str, last: bool| format!("id={id}\nbssid=02:00:00:00:{id:02x}:00\nfreq={freq}\nlevel={level}\nflags={flags}\nssid={name}\n{}\n", if last { "####" } else { "====" });
+        let reply = [
+            entry(0, 2412, -41, "[WPA2-PSK-CCMP][ESS]", "Home Net", false),
+            entry(1, 5180, -63, "[WPA2-PSK+SAE-CCMP][ESS]", "Home Net", false),
+            entry(4, 2437, -70, "[WPA2-SAE-CCMP][ESS]", "caf\\xc3\\xa9", false),
+            entry(5, 2462, -80, "[ESS]", "guest", false),
+            entry(6, 2462, -82, "[WPA2-EAP-CCMP][ESS]", "a=b corp", false),
+            entry(9, 2462, -50, "[WPA2-PSK-CCMP][ESS]", "", false),
+            entry(12, 2462, -51, "[WPA2-PSK-CCMP][ESS]", "\\x00\\x00\\x00", true),
+        ]
+        .concat();
+        let page = parse_bss_page(&reply);
+        assert_eq!(page.seen.iter().map(|s| (ssid_shown(&s.ssid), s.signal, s.freq, security_words(&s.flags))).collect::<Vec<_>>(), [
+            ("Home Net".to_string(), -41, 2412, "WPA2"),
+            ("Home Net".to_string(), -63, 5180, "WPA2/WPA3"),
+            ("café".to_string(), -70, 2437, "WPA3"),
+            ("guest".to_string(), -80, 2462, "open"),
+            ("a=b corp".to_string(), -82, 2462, "802.1X (a company network: not supported)"),
         ]);
+        assert_eq!((page.last_id, page.end), (Some(12), true), "an access point that hides its name counts for its id, and is left out");
+        // A page that is not the table's last: the next is asked for from the id after.
+        let page = parse_bss_page(&[entry(0, 2412, -41, "[ESS]", "one", false), entry(7, 2412, -42, "[ESS]", "two", false)].concat());
+        assert_eq!((page.seen.len(), page.last_id, page.end), (2, Some(7), false));
+        // A page that ends with access points that hide their names, and
+        // one that holds nothing else: their ids count all the same, or the
+        // next page would be asked for from before them, or not at all.
+        let page = parse_bss_page(&[entry(0, 2412, -41, "[ESS]", "one", false), entry(7, 2412, -42, "[ESS]", "", false), entry(8, 2412, -43, "[ESS]", "\\x00\\x00", false)].concat());
+        assert_eq!((page.seen.len(), page.last_id, page.end), (1, Some(8), false));
+        let page = parse_bss_page(&[entry(20, 2412, -41, "[ESS]", "", false), entry(21, 2412, -42, "[ESS]", "", false)].concat());
+        assert_eq!((page.seen.len(), page.last_id, page.end), (0, Some(21), false));
+        // Nothing at or after the id asked for: an empty answer.
+        assert_eq!(parse_bss_page(""), BssPage::default());
+        // An answer cut inside an entry never comes (the supplicant stops
+        // at the last one that fits whole); half an entry is no entry, and
+        // one without an id is not counted.
+        let page = parse_bss_page(&format!("{}id=3\nbssid=02:00:00:00:03:00\nfreq=2412\n", entry(2, 2412, -41, "[ESS]", "whole", false)));
+        assert_eq!((page.seen.len(), page.last_id, page.end), (1, Some(2), false));
+        let page = parse_bss_page("bssid=02:00:00:00:03:00\nfreq=2412\nlevel=-40\nflags=[ESS]\nssid=no id\n====\nnot a line\nFAIL\n");
+        assert_eq!(page, BssPage::default());
         assert_eq!(security_words("[WPA2-PSK+SAE-CCMP][ESS]"), "WPA2/WPA3");
         assert_eq!(security_words("[WPA-PSK-TKIP][ESS]"), "WPA");
         assert_eq!(security_words("[WEP][ESS]"), "WEP (not supported)");
         assert!(joinable("[WPA2-PSK-CCMP][ESS]") && joinable("[ESS]") && !joinable("[WPA2-EAP-CCMP][ESS]") && !joinable("[WEP]"));
-        assert!(parse_scan_results("").is_empty());
     }
 
     /// The kernel is built with the patches of `buildroot/patches/linux`.
