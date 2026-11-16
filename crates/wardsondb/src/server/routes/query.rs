@@ -280,7 +280,13 @@ mod tests {
                     seen_by_read.store(true, Ordering::SeqCst);
                     return Err::<(), AppError>(e);
                 }
-                std::thread::yield_now();
+                // The read gives its thread up once per look at the token,
+                // not once per entry. On a machine whose cores are all busy
+                // a yield takes milliseconds, and a thousand of them between
+                // two looks carried the read past the wait below.
+                if seen.is_multiple_of(cancel::CHECK_EVERY) {
+                    std::thread::yield_now();
+                }
             }
         })
         .await;
