@@ -24,7 +24,7 @@ use embra_guardian::caps::{
     Capabilities, EgressPolicy, HttpResponse, HttpTransport, SearchProvider, SearchRequest,
     SearchResponse, SearchResult,
 };
-use embra_guardian::host::{DEADLINE_WITH_HTTP, WasmHost};
+use embra_guardian::host::WasmHost;
 use embra_guardian::shipped;
 
 const WASM: &[u8] = include_bytes!("fixtures/web_search.wasm");
@@ -97,14 +97,21 @@ impl HttpTransport for SamePage {
     }
 }
 
-/// One call of the fixture under the deadline the brain gives a tool that
-/// declares `http_get`: `DEADLINE_WITH_HTTP`, the default fetch budget plus
-/// the guest's own five seconds (`guardian/mod.rs`, the invoke arm), as
-/// `http_request_roundtrip` runs its calls. The host's bare `DEFAULT_DEADLINE`
-/// is for a tool without fetches; under it `twenty_fetched_pages_fit_the_arena`
-/// timed out on CI with four cold builds sharing the runner's sixteen cores.
-/// The deadline is wall clock, and the guest's time under load is not what
-/// these tests pin.
+/// The deadline of this file's calls: none that a busy runner reaches. A
+/// call's deadline is wall clock (the engine's epoch ticks by the clock,
+/// `host::EPOCH_TICK`), and `twenty_fetched_pages_fit_the_arena` keeps the
+/// guest busy for three seconds on an idle machine. Under the deadlines the
+/// brain gives a tool, the bare `DEFAULT_DEADLINE` first and then
+/// `DEADLINE_WITH_HTTP`, that test timed out on CI whenever cold builds
+/// shared the runner's sixteen cores with it. What this file pins is what
+/// the tool answers and that twenty pages fit its arena, not how fast a
+/// loaded machine runs the guest. The deadline has tests of its own in
+/// `sandbox_limits.rs`: a spinning guest is stopped at a short one, and
+/// `DEADLINE_WITH_HTTP` is the fetch budget plus five seconds. A guest that
+/// never ends still fails here, ten minutes later.
+const DEADLINE: Duration = Duration::from_secs(600);
+
+/// One call of the fixture.
 fn run_caps(results: Vec<SearchResult>, input: &str, http: Option<Arc<dyn HttpTransport>>) -> serde_json::Value {
     let host = WasmHost::new().unwrap();
     let m = host.precompile(WASM).unwrap();
@@ -113,7 +120,7 @@ fn run_caps(results: Vec<SearchResult>, input: &str, http: Option<Arc<dyn HttpTr
         caps.http = Some(transport);
         caps.http_policy = EgressPolicy::default();
     }
-    let out = host.call(&m, input, caps, DEADLINE_WITH_HTTP, MEM).unwrap();
+    let out = host.call(&m, input, caps, DEADLINE, MEM).unwrap();
     serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
 }
 
