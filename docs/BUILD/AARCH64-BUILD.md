@@ -69,6 +69,23 @@
 > images of this architecture (`embraos.ova`, `embraos.vmdk`, `embraos.vhdx`) are
 > **TBD** on a hypervisor until run.
 >
+> **2026-11-16 — the first image with the wireless drivers: the release
+> `v0.25.0-phase2`.** The operator's two builds of the release commit (`e7cc54c`, fjall
+> and rocksdb) completed on Apple Silicon and are the release's aarch64 assets: the first
+> aarch64 images since the wireless drivers, their firmware step, the kernel's patches and
+> three packages joined the tree. Read from the two slot images (the builds' own output
+> was not kept): the fragment's 220 symbols in the kernel's configuration, none unapplied;
+> 1480 kernel modules, 82 MB under `/lib/modules`, 134 of them wireless drivers;
+> `/usr/share/embra/wireless.alias` with 1615 device patterns of 68 drivers; the firmware
+> table passing with 50 modules that name firmware; the squashfs 817 MiB of the 2048 MiB
+> slot and the installer ISO 920 MB. Both stamps are clean: the Docker pass still rewrites
+> git's index, and the stamp refreshes it before it asks (the fix that followed the last
+> cut). Each ISO installed unattended onto a blank disk under QEMU/HVF and the installed
+> disk came up on slot A with the five services healthy (the install 44 to 45 s, the
+> banner 22 s after the start, the lease in 0.2 s). That VM has no display and no Wi-Fi
+> card, so neither the display console nor a wireless driver ran in it: a Wi-Fi card on an
+> Arm machine is **TBD**.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
 > exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
@@ -604,7 +621,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
 | Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi, on Hyper-V and, but for the pointer and a click, on Parallels Desktop) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page at 800x600, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
-| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` alone, read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (1383 of them, 71 MB uncompressed under `/lib/modules`, on the 2026-11-09 build, before the wireless drivers). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others. The image has not been built since the wireless drivers, their firmware and the three packages joined the tree: **TBD** until run |
+| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` alone, read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (1480 modules with them, 82 MB uncompressed under `/lib/modules`, on the release build of 2026-11-16; 1383 and 71 MB before the wireless drivers). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others. The first image built with them is the release `v0.25.0-phase2`'s (the note of 2026-11-16 above) |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors (validated under QEMU, on ESXi, on Hyper-V and on Parallels Desktop) | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)); validated on Apple Silicon under QEMU and under VMware Fusion (2026-11-11) |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
 | Pre-wave-6 tree | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
