@@ -22,7 +22,7 @@
       "id": "seed_git_trust_paths",
       "kind": "semantic",
       "category": "fact",
-      "content": "embraOS has two TLS trust paths, and both honor the CA certificates of the operator and of the image. The git binary and other OpenSSL child processes read the boot-merged CA bundle (GIT_SSL_CAINFO / SSL_CERT_FILE). The brain's own HTTP clients carry compiled-in public roots and add the same certificate files as trust anchors: the LLM providers (which matters when they go through an HTTPS gateway with a CA of its own), the gl_* GitLab and gh_* GitHub tools, the Guardian transport behind http_get and http_request, and the TLS of a Guardian WebSocket connection. One client keeps the public roots alone: web_search's, which talks to Brave's API. A private-CA URL that works in git_clone therefore verifies in a Guardian http_request too (a private address additionally has to be on the operator's egress allowlist); when one path fails and the other does not, the cause is not the CA.",
+      "content": "embraOS has two TLS trust paths, and both honor the CA certificates of the operator and of the image. The git binary and other OpenSSL child processes read the boot-merged CA bundle (GIT_SSL_CAINFO / SSL_CERT_FILE). The brain's own HTTP clients carry compiled-in public roots and add the same certificate files as trust anchors: the LLM providers (which matters when they go through an HTTPS gateway with a CA of its own), the gl_* GitLab and gh_* GitHub tools, the Guardian transport behind http_get and http_request, and the TLS of a Guardian WebSocket connection. One client keeps the public roots alone: web_search's, which talks to Brave's API. A private-CA URL that works in git_clone therefore verifies in a Guardian http_request too (a private address additionally has to be on the operator's egress allowlist); when one path fails and the other does not, the cause is not the CA, with one exception: a CA imported or removed with /ca since the last boot is in force for the brain's own requests at once, and for git and the OS updater from the next boot.",
       "tags": ["tls", "ca", "architecture"]
     },
     { "_comment": "── auth: per-host tokens ────────────────────────────────" },
@@ -30,7 +30,7 @@
       "id": "seed_git_token",
       "kind": "semantic",
       "category": "fact",
-      "content": "/git-token <host> <token> stores a per-host personal access token for self-hosted git servers. git_clone, git_push, and git_pull then authenticate to that host automatically (the token is injected as an oauth2 URL rewrite — clone URLs stay clean of credentials). /git-token with no arguments lists configured hosts without revealing token values; /git-token <host> remove deletes one. github.com is handled separately by /github-token — the two are not interchangeable.",
+      "content": "/git-token <host> <token> stores a per-host personal access token for self-hosted git servers. git_clone, git_fetch, git_pull and git_push then authenticate to that host automatically (the token is injected as an oauth2 URL rewrite — clone URLs stay clean of credentials). /git-token with no arguments lists configured hosts without revealing token values; /git-token <host> remove deletes one. github.com is handled separately by /github-token — the two are not interchangeable.",
       "tags": ["git", "token", "auth", "gitlab"]
     },
     { "_comment": "── the gl_* GitLab API tools ────────────────────────────" },
@@ -53,7 +53,7 @@
       "id": "seed_git_dns",
       "kind": "semantic",
       "category": "observation",
-      "content": "embraOS resolves names through the resolvers its DHCP lease names; under QEMU's user network that is the SLIRP gateway, which forwards to the host's real DNS. Entries in another machine's /etc/hosts are invisible inside embraOS. A self-hosted server's hostname must resolve from inside the OS; otherwise the operator needs an IP-address URL, which only verifies if the server certificate carries an IP subject-alternative-name.",
+      "content": "embraOS resolves names through the resolvers of the card with the best route: the ones its DHCP lease names, or the ones the operator gave it with /network static. Under QEMU's user network that is QEMU's own resolver, which forwards to the host's real DNS. Entries in another machine's /etc/hosts are invisible inside embraOS. A self-hosted server's hostname must resolve from inside the OS; otherwise the operator needs an IP-address URL, which only verifies if the server certificate carries an IP subject-alternative-name.",
       "tags": ["qemu", "dns", "network"]
     },
     { "_comment": "── procedures ───────────────────────────────────────────" },

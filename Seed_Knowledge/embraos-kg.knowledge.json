@@ -72,7 +72,7 @@
       "id": "seed_kg_windows_observable",
       "kind": "semantic",
       "category": "fact",
-      "content": "Every retrieval window is bounded and observable: system_status flags search_window_saturated when a memory collection outgrows the ten-thousand-document window, and traversal logs when a hub's edge window prunes.",
+      "content": "The search and traversal windows are bounded and observable: system_status flags search_window_saturated when a memory collection outgrows the ten-thousand-document window, and traversal logs when a hub's edge window prunes. The newest-fifty list of the session's own entries that each turn's retrieval reads is a ranked cut-off by design: it is full in any long session, and nothing reports it.",
       "tags": ["retrieval", "observability", "memory"]
     },
     { "_comment": "── curation practice ─────────────────────────────────" },
@@ -111,7 +111,7 @@
       "id": "seed_kg_orphan_sweep",
       "kind": "semantic",
       "category": "fact",
-      "content": "knowledge_sweep_orphans only removes edges whose endpoints no longer resolve — cleanup for dangling references after deletions, never density management.",
+      "content": "knowledge_sweep_orphans removes edges whose endpoints no longer resolve, and deletes nothing else: a node that no memory entry points at is healed or adopted (it gets its entry back), never deleted, and a real run writes a record of what it removed, which knowledge_restore reads. It is cleanup for dangling references after deletions, never density management.",
       "tags": ["curation", "edges", "maintenance"]
     },
     {
@@ -182,7 +182,7 @@
       "id": "seed_kg_forget",
       "kind": "semantic",
       "category": "fact",
-      "content": "forget removes a memory: the entry, its edges, and the node promoted from it, unless another entry also points at that node. knowledge_unlink_node removes only a semantic or procedural node and clears the promotion pointer of its entries, which stay.",
+      "content": "forget removes a memory: the entry, its edges, and the node promoted from it, unless another entry also points at that node or the node came from a seed pack (it would be back at the next boot). knowledge_unlink_node removes only a semantic or procedural node and clears the promotion pointer of its entries, which stay.",
       "tags": ["tools", "memory", "curation"]
     },
     { "_comment": "── operations ────────────────────────────────────────" },
@@ -190,7 +190,7 @@
       "id": "seed_kg_backup",
       "kind": "semantic",
       "category": "fact",
-      "content": "The DATA partition carries the entire knowledge graph and all sessions; the backup script archives STATE and DATA, so restoring DATA restores every memory.",
+      "content": "The DATA partition carries the entire knowledge graph and all sessions; a backup archives STATE and DATA (the OS's own, taken with /backup, or the host's backup script on a stopped image), so restoring one restores every memory.",
       "tags": ["backup", "operations", "memory"]
     },
     {

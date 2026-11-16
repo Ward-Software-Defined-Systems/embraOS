@@ -3,7 +3,8 @@
 Curated packs of knowledge-graph nodes and edges that the brain loads into
 the **live** knowledge collections (`memory.semantic` / `memory.procedural`
 + `memory.edges`) on every boot. Four packs ship committed: `embraos-core` is
-the OS knowing itself (boot chain, the clock, services, storage model, the two OS
+the OS knowing itself (boot chain, the clock, the network with `/network` and
+Wi-Fi, services, storage model, the two OS
 slots with updates, backups and installation, trust/soul mechanics, the
 constraint surface, a layered answer-questions-about-yourself procedure and
 one for taking the operator through an update — stable architecture only,
@@ -24,7 +25,9 @@ image (`post_build.sh` → `/usr/share/embra/seed-knowledge/`). This README
 is host-side documentation and is not baked. Every `*.knowledge.json` here is
 baked, tracked by git or not: a pack of your own belongs in STATE (below),
 and `scripts/release-update.sh` signs no release whose image carries a pack
-the tagged commit does not hold.
+the tagged commit does not hold (it reads the image with `unsquashfs`; on a
+host without one it signs under `--allow-imported-cas` alone, and then says
+that the packs were not compared).
 
 ## Where packs load from
 
@@ -126,6 +129,9 @@ applied):
 - `tags` is required on every node (an empty array is allowed). Lowercase,
   single-word, reusing the instance's established vocabulary — exact
   lowercase match is what makes seeded knowledge retrievable.
+- **Both arrays are required.** A pack without edges writes `"edges": []`;
+  a pack without one of the two is refused whole, with the reason in the
+  brain's log.
 - **Edges** start at a node of the pack that lists them (`src`). `dst` is a
   node of the same pack or of another pack that is loaded: the four
   committed packs link into one another this way. An edge whose `dst` no
@@ -141,8 +147,10 @@ applied):
 
 ## What the loader does with a pack
 
-Per boot, per pack: two filtered counts + one spot-probe on the healthy
-path; on mismatch, an insert-missing walk writes absent nodes (and gives
+Per boot, per pack, on the healthy path: two filtered node counts and one
+spot-probe, then the revision pass over the pack's stored nodes, the read
+that retires the edges the pack no longer lists, and one edge count; on
+mismatch, an insert-missing walk writes absent nodes (and gives
 each **freshly inserted** node one auto-edge derivation pass, wiring its
 tags into the operator's existing knowledge), then probe-inserts absent
 edges. The nodes of every pack come before any edge, so an edge into
