@@ -32,6 +32,7 @@ mod media;
 mod embedding;
 mod net;
 mod network;
+mod network_wifi;
 mod secrets;
 mod update_check;
 

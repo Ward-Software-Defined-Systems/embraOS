@@ -75,12 +75,28 @@ const SECRET_FORMS: &[(&[&str], usize)] = &[
     (&["/guardian", "key", "brave"], 3), // /guardian key brave <token>
 ];
 
+/// The forms whose secret follows a marker word instead of standing at a
+/// fixed place: the leading tokens, then the marker. The secret is what
+/// follows the first marker after the leading tokens, to the last token of
+/// the line. A Wi-Fi network's name may hold spaces, so its passphrase is
+/// found by the word before it: `/network wifi join <name> --key <passphrase>`.
+const MARKED_SECRET_FORMS: &[(&[&str], &str)] = &[(&["/network", "wifi", "join"], "--key")];
+
 /// The byte range of the secret on `line`, from its first token to the end
 /// of the last one, when the line is one of the forms and carries a value in
 /// that place. Trailing whitespace stays outside it.
 fn secret_span(line: &str) -> Option<(usize, usize)> {
     let tokens = token_spans(line);
     let word = |i: usize| tokens.get(i).map(|&(s, e)| &line[s..e]);
+    for (lead, marker) in MARKED_SECRET_FORMS {
+        if !lead.iter().enumerate().all(|(i, w)| word(i) == Some(w)) {
+            continue;
+        }
+        let at = (lead.len()..tokens.len()).find(|&i| word(i) == Some(marker))?;
+        let &(start, _) = tokens.get(at + 1)?;
+        let &(_, last) = tokens.last()?;
+        return Some((start, last));
+    }
     for (lead, at) in SECRET_FORMS {
         let leads = lead.iter().enumerate().all(|(i, w)| word(i) == Some(w));
         if !leads {
@@ -200,6 +216,12 @@ mod tests {
             ),
             ("/github-token ghp_abc 123", "/github-token ••••"),
             ("/guardian key brave BSA-key", "/guardian key brave ••••"),
+            // A Wi-Fi passphrase follows `--key`, after a name that may hold
+            // spaces, and runs to the end of the line with its own spaces.
+            ("/network wifi join Home Net --key correct horse battery", "/network wifi join Home Net --key ••••"),
+            ("/network wifi join Home --hidden --key 12345678", "/network wifi join Home --hidden --key ••••"),
+            // The first `--key` is the marker: one inside the passphrase is part of it.
+            ("/network wifi join Home --key a --key b", "/network wifi join Home --key ••••"),
             // Extra spacing is kept as typed around the masked value.
             ("/github-token   ghp_abc123  ", "/github-token   ••••  "),
         ] {
@@ -226,6 +248,25 @@ mod tests {
             assert_eq!(mask_secret_argument(line), line, "{line}");
             assert_eq!(mask_secret_argument_keeping_length(line), line, "{line}");
         }
+    }
+
+    #[test]
+    fn a_wifi_line_without_its_marker_or_its_value_is_unchanged() {
+        for line in [
+            "/network wifi join Home Net",
+            "/network wifi join Home Net --open",
+            "/network wifi join Home Net --key",
+            "/network wifi join Home Net --key ",
+            "/network wifi forget --key not-a-secret-here",
+            "/network wifi",
+            "/network static eth0 --key 10.0.0.9/8",
+            "/other wifi join x --key y",
+        ] {
+            assert_eq!(mask_secret_argument(line), line, "{line}");
+            assert_eq!(mask_secret_argument_keeping_length(line), line, "{line}");
+        }
+        // While it is typed, the mask has the passphrase's own length.
+        assert_eq!(mask_secret_argument_keeping_length("/network wifi join Home Net --key pass word"), "/network wifi join Home Net --key •••••••••");
     }
 
     #[test]

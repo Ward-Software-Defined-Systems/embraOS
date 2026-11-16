@@ -1837,7 +1837,7 @@ mod key_tests {
         assert_eq!(app.input_shown(), "Europe/Paris");
     }
 
-    /// #20: a credential typed as the argument of one of the five secret
+    /// #20: a credential typed as the argument of one of the secret
     /// command forms is masked in the input box while typed, keeping the
     /// line's character count; `remove` in its place is a command word.
     #[tokio::test]

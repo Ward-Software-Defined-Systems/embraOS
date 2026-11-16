@@ -97,7 +97,9 @@ System:
                                  remove <file>; an import is trusted by the brain at once, by git and the OS updater after the next boot
   /network                       The network cards, their addresses and the machine's name: static <card> <address>/<prefix>
                                  [<gateway>] [dns <server> ...], dhcp <card>, hostname <name>|auto, time <server> ...|default|off
-                                 (the time servers the clock is checked against); applied within a few seconds
+                                 (the time servers the clock is checked against), wifi [join <name> --key <passphrase>|
+                                 join <name> --open|forget <name>|country <CC>] (blank: the card, its network and the
+                                 ones in range; the passphrase is masked while typed); applied within a few seconds
   /update                        Check the published release; apply, status, rollback, source [<url>|reset];
                                  --tag <v…> names one release, apply --allow-downgrade takes an older one;
                                  auto [on|off] is the check the brain runs by itself once a day

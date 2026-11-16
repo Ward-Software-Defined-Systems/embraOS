@@ -25,12 +25,13 @@ use embra_boot::net_lease::{self, CardStatus, Lease, Mode, Source};
 use embra_boot::net_settings::{self, Settings, StaticCard, TimeSetting};
 use serde::Serialize;
 
-pub(crate) const USAGE: &str = "Usage: /network | /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...] | /network dhcp <card> | /network hostname <name>|auto | /network time [<server> ...|default|off]\n\
+pub(crate) const USAGE: &str = "Usage: /network | /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...] | /network dhcp <card> | /network hostname <name>|auto | /network time [<server> ...|default|off] | /network wifi ...\n\
   /network                 The cards, their links and addresses, the default route, the resolvers and the machine's name.\n\
   /network static ...      That card keeps this address; DHCP is no longer asked on it. Example: /network static eth0 192.168.1.50/24 192.168.1.1 dns 192.168.1.1\n\
   /network dhcp <card>     Back to DHCP.\n\
   /network hostname <name> The machine's name (letters, digits and hyphens); auto takes the name a DHCP server assigns, or embraos.\n\
   /network time ...        The time servers the clock is checked against, every hour and when the network returns: your own (four at most, host or host:port), default (the ones a DHCP lease names, then time.cloudflare.com), or off. Blank shows the clock.\n\
+  /network wifi ...        Wi-Fi: blank shows the card, the network it is on and the ones in range; join <name> --key <passphrase> (or --open) stores one, forget <name> takes one away, country <CC> sets the regulatory domain.\n\
 A setting is stored on STATE and applied within a few seconds.";
 
 /// What a run of the command answers.
@@ -42,11 +43,11 @@ pub(crate) struct Reply {
 }
 
 impl Reply {
-    fn said(text: impl Into<String>) -> Self {
+    pub(crate) fn said(text: impl Into<String>) -> Self {
         Self { text: text.into(), refused: false }
     }
 
-    fn refusal(text: impl Into<String>) -> Self {
+    pub(crate) fn refusal(text: impl Into<String>) -> Self {
         Self { text: text.into(), refused: true }
     }
 }
@@ -71,6 +72,14 @@ pub(crate) struct NetEnv {
     /// Where the trust service keeps the certificate authority, with the
     /// record of what it may sign.
     pub(crate) pki: PathBuf,
+    /// The Wi-Fi networks the operator stored (`network_wifi.rs`).
+    pub(crate) wifi: PathBuf,
+    /// The supplicants' control sockets, one a card.
+    pub(crate) wifi_ctrl: PathBuf,
+    /// The supplicants' own lines, a file a card.
+    pub(crate) wifi_logs: PathBuf,
+    /// How long a scan's end is waited for before its results are read.
+    pub(crate) scan_wait: std::time::Duration,
 }
 
 impl NetEnv {
@@ -84,6 +93,10 @@ impl NetEnv {
             clock: PathBuf::from(embra_boot::clock::STATUS_PATH),
             cmdline: PathBuf::from("/proc/cmdline"),
             pki: PathBuf::from(names::PKI_DIR),
+            wifi: PathBuf::from(embra_boot::wifi::WIFI_PATH),
+            wifi_ctrl: PathBuf::from(embra_boot::wifi::CTRL_DIR),
+            wifi_logs: PathBuf::from(embra_boot::wifi::LOG_DIR),
+            scan_wait: std::time::Duration::from_secs(12),
         }
     }
 
@@ -172,7 +185,9 @@ fn name_words(env: &NetEnv, settings: &Settings, leases: &[Lease]) -> String {
         (Some(set), Some(k)) if set == k => format!("{k} (set by you)"),
         (Some(set), Some(k)) => format!("{k} (you set {set}; embrad applies it within a few seconds)"),
         (Some(set), None) => format!("{set} (set by you; not applied yet)"),
-        (None, Some(k)) if leases.iter().any(|l| l.hostname.as_deref() == Some(k.as_str())) => format!("{k} (assigned by the DHCP server)"),
+        // A DHCP server that hands the default name back assigned nothing:
+        // it is the name the machine asked with.
+        (None, Some(k)) if k != names::DEFAULT_HOSTNAME && leases.iter().any(|l| l.hostname.as_deref() == Some(k.as_str())) => format!("{k} (assigned by the DHCP server)"),
         (None, Some(k)) => format!("{k} (the default; /network hostname <name> sets another)"),
         (None, None) => "none yet".to_string(),
     }
@@ -304,7 +319,10 @@ fn show(env: &NetEnv) -> Reply {
     for line in refused {
         text.push_str(&format!("  A line of the settings file was not accepted: {line}\n"));
     }
-    text.push_str("  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...] · /network dhcp <card> · /network hostname <name>|auto · /network time <server> ...|default|off");
+    if found.iter().any(|c| c.kind == cards::Kind::Wifi) || !embra_boot::wifi::Wifi::read(&env.wifi).0.networks.is_empty() {
+        text.push_str("  Wi-Fi: /network wifi shows the network a card is on, the stored networks and the ones in range\n");
+    }
+    text.push_str("  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...] · /network dhcp <card> · /network hostname <name>|auto · /network time <server> ...|default|off · /network wifi");
     Reply::said(text)
 }
 
@@ -328,6 +346,11 @@ fn store(env: &NetEnv, settings: &Settings, done: String) -> Reply {
 
 /// Runs the command.
 pub(crate) fn answer(args: &str, env: &NetEnv) -> Reply {
+    // Wi-Fi has forms of its own: a network's name and its passphrase may
+    // hold spaces, so its words are not split here.
+    if let Some(rest) = args.trim_start().strip_prefix("wifi").filter(|r| r.is_empty() || r.starts_with(char::is_whitespace)) {
+        return crate::network_wifi::answer(rest, env);
+    }
     match parse(args) {
         Action::Show => show(env),
         Action::Usage => {
@@ -512,6 +535,10 @@ mod tests {
             clock: root.join("clock-status"),
             cmdline: root.join("cmdline"),
             pki: root.join("state").join("pki"),
+            wifi: root.join("state").join("network").join("wifi"),
+            wifi_ctrl: root.join("net").join("wpa"),
+            wifi_logs: root.join("net").join("wpa-log"),
+            scan_wait: std::time::Duration::from_millis(20),
         };
         (root, env)
     }
@@ -650,6 +677,29 @@ mod tests {
         }
         std::fs::write(&env.clock, "sync=synchronized\nserver=192.168.1.1\naddress=192.168.1.1:123\noffset=0.012\nstratum=2\nrtc=unchanged\n").unwrap();
         assert!(answer("", &env).text.contains("  Clock: set from 192.168.1.1 (192.168.1.1:123) at boot, corrected by +0.012 s\n"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn where_the_machines_name_came_from_is_said() {
+        let (root, env) = machine("name-words");
+        let name = |env: &NetEnv| answer("", env).text.lines().nth(1).unwrap_or("").to_string();
+        assert_eq!(name(&env), "  Name: none yet");
+        std::fs::write(&env.hostname, "embraos\n").unwrap();
+        assert_eq!(name(&env), "  Name: embraos (the default; /network hostname <name> sets another)");
+        // A DHCP server that hands the default name back in its lease
+        // assigned nothing: it is the name the machine asked with.
+        std::fs::write(net_lease::lease_path(&env.net_dir, "eth0"), "interface=eth0\nip=192.168.1.42\nmask=24\nhostname=embraos\nmetric=102\nsource=dhcp\n").unwrap();
+        assert_eq!(name(&env), "  Name: embraos (the default; /network hostname <name> sets another)");
+        // A name of the server's own is assigned.
+        std::fs::write(net_lease::lease_path(&env.net_dir, "eth0"), "interface=eth0\nip=192.168.1.42\nmask=24\nhostname=node-7\nmetric=102\nsource=dhcp\n").unwrap();
+        std::fs::write(&env.hostname, "node-7\n").unwrap();
+        assert_eq!(name(&env), "  Name: node-7 (assigned by the DHCP server)");
+        // The operator's own, applied and not yet applied.
+        assert!(!answer("hostname axiom", &env).refused);
+        assert_eq!(name(&env), "  Name: node-7 (you set axiom; embrad applies it within a few seconds)");
+        std::fs::write(&env.hostname, "axiom\n").unwrap();
+        assert_eq!(name(&env), "  Name: axiom (set by you)");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

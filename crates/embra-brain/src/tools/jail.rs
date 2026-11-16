@@ -321,6 +321,11 @@ pub(crate) fn read_denied(canonical: &Path) -> Option<&'static str> {
     if canonical == Path::new("/embra/workspace/.ssh/id_ed25519") {
         return Some("the workspace SSH key");
     }
+    // The supplicant's configuration as embrad renders it: the stored
+    // file is on STATE and refused below, this copy is on the tmpfs.
+    if canonical.starts_with(embra_boot::wifi::SECRET_DIR) {
+        return Some("the Wi-Fi passphrases");
+    }
     if let Ok(rest) = canonical.strip_prefix(STATE_ROOT) {
         let mut parts = rest.components();
         let first = parts.next().map(|c| c.as_os_str().to_string_lossy().into_owned());
@@ -634,6 +639,9 @@ mod read_tests {
             ("/embra/data/backups", "the backups on DATA (they carry the operator's STATE)"),
             ("/embra/data/backups/2026-11-05_101200_manual/backup.tar.gz", "the backups on DATA (they carry the operator's STATE)"),
             ("/embra/workspace/.ssh/id_ed25519", "the workspace SSH key"),
+            ("/embra/state/network/wifi", "the operator's STATE partition"),
+            ("/embra/ephemeral/net/secret", "the Wi-Fi passphrases"),
+            ("/embra/ephemeral/net/secret/wlan0.conf", "the Wi-Fi passphrases"),
         ] {
             assert_eq!(read_denied(Path::new(path)), Some(reason), "{path}");
         }
