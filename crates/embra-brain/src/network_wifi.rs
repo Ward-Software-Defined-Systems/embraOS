@@ -689,8 +689,10 @@ mod tests {
                     other => table(other).unwrap_or("UNKNOWN COMMAND\n").to_string(),
                 };
                 let Some(path) = from.as_pathname().map(Path::to_path_buf) else { continue };
-                let _ = socket.send_to(answer.as_bytes(), &path);
+                // On the record before it is answered: a test reads the
+                // record as soon as the brain has its last answer.
                 let _ = tx.send(named(&command));
+                let _ = socket.send_to(answer.as_bytes(), &path);
                 if command == "SCAN" && let Some(after) = scan_ends {
                     let (events, scanned) = (socket.try_clone().unwrap(), scanned.clone());
                     std::thread::spawn(move || {
@@ -768,10 +770,11 @@ mod tests {
                     page if page.starts_with("BSS RANGE=") => bss_page(table("SCAN_RESULTS").unwrap_or(""), page),
                     other => table(other).unwrap_or("UNKNOWN COMMAND\n").to_string(),
                 };
+                // On the record before it is answered, as in `supplicant`.
+                let _ = tx.send(named(&command));
                 if let Some(path) = from.as_pathname() {
                     let _ = socket.send_to(answer.as_bytes(), path);
                 }
-                let _ = tx.send(named(&command));
             }
         });
         rx
