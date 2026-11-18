@@ -5,64 +5,13 @@
 >
 > **Host:** macOS on Intel (a Mac with an `x86_64` CPU and a macOS that Homebrew supports).
 >
-> ✅ **Status — re-verified end-to-end on Intel Mac (2026-07-19).** Verified by
-> William on Intel MacBook Pro 16" against Buildroot `2026.02.1` under the
-> **named-volume Docker Buildroot flow** (note below): the full build pipeline (Step 0.5
-> Trunk/WASM frontend → Rust cross-compile → initramfs → Step 3.5 in-OS
-> Rust toolchain → Docker Buildroot pass), HVF-accelerated boot under
-> `qemu-system-x86_64`, Config Wizard + soul-formation, the serial TUI
-> (`EMBRA_TUI=1`), embra-guardian-v1 (a dynamic tool compiled in-guest via
-> `/opt/rust` and run in the wasmtime sandbox), and reboot + second-boot
-> soul SHA-256 verify. embra-guardian-v1 remains an experimental
-> feature upstream (project-wide, not Intel-Mac-specific). Re-run the
-> [End-to-End Validation](#end-to-end-validation) checklist after any
-> canonical-build bump and re-stamp this date.
+> What has been run on this host is in
+> [VALIDATION-STATUS.md](../VALIDATION-STATUS.md). embra-guardian-v1 is an
+> **experimental** feature project-wide, not on an Intel Mac alone.
 >
-> **2026-11-07 — the Phase 2 image on the Intel Mac.** Verified by William on the
-> Intel MacBook Pro 16" at `5be9bdf` (`--storage-engine rocksdb`): the full build
-> (Step 0.5 through the Docker Buildroot pass, with Rust 1.98.1, Step 3.6's
-> embedding model and the hardened Buildroot hooks, all TBD here since the
-> 2026-07-19 run), the UEFI boot under HVF (Homebrew's `edk2-x86_64-code.fd`,
-> GRUB's menu, slot A), the DHCP lease, the display window with GRUB, the boot log
-> and the console URL, and a bridged NIC through `vmnet-bridged` with the leased
-> URL (the note under [Boot](#4-boot)).
-> The Config Wizard, the soul and the steps after them in the
-> [End-to-End Validation](#end-to-end-validation) were not re-run on this date.
->
-> **2026-11-10 — the display console on the Intel Mac.** Verified by William on
-> the Intel MacBook Pro 16" under QEMU/HVF with a virtio-gpu display and a USB
-> tablet on xHCI (the command under [Boot](#4-boot)): after the boot log the window
-> shows the web console, which takes the keyboard, the pointer and a click. An
-> image of `22022ff` came up at 1280x800 there; one of `1ba8df5` comes up at
-> 1920x1080, by default and with `embra.kioskmode=1920x1080` in the `-smbios`
-> value. QEMU's window reports its size to the guest a second after every resize,
-> the kernel's own console then keeps only the display modes its 1280x800
-> framebuffer holds, and embrad found no 1920x1080 in that list; from `1ba8df5` it
-> asks the kernel to detect the displays again before it gives up on a mode.
->
-> **2026-11-11 — the launcher under macOS's bash.** macOS runs
-> `scripts/run-qemu.sh` with its own `/bin/bash`, 3.2, and that shell stops at an
-> empty array under `set -u`. The launcher of `3bfd40f` through `79821a4` expands
-> one on every launch without `EMBRA_ISO` (`MEDIA_ARGS[@]: unbound variable`,
-> before QEMU starts; reproduced with bash 3.2.57 on the Linux build host);
-> `0db28a8` expands it in a form that shell accepts. Verified by William on the
-> Intel Mac on 2026-11-11: `./scripts/run-qemu.sh` works there.
->
-> **2026-11-11 — Parallels Desktop on the Intel Mac.** Parallels Desktop 26.5
-> takes the build two ways, both run on this Mac on 2026-11-11
-> ([QUICK-START.md](QUICK-START.md), the Parallels note): `embraos.vmx` with its
-> VMDK converts and boots to the web console, its display console at 1920x1080,
-> and `embraos.iso` installs on a machine set to UEFI with Secure Boot off.
-> William ran the install and the import through Parallels' window. The pair as
-> the build writes it now, in `output/images/parallels/`, passed there on
-> 2026-11-14 (William's test). The pointer and a click on the display console
-> there are **TBD**.
->
-> **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
-> named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
-> Docker runtime's macOS-side file-provider fd pool (`Too many open files` —
-> observed and volume-fix-verified on the Apple-Silicon hosts; same mechanism
-> on Intel). Re-verified on Intel + re-stamped 2026-07-19 (banner above).
+> **Buildroot in a named volume.** The Docker pass mounts a named volume over
+> `buildroot-src`: bind-mount Buildroot trees exhaust the Docker runtime's
+> macOS-side file-provider fd pool (`Too many open files`).
 >
 > **Why a separate guide:** `scripts/build-image.sh` is shaped around a Linux
 > host (auto-detects musl.cc's `/opt/x86_64-linux-musl-cross`, expects `xz` and
@@ -89,8 +38,7 @@ Docker container.
 > terminal instead — no image rebuild needed. The serial TUI is functional but is
 > preferred for debugging; the web console is the primary interface. The disk
 > boots itself: the edk2 firmware Homebrew's qemu ships (`edk2-x86_64-code.fd`),
-> then GRUB's menu on the EFI System Partition (`EMBRA_BOOT=uefi`, the default;
-> validated on an Intel Mac 2026-11-07). `EMBRA_BOOT=direct` boots the
+> then GRUB's menu on the EFI System Partition (`EMBRA_BOOT=uefi`, the default). `EMBRA_BOOT=direct` boots the
 > kernel and the initramfs from the host as before, no firmware and no menu.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
@@ -228,7 +176,7 @@ EMBRA_BOOT=direct ./scripts/run-qemu.sh    # kernel + initramfs from the host: n
 The launcher is the one of [QUICK-START.md](QUICK-START.md), whose run section lists its
 other `EMBRA_*` knobs: the log filter, the serial image protocol, the installer medium and
 its buses, the DHCP start address, the time server (`EMBRA_NTP`), a USB device of the host
-handed to the VM (`EMBRA_USB_HOST`; **TBD** on a Mac), the firmware pair and the display
+handed to the VM (`EMBRA_USB_HOST`), the firmware pair and the display
 switches (the note below says what `EMBRA_VNC=1` meets on a Mac).
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM
@@ -237,7 +185,7 @@ Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge pac
 load before the wizard writes a configuration, so their nodes have no vectors until
 backfilled (see `docs/BUILD/QUICK-START.md`).
 
-> **Display window and a bridged network (validated on the Intel Mac: the bridged network and the standard-VGA window 2026-11-07, the virtio-gpu window 2026-11-10).**
+> **Display window and a bridged network.**
 > `run-qemu.sh`'s display switch, `EMBRA_VNC=1`, binds a VNC server to
 > `127.0.0.1:5900`, the port macOS Screen Sharing holds on a Mac. To see the
 > console on a window — the boot log and then the display console, the web console
@@ -255,13 +203,9 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 >   -device qemu-xhci -device usb-tablet \
 >   -nic user,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
 > ```
-> This window is validated on the Intel Mac (2026-11-10: the boot log on the
-> display, then the display console at 1920x1080 with the keyboard, the pointer
-> and a click; the mode needs an image from `1ba8df5` on, an older one comes up
-> at 1280x800 in this window), and the devices under QEMU on Linux. `-vga std` in
-> place of `-vga virtio` gives the standard VGA device, which the kernel's `bochs`
-> driver takes over: GRUB's menu, the boot log and the banner with the URL are
-> validated on it on the Intel Mac (2026-11-07, without the tablet line).
+> This window shows the boot log and then the display console at 1920x1080, with
+> the keyboard, the pointer and a click. `-vga std` in place of `-vga virtio`
+> gives the standard VGA device, which the kernel's `bochs` driver takes over.
 >
 > For a lease from the LAN instead of QEMU's user network, replace the `-nic user,…`
 > line with `-nic vmnet-bridged,ifname=en0,model=virtio-net-pci` (`en0`, or the
@@ -333,8 +277,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > volume in the commands above keeps the tree on the Docker VM's native
 > filesystem, bypassing the provider entirely. Mechanism + bind-mount stopgap
 > detailed in [AARCH64-BUILD.md](AARCH64-BUILD.md)'s Step-4 troubleshooting —
-> identical on Intel; observed and volume-fix-verified on the Apple-Silicon
-> hosts (2026-07-19).
+> identical on Intel.
 
 > **In-OS Rust toolchain (Step 3.5):** Downloads a SHA-256-verified
 > `rust-1.98.1-x86_64-unknown-linux-musl` (host triple = guest arch, not
@@ -344,7 +287,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > coreutils` + the gnubin PATH from step 1 satisfies both. First build needs
 > network for this. The toolchain is the largest item in the image: about
 > 320 MiB of a root filesystem of about 880 MiB, as compressed in the SquashFS (the firmware, the Wi-Fi cards' included, is about 310 MiB of that and the display console's stack about 90 MiB)
-> (measured on the x86_64 Linux build, 2026-11-15; the display console's stack 2026-11-08).
+> (measured on the x86_64 Linux build).
 > The pin moves with its hash lines in `scripts/rust-toolchain.sha256`
 > ([QUICK-START.md](QUICK-START.md)); `RUST_TOOLCHAIN_VERSION` alone stops the
 > build at the download check. An image with a different
@@ -403,13 +346,12 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 ## End-to-End Validation
 
 Run this sequence on the Intel Mac after the first successful build; re-run as
-the regression checklist after any canonical-build bump, and re-stamp the status
-banner at the top of this file.
+the regression checklist after any canonical-build bump.
 
 1. **Boot — web console (default).** `./scripts/run-qemu.sh`. Banner shows
    `Acceleration: HVF (macOS)`, `UI mode: web console (default)`, and
    `3345→3345 (HTTPS web)`; GRUB's menu shows on this terminal and boots slot A
-   (the UEFI path, validated on an Intel Mac 2026-11-07; `EMBRA_BOOT=direct` is
+   (the UEFI path; `EMBRA_BOOT=direct` is
    the older path). No kernel panic on `ttyS0`.
 2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
    boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, the provider gateway or direct, LLM
@@ -429,6 +371,5 @@ banner at the top of this file.
    SHA-256 verification passes; sessions/memory persisted on the DATA partition.
 
 If all pass, the Intel Mac image is functionally equivalent to the canonical
-Ubuntu build. Stamp the status banner at the top of this file with the date +
-commit you validated at, mirroring the [aarch64 guide](AARCH64-BUILD.md)'s
-wording.
+Ubuntu build, and [VALIDATION-STATUS.md](../VALIDATION-STATUS.md) is the page that
+records it.
