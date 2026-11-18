@@ -8,6 +8,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 - [CHANGE-LOG.md](CHANGE-LOG.md) — Chronological merge log for `main`, anchored on tagged releases.
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — The 7-layer continuity architecture, the boot chain and disk layout, the network, trust boundaries, the four LLM providers, reasoning controls, prompt caching.
 - [OPEN-PROBLEMS.md](OPEN-PROBLEMS.md) — Unresolved Phase 2–3 design questions tracked at the architecture level.
+- [VALIDATION-STATUS.md](VALIDATION-STATUS.md) — What embraOS has been run on, platform by platform, and what is still TBD. The one page that carries that status.
 
 ## Build — `BUILD/`
 
