@@ -15,7 +15,7 @@ import os
 import subprocess
 
 OUT = os.path.dirname(os.path.abspath(__file__))
-W, H = 1200, 1152
+W, H = 1200, 1177
 SCALE = 2
 
 # ---------------------------------------------------------------- palette --
@@ -104,10 +104,11 @@ box(60, 78, 190, 64, "Web console · desktop", ["xterm.js over /ws/terminal", "s
 box(260, 78, 180, 64, "Web console · mobile", ["chat mode over /ws/chat", "a viewport of 768 px or less", "same URL, same token"], UI, size=9.8)
 box(450, 78, 226, 64, "Display console", ["the web console on the machine's own", "display, keyboard and mouse · cog on", "WPE WebKit · ⑥ udevd  ⑦ embra-kiosk"], UI, size=9.8)
 box(686, 78, 186, 64, "Serial TUI", ["embra.tui=1 · no image rebuild", "the serial line of a VM or a board", "embra-web is not started"], UI, size=9.8)
-text(884, 90, "Any machine with the boot URL:", size=9.8, fill=DETAIL)
-text(884, 103, "https://<host>:3345/embraOS?token=…", size=9.6, fill=WEB, family=MONO)
-text(884, 116, "a new 32-hex token every boot, printed in the", size=9.8, fill=DETAIL)
-text(884, 129, "boot banner only; the first visit sets a cookie", size=9.8, fill=DETAIL)
+text(884, 86, "Any machine with the console's URL:", size=9.8, fill=DETAIL)
+text(884, 99, "https://<host>:3345/embraOS?token=…", size=9.6, fill=WEB, family=MONO)
+text(884, 112, "a 32-hex token kept on STATE: the same URL at", size=9.8, fill=DETAIL)
+text(884, 125, "every boot, until /web-token rotate makes a new one", size=9.8, fill=DETAIL)
+text(884, 138, "the first visit sets a cookie · 401 without either", size=9.8, fill=DETAIL)
 
 # ------------------------------------------------------------ services band --
 band(40, 172, 1120, 512, "Services · one static musl binary each · supervised by embrad")
@@ -115,7 +116,7 @@ band(40, 172, 1120, 512, "Services · one static musl binary each · supervised 
 box(60, 200, 420, 72, "embra-web", [
     "web console server · TLS certificate minted by trustd at every start",
     "/ws/terminal PTY bridge · /ws/chat · /ws/activity · /ws/tools · /api/*",
-    "serves embra-web-ui (Leptos/WASM) at /embraOS · gated by the boot token",
+    "serves embra-web-ui (Leptos/WASM) at /embraOS · gated by the access token",
 ], WEB, order=5, port="HTTPS :3345")
 box(520, 200, 340, 72, "embra-console", [
     "conversational TUI (ratatui over crossterm)",
@@ -143,13 +144,14 @@ box(420, 428, 308, 86, "embra-guardian · in-process", [
     "egress policy and secrets host-side · replicant check +",
     "operator approval · built by the in-OS Rust toolchain",
 ], GUARD, size=9.6, lead=11.6)
-box(880, 400, 280, 136, "Outside the OS", [
-    "reached through the NIC (DHCP, or 10.0.2.15):",
+box(880, 400, 280, 148, "Outside the OS", [
+    "reached through any card, wired or Wi-Fi:",
     "AI providers · Anthropic, Gemini,",
     "Ollama, LM Studio (local or remote)",
     "Brave Search (web_search)",
     "GitHub · GitLab (gh_*, gl_*, git)",
     "GitHub Releases · the signed OS update",
+    "a time server · SNTP, asked by embrad",
     "Guardian egress: https and wss only,",
     "address classes, egress allow <host>",
 ], DIM, dash="3 3", size=9.8, lead=12)
@@ -164,7 +166,8 @@ box(450, 560, 290, 98, "embra-trustd", [
     "soul SHA-256 verification against",
     "/embra/state/soul.sha256 · a mismatch halts",
     "PKI: root CA 10 y · service certs 1 y",
-    "GenerateCertificate for embra-web",
+    "GenerateCertificate for embra-web: localhost,",
+    "the machine's name, its private addresses",
 ], TRUST, order=2, port="gRPC :50001")
 # right column
 box(880, 200, 280, 188, "Also in the workspace", [
@@ -176,16 +179,18 @@ box(880, 200, 280, 188, "Also in the workspace", [
     "the tool registry (#[embra_tool])",
     "embra-init · the initramfs /init (below)",
     "embra-boot · the boot contract: the kernel line,",
-    "partitions by GPT name, grubenv, the release stamp",
+    "partitions by GPT name, grubenv, the release stamp,",
+    "the network's and clock's records, the web token",
     "embra-update · backups, restores, the signed release",
     "into the other slot, the installer, DATA's growth",
     "wardsondb · vendored fork, reached over REST,",
     "never a library dependency of a crate here",
-], KERNEL, size=9.6, lead=11.4)
-box(880, 560, 280, 98, "Writable mounts", [
+], KERNEL, size=9.6, lead=11.0)
+box(880, 560, 280, 110, "Writable mounts", [
     "the root filesystem is a slot's read-only SquashFS",
     "/embra/state ← STATE: soul.sha256, keys (0600), CA",
-    "drop-ins, imported-intelligence/, update-source",
+    "drop-ins, imported-intelligence/, update-source,",
+    "network/, web-console/ (the token), last-known-time",
     "/embra/data ← DATA: WardSONDB · backups/",
     "/embra/workspace: a bind mount by embrad,",
     "the one place the tools write",
@@ -193,7 +198,7 @@ box(880, 560, 280, 98, "Writable mounts", [
 
 # ------------------------------------------------------------------ arrows --
 # UIs → embra-web / embra-console
-arrow([(150, 142), (150, 199)], "HTTPS + WS :3345 · the boot token", (158, 172))
+arrow([(150, 142), (150, 199)], "HTTPS + WS :3345 · the access token", (158, 172))
 arrow([(350, 142), (350, 199)], "over the NIC", (358, 172))
 arrow([(466, 142), (466, 199)], "on 127.0.0.1 · the token in COG_URL", (474, 172))
 arrow([(780, 142), (780, 199)], "ttyS0 | ttyAMA0", (788, 172))
@@ -212,7 +217,7 @@ arrow([(230, 524), (230, 559)], "REST :8090 · soul, memory, knowledge graph, se
 arrow([(450, 636), (381, 636)], "REST :8090", (415, 630), anchor="middle")
 text(415, 649, "reads the soul", size=9.0, fill="#bdbac4", anchor="middle")
 # web → trustd (certificate), along the left margin and under wardsondb
-arrow([(60, 250), (48, 250), (48, 672), (560, 672), (560, 659)], "GenerateCertificate :50001 at every embra-web start", (300, 668), anchor="middle", label_dy=-4)
+arrow([(60, 250), (48, 250), (48, 675), (560, 675), (560, 659)], "GenerateCertificate :50001 at every start, again when a name, an address or the clock changes", (304, 671), anchor="middle", label_dy=-4)
 # brain → outside
 arrow([(740, 450), (879, 450)], "HTTPS · WSS out", (810, 445), anchor="middle", dash="2 3")
 text(810, 462, "providers · tools · Guardian", size=9.0, fill="#bdbac4", anchor="middle")
@@ -226,7 +231,7 @@ def slab(y, h, title, color, lines, order_note=None):
 
 # The four slabs stack with a 24 px gap for the connector's label; a slab is
 # 35 px to its first line and 12.6 px a line after it.
-Y_EMBRAD, H_EMBRAD = 712, 95
+Y_EMBRAD, H_EMBRAD = 712, 120
 Y_KERNEL, H_KERNEL = Y_EMBRAD + H_EMBRAD + 24, 70
 Y_GRUB, H_GRUB = Y_KERNEL + H_KERNEL + 24, 82
 Y_HOST, H_HOST = Y_GRUB + H_GRUB + 24, 84
@@ -234,13 +239,15 @@ assert Y_HOST + H_HOST + 37 == H, "the canvas ends 37 px under the last slab"
 
 slab(Y_EMBRAD, H_EMBRAD, "embrad · PID 1 · init and service supervisor", SLAB, [
     "starts the services in order ① → ⑤, then ⑥ ⑦ where the machine has a display (a boot goes on without those two) · soul gate: VerifySoul through trustd — a mismatch halts the boot, a missing soul is a first run",
-    "any exit is restarted, 1 s · 2ⁿ up to 30 s, ten in a burst halts the service · 5 s reconciliation loop · bind-mounts /embra/workspace · mints the web token and prints the boot URL on the serial line and the display",
+    "any exit is restarted, 1 s · 2ⁿ up to 30 s, ten in a burst halts the service · 5 s reconciliation loop · bind-mounts /embra/workspace · makes the web token once, keeps it on STATE and prints the URL on both consoles",
     "before the services: the image's and STATE's CA certificates merged · DATA grown to the end of its disk · a trial boot (embra.trial=1) snapshots STATE and DATA and is confirmed once every service is healthy",
     "embra.mode=update|backup|restore|install runs embra-update on both consoles in place of the services: the signed release into the other slot, a snapshot, a restore, the installer",
-    "eth0: a DHCP lease through udhcpc (the lease script applies it, the client renews it), the static 10.0.2.15/24 via 10.0.2.2 after 10 s without one · /etc/resolv.conf → /embra/ephemeral",
+    "the network: a udhcpc for every card on DHCP, started and stopped as the cards come and go, the wired cards first · Wi-Fi: the card's driver loaded as a module, a wpa_supplicant with the stored networks",
+    "/network: a card's own address, the machine's name, the time servers and the Wi-Fi networks, kept on STATE · the clock: never before the image's build time, set by SNTP at boot, checked every hour",
+    "a stop — /reboot now (SIGTERM, a restart) or /reboot halt (SIGUSR2, a power-off): the services stopped in reverse order, every other process ended, the workspace, DATA and STATE unmounted",
 ])
 slab(Y_KERNEL, H_KERNEL, "Linux kernel 6.18 LTS · Buildroot 2026.02.1 · initramfs /init = embra-init", KERNEL, [
-    "drivers built in: virtio, AHCI, NVMe, pvscsi, vmxnet3, Hyper-V, wired NICs, SAS and RAID controllers, USB · every linux-firmware family on the rootfs · probe-time firmware and CPU microcode as initrds",
+    "drivers built in: virtio, AHCI, NVMe, pvscsi, vmxnet3, Hyper-V, wired NICs, SAS, RAID, USB · Wi-Fi drivers as modules · every linux-firmware family on the rootfs · probe-time firmware and CPU microcode as initrds",
     "SquashFS (xz) · ext4 · the firmware's framebuffer (simpledrm) or the hypervisor's display: the boot log, then the display console drawn in software · console=tty0 console=ttyS0 | ttyAMA0 · embra.slot=a|b",
     "embra-init (sync, no tokio): mounts proc, sys, dev → / from the slot's partition by GPT name (rootfs_a | rootfs_b), read-only → /embra/state from state → /embra/data from data → chroot → exec /sbin/embrad",
 ])
