@@ -246,6 +246,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Quick Start](docs/BUILD/QUICK-START.md)** | Build the QEMU image from source (Ubuntu 24.04 / 26.04); first-boot Config Wizard; operational notes |
 | **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status, the post-Sprint-5 embra-web / embra-guardian v1 increments, Sprint 6 — the final Phase 1 sprint — the code-review pit stop, and Phase 2 |
 | **[Change Log](docs/CHANGE-LOG.md)** | Merge log, anchored on tagged releases |
+| **[Validation Status](docs/VALIDATION-STATUS.md)** | What embraOS has been run on, platform by platform, and what is still TBD |
 | **[Operation](docs/OPERATIONS/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/OPERATIONS/COMMAND-REFERENCE.md)** | Every slash command |
 | **[Updates and Backups](docs/OPERATIONS/UPDATES-AND-BACKUPS.md)** | The two OS slots and GRUB's A/B state, in-OS backups and restores, the signed OS update |
