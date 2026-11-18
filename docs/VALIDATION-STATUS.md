@@ -2,7 +2,7 @@
 
 What embraOS has been run on, and what has not been run yet. This is the one page that says so. The rest of the manual describes what the OS does, and the [change log](CHANGE-LOG.md) records what changed and when.
 
-**As of:** 2026-11-17, after `v0.25.0-phase2`.
+**As of:** 2026-11-18, `v0.26.0-phase2`.
 
 x86_64 under QEMU on Linux is the reference platform: what the manual describes has been run there, unless a row below marks it TBD. The tables list what has been run beyond that, and every item that is still TBD. An item marked TBD has not been run; it is not known to fail.
 

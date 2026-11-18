@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "embra-tools-core"
-version = "0.25.0-phase2"
+version = "0.26.0-phase2"
 dependencies = [
  "serde",
  "serde_json",
