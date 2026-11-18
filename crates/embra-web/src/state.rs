@@ -31,7 +31,7 @@ pub struct AppState {
     /// bounded backlog and fanned out to every `/ws/tools` socket
     /// (`tool_feed.rs`).
     pub tools: ToolFeed,
-    /// This boot's access token (`access.rs`): every request on `:3345`
+    /// The access token (`access.rs`): every request on `:3345`
     /// carries it, in the query once and in a cookie after.
     pub token: Arc<str>,
     /// Where the OS keeps its backups (`backups.rs`): `/embra/data/backups`

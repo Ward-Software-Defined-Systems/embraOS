@@ -10,6 +10,7 @@ mod provider_setup;
 mod slash;
 mod turn;
 mod update;
+mod web_token;
 #[cfg(test)]
 mod tests;
 

@@ -3,7 +3,7 @@
 //! The web console's certificate is signed by a certificate authority this
 //! machine made for itself, which no browser knows: every browser warns
 //! until its operator has imported that authority's certificate once. This
-//! route hands it out, behind the boot's token like every route. With it
+//! route hands it out, behind the access token like every route. With it
 //! imported, the console opens without a warning at every name its
 //! certificate carries: `localhost`, the machine's name, and the private
 //! addresses its cards hold (`embra_boot::names::leaf_names`).

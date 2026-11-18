@@ -4,7 +4,8 @@
 //! the release stamp a slot ships with, the boot console a message for the
 //! operator goes to (the serial line and the display both) and a prompt reads
 //! from, the network cards of the machine, the lease embrad records and the
-//! console URLs that follow from it, what embrad made of the clock at boot (and the date arithmetic that
+//! console URLs that follow from it, the web console's access token on STATE,
+//! what embrad made of the clock at boot (and the date arithmetic that
 //! reads the release stamp's build time), and what an installer needs: the
 //! layout, the medium, the disks. No runtime
 //! and no dependency but `libc`: embra-init runs it from the initramfs,
@@ -27,6 +28,7 @@ pub mod partitions;
 pub mod release;
 pub mod slot;
 pub mod vt;
+pub mod web_token;
 pub mod wifi;
 pub mod state;
 pub mod status;

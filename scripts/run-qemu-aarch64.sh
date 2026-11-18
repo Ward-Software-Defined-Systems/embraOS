@@ -226,7 +226,7 @@ if [ "${EMBRA_TUI:-}" = "1" ]; then
 else
     echo "  UI mode: web console (default) — set EMBRA_TUI=1 for the serial TUI"
     echo "  Port forwards: 127.0.0.1:8443→8443 (REST), *:3345→3345 (HTTPS web)"
-    echo "  Web console: the URL embraOS prints below at boot (it carries this boot's access token; accept the embraOS-CA cert)"
+    echo "  Web console: the URL embraOS prints below at boot (it carries the access token, the same at every boot; accept the embraOS-CA cert)"
 fi
 
 # The disk and the installer medium. Without any of the knobs the disk is the

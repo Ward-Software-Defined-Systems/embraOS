@@ -640,6 +640,8 @@ mod read_tests {
             ("/embra/data/backups/2026-11-05_101200_manual/backup.tar.gz", "the backups on DATA (they carry the operator's STATE)"),
             ("/embra/workspace/.ssh/id_ed25519", "the workspace SSH key"),
             ("/embra/state/network/wifi", "the operator's STATE partition"),
+            ("/embra/state/web-console", "the operator's STATE partition"),
+            ("/embra/state/web-console/token", "the operator's STATE partition"),
             ("/embra/ephemeral/net/secret", "the Wi-Fi passphrases"),
             ("/embra/ephemeral/net/secret/wlan0.conf", "the Wi-Fi passphrases"),
         ] {

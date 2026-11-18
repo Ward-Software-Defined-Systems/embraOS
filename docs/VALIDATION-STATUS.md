@@ -65,6 +65,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `/network hostname` | QEMU | the name in a router's list |
 | The web console's certificate and its CA | QEMU, with curl as the client: by address and by name, a name set with `/network hostname`, an address that changes, the CA of an earlier release issued again once | a browser with the CA imported; a name a DNS server serves |
 | The web console at the leased address | QEMU on an Intel Mac and on Apple Silicon (bridged); Hyper-V; Parallels; bare metal | |
+| The web console's access token: the same at every boot, a new one with `/web-token rotate`, left out of a backup and kept by a restore | QEMU, with curl and the display console as the clients, the commands typed at the wizard | a browser and a phone: a bookmark across a reboot, the sign-out at a rotation |
 
 ## Wi-Fi
 

@@ -884,6 +884,11 @@ mod tests {
         assert!(state_excluded(Path::new(embra_boot::clock::LAST_KNOWN_NAME)));
         assert_eq!(embra_boot::clock::LAST_KNOWN_NAME, "last-known-time");
         assert!(STATE_KEPT_BY_RESTORE.contains(&"lost+found") && STATE_KEPT_BY_RESTORE.contains(&"last-known-time"));
+        // The web console's access token is the machine's too: its
+        // directory is left out whole and kept by a restore.
+        assert_eq!(embra_boot::web_token::DIR_NAME, "web-console");
+        assert!(state_excluded(Path::new("web-console")) && STATE_KEPT_BY_RESTORE.contains(&"web-console"));
+        assert!(!state_excluded(Path::new("pki/web-console")));
         assert!(!state_excluded(Path::new("pki/halt_reason")));
         assert!(!state_excluded(Path::new("soul.sha256")));
     }

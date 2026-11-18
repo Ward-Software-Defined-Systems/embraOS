@@ -74,8 +74,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("obtained serving cert from embra-trustd");
     tokio::spawn(tls::keep_current(cfg.trust_addr.clone(), leaf, asked));
 
-    // This boot's access token (`access.rs`): embrad's, or one of our own
-    // on the host. In the OS it is never logged; the boot banner shows it.
+    // The access token (`access.rs`): embrad's, or one of our own on the
+    // host. In the OS it is never logged; the boot banner shows it.
     let from_env = cfg.token.is_some();
     let token: std::sync::Arc<str> = match cfg.token.clone() {
         Some(t) => t.into(),

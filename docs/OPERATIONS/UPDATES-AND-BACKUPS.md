@@ -20,7 +20,7 @@ GRUB boots the active slot by default and shows its menu for three seconds: each
 
 ## Backups
 
-A backup is a snapshot of STATE and DATA: a `tar.gz` under `/embra/data/backups/<timestamp>_<label>/` with a `backup.json` record beside it (the label, who took it, the release, the database engine, the counts, the sizes, the archive's SHA-256, what was left out). It holds STATE whole but the halt reason, the next-boot marker, the filesystem's own `lost+found` and the machine's saved clock (`last-known-time`, which a restore leaves in place: it belongs to the machine, not to the snapshot), DATA's database directory whole, and DATA's workspace but the Guardian's build tree (its built artifacts are kept) and cargo home. Links stay links; special files are skipped and named in the record.
+A backup is a snapshot of STATE and DATA: a `tar.gz` under `/embra/data/backups/<timestamp>_<label>/` with a `backup.json` record beside it (the label, who took it, the release, the database engine, the counts, the sizes, the archive's SHA-256, what was left out). It holds STATE whole but the halt reason, the next-boot marker, the filesystem's own `lost+found`, and what belongs to the machine and not to the snapshot, which a restore leaves in place: its saved clock (`last-known-time`) and the web console's access token (`web-console/`); DATA's database directory whole, and DATA's workspace but the Guardian's build tree (its built artifacts are kept) and cargo home. Links stay links; special files are skipped and named in the record.
 
 A snapshot runs only while the database is stopped, so a copy of its files is consistent: before the services start. Two ways to ask for one:
 
@@ -40,7 +40,7 @@ The archive is checked while it is written:
 - It is one gzip stream that holds one tar archive, read to its end with its checksum.
 - Every member is a directory, a regular file or a link.
 - Every path is under `state/`, `data/wardsondb/` or `data/workspace/`, named once, in a directory the archive named before it.
-- None is a STATE entry a snapshot leaves out (the halt reason, the next-boot marker, the saved clock, `lost+found`).
+- None is a STATE entry a snapshot leaves out (the halt reason, the next-boot marker, the saved clock, the web console's access token, `lost+found`).
 
 A snapshot the OS took passes. A file that is no backup, a damaged one, one cut short and a name that is taken are refused with the reason, the member named where one is at fault, and nothing of the upload is kept. What passes gets its record made again from the archive: the SHA-256, the counts and the sizes, the database engine from the archive's own marker, the stamp and the label from a name of a snapshot's shape. It is listed as `uploaded`, and the release that took it is not known. An uploaded backup is the operator's: the rotation never removes it, and it never passes for the snapshot an update takes before a release's first run.
 

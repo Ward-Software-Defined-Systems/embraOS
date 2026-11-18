@@ -18,7 +18,7 @@
 //! disposition with the sanitized name. Ids are validated here BEFORE the
 //! RPC so a malformed path never reaches the brain.
 //!
-//! Trust model: the rest of `/api/*`'s — TLS, and the boot's token on every
+//! Trust model: the rest of `/api/*`'s — TLS, and the access token on every
 //! request (`access.rs`; a write passes the Origin rule as well). What this
 //! route adds is a disk-fill / decode vector, bounded by the body limit
 //! here and the brain's size/dimension caps.

@@ -1,4 +1,6 @@
-//! The web console's gate: a per-boot access token. embrad mints one and
+//! The web console's gate: an access token. embrad keeps one on STATE
+//! across boots (`embra_boot::web_token`), makes a new one when the operator
+//! asks (`/web-token rotate`, which starts this process again with it) and
 //! hands it over in `EMBRA_WEB_TOKEN`; the URL it prints at boot carries it
 //! (`https://localhost:3345/embraOS?token=…`). The first visit with the
 //! token sets a cookie and redirects to the clean URL; every later request,
@@ -32,7 +34,7 @@ pub const TOKEN_ENV: &str = "EMBRA_WEB_TOKEN";
 /// The cookie the first visit sets.
 pub const COOKIE: &str = "embra_token";
 /// What a request without the token is told. Never the token.
-pub const REFUSAL: &str = "embraOS web console: open the URL printed at boot on the serial console and on the display; it carries this boot's access token. On the display the console's menu (the right mouse button) shows it again.\n";
+pub const REFUSAL: &str = "embraOS web console: open the URL printed at boot on the serial console and on the display; it carries the console's access token, which /web-token rotate replaces. On the display the console's menu (the right mouse button) shows the URL again.\n";
 /// What a socket handshake or a write from another origin is told.
 pub const ORIGIN_REFUSAL: &str = "embraOS web console: refused — the request came from a page on another origin; the console answers the pages it serves itself.\n";
 

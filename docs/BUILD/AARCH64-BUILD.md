@@ -31,8 +31,8 @@ Rust toolchain), Step 3.6 (the embedding model) and Step 4 (Buildroot) run in a
 > **Default UI is the browser console.** `run-qemu-aarch64.sh` boots the
 > **embra-web** console by default, served over HTTPS at
 > **https://localhost:3345/embraOS** — open it from the URL embraOS prints at boot, which
-> carries this boot's access token (`?token=…`; accept the embraOS-CA cert on first
-> visit; the token changes at every boot and is shown nowhere else). Set
+> carries the console's access token (`?token=…`; accept the embraOS-CA cert on first
+> visit; the token stays the same across boots, and `/web-token rotate` makes a new one). Set
 > **`EMBRA_TUI=1`** before `run-qemu-aarch64.sh` to boot the serial TUI on this
 > terminal instead — no image rebuild needed. The serial TUI is functional but is
 > preferred for debugging; the web console is the primary interface. The disk
@@ -257,7 +257,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > missing from the rootfs rather than shipping keyword-only retrieval.
 
 > **Port forwarding:** QEMU forwards 8443 (REST) on the host's loopback only (the gRPC ports, 50000 and 50002, bind the machine's loopback and are not forwarded),
-> and 3345 (HTTPS — https://localhost:3345/embraOS, behind this boot's access token) on every host interface, in both UI modes;
+> and 3345 (HTTPS — https://localhost:3345/embraOS, behind the console's access token) on every host interface, in both UI modes;
 > other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot. apid's REST routes are `/health`,
 > `/version` and `/status` (the brain's status incl. the LLM provider probe; 503 while
 > the brain is away). Test:

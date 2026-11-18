@@ -124,7 +124,7 @@
   // browser on another machine, and the page's alerts. It holds the
   // keyboard while it is up (Escape and Enter close it, nothing is typed
   // into the console or the form behind it) and gives the focus back to
-  // where it was. The URL carries the boot's token: embra-web gives it to
+  // where it was. The URL carries the access token: embra-web gives it to
   // the machine's own browser and to no other (`/api/console-url`), and it
   // is on the page only while the sheet is up.
   let kioskSheet = null;
@@ -164,7 +164,7 @@
       const rows = what.urls ? el("div", "ks-body", null) : null;
       if (rows) {
         box.appendChild(rows);
-        box.appendChild(el("div", "ks-note", "The URL carries this boot\u2019s access token: whoever has it has the console, until the next boot. The browser asks about the certificate once (embraOS-CA)."));
+        box.appendChild(el("div", "ks-note", "The URL carries the console\u2019s access token: whoever has it has the console, until /web-token rotate makes a new one. The browser asks about the certificate once (embraOS-CA)."));
       }
       const bye = el("button", "ks-close", "Close");
       bye.type = "button";
@@ -389,7 +389,7 @@
     item("url", "This console\u2019s URL\u2026");
     document.body.appendChild(menu);
 
-    // This console's URL with the boot's token, for a browser on another
+    // This console's URL with the access token, for a browser on another
     // machine: the boot banner printed it once and the display console
     // covers that copy. The sheet shows it (`embraKioskSheet`).
     const sheetOpen = () => kioskSheet.isOpen();

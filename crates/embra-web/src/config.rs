@@ -17,7 +17,7 @@ pub struct WebConfig {
     pub trust_addr: String,
     /// Path to the `embra-console` binary the PTY bridge spawns.
     pub console_bin: String,
-    /// This boot's access token, from `EMBRA_WEB_TOKEN` (embrad mints it
+    /// The access token, from `EMBRA_WEB_TOKEN` (embrad keeps it on STATE
     /// and prints the URL that carries it); `None` on the host, where
     /// embra-web mints its own. An environment variable, never an
     /// argument: `ps` shows arguments.

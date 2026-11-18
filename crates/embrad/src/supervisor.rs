@@ -112,10 +112,21 @@ pub enum ServiceStatus {
 }
 
 pub struct Supervisor {
-    /// This boot's web console access token (web mode): minted once in
-    /// `register_services`, handed to embra-web in its environment and
-    /// printed in the boot banner, the one place it is shown.
+    /// The web console's access token (web mode): the one kept on STATE, or
+    /// made and stored by this boot (`embra_boot::web_token`). It is handed
+    /// to embra-web in its environment and printed in the boot banner; a
+    /// request of the operator's replaces it while the services run
+    /// (`rotate_web_token`).
     web_token: Option<String>,
+    /// Whether the token is on STATE, so that the next boot's is the same
+    /// one: the banner says which.
+    web_token_stored: bool,
+    /// Where the token is kept: STATE's directory for it (a test passes its
+    /// own).
+    web_token_dir: PathBuf,
+    /// A request for a new token failed in this boot. It is not tried again
+    /// every few seconds; the request stays on STATE for the next boot.
+    web_token_rotation_failed: bool,
     /// The stdio of the boot, kept before the log redirect for the serial
     /// console's restarts (`keep_boot_stdio`, #29).
     boot_stdio: Option<(std::fs::File, std::fs::File)>,
@@ -140,6 +151,9 @@ impl Supervisor {
     pub fn with_cmdline(cmdline: Cmdline) -> Self {
         Self {
             web_token: None,
+            web_token_stored: false,
+            web_token_dir: web_token_dir(),
+            web_token_rotation_failed: false,
             boot_stdio: None,
             services: Vec::new(),
             cmdline,
@@ -349,18 +363,27 @@ impl Supervisor {
         // kernel line): embra-web, which spawns the sole PTY-hosted
         // embra-console internally. Otherwise the serial embra-console TUI.
         if self.cmdline.web_console() {
-            // The web console's gate: a token for this boot, in embra-web's
-            // environment (never an argument: `ps` shows those) and in the
-            // URL the banner prints. Without a token there is no gate, and
-            // an open console is worse than none: the error stays on the
-            // serial console, and `EMBRA_TUI=1` still boots the TUI.
-            let token = match boot_token() {
-                Ok(t) => t,
+            // The web console's gate: the token kept on STATE, or a new one
+            // stored there (a first boot, the operator's request), in
+            // embra-web's environment (never an argument: `ps` shows those)
+            // and in the URL the banner prints. Without a token there is no
+            // gate, and an open console is worse than none: the error stays
+            // on the serial console, and `EMBRA_TUI=1` still boots the TUI.
+            use embra_boot::web_token::Origin;
+            let boot = match embra_boot::web_token::for_boot(&self.web_token_dir) {
+                Ok(b) => b,
                 Err(e) => {
                     error!("Web mode: no access token could be minted ({e}); embra-web is NOT started. Boot with EMBRA_TUI=1 for the serial console.");
                     return;
                 }
             };
+            match &boot.origin {
+                Origin::Kept => info!("Web console: the access token kept on STATE"),
+                Origin::Made => info!("Web console: a new access token, stored on STATE"),
+                Origin::NotStored(e) => warn!("Web console: a new access token that could not be stored on STATE ({e}); the next boot makes another"),
+            }
+            self.web_token_stored = !matches!(boot.origin, Origin::NotStored(_));
+            let token = boot.token;
             self.web_token = Some(token.clone());
             info!("Web mode (embra.web=1): registering embra-web; serial console skipped");
             self.add_service(ServiceDef {
@@ -546,13 +569,7 @@ impl Supervisor {
                     // console runs: its menu shows the URL again (embra-web's
                     // `/api/console-url`, answered to the machine's own browser
                     // alone), the display console covering this copy.
-                    let shown = if self.kiosk {
-                        "it is shown here and in the display console's menu (the right mouse button)"
-                    } else {
-                        "it is shown here only"
-                    };
-                    let _ = writeln!(b,
-                        "    \x1b[2mThis boot's access token is in the URL; the URL is the credential, and {shown}.\x1b[0m");
+                    let _ = writeln!(b, "    \x1b[2m{}\x1b[0m", banner_token_note(self.web_token_stored, self.kiosk));
                     if self.kiosk {
                         let _ = writeln!(b,
                             "    \x1b[2mThe display shows this console too (embra.kiosk=0 boots without it).\x1b[0m");
@@ -928,6 +945,97 @@ impl Supervisor {
         self.start_service(index).await
     }
 
+    /// Whether the operator asked for a new access token (`/web-token
+    /// rotate`: the brain leaves the request on STATE) and the loop has it
+    /// to make: a web console runs on a token, and no request failed in
+    /// this boot.
+    pub fn web_token_rotation_asked(&self) -> bool {
+        self.web_token.is_some()
+            && !self.web_token_rotation_failed
+            && embra_boot::web_token::rotation_asked(&self.web_token_dir)
+    }
+
+    /// The new token in this supervisor and in the environment of the two
+    /// services that carry it; they take it at their next start.
+    fn take_web_token(&mut self, token: String) {
+        for svc in &mut self.services {
+            match svc.def.name.as_str() {
+                "embra-web" => set_env(&mut svc.def.env, WEB_TOKEN_ENV, token.clone()),
+                "embra-kiosk" => set_env(&mut svc.def.env, KIOSK_URL_ENV, kiosk_url(&token)),
+                _ => {}
+            }
+        }
+        self.web_token = Some(token);
+        self.web_token_stored = true;
+    }
+
+    /// The operator's request for a new access token. A new token is made
+    /// and stored, and the request removed; then the display console and
+    /// the web console are stopped and started again with it, which ends
+    /// every connection the old token opened and signs every browser out
+    /// (a browser's cookie is the old token). The new URLs go to both
+    /// consoles as the banner's did, and never to a log: the tools read the
+    /// logs. A request that cannot be answered is said on the consoles, the
+    /// token stays as it is, and the request waits for the next boot.
+    pub async fn rotate_web_token(&mut self) {
+        let token = match embra_boot::web_token::rotate(&self.web_token_dir) {
+            Ok(t) => t,
+            Err(e) => {
+                self.web_token_rotation_failed = true;
+                error!("the web console's access token was not made again: {e}; the token stays as it is, and the request is answered by the next boot");
+                embra_boot::console::BootConsole::open()
+                    .line(&format!("[embrad] the web console's access token was not made again ({e}); the console stays at its URL, and the next boot makes the new token"));
+                return;
+            }
+        };
+        info!("The web console's access token was made again on the operator's request; restarting the web console");
+        self.take_web_token(token.clone());
+        // The display console is a client of the web console: it goes
+        // first and comes back last, on the new URL.
+        let kiosk = self.services.iter().position(|s| s.def.name == "embra-kiosk");
+        let web = self.services.iter().position(|s| s.def.name == "embra-web");
+        let kiosk_ran = kiosk.is_some_and(|i| self.services[i].child.is_some());
+        if let Some(i) = kiosk.filter(|_| kiosk_ran) {
+            self.stop_service(i).await;
+        }
+        if let Some(i) = web {
+            // A web console that is not running (failed, and waiting for its
+            // restart) takes the new token when the loop starts it.
+            if self.services[i].child.is_some() {
+                self.stop_service(i).await;
+                if let Err(e) = self.start_service(i).await {
+                    error!("embra-web did not come back with the new access token: {e}");
+                    self.services[i].status = ServiceStatus::Failed(e.to_string());
+                }
+            }
+        }
+        if let Some(i) = kiosk.filter(|_| kiosk_ran)
+            && let Err(e) = self.start_service(i).await
+        {
+            warn!("embra-kiosk did not come back on the new URL: {e}");
+            self.services[i].status = ServiceStatus::Failed(e.to_string());
+        }
+        let leases = embra_boot::net_lease::read();
+        let mut consoles = embra_boot::console::BootConsole::open();
+        for line in new_token_lines(&token, &leases, self.kiosk) {
+            consoles.line(&line);
+        }
+    }
+
+    /// Stops one service and leaves it stopped: its caller starts it again.
+    async fn stop_service(&mut self, index: usize) {
+        let name = self.services[index].def.name.clone();
+        info!("Stopping {name}");
+        if let Some(ref mut child) = self.services[index].child {
+            stop_one(child, &name, STOP_GRACE).await;
+        }
+        self.services[index].status = ServiceStatus::Stopped;
+        self.services[index].child = None;
+        if name == "embra-kiosk" {
+            release_display();
+        }
+    }
+
     pub fn service_count(&self) -> usize {
         self.services.len()
     }
@@ -1028,6 +1136,21 @@ fn banner_url_lines(urls: &[embra_boot::net_lease::ConsoleUrl<'_>], no_address: 
         .collect();
     if no_address {
         lines.push("    \x1b[2m(no address on a network yet; DHCP is still being asked on every card)\x1b[0m".to_string());
+    }
+    lines
+}
+
+/// What both consoles are told after the operator's request for a new
+/// access token: what happened, and the console's URLs as the banner prints
+/// them, each with where it works.
+fn new_token_lines(token: &str, leases: &[embra_boot::net_lease::Lease], kiosk: bool) -> Vec<String> {
+    let urls = embra_boot::net_lease::console_urls(token, leases);
+    let mut lines = vec![
+        "[embrad] The web console has a new access token (/web-token rotate): every browser is signed out. The console is at:".to_string(),
+    ];
+    lines.extend(banner_url_lines(&urls, leases.is_empty()));
+    if kiosk {
+        lines.push("    \x1b[2mThe display console is on the new URL, and its menu shows it (the right mouse button).\x1b[0m".to_string());
     }
     lines
 }
@@ -1177,7 +1300,61 @@ fn kiosk_args(scale: u8) -> Vec<String> {
     ]
 }
 
-/// The display console's environment: the console URL with this boot's
+/// The variable cog reads its page's URL from.
+const KIOSK_URL_ENV: &str = "COG_URL";
+/// The variable embra-web reads its token from (`embra-web`'s `access.rs`).
+const WEB_TOKEN_ENV: &str = "EMBRA_WEB_TOKEN";
+
+/// The display console's page: the web console on loopback, with the access
+/// token and the flag that tells the page it is on the display.
+fn kiosk_url(token: &str) -> String {
+    format!("https://127.0.0.1:3345/embraOS?token={token}&kiosk=1")
+}
+
+/// A service's variable, replaced or added.
+fn set_env(env: &mut Vec<(String, String)>, key: &str, value: String) {
+    match env.iter_mut().find(|(k, _)| k == key) {
+        Some(pair) => pair.1 = value,
+        None => env.push((key.to_string(), value)),
+    }
+}
+
+/// Where the web console's token is kept. A test build's default is a
+/// place nothing can be stored in, so no test touches STATE or leaves a
+/// directory behind: its supervisor runs on a token that is not kept, and a
+/// test of the keeping passes a directory of its own.
+#[cfg(not(test))]
+fn web_token_dir() -> PathBuf {
+    PathBuf::from(embra_boot::web_token::DIR)
+}
+
+#[cfg(test)]
+fn web_token_dir() -> PathBuf {
+    PathBuf::from("/dev/null/embrad-test-web-token")
+}
+
+/// The banner's line under the console's URLs: what the token in them is,
+/// and where the URL is shown. A token that could not be stored is named as
+/// this boot's: the next boot's URL differs.
+fn banner_token_note(stored: bool, kiosk: bool) -> String {
+    let token = if stored {
+        "The access token is in the URL and stays the same across boots (/web-token rotate makes a new one)"
+    } else {
+        "This boot's access token is in the URL (it could not be stored on STATE, so the next boot makes another)"
+    };
+    // Printed here and nowhere else, except where the display console runs:
+    // its menu shows the URL again (embra-web's `/api/console-url`, answered
+    // to the machine's own browser alone), the display console covering
+    // this copy.
+    let shown = if kiosk {
+        "it is shown here and in the display console's menu (the right mouse button)"
+    } else {
+        "it is shown here only"
+    };
+    format!("{token}; the URL is the credential, and {shown}.")
+}
+
+/// The display console's environment: the console URL with the access
 /// token in `COG_URL` (never an argument: `ps` shows those; `?kiosk=1` tells
 /// the page it is on the display), Mesa's software path on the card
 /// (kms_swrast through GBM; never `LIBGL_ALWAYS_SOFTWARE`, which would send
@@ -1186,7 +1363,7 @@ fn kiosk_args(scale: u8) -> Vec<String> {
 /// mode when the display console asks for one (`kiosk_video_mode`).
 fn kiosk_env(token: &str, layout: Option<&str>, mode: Option<(u32, u32)>) -> Vec<(String, String)> {
     let mut env = vec![
-        ("COG_URL".to_string(), format!("https://127.0.0.1:3345/embraOS?token={token}&kiosk=1")),
+        (KIOSK_URL_ENV.to_string(), kiosk_url(token)),
         ("MESA_LOADER_DRIVER_OVERRIDE".to_string(), "kms_swrast".to_string()),
         ("GBM_ALWAYS_SOFTWARE".to_string(), "1".to_string()),
         ("XDG_RUNTIME_DIR".to_string(), XDG_RUNTIME_DIR.to_string()),
@@ -1682,20 +1859,6 @@ fn soul_decision(valid: bool, error: &str, computed: &str, stored: &str) -> Soul
     }
 }
 
-/// 16 bytes of `/dev/urandom` as 32 lowercase hex characters: the web
-/// console's token for this boot. A failed read is an error, never a
-/// weaker source.
-fn boot_token() -> Result<String> {
-    use std::io::Read;
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(hex_of(&bytes))
-}
-
-fn hex_of(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -1741,22 +1904,149 @@ mod boot_environment_tests {
 
 #[cfg(test)]
 mod web_token_tests {
-    use super::{boot_token, hex_of};
+    use super::*;
 
+    /// A supervisor in web mode over a token directory of the test's own.
+    fn web_mode(tag: &str) -> Supervisor {
+        let mut sup = Supervisor::with_cmdline(Cmdline::parse("embra.web=1"));
+        sup.web_token_dir = std::env::temp_dir().join(format!("embrad-web-token-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sup.web_token_dir);
+        sup
+    }
+
+    fn env_of(sup: &Supervisor, service: &str, key: &str) -> Option<String> {
+        let svc = sup.services.iter().find(|s| s.def.name == service)?;
+        svc.def.env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    /// The token is made once and kept: a second boot over the same STATE
+    /// registers the web console and the display console with the first
+    /// boot's token.
     #[test]
-    fn a_boot_token_is_thirty_two_lowercase_hex_characters() {
-        assert_eq!(hex_of(&[0u8; 16]).len(), 32);
-        assert_eq!(hex_of(&[0xde, 0xad, 0x00, 0x0f]), "dead000f");
-        let t = boot_token().expect("/dev/urandom");
-        assert_eq!(t.len(), 32);
-        assert!(t.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        assert_ne!(t, boot_token().unwrap());
+    fn a_second_boot_takes_the_token_the_first_one_stored() {
+        let mut first = web_mode("kept");
+        let dir = first.web_token_dir.clone();
+        first.register_services_with(true, true, Path::new("/nonexistent/embrad-test/drm"));
+        let token = first.web_token.clone().expect("a token in web mode");
+        assert!(embra_boot::web_token::well_formed(&token));
+        assert!(first.web_token_stored);
+        assert_eq!(embra_boot::web_token::read(&dir).as_deref(), Some(token.as_str()), "on STATE");
+        assert_eq!(env_of(&first, "embra-web", WEB_TOKEN_ENV).as_deref(), Some(token.as_str()));
+
+        let mut second = Supervisor::with_cmdline(Cmdline::parse("embra.web=1"));
+        second.web_token_dir = dir.clone();
+        second.register_services_with(true, true, Path::new("/nonexistent/embrad-test/drm"));
+        assert_eq!(second.web_token.as_deref(), Some(token.as_str()), "the same token at the next boot");
+        assert_eq!(env_of(&second, "embra-web", WEB_TOKEN_ENV).as_deref(), Some(token.as_str()));
+        assert_eq!(env_of(&second, "embra-kiosk", KIOSK_URL_ENV), Some(kiosk_url(&token)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A request for a new token that the machine stopped before answering
+    /// is answered by the next boot: a new token, and the request gone.
+    #[test]
+    fn a_request_left_on_state_is_answered_by_the_next_boot() {
+        let mut first = web_mode("asked");
+        let dir = first.web_token_dir.clone();
+        first.register_services_with(false, false, Path::new("/nonexistent/embrad-test/drm"));
+        let old = first.web_token.clone().unwrap();
+        embra_boot::web_token::ask_rotation(&dir).unwrap();
+
+        let mut second = Supervisor::with_cmdline(Cmdline::parse("embra.web=1"));
+        second.web_token_dir = dir.clone();
+        second.register_services_with(false, false, Path::new("/nonexistent/embrad-test/drm"));
+        let new = second.web_token.clone().unwrap();
+        assert_ne!(new, old);
+        assert!(!embra_boot::web_token::rotation_asked(&dir));
+        assert_eq!(embra_boot::web_token::read(&dir).as_deref(), Some(new.as_str()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The loop looks for a request only where a web console runs on a
+    /// stored token, and not again in a boot where one failed.
+    #[test]
+    fn a_request_is_seen_where_a_web_console_runs_and_not_again_after_a_failure() {
+        let mut sup = web_mode("seen");
+        let dir = sup.web_token_dir.clone();
+        embra_boot::web_token::ask_rotation(&dir).unwrap();
+        assert!(!sup.web_token_rotation_asked(), "no web console registered: nothing to make again");
+        sup.register_services_with(false, false, Path::new("/nonexistent/embrad-test/drm"));
+        assert!(!sup.web_token_rotation_asked(), "the registration answered the request");
+        embra_boot::web_token::ask_rotation(&dir).unwrap();
+        assert!(sup.web_token_rotation_asked());
+        sup.web_token_rotation_failed = true;
+        assert!(!sup.web_token_rotation_asked(), "one failure a boot");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // The serial TUI: no web console, no token, no request looked for.
+        let mut tui = web_mode("tui");
+        tui.cmdline = Cmdline::parse("embra.tui=1");
+        tui.register_services_with(false, false, Path::new("/nonexistent/embrad-test/drm"));
+        assert!(tui.web_token.is_none());
+        embra_boot::web_token::ask_rotation(&tui.web_token_dir).unwrap();
+        assert!(!tui.web_token_rotation_asked());
+        std::fs::remove_dir_all(&tui.web_token_dir).unwrap();
+    }
+
+    /// A new token reaches both services that carry it, and the display
+    /// console's other variables stay as they were registered.
+    #[test]
+    fn a_new_token_replaces_the_old_one_in_both_services_environments() {
+        let mut sup = web_mode("env");
+        let dir = sup.web_token_dir.clone();
+        sup.register_services_with(true, true, Path::new("/nonexistent/embrad-test/drm"));
+        let old = sup.web_token.clone().unwrap();
+        let kiosk_before = sup.services.iter().find(|s| s.def.name == "embra-kiosk").unwrap().def.env.clone();
+        let new = "0123456789abcdef0123456789abcdef".to_string();
+        sup.take_web_token(new.clone());
+        assert_eq!(sup.web_token.as_deref(), Some(new.as_str()));
+        assert_eq!(env_of(&sup, "embra-web", WEB_TOKEN_ENV).as_deref(), Some(new.as_str()));
+        assert_eq!(env_of(&sup, "embra-kiosk", KIOSK_URL_ENV), Some(kiosk_url(&new)));
+        let kiosk_after = sup.services.iter().find(|s| s.def.name == "embra-kiosk").unwrap().def.env.clone();
+        assert_eq!(kiosk_after.len(), kiosk_before.len(), "replaced, not added");
+        for (before, after) in kiosk_before.iter().zip(&kiosk_after) {
+            assert_eq!(before.0, after.0);
+            if before.0 != KIOSK_URL_ENV {
+                assert_eq!(before.1, after.1, "{}", before.0);
+            }
+        }
+        for svc in &sup.services {
+            for (_, value) in &svc.def.env {
+                assert!(!value.contains(&old), "{} still carries the old token", svc.def.name);
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What the banner says of the token: kept across boots and how to
+    /// replace it, or this boot's alone when it could not be stored; and
+    /// where the URL is shown.
+    #[test]
+    fn the_banner_says_whether_the_token_stays_and_where_the_url_is_shown() {
+        let kept = banner_token_note(true, false);
+        assert!(kept.contains("stays the same across boots") && kept.contains("/web-token rotate"), "{kept}");
+        assert!(kept.ends_with("the URL is the credential, and it is shown here only."), "{kept}");
+        let unstored = banner_token_note(false, true);
+        assert!(unstored.starts_with("This boot's access token") && unstored.contains("the next boot makes another"), "{unstored}");
+        assert!(unstored.contains("the display console's menu"), "{unstored}");
+    }
+
+    /// The lines an operator at a console reads after a request: what
+    /// happened, and the console's URLs as the banner prints them.
+    #[test]
+    fn the_lines_after_a_new_token_name_what_happened_and_the_new_urls() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let lines = new_token_lines(token, &[], true);
+        assert!(lines[0].contains("a new access token") && lines[0].contains("every browser is signed out"), "{}", lines[0]);
+        assert!(lines.iter().any(|l| l.contains("https://localhost:3345/embraOS?token=0123456789abcdef0123456789abcdef")));
+        assert!(lines.last().unwrap().contains("The display console is on the new URL"), "{lines:?}");
+        assert!(!new_token_lines(token, &[], false).iter().any(|l| l.contains("display console")));
     }
 
     #[test]
     fn the_console_url_carries_the_token() {
         // The banner's first line is the console through QEMU's port forward
-        // with this boot's token; the records decide what follows
+        // with the access token; the records decide what follows
         // (`net_lease::console_urls`).
         let token = "0123456789abcdef0123456789abcdef";
         let urls = embra_boot::net_lease::console_urls(token, &[]);

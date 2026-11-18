@@ -170,7 +170,7 @@ pub async fn serve(
         .route("/api/ca.crt", get(api_ca_cert))
         .fallback(static_handler)
         // The gate (`access.rs`) over every route and the fallback: the
-        // boot's token in the query once, the cookie after, 401 otherwise.
+        // access token in the query once, the cookie after, 401 otherwise.
         .layer(axum::middleware::from_fn_with_state(state.clone(), access::require_token))
         .with_state(state);
 

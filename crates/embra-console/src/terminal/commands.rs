@@ -104,6 +104,9 @@ System:
   /update                        Check the published release; apply, status, rollback, source [<url>|reset];
                                  --tag <v…> names one release, apply --allow-downgrade takes an older one;
                                  auto [on|off] is the check the brain runs by itself once a day
+  /web-token                     Say what the web console's access token is; /web-token rotate makes a new one:
+                                 every browser is signed out, and the new URL is on the serial console and in
+                                 the display console's menu
   /feedback-loop                 Trigger Phase 2 Continuity Engine self-evaluation (experimental)
 
 Keyboard:

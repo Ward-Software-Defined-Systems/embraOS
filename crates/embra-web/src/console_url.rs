@@ -1,4 +1,4 @@
-//! `GET /api/console-url`: the console's URLs with this boot's token, for
+//! `GET /api/console-url`: the console's URLs with the access token, for
 //! the display console's menu.
 //!
 //! The boot banner prints the URLs once, on the serial line and on the
