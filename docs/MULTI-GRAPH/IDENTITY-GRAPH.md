@@ -72,8 +72,8 @@ under `metadata.origin` (`identity_import` for the sealed graph,
   runtime mutation.
 - **Deliberately absent from bulk retrieval.** Identity nodes are not in
   enrichment's prefetch — the full sealed graph already rides the system
-  prompt. Since graph expansion was removed from retrieval (2026-09-08)
-  they no longer surface there at all, which is the intended state: they
+  prompt. Retrieval does no graph expansion, so they do not surface
+  there at all, which is the intended state: they
   also carry `tags: []`, so they could never produce a tag hit, and they
   are not embedded. They remain reachable through `knowledge_traverse` /
   `knowledge_dump` (`identity` collection) and through the projected
@@ -150,8 +150,8 @@ include WardSONDB and the OS has no shell, so the edits happen offline
 from the host, using the workspace's own `wardsondb` binary against the
 loop-mounted partition. The steps are written for a raw disk image
 (`embraos.img`) on the build host. A machine installed from the ISO and a
-disk converted for a hypervisor have no image file to loop-mount; the
-ceremony there is TBD.
+disk converted for a hypervisor have no image file to loop-mount: these
+steps do not cover them.
 
 1. **Back up** (`scripts/embraos-backup.sh` or a raw image copy).
 2. Stop the instance.
