@@ -451,9 +451,24 @@ fn sample(reply: sntp::Reply, sent: Instant, at: Instant, address: SocketAddr) -
     Sample { time: reply.transmit.plus(way_back), at, address, stratum: reply.stratum, round_trip }
 }
 
-/// A wait as a line names it: `5 s`, `1.5 s`.
+/// A wait as a line names it, to two digits: `5 s`, `1.5 s`, `0.2 s`. The
+/// boot asks each server inside what is left of its one wait, so the wait a
+/// line names can be nanoseconds short of the round figure, and a float of
+/// it prints every digit of that (`4.9999995 s`).
 fn seconds(wait: Duration) -> String {
-    format!("{} s", wait.as_secs_f32())
+    let nanos = wait.as_nanos();
+    // The place of the second digit, and the wait rounded to it.
+    let mut place = 1u128;
+    while nanos / place >= 100 {
+        place *= 10;
+    }
+    let rounded = (nanos + place / 2) / place * place;
+    let (whole, fraction) = (rounded / 1_000_000_000, rounded % 1_000_000_000);
+    if fraction == 0 {
+        return format!("{whole} s");
+    }
+    let fraction = format!("{fraction:09}");
+    format!("{whole}.{} s", fraction.trim_end_matches('0'))
 }
 
 /// An exchange that set no clock: why, and whether another address may be
@@ -1419,6 +1434,29 @@ mod tests {
         assert!(started.elapsed() < REPLY_WAIT, "the boot went on before the address's own wait ended: {:?}", started.elapsed());
         let good = server(1, |nonce| vec![answer(nonce, REAL).to_vec()]);
         assert_eq!(fetch_within("127.0.0.1", good.port(), Duration::from_secs(5)).expect("the answer").time.secs, REAL);
+    }
+
+    #[test]
+    fn a_wait_is_named_in_round_figures_and_the_boots_remainder_reads_as_its_wait() {
+        // The boot hands each server what is left of its one wait, which is
+        // short of the round figure by the time since its request began:
+        // nanoseconds for the first server.
+        for short_by in [1u64, 240, 500, 720, 40_000, 2_000_000] {
+            assert_eq!(seconds(FETCH_WAIT - Duration::from_nanos(short_by)), "5 s", "{short_by} ns short of the wait");
+        }
+        // What the default server is left when a lease's server was silent first.
+        assert_eq!(seconds(FETCH_WAIT - REPLY_WAIT - Duration::from_micros(1_279)), "3.5 s");
+        // Two digits, the second one rounded, and a short wait never reads as none.
+        assert_eq!(seconds(Duration::from_millis(9_960)), "10 s");
+        assert_eq!(seconds(Duration::from_millis(1_250)), "1.3 s");
+        assert_eq!(seconds(Duration::from_millis(30)), "0.03 s");
+        assert_eq!(seconds(Duration::from_micros(400)), "0.0004 s");
+        assert_eq!(seconds(CHECK_EVERY), "3600 s");
+        assert_eq!(seconds(Duration::ZERO), "0 s");
+        // And in the line itself: a fetch that a remainder cuts off.
+        let silent = server(3, |_| Vec::new());
+        let left = Duration::from_millis(300) - Duration::from_nanos(500);
+        assert_eq!(fetch_within("127.0.0.1", silent.port(), left).unwrap_err(), "no answer within 0.3 s");
     }
 
     #[test]
