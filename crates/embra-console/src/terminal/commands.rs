@@ -91,7 +91,8 @@ Identity:
 System:
   /help                          Show this help message
   /status                        System status
-  /reboot                        Say what a reboot does; /reboot now reboots embraOS through the boot menu
+  /reboot                        Say what a reboot does; /reboot now reboots embraOS through the boot menu,
+                                 /reboot halt stops embraOS and powers the machine off
   /backup                        Snapshots of STATE and DATA: create [label], list, restore <name>, delete <name>, upload, status
   /ca                            Certificate authorities beside the public ones: list, import <url|uploads/file> [sha256:<fingerprint>],
                                  remove <file>; an import is trusted by the brain at once, by git and the OS updater after the next boot

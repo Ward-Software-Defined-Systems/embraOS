@@ -1421,18 +1421,218 @@ pub(crate) fn halt_system(reason: &str) -> ! {
     std::process::exit(1);
 }
 
+/// How the machine is stopped once the services are: what a signal asks of
+/// PID 1 (`reconcile::run`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// Through the firmware and the boot menu again: the operator's
+    /// `/reboot now`, and the end of every boot-menu job.
+    Restart,
+    /// Powered off: the operator's `/reboot halt`. A machine that cannot
+    /// power itself off halts (the kernel's own fallback), and is switched
+    /// off by hand.
+    PowerOff,
+}
+
+impl std::fmt::Display for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Stop::Restart => "a restart",
+            Stop::PowerOff => "a power-off",
+        })
+    }
+}
+
+/// What the operator at a console reads before the power goes: the display
+/// has its text back by now (the display console is stopped), and a machine
+/// that cannot power itself off keeps the line on its screen.
+const POWER_OFF_LINE: &str =
+    "[embrad] embraOS has stopped. The machine powers off now; if it stays on, it is safe to switch it off.";
+
+/// The end of PID 1: the disk's filesystems are closed (`settle_the_disks`)
+/// and the machine restarts or is powered off. The services are stopped by
+/// now (`Supervisor::stop_all`), or never ran (a boot-menu job).
 #[cfg(target_os = "linux")]
-pub(crate) fn reboot_system() -> ! {
-    info!("Rebooting system");
-    unsafe { libc::sync(); }
-    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART); }
+pub(crate) fn stop_machine(stop: Stop) -> ! {
+    info!("Stopping the machine: {stop}");
+    if std::process::id() != 1 {
+        // Development: embrad is not PID 1, so the machine is not the OS
+        // and is not ours to stop, and its processes are not ours to end.
+        info!("not PID 1 — exiting instead of stopping the host");
+        std::process::exit(0);
+    }
+    settle_the_disks();
+    let command = match stop {
+        Stop::Restart => libc::LINUX_REBOOT_CMD_RESTART,
+        Stop::PowerOff => {
+            embra_boot::console::BootConsole::open().line(POWER_OFF_LINE);
+            // Let the consoles drain the line before the power goes.
+            std::thread::sleep(Duration::from_millis(500));
+            libc::LINUX_REBOOT_CMD_POWER_OFF
+        }
+    };
+    // SAFETY: reboot(2) with a command and no argument; it does not return
+    // when it succeeds.
+    unsafe { libc::reboot(command); }
     loop { std::thread::sleep(Duration::from_secs(3600)); }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn reboot_system() -> ! {
-    info!("Reboot requested (dev mode, would reboot on Linux)");
+pub(crate) fn stop_machine(stop: Stop) -> ! {
+    info!("{stop} requested (dev mode, would stop the machine on Linux)");
     std::process::exit(0);
+}
+
+/// A restart, for the boot-menu jobs and a scheduled restore, which end in
+/// one whatever happened.
+pub(crate) fn reboot_system() -> ! {
+    stop_machine(Stop::Restart)
+}
+
+/// The mounts on the machine's disk, innermost first: the workspace is a
+/// bind mount of a directory on DATA (`mount.rs`).
+#[cfg(target_os = "linux")]
+const DISK_MOUNTS: [&str; 3] = ["/embra/workspace", "/embra/data", "/embra/state"];
+
+/// How long every other process has to exit on SIGTERM before SIGKILL, and
+/// how long the kernel has to take the killed ones down.
+#[cfg(target_os = "linux")]
+const LAST_PROCESSES_GRACE: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const LAST_PROCESSES_KILLED: Duration = Duration::from_secs(1);
+
+/// Before the machine restarts or powers off, the filesystems on its disk
+/// are closed. Every process but this one is ended first (SIGTERM, a grace,
+/// SIGKILL): an orphan a tool left behind, a build of the Guardian's, would
+/// hold the workspace open. Then the workspace, DATA and STATE are unmounted,
+/// or remounted read-only when something still holds one. An ext4 that is
+/// neither keeps its journal open and is replayed at the next mount, as
+/// after a power cut: `sync` alone left both that way at every restart.
+/// Every step is bounded and none is fatal: what cannot be closed has been
+/// synced, as before.
+#[cfg(target_os = "linux")]
+fn settle_the_disks() {
+    end_every_other_process();
+    // SAFETY: sync(2) takes no arguments and cannot fail.
+    unsafe { libc::sync(); }
+    for path in DISK_MOUNTS {
+        match close_filesystem(Path::new(path)) {
+            Closed::Unmounted => info!("{path}: unmounted"),
+            Closed::ReadOnly => info!("{path}: busy, remounted read-only"),
+            Closed::NotMounted => {}
+            Closed::Left(e) => warn!("{path}: neither unmounted nor remounted read-only ({e}); its journal is replayed at the next boot"),
+        }
+    }
+    // SAFETY: as above.
+    unsafe { libc::sync(); }
+}
+
+/// SIGTERM to every process but PID 1, `LAST_PROCESSES_GRACE` for them to
+/// go, SIGKILL to what is left. `kill(-1, …)` from PID 1 reaches every
+/// process except PID 1 itself; every one of them is a child of PID 1 by
+/// now or becomes one when its parent goes, so "no child left" is "no
+/// process left". PID 1 only: anywhere else `-1` is every process the caller
+/// may signal.
+#[cfg(target_os = "linux")]
+fn end_every_other_process() {
+    if std::process::id() != 1 {
+        return;
+    }
+    // SAFETY: kill(2) with a pid and a signal; no pointer.
+    unsafe { libc::kill(-1, libc::SIGTERM); }
+    if !no_child_left_within(LAST_PROCESSES_GRACE) {
+        // SAFETY: as above.
+        unsafe { libc::kill(-1, libc::SIGKILL); }
+        no_child_left_within(LAST_PROCESSES_KILLED);
+    }
+}
+
+/// Collects exited children until none is left (`true`) or the time is up.
+#[cfg(target_os = "linux")]
+fn no_child_left_within(limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        let mut status = 0;
+        // SAFETY: a non-blocking wait for any child; `status` is a valid
+        // pointer for the call.
+        let r = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if r > 0 {
+            continue;
+        }
+        if r < 0 {
+            // ECHILD: nothing is left to wait for.
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// What became of one mount at the end of a boot.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+enum Closed {
+    Unmounted,
+    /// Still held by something: read-only, which closes an ext4's journal
+    /// as an unmount does.
+    ReadOnly,
+    NotMounted,
+    /// Neither: the filesystem stays as `sync` left it.
+    Left(nix::errno::Errno),
+}
+
+/// What an unmount's result asks for next.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+enum AfterUnmount {
+    Done,
+    /// Not a mount point, or no such directory: a boot-menu job that never
+    /// had it, a development tree.
+    Nothing,
+    /// Busy: the read-only remount is tried, and the unmount again after a
+    /// moment when that is refused too.
+    ReadOnly,
+    GiveUp(nix::errno::Errno),
+}
+
+#[cfg(target_os = "linux")]
+fn after_unmount(result: Result<(), nix::errno::Errno>) -> AfterUnmount {
+    use nix::errno::Errno;
+    match result {
+        Ok(()) => AfterUnmount::Done,
+        Err(Errno::EINVAL | Errno::ENOENT) => AfterUnmount::Nothing,
+        Err(Errno::EBUSY) => AfterUnmount::ReadOnly,
+        Err(e) => AfterUnmount::GiveUp(e),
+    }
+}
+
+/// Unmounts one filesystem, or remounts it read-only while something holds
+/// it; a holder that is on its way out (a process just killed) gets
+/// `CLOSE_TRIES` looks, a tenth of a second apart.
+#[cfg(target_os = "linux")]
+fn close_filesystem(path: &Path) -> Closed {
+    use nix::mount::{mount, umount2, MntFlags, MsFlags};
+    const CLOSE_TRIES: u32 = 10;
+    let mut last = nix::errno::Errno::EBUSY;
+    for attempt in 0..CLOSE_TRIES {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        match after_unmount(umount2(path, MntFlags::empty())) {
+            AfterUnmount::Done => return Closed::Unmounted,
+            AfterUnmount::Nothing => return Closed::NotMounted,
+            AfterUnmount::GiveUp(e) => return Closed::Left(e),
+            AfterUnmount::ReadOnly => {
+                match mount(None::<&str>, path, None::<&str>, MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, None::<&str>) {
+                    Ok(()) => return Closed::ReadOnly,
+                    Err(e) => last = e,
+                }
+            }
+        }
+    }
+    Closed::Left(last)
 }
 
 /// Whether trustd's report says there is no soul yet, as on a first boot.
@@ -1826,9 +2026,49 @@ mod shutdown_during_restart_tests {
             let _ = tx.send(());
         });
         let started = Instant::now();
-        crate::reconcile::run_until(&mut sup, async move { rx.await.ok(); "the test" }, None).await;
+        let stop = crate::reconcile::run_until(&mut sup, async move { rx.await.ok(); ("the test", Stop::Restart) }, None).await;
         assert!(started.elapsed() < Duration::from_secs(5), "the backoff held the signal: {:?}", started.elapsed());
         assert_eq!(sup.services[0].restart_count, 1, "the restart had begun");
+        assert_eq!(stop, Stop::Restart);
+    }
+
+    /// The loop ends on the signal and hands back how it asked for the
+    /// machine to be stopped: `main` restarts on one and powers off on the
+    /// other, and nothing else tells the two apart.
+    #[tokio::test]
+    async fn the_loop_hands_back_how_the_signal_asked_for_the_machine_to_be_stopped() {
+        for asked in [Stop::Restart, Stop::PowerOff] {
+            let mut sup = Supervisor::new();
+            let stop = crate::reconcile::run_until(&mut sup, async move { ("the test", asked) }, None).await;
+            assert_eq!(stop, asked);
+        }
+    }
+
+    /// What an unmount's result asks for at the end of a boot: a busy
+    /// filesystem is remounted read-only, one that is not mounted is passed
+    /// over, and any other refusal ends the try.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_busy_filesystem_is_remounted_read_only_and_one_that_is_not_mounted_is_passed_over() {
+        use nix::errno::Errno;
+        assert_eq!(after_unmount(Ok(())), AfterUnmount::Done);
+        assert_eq!(after_unmount(Err(Errno::EBUSY)), AfterUnmount::ReadOnly);
+        assert_eq!(after_unmount(Err(Errno::EINVAL)), AfterUnmount::Nothing, "not a mount point");
+        assert_eq!(after_unmount(Err(Errno::ENOENT)), AfterUnmount::Nothing, "no such directory");
+        assert_eq!(after_unmount(Err(Errno::EPERM)), AfterUnmount::GiveUp(Errno::EPERM));
+        // The workspace is a bind mount of a directory on DATA: it goes
+        // first, or DATA is busy with it.
+        assert_eq!(DISK_MOUNTS, ["/embra/workspace", "/embra/data", "/embra/state"]);
+    }
+
+    /// Only PID 1 ends every other process: `kill(-1, …)` anywhere else is
+    /// every process the caller may signal. The test would not be here to
+    /// assert it otherwise.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_last_processes_are_ended_by_pid_one_alone() {
+        assert_ne!(std::process::id(), 1);
+        end_every_other_process();
     }
 }
 

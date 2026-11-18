@@ -555,7 +555,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("System", &[
         ("/status", "system overview"),
         ("/help", "show command help"),
-        ("/reboot", "reboot embraOS (/reboot now)"),
+        ("/reboot", "reboot embraOS (/reboot now) or power the machine off (/reboot halt)"),
         ("/backup", "snapshots of STATE and DATA: create, list, restore, delete, upload"),
         ("/ca", "certificate authorities: list, import <url|uploads/file> [sha256:…], remove"),
         ("/network", "network cards, the machine's name, the clock and Wi-Fi: static <card> <address>/<prefix> [gateway], dhcp <card>, hostname <name>, time <server>, wifi [join <name> --key <passphrase>]"),

@@ -46,7 +46,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 | Key | Action |
 |---|---|
-| `Ctrl+A X` | Exit QEMU (powers off the VM) |
+| `Ctrl+A X` | Exit QEMU: a power cut for the VM. `/reboot halt` stops embraOS first and then powers the VM off, which ends QEMU too |
 | `Ctrl+A C` | Switch between serial console and QEMU monitor |
 | `Ctrl+A H` | Show all QEMU escape sequences |
 

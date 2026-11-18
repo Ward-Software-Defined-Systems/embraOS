@@ -43,7 +43,7 @@ use anyhow::Result;
 use embra_boot::{BootMode, Cmdline, Release};
 use tracing::{error, info, warn};
 
-use supervisor::{halt_system, reboot_system, HALT_REASON_PATH};
+use supervisor::{halt_system, reboot_system, stop_machine, Stop, HALT_REASON_PATH};
 
 fn main() -> Result<()> {
     init_logging();
@@ -190,18 +190,19 @@ fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    match runtime.block_on(run(&cmdline, mode, built)) {
-        Ok(()) => {}
+    let stop = match runtime.block_on(run(&cmdline, mode, built)) {
+        Ok(stop) => stop,
         Err(e) if pid == 1 => halt_system(&fatal_reason(&e)),
         Err(e) => return Err(e),
-    }
+    };
 
     if pid == 1 {
         // The services are stopped: the clock is saved once more, so the
-        // boot that follows a restart loses none of this one's time.
+        // boot that follows loses none of this one's time.
         clock::save_to_state(built);
-        // PID 1 should reboot or halt
-        reboot_system();
+        // PID 1 never exits: the machine restarts or is powered off, as the
+        // signal asked (`reconcile::run`).
+        stop_machine(stop);
     }
 
     Ok(())
@@ -262,9 +263,11 @@ fn prepare(pid: u32) -> Result<Cmdline> {
     Ok(cmdline)
 }
 
-/// The services and the reconciliation loop. An `Err` is fatal: PID 1
-/// halts with it as the reason, development mode returns it.
-async fn run(cmdline: &Cmdline, mode: BootMode, built: Option<i64>) -> Result<()> {
+/// The services and the reconciliation loop, until a signal asks for the
+/// machine to be stopped: what comes back is how (`Stop`), with the services
+/// stopped. An `Err` is fatal: PID 1 halts with it as the reason,
+/// development mode returns it.
+async fn run(cmdline: &Cmdline, mode: BootMode, built: Option<i64>) -> Result<Stop> {
     // Step 5: Start services in dependency order
     info!("Starting services");
     let mut supervisor = supervisor::Supervisor::with_cmdline(cmdline.clone());
@@ -295,12 +298,12 @@ async fn run(cmdline: &Cmdline, mode: BootMode, built: Option<i64>) -> Result<()
     // Step 8: Reconciliation loop (runs forever)
     // Note: embrad's stdout/stderr are already redirected to log file
     // (done in supervisor before spawning embra-console)
-    reconcile::run(&mut supervisor).await;
+    let stop = reconcile::run(&mut supervisor).await;
 
     // If we get here, we're shutting down
     info!("embrad shutting down");
     supervisor.stop_all().await;
-    Ok(())
+    Ok(stop)
 }
 
 /// The panic hook for PID 1. The reason goes to STATE and is synced before

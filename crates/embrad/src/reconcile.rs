@@ -1,30 +1,37 @@
 //! Reconciliation loop for embrad.
 //!
 //! Continuously monitors service health and restarts failed services,
-//! reaps the orphans that reparent to PID 1 (#18), and handles
-//! SIGTERM/SIGINT for graceful shutdown — during a restart's backoff and
-//! health wait as well, not after them (#63).
+//! reaps the orphans that reparent to PID 1 (#18), and handles the signals
+//! that stop the machine — SIGTERM and SIGINT for a restart, SIGUSR2 for a
+//! power-off (`Stop`) — during a restart's backoff and health wait as well,
+//! not after them (#63).
 
 use std::future::Future;
 use std::pin::pin;
 
-use crate::supervisor::{ServiceStatus, Supervisor};
+use crate::supervisor::{ServiceStatus, Stop, Supervisor};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use tracing::{error, info, warn};
 
-pub async fn run(supervisor: &mut Supervisor) {
+/// Runs until a signal asks for the machine to be stopped, and says how:
+/// SIGTERM (the operator's `/reboot now`) and SIGINT restart it, SIGUSR2
+/// (`/reboot halt`) powers it off. The numbers are BusyBox init's: its
+/// `reboot` sends SIGTERM and its `poweroff` SIGUSR2.
+pub async fn run(supervisor: &mut Supervisor) -> Stop {
     // A handler that cannot be installed is logged once and that signal is
     // never awaited; PID 1 does not panic for it.
     let mut sigterm = install(SignalKind::terminate(), "SIGTERM");
     let mut sigint = install(SignalKind::interrupt(), "SIGINT");
+    let mut sigusr2 = install(SignalKind::user_defined2(), "SIGUSR2");
     let sigchld = install(SignalKind::child(), "SIGCHLD");
     let shutdown = async move {
         tokio::select! {
-            _ = recv_or_pending(&mut sigterm) => "SIGTERM",
-            _ = recv_or_pending(&mut sigint) => "SIGINT",
+            _ = recv_or_pending(&mut sigterm) => ("SIGTERM", Stop::Restart),
+            _ = recv_or_pending(&mut sigint) => ("SIGINT", Stop::Restart),
+            _ = recv_or_pending(&mut sigusr2) => ("SIGUSR2", Stop::PowerOff),
         }
     };
-    run_until(supervisor, shutdown, sigchld).await;
+    run_until(supervisor, shutdown, sigchld).await
 }
 
 /// The loop, with the shutdown signal as a future (a test passes a channel)
@@ -32,11 +39,12 @@ pub async fn run(supervisor: &mut Supervisor) {
 /// restarts the failed ones; a restart's backoff and health wait run under
 /// the shutdown future as well, so a signal is answered during them (#63).
 /// A SIGCHLD, and every tick, reaps the orphans that reparented to PID 1.
+/// What comes back is how the signal asked for the machine to be stopped.
 pub(crate) async fn run_until(
     supervisor: &mut Supervisor,
-    shutdown: impl Future<Output = &'static str>,
+    shutdown: impl Future<Output = (&'static str, Stop)>,
     mut sigchld: Option<Signal>,
-) {
+) -> Stop {
     let mut shutdown = pin!(shutdown);
     let health_interval = tokio::time::Duration::from_secs(5);
     let mut health_tick = tokio::time::interval(health_interval);
@@ -45,18 +53,18 @@ pub(crate) async fn run_until(
 
     loop {
         tokio::select! {
-            name = &mut shutdown => {
-                info!("Received {name} — initiating shutdown");
-                break;
+            (name, stop) = &mut shutdown => {
+                info!("Received {name} — initiating shutdown ({stop})");
+                break stop;
             }
             _ = recv_or_pending(&mut sigchld) => {
                 reap(supervisor.child_pids());
             }
             _ = health_tick.tick() => {
                 tokio::select! {
-                    name = &mut shutdown => {
-                        info!("Received {name} during a restart — initiating shutdown");
-                        break;
+                    (name, stop) = &mut shutdown => {
+                        info!("Received {name} during a restart — initiating shutdown ({stop})");
+                        break stop;
                     }
                     _ = reconcile_once(supervisor) => {}
                 }

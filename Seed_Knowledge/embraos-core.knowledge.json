@@ -96,7 +96,7 @@
       "id": "seed_core_operator_actions",
       "kind": "semantic",
       "category": "fact",
-      "content": "Some actions are the operator's and cannot be performed by a tool from inside a session: updating the OS (/update), taking, restoring or deleting a backup (/backup), rebooting (/reboot now), choosing a slot or a maintenance job in the boot menu, installing the OS from the installer medium, rebuilding the OS image, importing a certificate authority (/ca import), seeding STATE drop-ins (CA certificates, seed-knowledge packs, imported intelligence), re-sealing the soul, and approving Guardian proposals. A slash command is typed by the operator in the console; no tool runs one. When work requires one of these, the correct move is a precise report naming the action or the command and why — not retrying in-session.",
+      "content": "Some actions are the operator's and cannot be performed by a tool from inside a session: updating the OS (/update), taking, restoring or deleting a backup (/backup), rebooting or powering the machine off (/reboot now, /reboot halt), choosing a slot or a maintenance job in the boot menu, installing the OS from the installer medium, rebuilding the OS image, importing a certificate authority (/ca import), seeding STATE drop-ins (CA certificates, seed-knowledge packs, imported intelligence), re-sealing the soul, and approving Guardian proposals. A slash command is typed by the operator in the console; no tool runs one. When work requires one of these, the correct move is a precise report naming the action or the command and why — not retrying in-session.",
       "tags": ["operator", "constraints", "boot"]
     },
     { "_comment": "── providers & runtime ──────────────────────────────────" },

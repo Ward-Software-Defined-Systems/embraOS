@@ -1,7 +1,7 @@
-//! The operator's system commands: `/reboot` now; `/update` and `/backup`
-//! land with their waves. None of them is a tool: an OS action is the
-//! operator's decision, typed as a command, and the tool manifest the model
-//! sees does not move.
+//! The operator's system commands: `/reboot` (a restart, or a power-off
+//! with `halt`), `/backup` and `/update`. None of them is a tool: an OS
+//! action is the operator's decision, typed as a command, and the tool
+//! manifest the model sees does not move.
 
 use embra_common::proto::brain::{
     ConversationRequest, ConversationResponse, SystemMessage, SystemMessageType, conversation_request, conversation_response,
@@ -22,6 +22,10 @@ pub(super) enum RebootDecision {
     /// `/reboot now`: SIGTERM to PID 1, which stops the services in order
     /// and reboots through the boot menu.
     Reboot,
+    /// `/reboot halt`: SIGUSR2 to PID 1, which stops the services in order
+    /// and powers the machine off. The text is what the operator is told
+    /// first: a job scheduled for the next boot waits for the power button.
+    PowerOff(String),
 }
 
 pub(super) fn pid_one_is_embrad(comm: Option<&str>) -> bool {
@@ -42,10 +46,15 @@ pub(super) fn reboot_decision(args: &str, pid_one_comm: Option<&str>, scheduled:
     let job = scheduled.map(|j| format!(" The next boot first runs {j}.")).unwrap_or_default();
     match args.trim() {
         "now" => RebootDecision::Reboot,
-        "" => RebootDecision::Explain(format!(
-            "Reboot embraOS? Every session is kept; a turn in flight is stopped, and the console disconnects for about a minute while the machine comes back through the boot menu.{job} Type /reboot now to proceed."
+        "halt" => RebootDecision::PowerOff(format!(
+            "Stopping embraOS and powering the machine off. Every session is kept; switch the machine on again to come back through the boot menu.{job}"
         )),
-        other => RebootDecision::Explain(format!("Unknown argument '{other}'. /reboot explains, /reboot now reboots.")),
+        "" => RebootDecision::Explain(format!(
+            "Reboot embraOS? Every session is kept; a turn in flight is stopped, and the console disconnects for about a minute while the machine comes back through the boot menu.{job} Type /reboot now to proceed, or /reboot halt to stop embraOS and power the machine off instead."
+        )),
+        other => RebootDecision::Explain(format!(
+            "Unknown argument '{other}'. /reboot explains, /reboot now reboots, /reboot halt powers the machine off."
+        )),
     }
 }
 
@@ -88,6 +97,22 @@ pub(super) async fn handle_reboot_command(args: &str, tx: &mpsc::Sender<Result<C
                 .await;
             }
         }
+        RebootDecision::PowerOff(msg) => {
+            send(msg, SystemMessageType::Info).await;
+            // The frame leaves before the stack is stopped.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // SAFETY: as above. SIGUSR2 ends embrad's reconcile loop the
+            // same way, and the machine is powered off where SIGTERM
+            // restarts it (`embrad::reconcile::run`).
+            let rc = unsafe { libc::kill(1, libc::SIGUSR2) };
+            if rc != 0 {
+                send(
+                    format!("The power-off signal could not be sent: {}", std::io::Error::last_os_error()),
+                    SystemMessageType::Error,
+                )
+                .await;
+            }
+        }
     }
 }
 
@@ -109,6 +134,24 @@ mod tests {
         assert_eq!(reboot_decision("now", Some("embrad\n"), None), RebootDecision::Reboot);
         assert_eq!(reboot_decision("  now ", Some("embrad"), None), RebootDecision::Reboot);
         assert!(matches!(reboot_decision("please", Some("embrad"), None), RebootDecision::Explain(m) if m.contains("please")));
+    }
+
+    /// `/reboot halt` powers the machine off without a second question, as
+    /// `/reboot now` restarts it; `/reboot` alone names both, and so does
+    /// the answer to a word that is neither. A job scheduled for the next
+    /// boot is named: it waits until the machine is switched on again.
+    #[test]
+    fn reboot_halt_powers_off_and_the_explanation_names_it() {
+        assert!(matches!(reboot_decision("halt", Some("embrad\n"), None), RebootDecision::PowerOff(m) if m.contains("powering the machine off")));
+        assert!(matches!(reboot_decision(" halt ", Some("embrad"), None), RebootDecision::PowerOff(_)));
+        assert!(matches!(
+            reboot_decision("halt", Some("embrad"), Some("a restore of \"nightly\"")),
+            RebootDecision::PowerOff(m) if m.contains("The next boot first runs a restore of \"nightly\"")
+        ));
+        assert!(matches!(reboot_decision("", Some("embrad"), None), RebootDecision::Explain(m) if m.contains("/reboot now") && m.contains("/reboot halt")));
+        assert!(matches!(reboot_decision("off", Some("embrad"), None), RebootDecision::Explain(m) if m.contains("'off'") && m.contains("/reboot halt")));
+        // Not embraOS: nothing here is powered off either.
+        assert!(matches!(reboot_decision("halt", Some("systemd"), None), RebootDecision::Refused(_)));
     }
 }
 
