@@ -5,99 +5,19 @@
 >
 > **Host:** macOS on Apple Silicon (M1/M2/M3/M4).
 >
-> ✅ **Status — re-verified end-to-end on Apple Silicon (2026-07-19).** Verified on a
-> MacBook (Apple M2, 8 GB) against Buildroot `2026.02.1` under the **named-volume
-> Docker Buildroot flow** (note below; build also green on an M1 Mac Mini): the full build
-> pipeline (Step 0.5 Trunk/WASM frontend → Rust cross-compile → initramfs → Step 3.5
-> in-OS Rust toolchain → Buildroot, including the new `embra-web` and
-> `embra-rust-toolchain` packages), HVF boot, soul formation, the serial TUI
-> (`EMBRA_TUI=1`), and **embra-guardian-v1** (a dynamic tool compiled in-guest via
-> `/opt/rust` and run in the wasmtime sandbox). embra-guardian-v1 remains an
-> **experimental** feature upstream (project-wide, not aarch64-specific). The build's
-> memory wants are in the `JOBS` note below (WebKit's compile sizes the Docker VM). Re-run the [End-to-End
-> Validation](#end-to-end-validation) checklist after any canonical-build bump and
-> re-stamp this date.
+> What has been run on this host and architecture is in
+> [VALIDATION-STATUS.md](../VALIDATION-STATUS.md). embra-guardian-v1 is an
+> **experimental** feature project-wide, not on aarch64 alone.
 >
-> **2026-10-25 — the build passes with everything that landed since.** The toolchain
-> bump to Rust 1.98.1, Step 3.6 (the embedding model) and the hardened Buildroot hooks
-> (`set -euo pipefail`) landed after the 2026-07-19 run; the operator's Apple Silicon
-> build of 2026-10-25 passed with all three. The x86_64 Linux build validates them on
-> every rebuild. The End-to-End Validation checklist's date above stands until the
-> checklist is re-run in full.
+> **Buildroot in a named volume.** The Docker pass mounts a named volume over
+> `buildroot-src`: building the Buildroot tree on the bind mount exhausts the
+> Docker runtime's macOS-side file provider (`Too many open files`; see
+> [Troubleshooting — Step 4](#troubleshooting--step-4-buildroot-in-docker)).
 >
-> **2026-11-06 — the Phase 2 image on Apple Silicon.** The operator's build and run
-> of 2026-11-06 (branch `phase2`): the build with macOS's BSD cpio, the disk booting
-> itself through the edk2 firmware and GRUB's menu into slot A, the display window
-> (`ramfb`) with the boot log and the console URL, a bridged NIC through
-> `vmnet-bridged` with the leased URL opened from another machine, DHCP, and the
-> backup wrapper on a RocksDB image. Step 1 of the checklist below carries it.
->
-> **2026-11-09 — the wave-6 image on Apple Silicon.** The operator's build of
-> 2026-11-09 (branch `phase2`: the display console's stack, every firmware family,
-> 2048 MiB slots) completed in Docker under OrbStack with the VM's memory at 64 GiB
-> and Buildroot's 17 jobs, in about 45 minutes; every assert passed (128 fragment
-> symbols read back, 134 of 134 firmware families, 1383 modules in 71 MB, the
-> squashfs 753 MiB of the 2048 MiB slot, the image 8514 MiB), and the image booted
-> through GRUB's menu to the banner under QEMU/HVF, the lease in 0.2 s. The one
-> kernel line of that boot, `PCI: OF: of_root node is NULL, cannot create PCI host
-> bridge node`, is the arm64 base configuration's Raspberry Pi RP1 driver selecting
-> `PCI_DYNAMIC_OF_NODES`, printed under an ACPI boot where there is no device tree:
-> expected and harmless. The same boot's `Freed the initramfs: 0 MiB` line showed
-> the probe-time firmware archive unpacking to nothing on both architectures, fixed
-> in `fb6399c`; an image built before it carries the old archive until rebuilt. The
-> image rebuilt after the fix (`--buildroot-only`, from `182e731`) booted the same
-> way on 2026-11-09 and said `Freed the initramfs: 4 MiB`: the five probe-time
-> blobs (cxgb4, ice, qed) and the init, there being no microcode on aarch64; an
-> x86_64 image of the same build says 31 MiB, its microcode archive included.
->
-> **2026-11-10 — the display console on Apple Silicon.** The operator's run of
-> 2026-11-10 under QEMU/HVF with a virtio-gpu display and a USB keyboard and tablet
-> on xHCI (the command under [Boot](#3-boot)): after the boot log the window shows
-> the web console at 1920x1080, which takes the keyboard, the pointer and a click.
-> With `-device ramfb` in place of the virtio-gpu device (the firmware's framebuffer,
-> which had shown the boot log on 2026-11-06) the same run passed that day: after
-> the boot log the window shows the web console at 800x600, which takes the
-> keyboard, the pointer and a click.
->
-> **2026-11-11 — the installer medium on Apple Silicon.** The aarch64 build writes
-> `embraos.iso` from `9e42bd1` on. The operator's runs of 2026-11-11: the medium
-> works under VMware Fusion, where an ISO is a VM's DVD drive, and under QEMU in
-> three layouts of the launcher: the DVD onto a virtio-blk disk (the default), the
-> DVD onto a virtio-scsi disk (`EMBRA_DISK_IF=scsi`) and the USB stick onto an
-> NVMe disk (`EMBRA_ISO_AS=usb` with `EMBRA_DISK_IF=nvme`). Each installed disk
-> then boots alone on its bus. The commands are under [Boot](#3-boot). The VM
-> images of this architecture (`embraos.ova`, `embraos.vmdk`, `embraos.vhdx`) are
-> **TBD** on a hypervisor until run.
->
-> **2026-11-16 — the first image with the wireless drivers: the release
-> `v0.25.0-phase2`.** The operator's two builds of the release commit (`e7cc54c`, fjall
-> and rocksdb) completed on Apple Silicon and are the release's aarch64 assets: the first
-> aarch64 images since the wireless drivers, their firmware step, the kernel's patches and
-> three packages joined the tree. Read from the two slot images (the builds' own output
-> was not kept): the fragment's 220 symbols in the kernel's configuration, none unapplied;
-> 1480 kernel modules, 82 MB under `/lib/modules`, 134 of them wireless drivers;
-> `/usr/share/embra/wireless.alias` with 1615 device patterns of 68 drivers; the firmware
-> table passing with 50 modules that name firmware; the squashfs 817 MiB of the 2048 MiB
-> slot and the installer ISO 920 MB. Both stamps are clean: the Docker pass still rewrites
-> git's index, and the stamp refreshes it before it asks (the fix that followed the last
-> cut). Each ISO installed unattended onto a blank disk under QEMU/HVF and the installed
-> disk came up on slot A with the five services healthy (the install 44 to 45 s, the
-> banner 22 s after the start, the lease in 0.2 s). That VM has no display and no Wi-Fi
-> card, so neither the display console nor a wireless driver ran in it: a Wi-Fi card on an
-> Arm machine is **TBD**.
->
-> **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
-> volume over `buildroot-src`: building the Buildroot tree on the bind mount
-> exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
-> see [Troubleshooting — Step 4](#troubleshooting--step-4-buildroot-in-docker)).
-> Operator-verified 2026-07-19: builds green on the M2, M1, and Intel-Mac hosts,
-> and the full E2E checklist re-passed — the banner date above reflects it.
->
-> **Single source of truth (2026-05-19):** the aarch64 scripts are committed
-> in-tree (`scripts/`, `buildroot/configs/`) and the arch-parameterized Buildroot
-> tree (commit `f6a684a`) is end-to-end QEMU-verified on **both** x86_64 and
-> aarch64. The former standalone Apple-Silicon build bundle has been retired —
-> this guide now lives at `docs/BUILD/AARCH64-BUILD.md`, its scripts in `scripts/`.
+> **A kernel line to expect.** `PCI: OF: of_root node is NULL, cannot create PCI
+> host bridge node` is the arm64 base configuration's Raspberry Pi RP1 driver
+> selecting `PCI_DYNAMIC_OF_NODES`, printed under an ACPI boot where there is no
+> device tree: expected and harmless.
 
 ---
 
@@ -117,8 +37,7 @@ Rust toolchain), Step 3.6 (the embedding model) and Step 4 (Buildroot) run in a
 > terminal instead — no image rebuild needed. The serial TUI is functional but is
 > preferred for debugging; the web console is the primary interface. The disk
 > boots itself: the edk2 firmware Homebrew's qemu ships, then GRUB's menu on the
-> EFI System Partition (`EMBRA_BOOT=uefi`, the default; validated on Apple Silicon
-> 2026-11-06). `EMBRA_BOOT=direct` boots the kernel and the
+> EFI System Partition (`EMBRA_BOOT=uefi`, the default). `EMBRA_BOOT=direct` boots the kernel and the
 > initramfs from the host as before, no firmware and no menu.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
@@ -202,14 +121,14 @@ EMBRA_NTP=off ./scripts/run-qemu-aarch64.sh    # the time server the OS asks in 
 # EMBRA_FW_CODE=<code.fd> EMBRA_FW_VARS=<vars.fd> name another firmware pair than the host's edk2
 EMBRA_BOOT=direct ./scripts/run-qemu-aarch64.sh    # kernel + initramfs from the host: no firmware, no GRUB menu
 EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu-aarch64.sh   # QEMU's DHCP leases this address: the banner's second URL
-EMBRA_USB_HOST=0bda:c811 ./scripts/run-qemu-aarch64.sh      # hand a USB device of this host to the VM (a Wi-Fi adapter); TBD on a Mac
+EMBRA_USB_HOST=0bda:c811 ./scripts/run-qemu-aarch64.sh      # hand a USB device of this host to the VM (a Wi-Fi adapter)
 EMBRA_ISO=output/images/embraos.iso ./scripts/run-qemu-aarch64.sh disk.qcow2   # boot the installer onto a blank qemu-img disk
 EMBRA_ISO_AS=usb EMBRA_DISK_IF=nvme ...            # the medium as a USB stick, the target on NVMe (a DVD on virtio-scsi and
                                                    # virtio-blk by default; EMBRA_DISK_IF=scsi is virtio-scsi)
 EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that bus without the medium (*.qcow2 is opened as qcow2)
 ```
 
-> **Installing from the ISO (validated on Apple Silicon under QEMU and under VMware Fusion, 2026-11-11).** The build
+> **Installing from the ISO.** The build
 > writes `output/images/embraos.iso`, the installer medium of
 > [QUICK-START.md](QUICK-START.md) for aarch64: GRUB's arm64 loader at
 > `EFI/BOOT/BOOTAA64.EFI`, the same menu and the same installer, a DVD through El
@@ -227,12 +146,8 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 > the ISO as a new VM's DVD drive, with a blank disk beside it. A release carries
 > the medium as `embraos-<tag>-aarch64-<engine>.iso` with its checksum line and
 > signature ([UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)).
-> Validated on Apple Silicon on 2026-11-11 under VMware Fusion and under QEMU: as
-> a DVD onto a virtio-blk disk and onto a virtio-scsi disk, and as a USB stick
-> onto an NVMe disk, each installed disk booting alone on its bus. Every other
-> hypervisor of this architecture is **TBD** until run.
 
-> **Display window and a bridged network (validated on Apple Silicon: the window 2026-11-10, the bridged network 2026-11-06).**
+> **Display window and a bridged network.**
 > `run-qemu-aarch64.sh` has no display switch (the x86_64 launcher's `EMBRA_VNC=1`
 > has no aarch64 counterpart yet) and passes none of the display console's knobs
 > (`EMBRA_KIOSK`, `EMBRA_KBD`, `EMBRA_KIOSK_MODE`). To see the console on a window — the boot log
@@ -251,9 +166,8 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 >   -nic user,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
 > ```
 > `-device ramfb` in place of `-device virtio-gpu-pci` gives the firmware's own
-> framebuffer, which the kernel's `simpledrm` takes over: GRUB's menu, the boot log
-> and the banner with the URL are validated on it (2026-11-06), and the display
-> console with the keyboard, the pointer and a click (2026-11-10). The display is
+> framebuffer, which the kernel's `simpledrm` takes over: it shows GRUB's menu, the boot
+> log, the banner with the URL and the display console. The display is
 > 800x600 there: edk2's `ramfb` driver (`OvmfPkg/QemuRamfbDxe`) offers 640x480,
 > 800x600 and 1024x768 and starts in the second, so the request for 1920x1080
 > leaves it as it is.
@@ -305,7 +219,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > 3 GiB process, the heaviest in 5 GiB, and the link of libWPEWebKit takes 1.1 GiB.
 > The script runs WebKit's ninja at `JOBS`, every core by default, so plan about
 > 3.5 GiB of VM memory per job: 56 GiB at 16 jobs, 16 GiB at 4; a 64 GiB VM completed
-> the build at 17 jobs in about 45 minutes (2026-11-09). Give the VM the memory
+> the build at 17 jobs in about 45 minutes. Give the VM the memory
 > (OrbStack: `orb config set memory_mib 61440 && orb restart`; Docker Desktop:
 > Settings, Resources) or cap the jobs with `JOBS`, passed into the container with
 > `-e`: the script hands it to the make-based packages through make's jobserver and to
@@ -457,19 +371,16 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
   controller for the keyboard and the pointer: the kernel builds VMware's
   paravirtual SCSI driver for x86 alone, so the aarch64 descriptor does not
   declare the controller the x86_64 one does). Each is checked against the raw
-  image's size; the aarch64 ones are **TBD** until booted on a hypervisor of that
-  architecture. `parallels/` holds `embraos.vmx` beside a copy of the VMDK: the
+  image's size. `parallels/` holds `embraos.vmx` beside a copy of the VMDK: the
   machine Parallels Desktop imports on an Intel Mac
   ([QUICK-START.md](QUICK-START.md)), written here with VMware's Arm guest type
-  (`arm-other6xlinux-64`) and the disk on SATA. It is **TBD**: no import of it
-  has been run, and Parallels' list of what Apple silicon Macs do not support
-  ([KB 128914](https://kb.parallels.com/en/128914), reviewed 2026-07-07) names
+  (`arm-other6xlinux-64`) and the disk on SATA. Parallels' list of what Apple silicon Macs do not support
+  ([KB 128914](https://kb.parallels.com/en/128914)) names
   the import of VMware machines and NVMe disks, so the import may be refused
   there and the installer medium may be the one way in. Beside the raw image
   `embraos.iso`, the installer medium for aarch64
   (`write_installer_iso`: xorriso and GRUB's arm64 modules, both built by
-  Buildroot inside the Docker pass), validated on Apple Silicon under QEMU and
-  under VMware Fusion (2026-11-11; [Boot](#3-boot)).
+  Buildroot inside the Docker pass; [Boot](#3-boot)).
 
 **Isolated cross-compilation validation (optional).** To validate Rust cross-compilation
 before wiring in the full pipeline, set the env vars the build script sets automatically
@@ -576,7 +487,7 @@ both arches, so there is **no per-arch sed** and nothing to revert.
 | `buildroot/board/embraos/post_image.sh` | Detects the kernel (`Image`/`bzImage`) in `BINARIES_DIR`, stages the ESP (GRUB's loader, `grub.cfg` rendered from `grub.cfg.in` with the kernel name and `console=ttyAMA0`, `grubenv`), renders `genimage.cfg.in` from `layout.sh`, runs genimage and checks the layout |
 | `buildroot/board/embraos/genimage.cfg` → `…/genimage.cfg.in` | Static config replaced by a template: the sizes from `layout.sh` (resolved per build); the kernel lives inside each slot's SquashFS, so the template names no kernel |
 
-#### How the aarch64 pipeline tracks canonical (`f8cad9c`)
+#### How the aarch64 pipeline tracks canonical
 
 | Area | aarch64 behaviour (matches canonical x86_64) |
 |---|---|
@@ -610,7 +521,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 |---|---|---|
 | Binary | `qemu-system-x86_64` | `qemu-system-aarch64` |
 | Machine | `-machine q35` on the UEFI path, QEMU's default `pc` on the direct path | `-machine virt` |
-| Firmware (UEFI path) | OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd`, the `ovmf` package) or QEMU's `edk2-x86_64-code.fd` | `edk2-aarch64-code.fd` (Homebrew's qemu) or AAVMF (`qemu-efi-aarch64`) — validated on Apple Silicon 2026-11-06 |
+| Firmware (UEFI path) | OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd`, the `ovmf` package) or QEMU's `edk2-x86_64-code.fd` | `edk2-aarch64-code.fd` (Homebrew's qemu) or AAVMF (`qemu-efi-aarch64`) |
 | Loader | `EFI/BOOT/BOOTX64.EFI` | `EFI/BOOT/BOOTAA64.EFI` |
 | Acceleration on macOS | `-accel hvf` (`run-qemu.sh` passes it on every Mac; an x86_64 guest runs under HVF on an Intel Mac only) | `-accel hvf` (native — near-native speed) |
 | CPU | QEMU's default (`run-qemu.sh` passes no `-cpu`) | `-cpu host` under HVF and under KVM, `-cpu max` under TCG |
@@ -620,11 +531,11 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Port forwards | 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
-| Display console | the web console on the display through WPE WebKit and cog (validated under QEMU, on ESXi, on Hyper-V and, but for the pointer and a click, on Parallels Desktop) | the same stack; validated under QEMU on Apple Silicon on a virtio-gpu display with a USB keyboard and tablet (2026-11-10: the page at 1920x1080, the keyboard, the pointer and a click; the command under [Boot](#3-boot)) and on `ramfb`, the firmware's framebuffer (2026-11-10: the page at 800x600, the keyboard, the pointer and a click); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above; the aarch64 build with this stack completes: 2026-11-09, OrbStack's VM at 64 GiB, 17 jobs, about 45 minutes) |
-| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` alone, read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (1480 modules with them, 82 MB uncompressed under `/lib/modules`, on the release build of 2026-11-16; 1383 and 71 MB before the wireless drivers). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others. The first image built with them is the release `v0.25.0-phase2`'s (the note of 2026-11-16 above) |
-| Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors (validated under QEMU, on ESXi, on Hyper-V and on Parallels Desktop) | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)); validated on Apple Silicon under QEMU and under VMware Fusion (2026-11-11) |
+| Display console | the web console on the display through WPE WebKit and cog | the same stack, on a virtio-gpu display with a USB keyboard and tablet (1920x1080; the command under [Boot](#3-boot)) or on `ramfb`, the firmware's framebuffer (800x600); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above) |
+| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` alone, read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (1480 modules with them, 82 MB uncompressed under `/lib/modules`). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others |
+| Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)) |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
-| Pre-wave-6 tree | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
+| A Buildroot tree from before `v0.24.0-phase2` | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
 
 ### Backup & Restore
 
@@ -714,8 +625,7 @@ images — it is a macOS-host tool, not an ARM tool.
 #### Usage
 
 The options of `seed-state.sh`, and `--dry-run` of its own (`--update-key <pem>`, the
-release signing key of your own, is bound into the container as one read-only file; its
-run on a Mac is **TBD**):
+release signing key of your own, is bound into the container as one read-only file):
 
 ```bash
 ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
@@ -1024,8 +934,7 @@ the same WebKit; the link takes 1.1 GiB), and the script runs WebKit's ninja at
 cmake package's ninja `-j$(PARALLEL_JOBS)`, which `BR2_JLEVEL=0` sets to `nproc+1`
 whatever the top-level `-j` says, and ninja 1.13 ignores make 4.3's pipe-style
 jobserver (`Ignoring jobserver: Pipe-based protocol is not supported`), so `JOBS`
-reaches this phase only as `BR2_JLEVEL`, which the script passes since 2026-11-08; an
-older checkout ran it at `nproc+1` whatever `JOBS` said.
+reaches this phase only as `BR2_JLEVEL`, which the script passes.
 
 **Fix:** give the VM about 3.5 GiB per job (`orb config set memory_mib 61440 && orb
 restart` covers 16 jobs on OrbStack; Docker Desktop: Settings, Resources) or cap the jobs
@@ -1051,8 +960,8 @@ failure mode).
 
 **Fix:** build in the named volume — the default flow above
 (`-v embraos-br-aarch64:/work/buildroot-src`) keeps the tree on the Docker VM's native
-filesystem, bypassing the file provider entirely. Operator-verified 2026-07-19 on an
-8 GB M2 that failed every bind-mount variant. Stopgap if you must build on the bind
+filesystem, bypassing the file provider entirely (an 8 GB M2 failed every
+bind-mount variant). Stopgap if you must build on the bind
 mount: raise the host caps and restart the Docker runtime first —
 `sudo sysctl kern.maxfiles=1048576 kern.maxfilesperproc=524288` (resets on Mac reboot).
 
@@ -1175,15 +1084,14 @@ correctly on Apple Silicon with **no code change** — verified on aarch64.
 
 ### End-to-End Validation
 
-This is the sequence used to verify the 2026-07-19 run (see the status banner).
-Re-run it as the regression checklist after any canonical-build bump:
+The regression checklist for this host. Run it after any canonical-build bump:
 
 1. **Boot — web console (default).** `./scripts/run-qemu-aarch64.sh`. Banner shows
    `UI mode: web console (default)` and `3345→3345 (HTTPS web)`. QEMU launches
    `qemu-system-aarch64 -machine virt -accel hvf -cpu host` with the edk2
    firmware; GRUB's menu shows on this terminal and boots slot A (`Image` from
    the slot's SquashFS, `console=ttyAMA0`) — no kernel panic on the PL011
-   console (validated 2026-11-06; `EMBRA_BOOT=direct` boots the kernel from the
+   console (`EMBRA_BOOT=direct` boots the kernel from the
    host as before, no firmware and no menu).
 2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
    boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, the provider gateway or direct, LLM provider
@@ -1199,5 +1107,5 @@ Re-run it as the regression checklist after any canonical-build bump:
 7. **Reboot / soul verify:** `Ctrl-A X`, relaunch (web mode) — second-boot soul SHA-256
    verification passes; sessions/memory persisted on the DATA partition.
 
-If all pass, the aarch64 image is functionally equivalent to x86_64. Re-stamp the status
-banner at the top of this file with the new verified date and commit.
+If all pass, the aarch64 image is functionally equivalent to x86_64, and
+[VALIDATION-STATUS.md](../VALIDATION-STATUS.md) is the page that records it.
