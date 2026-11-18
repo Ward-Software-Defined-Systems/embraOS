@@ -36,7 +36,7 @@
 > `v0.25.0-phase2`, publishes the installer ISOs (x86_64 and aarch64, one per storage
 > engine); the disk image and the hypervisor conversions come from a build. What each
 > surface has been validated on, and what is still TBD, is in
-> [docs/OPERATIONS/OPERATION.md](docs/OPERATIONS/OPERATION.md).
+> [docs/VALIDATION-STATUS.md](docs/VALIDATION-STATUS.md).
 
 Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors and bare metal (the A/B slots with rollback, the signed update, the hypervisor and bare-metal drivers with their firmware, the display console and the installer ISO landed in Phase 2's waves; LUKS and mTLS follow); a governed module system with an `embractl` management CLI; a custom kernel; and a sovereign-intelligence tier — the embraOS-QNM-Core model option and Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
