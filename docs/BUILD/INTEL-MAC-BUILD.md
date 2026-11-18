@@ -301,7 +301,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > The build fails if the model is missing from the rootfs rather than shipping an image whose
 > retrieval silently falls back to keyword-only.
 
-> **Port forwarding:** QEMU forwards 8443 (REST) on the host's loopback only (the gRPC ports, 50000 and 50002, bind the machine's loopback and are not forwarded),
+> **Port forwarding:** QEMU forwards 8443 (REST) on the host's loopback only (the gRPC ports, 50000 to 50002, and the database's, 8090, bind the machine's loopback and are not forwarded),
 > and 3345 (HTTPS — https://localhost:3345/embraOS, behind the console's access token) on every host interface, in both UI modes;
 > other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot. apid's REST routes are
 > `/health`, `/version` and `/status` (the brain's status incl. the LLM provider

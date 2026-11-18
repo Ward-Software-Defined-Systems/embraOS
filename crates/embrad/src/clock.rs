@@ -42,7 +42,7 @@
 //! date error's hint.
 //!
 //! What also runs beside the services is the save ([`keep_saved`]): the
-//! clock written to STATE every [`SAVE_EVERY`] and once more at a restart,
+//! clock written to STATE every [`SAVE_EVERY`] and once more at a stop,
 //! so that a board whose clock battery is dead and which boots without a
 //! network starts where it left off, behind by as long as it was off, and
 //! not at the image's build time again.

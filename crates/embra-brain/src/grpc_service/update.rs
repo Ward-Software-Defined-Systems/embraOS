@@ -627,8 +627,8 @@ mod backup_tests {
     }
 
     /// Before a session the operator's messages go to the stage, `/backup`,
-    /// `/ca` and `/reboot` are answered, and any other command gets its one
-    /// line: none is dropped without a word.
+    /// `/ca`, `/network`, `/reboot` and `/web-token` are answered, and any
+    /// other command gets its one line: none is dropped without a word.
     #[tokio::test]
     async fn before_a_session_backup_ca_network_reboot_and_web_token_are_answered_and_any_other_command_is_told_to_wait() {
         let (tx, mut rx) = mpsc::channel(16);

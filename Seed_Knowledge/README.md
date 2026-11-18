@@ -167,4 +167,7 @@ tests read the committed packs together:
 `the_committed_packs_are_one_connected_graph` — every node of the four
 packs is reachable from every other through the edges the packs list, so a
 fresh instance boots with its seed knowledge in one piece. A node added
-without an edge to the rest fails that test.
+without an edge to the rest fails that test. A fourth,
+`the_committed_packs_name_no_person_or_private_host`, reads each committed
+pack's text: every instance loads these packs, so one names no person and
+no private host, and an example uses an example host.

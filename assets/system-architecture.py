@@ -259,7 +259,7 @@ slab(Y_GRUB, H_GRUB, "UEFI firmware · GRUB 2.12 on the EFI System Partition · 
 ])
 slab(Y_HOST, H_HOST, "Where it runs · one disk, converted or installed", QEMU, [
     "QEMU (run-qemu.sh, run-qemu-aarch64.sh): kvm | hvf · -m 4G · the firmware on pflash (EMBRA_BOOT=uefi, default) | -kernel + -initrd (direct) · -serial mon:stdio · EMBRA_VNC=1 gives the x86_64 VM a display",
-    "-nic user: hostfwd 3345 → every host interface, 8443 → the host's loopback · QEMU's DHCP leases 10.0.2.15 · a bridged or a real NIC answers on 3345 and 8443; gRPC 50000 and 50002 listen on loopback alone",
+    "-nic user: hostfwd 3345 → every host interface, 8443 → the host's loopback · QEMU's DHCP leases 10.0.2.15 · a bridged or a real NIC answers on 3345 and 8443; the other four ports listen on loopback alone",
     "hypervisors: vmware/embraos.ova and .vmdk (ESXi, Fusion) · hyper-v/embraos.vhdx (generation 2) · parallels/embraos.vmx with its VMDK · any of them, and bare metal: embraos.iso as a DVD or a USB stick",
     "embraos.img · GPT aligned to 1 MiB: esp vfat 64 MiB (GRUB, grub.cfg, grubenv) · rootfs_a | rootfs_b 2 GiB each, an xz SquashFS with its kernel and initrds · state ext4 256 MiB · data ext4 4 GiB, grown at boot",
 ])
