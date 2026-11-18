@@ -52,11 +52,25 @@ pub struct ImportSummary {
     pub type_histogram: BTreeMap<String, usize>,
 }
 
-/// Mirror of WardSONDB's `validate_custom_id` (engine/document.rs): the
-/// projection uses graph node ids as document `_id`s, so anything the
-/// server would reject must fail validation here, before sealing.
-/// `pub(crate)`: the seed-knowledge validator (knowledge/seed.rs) reuses
-/// the same server mirror for pack node ids.
+/// What a node id must be to become a document `_id`: one the database
+/// stores and one the brain's client can name. The projection uses graph
+/// node ids as document `_id`s, and every later read, patch and link names
+/// a node by its id in a URL, so what either side refuses fails validation
+/// here, before sealing.
+///
+/// - WardSONDB's `validate_custom_id` with its `segment_fault`
+///   (engine/document.rs): not empty, at most 512 bytes, no leading `_`,
+///   not `.` or `..`, no path separator, no control character. An id the
+///   server refused would leave a sealed node that no boot can project.
+/// - The client's `segment_ok` (db/client.rs), which holds all of that for
+///   an id and refuses `? # %` and whitespace as well: such a node would be
+///   stored and then named by no tool.
+///
+/// `pub(crate)`: the seed-knowledge validator (knowledge/seed.rs) uses the
+/// same rule for pack node ids. A sealed soul is read back by
+/// `parse_sealed`, which validates nothing: the rule meets an import file
+/// and a pack, never an instance that is sealed. Guard
+/// `an_id_that_passes_validation_is_one_the_client_can_address`.
 pub(crate) fn id_violation(id: &str) -> Option<String> {
     if id.is_empty() {
         return Some("empty id".to_string());
@@ -69,6 +83,15 @@ pub(crate) fn id_violation(id: &str) -> Option<String> {
     }
     if id.contains('\0') {
         return Some("id contains a NUL byte".to_string());
+    }
+    if id == "." || id == ".." {
+        return Some(format!("id '{id}' is a dot segment, which names no document"));
+    }
+    if let Some(c) = id.chars().find(|c| matches!(c, '/' | '\\' | '?' | '#' | '%')) {
+        return Some(format!("id '{id}' contains '{c}' (an id carries none of / \\ ? # %)"));
+    }
+    if id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some(format!("id {id:?} contains whitespace or a control character"));
     }
     None
 }
@@ -449,6 +472,54 @@ mod format_tests {
         .expect("markers skipped");
         assert_eq!(g.nodes.len(), 2);
         assert_eq!(g.edges.len(), 1);
+    }
+
+    /// The projection writes a node under its id and every tool names the
+    /// node by that id: what the database refuses to store, or the client
+    /// refuses to put in a URL, is refused here, before a seal.
+    #[test]
+    fn an_id_the_database_or_the_client_refuses_fails_validation() {
+        for id in [".", "..", "a/b", "a\\b", "a?b", "a#b", "a%b", "a b", " a", "a\tb", "a\nb", "a\u{a0}b", "a\u{7f}b", "a\u{0}b"] {
+            assert!(id_violation(id).is_some(), "{id:?} must be refused");
+        }
+        for id in ["identity_core", "seed_core_boot", "ñandú", "名前", "a-b.c", "A1", "x~y", "a:b", "a+b", "a@b", "...", "a..b"] {
+            assert_eq!(id_violation(id), None, "{id:?} is an id");
+        }
+    }
+
+    /// No id passes validation that the client refuses in a URL: over every
+    /// ASCII character and some of the rest, alone, doubled and inside an id.
+    #[test]
+    fn an_id_that_passes_validation_is_one_the_client_can_address() {
+        use crate::db::client::{segment_ok, Segment};
+        let mut chars: Vec<char> = (0u8..=127).map(char::from).collect();
+        chars.extend(['\u{85}', '\u{a0}', '\u{2028}', '\u{3000}', '\u{feff}', 'é', '日']);
+        let mut passed = 0;
+        for c in chars {
+            for id in [c.to_string(), format!("{c}{c}"), format!("a{c}b")] {
+                if id_violation(&id).is_none() {
+                    passed += 1;
+                    assert!(segment_ok(Segment::Id(&id)).is_ok(), "{id:?} passes validation and the client refuses it");
+                }
+            }
+        }
+        assert!(passed > 200, "the comparison ran over {passed} ids");
+    }
+
+    /// An import file with such an id is refused by its node, with the rest
+    /// of what is wrong with it, and nothing is sealed.
+    #[test]
+    fn an_import_whose_node_id_no_url_can_carry_is_refused() {
+        let e = parse_import(
+            r#"{"nodes":[
+                {"id":"me","type":"self","text":"t"},
+                {"id":"core purpose","type":"value","text":"t"},
+                {"id":"a/b","type":"value","text":"t"}
+            ],"edges":[{"src":"me","dst":"core purpose","relation":"holds"}]}"#,
+        )
+        .unwrap_err();
+        assert!(e.iter().any(|m| m.contains("node 'core purpose'") && m.contains("whitespace")), "{e:?}");
+        assert!(e.iter().any(|m| m.contains("node 'a/b'") && m.contains("'/'")), "{e:?}");
     }
 
     #[test]

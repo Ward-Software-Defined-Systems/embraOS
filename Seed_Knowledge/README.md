@@ -116,9 +116,10 @@ applied):
 
 - `format` must be `"knowledge.v1"`; `name` non-empty (it namespaces the
   loader's bookkeeping — keep it stable across releases of the same pack).
-- **Node ids**: non-empty, ≤ 512 bytes, no leading `_`, no NUL, unique
-  within the pack; the `user_` prefix is reserved for the operator
-  profile. A `seed_<pack>_<topic>` convention is recommended (not
+- **Node ids**: non-empty, ≤ 512 bytes, no leading `_`, none of
+  `/ \ ? # %`, no whitespace or control character, not `.` or `..` (a
+  node is stored under its id and named by it in a URL), unique within
+  the pack; the `user_` prefix is reserved for the operator profile. A `seed_<pack>_<topic>` convention is recommended (not
   enforced) — ids share the `_id` namespace with server-minted UUIDs and
   identity slugs.
 - `kind: "semantic"` needs `category` (one of `fact`, `preference`,

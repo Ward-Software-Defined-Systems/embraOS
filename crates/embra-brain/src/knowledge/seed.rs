@@ -1203,6 +1203,12 @@ mod tests {
             ("_lead", "reserved"),
             ("user_thing", "user_"),
             ("", "empty"),
+            // What the database's client cannot put in a URL: such a node
+            // would be seeded and then named by no tool.
+            ("seed core boot", "whitespace"),
+            ("seed/core", "'/'"),
+            ("seed%20core", "'%'"),
+            ("..", "dot segment"),
         ] {
             let raw = minimal_pack(
                 json!([{"id": id, "kind": "semantic", "category": "fact",

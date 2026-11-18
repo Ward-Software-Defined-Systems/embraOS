@@ -67,8 +67,9 @@ excluded from the import selector:
 2. **No dangling references** — every edge `src`/`dst` names an existing
    node `id`.
 3. **No duplicate edges** — the `(src, dst, relation)` triple is unique.
-4. **Valid ids** — unique within the graph, non-empty, ≤ 512 bytes, no leading `_`, no NUL, and
-   **not prefixed `user_`** (that namespace is reserved for the operator
+4. **Valid ids** — unique within the graph, non-empty, ≤ 512 bytes, no leading `_`, none of
+   `/ \ ? # %`, no whitespace or control character, not `.` or `..` (a node is stored under
+   its id and named by it in a URL), and **not prefixed `user_`** (that namespace is reserved for the operator
    subgraph embraOS generates locally from the Phase-1 profile).
 5. Parseable JSON with `nodes` and `edges` arrays.
 
