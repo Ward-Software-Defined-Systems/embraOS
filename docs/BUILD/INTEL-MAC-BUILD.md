@@ -270,7 +270,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > port forwards in that mode; the banner's second URL, on the leased address, is the
 > one to open, from this Mac or from another machine on the LAN (the certificate
 > names that address; the browser warns about the machine's own CA until its
-> certificate is imported once, `/api/ca.crt`: QUICK-START.md, Network and display). The same recipe
+> certificate is imported once, `/api/ca.crt`: QUICK-START.md, The web console's certificate). The same recipe
 > for Apple Silicon, with `-device virtio-gpu-pci` and a USB keyboard beside the
 > tablet, is in [AARCH64-BUILD.md](AARCH64-BUILD.md).
 
