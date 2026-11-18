@@ -115,8 +115,7 @@ split by a line break is not found.
   text in and keep it (`ingest this`, `train upon`, `remember it`, …), the
   imperative paired with the nearest lead in the 2 KiB before it; either
   side alone is prose and names nothing. Aimed at the durable surface, the
-  model's memory, not the turn; flag-only, the text is kept (Embra #24, the
-  farsight.org passage that passed clean at every length until 2026-10-31);
+  model's memory, not the turn; flag-only, the text is kept (Embra #24);
 - `marker: <marker>` (`marker: assistant:`): the frame of an injected turn;
 - `mentions: system prompt`: the phrase only, not a directive. Pages about
   prompt injection carry it, and so does a repository whose commits talk

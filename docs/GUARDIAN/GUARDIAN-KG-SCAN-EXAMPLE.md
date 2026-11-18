@@ -7,7 +7,7 @@ itself: drafted on a production instance via `guardian_propose`,
 (fail-closed), and compiled only after operator approval — the full gated
 path, intelligence-proposed, soul-gated, operator-approved
 ([REPLICANT-CHECK.md](./REPLICANT-CHECK.md)). The
-intelligence iterated it v1 → v5 in one day (2026-06-03): v1's
+intelligence iterated it v1 → v5 in one day: v1's
 temporal-gating matcher was a stub; v5 added the Crockford-Base32
 timestamp decode with hyphen handling and corrected the
 sovereignty-shield matcher.
@@ -125,8 +125,7 @@ do. The granularity is coarser than the 8 bits the ten digits leave out:
 each hex digit sits in a 5-bit slot, so the final `>> 2` also drops the two
 low bits of the tenth digit, and the decoded value depends on the
 timestamp's top 38 bits alone — pairs within 1024 ms (about a second,
-aligned to multiples of it) read as equal, not ~256 ms as this page said
-until 2026-10-31 (Embra #36). `temporal_gating` requires strictly newer, so
+aligned to multiples of it) read as equal. `temporal_gating` requires strictly newer, so
 near-simultaneous pairs are skipped, never misreported.
 
 ## Limits

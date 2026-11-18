@@ -16,44 +16,8 @@ connection to the service's DevTools endpoint open between tool calls: a
 browser session over several calls. The files under
 [`BROWSER-SERVICE/`](./BROWSER-SERVICE/) run it with Docker Compose.
 
-**Validated:** 2026-10-17. Browserless `v2.57.1` behind Caddy `2.11.7` with
-Docker Compose on an Ubuntu 24.04 host, Caddy's internal CA seeded into
-STATE; from a QEMU image, every use and refusal on this page, the 60 s
-budget, and the full-page measurements under *A screenshot*. The tiles of
-`image_view` named there: validated 2026-10-18 in three rounds on the same
-captures (seven tiles of 800×2366–2383 px for a 16,642 px page, the cuts
-on blank lines and in the gap beside a figure, `part=2`, the refusals, the
-mobile UI, the recapture with `scrollPage`).
-
-**The session over several calls:** 2026-11-14, from the build host and
-not from a booted machine. The shipped `websocket` module, the Guardian
-guard, the brain's connection broker and its TLS on the service's root ran
-in one test process (`a_devtools_session_against_a_live_browser_service`,
-`crates/embra-brain/src/guardian/ws.rs`; its comment has the command)
-against a second instance of this compose: its own project and token,
-published on the Docker host's bridge address alone, `BROWSER_HOST` an IP
-literal (the `default_sni` line of *Start it* came out of that run). Every answer, refusal
-and figure under *A session over several calls* and in the last three
-*Limits* is from those runs, and so is the bare upgrade under *Check it
-from the host*.
-
-The same day it ran inside the OS: a scratch VM of the `v0.24.0-phase2`
-image with this change's binaries in its slot, and in the place of a model
-a scripted stand-in for the provider that issues the tool call the
-operator types. The tool was installed and built at boot by the in-OS
-toolchain (`/guardian status websocket`: `Ready`, 1.24 s). An `open` was
-refused as a private address, then for its issuer, then with the service's
-401, as `/guardian egress allow`, `/ca import` and `/guardian secret` went
-in one after the other, with no restart between them. The exchange above
-ran a command a turn. A stop from the web console ended a 60 s wait at
-once and left the connection open; `/guardian connections` listed it and
-closed it; `/guardian egress deny` and the removal of the host's secret
-each closed a connection and said so; a 5 MB reply closed its connection
-with code 1009; a connection left unused was closed after ten minutes;
-`http_request` reached `/content` on the same service. After a reboot the
-tool was loaded as built, an id from before named nothing, and an `open`
-went through at once. An intelligence driving the service of its own
-accord, and a machine that is not a VM: **TBD**.
+What has been run against the service, and on what, is in
+[VALIDATION-STATUS.md](../VALIDATION-STATUS.md).
 
 ## What runs
 
@@ -92,10 +56,10 @@ private address: a name in your DNS, or the IP literal itself as the site
 name. Caddy issues a certificate for an IP, and `default_sni
 {$BROWSER_HOST}` in `caddy/Caddyfile` is what serves it: a client that
 reaches a site by an IP literal sends no server name, and without that
-line Caddy finds no certificate for it (found 2026-11-14 with an IP
-literal as the site: `curl` got a TLS `internal error` alert, and a
-WebSocket `open` answered `TLS with <address> failed: received fatal
-alert: InternalError`). A Caddy started before the line was there takes
+line Caddy finds no certificate for it (with an IP literal as
+the site, `curl` gets a TLS `internal error` alert, and a WebSocket
+`open` answers `TLS with <address> failed: received fatal alert:
+InternalError`). A Caddy started before the line was there takes
 it at its next start (`docker compose restart caddy`). QEMU's user-mode
 network forwards DNS to the host's resolver.
 
@@ -130,8 +94,7 @@ Two ways, one `tls` line in `caddy/Caddyfile`:
   by that SHA-256
   ([COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md)); the brain
   trusts it from its next request and a connection's next `open`, with
-  no restart. The run of 2026-11-14 took the URL route. On a stopped raw
-  image the file is seeded instead:
+  no restart. On a stopped raw image the file is seeded instead:
 
   ```text
   ../../../scripts/seed-state.sh --ca-dir ca
@@ -202,16 +165,15 @@ Ask in plain language; these are the inputs Embra sends:
   and the file under 1.5 MiB. A `fullPage` capture of a long page, with a
   long edge over 5152 px, comes back in tiles at full scale, four per call,
   the header naming each tile's coordinates; `part=2, 3, …` shows the next
-  group. An image over 64 megapixels is refused before decode. Measured
-  2026-10-17: a capture 4,385 px tall is shown whole and stays readable
-  (1.7×); one 8,000 px tall shown whole was not (3.1×), and is four tiles
-  now, readable down to the reference markers (2026-10-18). A `fullPage`
+  group. An image over 64 megapixels is refused before decode. A capture
+  4,385 px tall is shown whole and stays readable (1.7×); one 8,000 px
+  tall comes back as four tiles, readable down to the reference markers. A `fullPage`
   capture shows only what had loaded: lazy-loaded pictures below the fold
   came out as empty frames and scroll-triggered fades as blank cards. The
   top-level `"scrollPage": true` together with
   `"gotoOptions": {"waitUntil": "networkidle0"}` scrolls the page and
   waits before the capture; on a long article every lazy-loaded picture
-  was present (2026-10-18, the two options together). Text is still read
+  is then present. Text is still read
   through `/content`; the viewport or a top-level `selector` suit a single
   picture.
 - **A PDF** (`/pdf`):

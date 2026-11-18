@@ -151,12 +151,9 @@ reply of each command names the next one's ids.
 {"op": "close", "id": "<id>"}
 ```
 
-Run 2026-11-14 against the browser service of
-[BROWSER-SERVICE.md](./BROWSER-SERVICE.md), from the build host: that
-page's *A session over several calls* has the answers, its *Limits* what
-`?timeout=` is for, and its *Validated* how the runs were made, the one
-inside a scratch OS among them. An intelligence driving it of its own
-accord: **TBD**.
+The answers of this exchange against the browser service are in
+[BROWSER-SERVICE.md](./BROWSER-SERVICE.md), under *A session over several
+calls*; its *Limits* say what `?timeout=` is for.
 
 ## The module
 
