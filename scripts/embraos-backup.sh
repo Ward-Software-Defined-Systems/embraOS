@@ -9,6 +9,7 @@
 #   ./embraos-backup.sh list                      # List available backups
 #   ./embraos-backup.sh verify                    # Verify current disk image has valid data
 #   ./embraos-backup.sh --image /path/embraos.img verify   # Target a specific image
+#   ./embraos-backup.sh self-test                 # Check the STATE rule below on scratch directories (no root, no image)
 #
 # Image resolution: --image <path> → $EMBRAOS_IMAGE → <root>/buildroot-src/output/images/
 # embraos.img → <root>/output/images/embraos.img (same precedence as run-qemu.sh and
@@ -28,6 +29,10 @@
 #     - soul.sha256 (soul hash)
 #     - pki/ (Root CA, service certs)
 #     - halt_reason (if present)
+#     - everything else on it but what belongs to the machine and to no
+#       backup: the web console's access token (web-console/) and the saved
+#       clock (last-known-time). A restore leaves the image's own where they
+#       are (STATE_MACHINE_OWN below).
 #
 #   DATA partition (GPT name `data`, /embra/data in the OS):
 #     - wardsondb/ (all collections: soul, identity, memory, sessions, config, tools, etc.)
@@ -173,6 +178,42 @@ report_wardsondb() {
 }
 log_step()  { echo -e "${CYAN}[STEP]${NC}  $*"; }
 
+# --- What belongs to the machine and to no backup -------------------------
+# The web console's access token (web-console/) and the saved clock
+# (last-known-time). The OS's own snapshot leaves both out and its restore
+# keeps the ones in place (STATE_EXCLUDED and STATE_KEPT_BY_RESTORE in
+# crates/embra-update/src/paths.rs), so that no restored backup brings back
+# a token that was replaced with /web-token rotate. This script does the
+# same: a backup carries neither, and a restore leaves the image's own where
+# they are. A backup made before this rule carries both; neither is copied
+# back. `self-test` runs the three steps on scratch directories.
+STATE_MACHINE_OWN=(web-console last-known-time)
+
+# rsync's exclusions for those names, at STATE's root and nowhere deeper.
+state_excludes() {
+    local name
+    for name in "${STATE_MACHINE_OWN[@]}"; do printf -- '--exclude=/%s\n' "$name"; done
+}
+
+# <mounted STATE> <a backup's state directory> [rsync option]
+copy_state_out() {
+    local excludes; mapfile -t excludes < <(state_excludes)
+    rsync -a ${3:+"$3"} "${excludes[@]}" "$1/" "$2/"
+}
+
+# <mounted STATE>: everything on it goes but what is the machine's own.
+clear_state() {
+    local name keep=()
+    for name in "${STATE_MACHINE_OWN[@]}"; do keep+=( ! -name "$name" ); done
+    find "$1" -mindepth 1 -maxdepth 1 "${keep[@]}" -exec rm -rf -- {} + 2>/dev/null || true
+}
+
+# <a backup's state directory> <mounted STATE> [rsync option]
+copy_state_in() {
+    local excludes; mapfile -t excludes < <(state_excludes)
+    rsync -a ${3:+"$3"} "${excludes[@]}" "$1/" "$2/"
+}
+
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         log_error "This script must be run as root (need loop mount access)"
@@ -300,7 +341,8 @@ do_backup() {
 
     # --- Backup STATE ---
     log_step "Backing up STATE partition..."
-    rsync -a --info=progress2 "${MOUNT_STATE}/" "${backup_path}/state/"
+    copy_state_out "$MOUNT_STATE" "${backup_path}/state" --info=progress2
+    log_info "Left out, the machine's own: ${STATE_MACHINE_OWN[*]}"
 
     local state_files=$(find "${backup_path}/state" -type f | wc -l)
     local state_size=$(du -sh "${backup_path}/state" | cut -f1)
@@ -432,10 +474,12 @@ do_restore() {
     if [ -d "${backup_path}/state" ]; then
         log_step "Restoring STATE partition..."
 
-        # Clear existing state (but preserve the directory structure)
-        find "$MOUNT_STATE" -mindepth 1 -delete 2>/dev/null || true
+        # Clear existing state, but what is the machine's own: that stays
+        # as the image has it, and none of it is copied from the backup.
+        clear_state "$MOUNT_STATE"
 
-        rsync -a --info=progress2 "${backup_path}/state/" "${MOUNT_STATE}/"
+        copy_state_in "${backup_path}/state" "$MOUNT_STATE" --info=progress2
+        log_info "Kept as the image has them: ${STATE_MACHINE_OWN[*]}"
 
         local state_files=$(find "$MOUNT_STATE" -type f | wc -l)
         log_info "STATE restored: ${state_files} files"
@@ -605,6 +649,60 @@ do_verify() {
     fi
 }
 
+# --- Self-test ---
+# The STATE rule on scratch directories: what a backup leaves out, what a
+# restore removes, keeps and copies. No root, no image, no mount.
+do_self_test() {
+    local t fails=0
+    t=$(mktemp -d /tmp/embra-backup-selftest.XXXXXX)
+    check() {   # <what> <command...>
+        local what="$1"; shift
+        if "$@"; then echo "  ok    $what"; else echo "  FAIL  $what"; fails=$((fails + 1)); fi
+    }
+    absent() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
+    holds() { [ "$(cat "$1" 2>/dev/null)" = "$2" ]; }
+
+    # A machine's STATE, as an OS that has booted leaves it.
+    mkdir -p "$t/state/pki/web-console" "$t/state/web-console" "$t/state/network" "$t/backup/state"
+    echo hash > "$t/state/soul.sha256"; echo cert > "$t/state/pki/ca.crt"; echo why > "$t/state/halt_reason"
+    echo settings > "$t/state/network/settings"; echo deeper > "$t/state/pki/web-console/kept"
+    echo token-of-the-backup > "$t/state/web-console/token"; echo 100 > "$t/state/last-known-time"
+    copy_state_out "$t/state" "$t/backup/state"
+    check "a backup holds the soul's hash, the CA, the halt reason and the network's settings" \
+        test -f "$t/backup/state/soul.sha256" -a -f "$t/backup/state/pki/ca.crt" -a -f "$t/backup/state/halt_reason" -a -f "$t/backup/state/network/settings"
+    check "a backup does not hold the web console's access token" absent "$t/backup/state/web-console"
+    check "a backup does not hold the saved clock" absent "$t/backup/state/last-known-time"
+    check "a name of that kind deeper in STATE is no exclusion" holds "$t/backup/state/pki/web-console/kept" deeper
+
+    # A backup of before the rule, which carries both, onto another image.
+    mkdir -p "$t/old/state/web-console" "$t/image/web-console" "$t/image/stale/dir"
+    cp -a "$t/backup/state/." "$t/old/state/"
+    echo token-of-the-backup > "$t/old/state/web-console/token"; echo 100 > "$t/old/state/last-known-time"
+    echo token-of-the-image > "$t/image/web-console/token"; echo 200 > "$t/image/last-known-time"
+    echo gone > "$t/image/stale/dir/file"; echo gone > "$t/image/.hidden"; echo other-hash > "$t/image/soul.sha256"
+    clear_state "$t/image"
+    check "a restore removes what the image held" absent "$t/image/stale"
+    check "a restore removes a hidden file as well" absent "$t/image/.hidden"
+    copy_state_in "$t/old/state" "$t/image"
+    check "a restore brings the backup's STATE" holds "$t/image/soul.sha256" hash
+    check "a restore keeps the image's own access token" holds "$t/image/web-console/token" token-of-the-image
+    check "a restore keeps the image's own saved clock" holds "$t/image/last-known-time" 200
+
+    # An image that has neither (a new one): a backup's are still not copied.
+    mkdir -p "$t/new"
+    clear_state "$t/new"; copy_state_in "$t/old/state" "$t/new"
+    check "a restore onto a new image copies no token from an older backup" absent "$t/new/web-console"
+    check "a restore onto a new image copies no saved clock from an older backup" absent "$t/new/last-known-time"
+    check "a restore onto a new image brings the rest" test -f "$t/new/pki/ca.crt" -a -f "$t/new/network/settings"
+
+    rm -rf "$t"
+    if [ "$fails" -eq 0 ]; then
+        echo "self-test: PASS"
+    else
+        echo "self-test: FAIL ($fails)"; exit 1
+    fi
+}
+
 # --- Main ---
 
 COMMAND="${1:-help}"
@@ -630,6 +728,9 @@ case "$COMMAND" in
     verify)
         do_verify
         ;;
+    self-test)
+        do_self_test
+        ;;
     help|--help|-h)
         echo "embraos-backup.sh — Backup and restore embraOS STATE and DATA partitions"
         echo ""
@@ -638,6 +739,7 @@ case "$COMMAND" in
         echo "  sudo $0 [--image PATH] restore [BACKUP_NAME]     Restore into disk image (latest if no name)"
         echo "  sudo $0 list                                     List available backups"
         echo "  sudo $0 [--image PATH] verify                    Check disk image has valid data"
+        echo "  $0 self-test                                     Check what a backup leaves out of STATE and a restore keeps (no root, no image)"
         echo ""
         echo "Options:"
         echo "  --image PATH        Disk image to operate on (default: buildroot-src/output/images/ then output/images/)"
