@@ -162,14 +162,14 @@ Build from source: **[docs/BUILD/QUICK-START.md](docs/BUILD/QUICK-START.md)** (A
 
 > **Default UI.** The browser-based **embra-web** console is the default UI and the primary interface, served over HTTPS on **:3345**; embraOS prints the URL with the console's access token when the console is ready. Set **`EMBRA_TUI=1`** before `run-qemu.sh` for the serial TUI instead — no image rebuild needed. The serial TUI is functional but is preferred for debugging.
 
-> **The disk boots itself.** `run-qemu.sh` boots the image through UEFI, and GRUB's menu offers slot A or B, Diagnostics, Update embraOS, and Backup and restore. In a session, `/backup` schedules a snapshot or a restore for the next boot and `/update` checks for a signed release and stages it into the inactive slot; the first boots of a staged slot are trials, and GRUB falls back to the previous slot on its own when one does not come up. **[Updates and backups →](docs/OPERATIONS/UPDATES-AND-BACKUPS.md)**
+> **The disk boots itself.** `run-qemu.sh` boots the image through UEFI, and GRUB's menu offers slot A or B, Diagnostics, Update embraOS, Backup and restore, Reboot, Halt and Firmware setup. In a session, `/backup` schedules a snapshot or a restore for the next boot and `/update` checks for a signed release and stages it into the inactive slot; the first boots of a staged slot are trials, and GRUB falls back to the previous slot on its own when one does not come up. **[Updates and backups →](docs/OPERATIONS/UPDATES-AND-BACKUPS.md)**
 
 ---
 
 ## What Happens When You Run It
 
 ### 1. Configuration
-A minimal setup: name the intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), provide the corresponding credentials (API key for Anthropic/Gemini, or endpoint URL + optional bearer + model selection for OpenAI-compat presets), confirm your timezone.
+A minimal setup: name the intelligence, say whether the providers are reached directly or through WSDS Local AI Gateway, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), provide the corresponding credentials (API key for Anthropic/Gemini, or endpoint URL + optional bearer + model selection for OpenAI-compat presets), confirm your timezone.
 
 ### 2. Learning Mode
 A six-phase guided setup (`UserConfiguration → IdentityFormation → SoulDefinition → InitialToolset → Confirmation → Complete`, `crates/embra-brain/src/learning/mod.rs:12–19`) walks through user profile, identity, values, and toolset — or, after the user-profile phase, offers importing a pre-built intelligence graph from `Imported_Intelligence/`. On approval the identity and values become a canonical IDENTITY+SOUL graph, serialized with `serde_json::to_string_pretty`, hashed with SHA-256, and the hash is written to `/embra/state/soul.sha256`. Subsequent boots verify the hash via `embra-trustd` and HALT on mismatch.
@@ -211,11 +211,11 @@ The runtime services that implement those layers:
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
 | `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools (both authoring paths replicant-checked; intelligence proposals also operator-approved); capability-broker host imports. |
-| `embra-update` | — | The OS's backups, updates and installs: snapshots and restores of STATE and DATA, the signed release fetched, verified and written into the inactive slot, the installer of the ISO, and DATA grown to the disk's end. Run by `embrad` in the maintenance boots, before a trial boot's services and at every normal boot, and by the brain for `/backup` and `/update`. |
+| `embra-update` | — | The OS's backups, updates and installs: snapshots and restores of STATE and DATA, an uploaded backup checked and taken in, the signed release fetched, verified and written into the inactive slot, the installer of the ISO, and DATA grown to the disk's end. Run by `embrad` in the maintenance boots, before a trial boot's services and at every normal boot, by the brain for `/backup` and `/update`, for its own check for a newer release and for the `update_check` tool, and by `embra-web` for an uploaded backup. |
 
 embrad also keeps helper processes that are no services of this table: one `udhcpc` for each card on DHCP and one `wpa_supplicant` for each Wi-Fi card, started and stopped as the cards come and go.
 
-Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database, vendored into this workspace at `crates/wardsondb` as a deliberate in-tree fork (the upstream project continues independently). Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 120 tools work identically across every backend.
+Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database, vendored into this workspace at `crates/wardsondb` as a deliberate in-tree fork (the upstream project continues independently). Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there is no config file to edit, and the few settings outside the database (the provider keys, the network's settings) are small files on STATE that the operator's commands write. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 120 tools work identically across every backend.
 
 Provider wire details, per-family reasoning controls, bearer storage, and the prompt-caching model: **[docs/SYSTEM-DESIGN.md](docs/SYSTEM-DESIGN.md)**.
 
