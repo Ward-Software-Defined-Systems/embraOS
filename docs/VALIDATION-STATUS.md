@@ -31,7 +31,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `hyper-v/embraos.vhdx` | Hyper-V | the aarch64 VHDX |
 | `parallels/embraos.vmx` with its VMDK | Parallels | Parallels on Apple Silicon |
 | A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early | every other machine; an aarch64 machine |
-| `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU | a machine's own power-off, and one that cannot power itself off; aarch64 |
+| `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it) | a machine that cannot power itself off; aarch64 |
 
 ## The installer (`embraos.iso`)
 
@@ -50,7 +50,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | What | Validated on | TBD |
 |---|---|---|
 | The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI) | the pointer and a click on Parallels, where the page, the mode and the keyboard work |
-| A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA) | a machine's own keyboard |
+| A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA); bare metal (a held modifier) | |
 | A firmware framebuffer (`ramfb`): 800x600, and 1024x768 on request | QEMU; QEMU on Apple Silicon | |
 | `embra.kioskmode=` | QEMU (standard VGA, virtio-gpu, a firmware framebuffer), GRUB's Diagnostics entry among the ways in | |
 | The menu: Copy, Paste, This console's URL | QEMU; QEMU on an Intel Mac and on Apple Silicon | |
@@ -65,7 +65,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `/network hostname` | QEMU | the name in a router's list |
 | The web console's certificate and its CA | QEMU, with curl as the client: by address and by name, a name set with `/network hostname`, an address that changes, the CA of an earlier release issued again once | a browser with the CA imported; a name a DNS server serves |
 | The web console at the leased address | QEMU on an Intel Mac and on Apple Silicon (bridged); Hyper-V; Parallels; bare metal | |
-| The web console's access token: the same at every boot, a new one with `/web-token rotate`, left out of a backup and kept by a restore | QEMU, with curl and the display console as the clients, the commands typed at the wizard | a browser and a phone: a bookmark across a reboot, the sign-out at a rotation |
+| The web console's access token: the same at every boot, a new one with `/web-token rotate`, left out of a backup and kept by a restore | QEMU, with curl and the display console as the clients, the commands typed at the wizard; bare metal, with a browser (the same URL after a reboot, the sign-out at a rotation) | the phone's page |
 
 ## Wi-Fi
 
