@@ -1,0 +1,94 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] drm: a held key is pressed once in the xkb state, a modifier
+ does not repeat
+
+The DRM platform repeats a held key itself: after half a second it sends
+the press again every tenth of a second, through the function that takes
+a key event from libinput. That function gives each press to xkbcommon,
+so a held key was pressed in the xkb state once for its press and once
+more for every repeat, and released once. xkbcommon counts the presses of
+a modifier key and clears the modifier when as many releases have come: a
+Shift, Ctrl or Alt held for longer than half a second stayed set after
+its release, a Caps Lock held that long stayed locked, and no later press
+of the key cleared either.
+
+A repeat no longer reaches the xkb state, which has had the key's press.
+And a key starts a repeat only when the keymap says it repeats
+(xkb_keymap_key_repeats), which a modifier does not: the web view is no
+longer sent a held Shift ten times a second, and a modifier pressed under
+a repeating key no longer takes the repeat from it. The Wayland platform
+asks the keymap the same question, and its xkb state is fed by the
+compositor's modifier events, never by a repeat.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/platform/drm/cog-platform-drm.c
++++ b/platform/drm/cog-platform-drm.c
+@@ -758,8 +758,13 @@
+ }
+ 
+ 
++/* A key event for the web view. `repeated` is a key that is still held down:
++ * xkbcommon has had its press and is not given another. A second press
++ * without a release is counted (the filter of a modifier counts its presses
++ * and clears the modifier when the releases have matched them), so a Shift
++ * held past the repeat delay stayed set after its one release. */
+ static void
+-input_dispatch_key_event (uint32_t time, uint32_t key, enum libinput_key_state state)
++input_dispatch_key_event (uint32_t time, uint32_t key, enum libinput_key_state state, bool repeated)
+ {
+     struct wpe_input_xkb_context *default_context = wpe_input_xkb_context_get_default ();
+ 
+@@ -783,7 +788,8 @@
+ 
+     uint32_t keysym = wpe_input_xkb_context_get_key_code (default_context, key, !!state);
+ 
+-    xkb_state_update_key (context_state, key, !!state ? XKB_KEY_DOWN : XKB_KEY_UP);
++    if (!repeated)
++        xkb_state_update_key (context_state, key, !!state ? XKB_KEY_DOWN : XKB_KEY_UP);
+     uint32_t modifiers = wpe_input_xkb_context_get_modifiers (default_context,
+         xkb_state_serialize_mods (context_state, XKB_STATE_MODS_DEPRESSED),
+         xkb_state_serialize_mods (context_state, XKB_STATE_MODS_LATCHED),
+@@ -823,6 +829,18 @@
+     input_data.repeating_key = (keyboard_event) {0, 0};
+ }
+ 
++/* Whether a key held down repeats: the keymap's word. A modifier does not. */
++static bool
++key_repeats (uint32_t key)
++{
++    struct wpe_input_xkb_context *context = wpe_input_xkb_context_get_default ();
++    if (!context || !wpe_input_xkb_context_get_context (context))
++        return false;
++
++    struct xkb_state *state = wpe_input_xkb_context_get_state (context);
++    return state && xkb_keymap_key_repeats (xkb_state_get_keymap (state), key);
++}
++
+ static void
+ input_handle_key_event (struct libinput_event_keyboard *key_event)
+ {
+@@ -832,10 +850,11 @@
+     uint32_t time = libinput_event_keyboard_get_time (key_event);
+     enum libinput_key_state key_state = libinput_event_keyboard_get_key_state (key_event);
+ 
+-    input_dispatch_key_event (time, key, key_state);
++    input_dispatch_key_event (time, key, key_state, false);
+ 
+     if (!!key_state) {
+-        start_repeating_key (time, key);
++        if (key_repeats (key))
++            start_repeating_key (time, key);
+     } else {
+         stop_repeating_key ();
+     }
+@@ -1396,7 +1415,7 @@
+ 
+     input_dispatch_key_event (input_data.repeating_key.time,
+                               input_data.repeating_key.key,
+-                              LIBINPUT_KEY_STATE_PRESSED);
++                              LIBINPUT_KEY_STATE_PRESSED, true);
+     g_source_set_ready_time (base, g_get_monotonic_time() + KEY_REPEAT_DELAY);
+     return TRUE;
+ }
