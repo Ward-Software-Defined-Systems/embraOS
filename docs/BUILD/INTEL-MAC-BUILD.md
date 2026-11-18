@@ -125,7 +125,7 @@ export AR=x86_64-linux-musl-ar
 export RANLIB=x86_64-linux-musl-ranlib
 export RANLIB_x86_64_unknown_linux_musl=x86_64-linux-musl-ranlib
 
-# Point bindgen/clang at the musl sysroot — required for zstd-sys + rocksdb-sys.
+# Point bindgen/clang at the musl sysroot — required for rust-librocksdb-sys, the crate that runs bindgen.
 # Without this, clang picks up Xcode's headers and fails with
 # `fatal error: 'stddef.h' file not found`.
 export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--sysroot=${MUSL_SYSROOT} -I${MUSL_SYSROOT}/include"
@@ -134,8 +134,8 @@ export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--sysroot=${MUSL_SYSR
 > **Don't simplify the glob to `$(brew --prefix musl-cross)`.** `brew --prefix`
 > returns the versionless symlink root, where the toolchain binaries live in
 > `bin/` — but the `x86_64-linux-musl/` sysroot only exists under the versioned
-> `Cellar/` directory used here. Without the sysroot, bindgen-based crates
-> (zstd-sys, rocksdb-sys) fail.
+> `Cellar/` directory used here. Without the sysroot, the bindgen-based crate
+> (rust-librocksdb-sys) fails.
 
 ### 3. Clone & build the image
 

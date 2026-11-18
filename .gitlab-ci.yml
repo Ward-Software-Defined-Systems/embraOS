@@ -261,10 +261,10 @@ musl-cross:
       "./.bootlin/$BOOTLIN_SDK/relocate-sdk.sh"
     - |
       set -eu
-      # bindgen (zstd-sys AND rust-librocksdb-sys) parses headers through
+      # bindgen (run by rust-librocksdb-sys's build script) parses headers through
       # libclang. stddef.h is a COMPILER BUILTIN living in clang's resource
       # dir, not in any sysroot. For the HOST target clang falls back to GCC's
-      # include dir — which is why the `test` job builds these same crates
+      # include dir — which is why the `test` job builds this same crate
       # fine — but targeting musl drops that fallback, and on Debian's layout
       # libclang cannot resolve its own resource dir from the .so path. The
       # Ubuntu image this was ported from happened to resolve it; bookworm

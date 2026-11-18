@@ -406,7 +406,7 @@ export AR=aarch64-linux-musl-ar
 export RANLIB=aarch64-linux-musl-ranlib
 export RANLIB_aarch64_unknown_linux_musl=aarch64-linux-musl-ranlib
 
-# Point bindgen/clang at the musl sysroot (required for zstd-sys, rocksdb-sys, etc.)
+# Point bindgen/clang at the musl sysroot (required for rust-librocksdb-sys, the crate that runs bindgen)
 # Without this, bindgen picks up Xcode's clang headers and fails with:
 #   fatal error: 'stddef.h' file not found
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="--sysroot=${MUSL_SYSROOT} -I${MUSL_SYSROOT}/include"
@@ -422,10 +422,11 @@ cd embraOS
 cargo build --release --locked --target aarch64-unknown-linux-musl --workspace
 ```
 
-> **bindgen-based crates:** the in-tree `wardsondb` crate pulls in `zstd-sys` (and
-> `rocksdb-sys` with the RocksDB backend), both of which use `bindgen`. Without
-> `BINDGEN_EXTRA_CLANG_ARGS`, clang finds Xcode's SDK headers and can't resolve
-> cross-compile references.
+> **The bindgen-based crate:** the in-tree `wardsondb` crate pulls in
+> `rust-librocksdb-sys`, the one crate of the lock that runs `bindgen`; both storage
+> engines are compiled into every build, so it is built whichever engine the image
+> uses. Without `BINDGEN_EXTRA_CLANG_ARGS`, clang finds Xcode's SDK headers and can't
+> resolve cross-compile references.
 
 > **The `wardsondb` crate's `aws-lc-sys` dependency:** has a C/assembly build step. `ToolNotFound`
 > errors mentioning `aarch64-linux-musl-gcc` mean the musl-cross path isn't on `PATH`
@@ -789,12 +790,12 @@ export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
 
 #### `fatal error: 'stddef.h' file not found` (bindgen)
 
-**Symptom:** the workspace build fails during `zstd-sys` (or `rocksdb-sys`, both
-pulled in by the in-tree `wardsondb` crate) with:
+**Symptom:** the workspace build fails in the build script of the crate that runs
+`bindgen` (`rust-librocksdb-sys`, pulled in by the in-tree `wardsondb` crate) with:
 
 ```
 .../clang/21/include/stddef.h:39:15: fatal error: 'stddef.h' file not found
-thread 'main' panicked at .../zstd-sys-.../build.rs:44:40:
+thread 'main' panicked at .../<crate>-.../build.rs:<line>:
 Unable to generate bindings: ClangDiagnostic(...)
 ```
 

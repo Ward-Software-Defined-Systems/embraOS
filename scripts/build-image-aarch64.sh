@@ -158,7 +158,7 @@ if [ "$BUILDROOT_ONLY" = false ]; then
             exit 1
         fi
         export PATH="$MUSL_CROSS_BIN:$PATH"
-        # Sysroot for bindgen/clang (needed by zstd-sys, rocksdb-sys, etc.)
+        # Sysroot for bindgen/clang (needed by rust-librocksdb-sys, the crate that runs bindgen)
         # Homebrew layout: libexec/aarch64-linux-musl/ is sibling of libexec/bin/
         if [ -d "$MUSL_CROSS_ROOT/aarch64-linux-musl" ]; then
             MUSL_SYSROOT="$MUSL_CROSS_ROOT/aarch64-linux-musl"
@@ -195,7 +195,7 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     export RANLIB_aarch64_unknown_linux_musl=aarch64-linux-musl-ranlib
 
     # Tell bindgen/clang to use the musl sysroot instead of Xcode's macOS SDK.
-    # Without this, crates like zstd-sys and rocksdb-sys fail with:
+    # Without this, rust-librocksdb-sys's build script fails with:
     #   fatal error: 'stddef.h' file not found
     # because clang picks up Xcode's stddef.h which pulls in macOS headers.
     if [ -n "$MUSL_SYSROOT" ]; then
