@@ -9,6 +9,7 @@ mod network;
 mod provider_setup;
 mod slash;
 mod turn;
+mod theme;
 mod update;
 mod web_token;
 #[cfg(test)]

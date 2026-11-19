@@ -563,6 +563,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/network", "network cards, the machine's name, the clock and Wi-Fi: static <card> <address>/<prefix> [gateway], dhcp <card>, hostname <name>, time <server>, wifi [join <name> --key <passphrase>]"),
         ("/update", "check the published release; apply, status, rollback, source, auto"),
         ("/web-token", "the web console's access token (/web-token rotate makes a new one and signs every browser out)"),
+        ("/theme", "the look of the web console, this page and the display: pick one for the whole machine"),
         ("/feedback-loop", "trigger the feedback loop (experimental)"),
     ]),
 ];

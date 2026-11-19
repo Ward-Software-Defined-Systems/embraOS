@@ -110,6 +110,9 @@ System:
   /web-token                     Say what the web console's access token is; /web-token rotate makes a new one:
                                  every browser is signed out, and the new URL is on the serial console and in
                                  the display console's menu
+  /theme                         Show the web console's themes and the one in use; /theme <name> sets it for the whole
+                                 machine: every browser, the phone's page and the display console follow, and this
+                                 serial console keeps its terminal's colours; /theme reset goes back to the default
   /feedback-loop                 Trigger Phase 2 Continuity Engine self-evaluation (experimental)
 
 Keyboard:

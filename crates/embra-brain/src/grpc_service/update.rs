@@ -494,6 +494,9 @@ pub(super) enum SetupCommand {
     /// anything that needs the network.
     Network,
     Reboot,
+    /// The look of the console the setup is answered in is chosen without
+    /// waiting for the setup to end.
+    Theme,
     /// A console URL someone else has seen is replaced without waiting for
     /// the setup to end.
     WebToken,
@@ -507,6 +510,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
         "/ca" => SetupCommand::Ca,
         "/network" => SetupCommand::Network,
         "/reboot" => SetupCommand::Reboot,
+        "/theme" => SetupCommand::Theme,
         "/web-token" => SetupCommand::WebToken,
         _ => SetupCommand::Later,
     }
@@ -516,7 +520,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
 /// the command but that it was not run: the word may be one no command has.
 pub(super) fn later_notice(command: &str) -> String {
     let shown: String = command.trim().chars().take(40).collect();
-    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca, /network, /reboot and /web-token are.")
+    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca, /network, /reboot, /theme and /web-token are.")
 }
 
 /// What the stages before a session do with a client's frame: the
@@ -528,8 +532,10 @@ pub(super) fn later_notice(command: &str) -> String {
 /// gateway's certificate authority is imported there, ahead of the
 /// provider's setup (`/ca import`), and a machine on a network without
 /// DHCP is given its address there (`/network static`), and a console URL
-/// that someone else has seen is replaced there (`/web-token rotate`). So
-/// `/backup`, `/ca`, `/network`, `/reboot` and `/web-token` are answered as
+/// that someone else has seen is replaced there (`/web-token rotate`), and
+/// the look of the console all of that is done in is chosen there
+/// (`/theme`). So `/backup`, `/ca`, `/network`, `/reboot`, `/theme` and
+/// `/web-token` are answered as
 /// in a session, the confirmation of a restore is taken, and any other
 /// command gets one line.
 #[derive(Clone)]
@@ -573,6 +579,7 @@ impl SetupCommands {
                     SetupCommand::Ca => super::ca::handle_ca_command(&cmd.args, &self.tx).await,
                     SetupCommand::Network => super::network::handle_network_command(&cmd.args, &self.tx).await,
                     SetupCommand::Reboot => handle_reboot_command(&cmd.args, &self.tx).await,
+                    SetupCommand::Theme => super::theme::handle_theme_command(&cmd.args, &self.tx).await,
                     SetupCommand::WebToken => super::web_token::handle_web_token_command(&cmd.args, &self.tx).await,
                     SetupCommand::Later => {
                         let _ = self
@@ -630,7 +637,7 @@ mod backup_tests {
     /// `/ca`, `/network`, `/reboot` and `/web-token` are answered, and any
     /// other command gets its one line: none is dropped without a word.
     #[tokio::test]
-    async fn before_a_session_backup_ca_network_reboot_and_web_token_are_answered_and_any_other_command_is_told_to_wait() {
+    async fn before_a_session_backup_ca_network_reboot_theme_and_web_token_are_answered_and_any_other_command_is_told_to_wait() {
         let (tx, mut rx) = mpsc::channel(16);
         let pending = Arc::new(Mutex::new(None));
         let door = SetupCommands::new(&tx, &pending);
@@ -679,11 +686,18 @@ mod backup_tests {
             "{web_token:?}"
         );
 
+        // `/theme` too: a word that is no theme gets the refusal only the
+        // command gives, on any host, and nothing is written.
+        assert_eq!(door.take(command("/theme", "no-such-theme")).await, None);
+        let theme = said(&mut rx);
+        assert_eq!(theme.len(), 1);
+        assert!(theme[0].starts_with("No theme is called 'no-such-theme'. The themes: ember, "), "{theme:?}");
+
         for other in ["/status", "/sessions", "/provider", "/frobnicate"] {
             assert_eq!(door.take(command(other, "now")).await, None);
             let line = said(&mut rx);
             assert_eq!(line, vec![later_notice(other)], "{other}");
-            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca, /network, /reboot and /web-token are"), "{line:?}");
+            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca, /network, /reboot, /theme and /web-token are"), "{line:?}");
         }
 
         // A frame the stages never read is still not theirs, and says nothing.
@@ -722,6 +736,8 @@ mod backup_tests {
         assert_eq!(setup_command("/backup"), SetupCommand::Backup);
         assert_eq!(setup_command(" /reboot "), SetupCommand::Reboot);
         assert_eq!(setup_command("/web-token"), SetupCommand::WebToken);
+        assert_eq!(setup_command("/theme"), SetupCommand::Theme);
+        assert_eq!(setup_command("/themes"), SetupCommand::Later);
         assert_eq!(setup_command("/web-tokens"), SetupCommand::Later);
         assert_eq!(setup_command("/ca"), SetupCommand::Ca);
         assert_eq!(setup_command("/cas"), SetupCommand::Later);
