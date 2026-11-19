@@ -328,22 +328,35 @@ impl LlmProvider for AnthropicProvider {
         let (tx, rx) = mpsc::channel::<wire::AnthropicStreamEvent>(128);
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            match send_with_retry(&http, &url, &api_key, &body, RETRY_DELAYS_SECS).await {
-                Ok(response) => {
-                    if let Err(e) =
-                        streaming::process_sse_stream(response, tx_clone.clone()).await
-                    {
-                        error!("SSE stream error: {}", e);
+            let exchange = async {
+                match send_with_retry(&http, &url, &api_key, &body, RETRY_DELAYS_SECS).await {
+                    Ok(response) => {
+                        if let Err(e) =
+                            streaming::process_sse_stream(response, tx_clone.clone()).await
+                        {
+                            error!("SSE stream error: {}", e);
+                            let _ = tx_clone
+                                .send(wire::AnthropicStreamEvent::Error(e.to_string()))
+                                .await;
+                        }
+                    }
+                    Err(err) => {
                         let _ = tx_clone
-                            .send(wire::AnthropicStreamEvent::Error(e.to_string()))
+                            .send(wire::AnthropicStreamEvent::Error(err.into_wire_message()))
                             .await;
                     }
                 }
-                Err(err) => {
-                    let _ = tx_clone
-                        .send(wire::AnthropicStreamEvent::Error(err.into_wire_message()))
-                        .await;
-                }
+            };
+            // The turn dropped the stream (the operator's stop): nobody
+            // will read what this task sends. Without the watch the request
+            // waited out its read bound and the ladder went on posting, and
+            // a request that got through was answered, and billed, until
+            // the parser's first send found no receiver. Ending the task
+            // drops the request, which closes the connection.
+            tokio::select! {
+                biased;
+                () = tx_clone.closed() => {}
+                () = exchange => {}
             }
         });
 
@@ -645,6 +658,51 @@ mod tests {
         let p = AnthropicProvider::new(String::new())
             .with_base_url(format!("{}/anthropic", server.uri()));
         assert_eq!(p.validate_key("sk-test").await, ValidationResult::Valid);
+    }
+
+    /// The operator's stop drops the stream while the request waits for
+    /// its answer, and the request ends with it: the server reads the end
+    /// of the connection. Before, the task held the request for the read
+    /// bound and then went through its retries with nobody listening. The
+    /// deadline is one no loaded machine reaches when the request ends.
+    #[tokio::test]
+    async fn a_dropped_stream_ends_the_request_that_was_waiting() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a listener");
+        let base = format!("http://{}", listener.local_addr().expect("its address"));
+        let (asked_tx, asked_rx) = tokio::sync::oneshot::channel::<()>();
+        // A server that reads the request, answers nothing and waits for
+        // the client to go.
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("the request's connection");
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut asked = Some(asked_tx);
+            loop {
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        if let Some(tx) = asked.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            }
+        });
+
+        let provider = AnthropicProvider::new("k".into()).with_base_url(base);
+        let system = SystemPromptBundle { text: "s".into(), session_name: "main".into() };
+        let tools = ToolManifest { wire_json: json!([]) };
+        let stream = provider
+            .stream_turn(&[ApiMessage::user_text("hi")], &system, &tools, LlmRequestOptions::default())
+            .await
+            .expect("the stream is handed back while the request is on its way");
+        asked_rx.await.expect("the request reached the server");
+        drop(stream);
+        tokio::time::timeout(std::time::Duration::from_secs(120), server)
+            .await
+            .expect("the request ends when its stream is dropped")
+            .expect("the server task");
     }
 
     #[test]

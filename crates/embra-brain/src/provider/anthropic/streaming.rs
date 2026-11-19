@@ -11,12 +11,12 @@
 //! [`crate::provider::StreamEvent`].
 
 use anyhow::Result;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 use super::wire::{AnthropicStreamEvent, AssistantResponse, MessageBlock, StopDetails, StopReason};
-use crate::provider::sse::LineBuffer;
+use crate::provider::sse::{LineBuffer, Next, next_chunk};
 
 #[derive(Debug)]
 enum BlockKind {
@@ -134,8 +134,18 @@ where
     let mut stop_reason: Option<StopReason> = None;
     let mut stop_details: Option<StopDetails> = None;
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(Into::into)?;
+    loop {
+        let chunk = match next_chunk(&mut stream, &tx).await {
+            Next::Chunk(chunk) => chunk.map_err(Into::into)?,
+            Next::Ended => break,
+            Next::Unheard => {
+                // Nobody is listening (the turn dropped the stream: an
+                // operator's stop). Returning drops the response, which
+                // closes the connection and stops the server's reply.
+                tracing::debug!(target: "provider::anthropic::streaming", "receiver dropped; the parser ends");
+                return Ok(());
+            }
+        };
         lines.push(chunk.as_ref());
 
         while let Some(line) = lines.next_line() {
@@ -363,6 +373,7 @@ fn parse_stop_details(delta: &serde_json::Value) -> Option<StopDetails> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
 
     fn sse_body(events: &[&str]) -> Vec<u8> {
         let mut body = String::new();
@@ -898,17 +909,65 @@ mod tests {
             let read = Arc::new(AtomicUsize::new(0));
             let counter = read.clone();
             let chunks = vec![first, more.clone(), more.clone(), more.clone()];
+            // The receiver goes while the first chunk is being read, after
+            // the parser asked whether anybody listens: the failed send is
+            // what ends it here.
+            let (tx, rx) = mpsc::channel(8);
+            let listener = std::sync::Mutex::new(Some(rx));
             let stream = futures::stream::iter(
                 chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
             )
             .inspect(move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
+                drop(listener.lock().unwrap().take());
             });
-            let (tx, rx) = mpsc::channel(8);
-            drop(rx);
             pump(stream, tx).await.expect("a dropped receiver is not an error");
             assert_eq!(read.load(Ordering::SeqCst), 1, "read on after {checkpoint}");
         }
+    }
+
+    /// The parser sends nothing while a tool call's input arrives: a send
+    /// that fails never came, and the reply was read to its end after the
+    /// operator's stop. With nobody listening the parser reads nothing.
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_parser_though_nothing_is_sent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let input = sse_body(&[
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+        ]);
+        let read = Arc::new(AtomicUsize::new(0));
+        let counter = read.clone();
+        let chunks = vec![input; 4];
+        let stream = futures::stream::iter(
+            chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
+        )
+        .inspect(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let (tx, rx) = mpsc::channel(8);
+        drop(rx);
+        pump(stream, tx).await.expect("a dropped receiver is not an error");
+        assert_eq!(read.load(Ordering::SeqCst), 0, "read on through a tool call's input");
+    }
+
+    /// The receiver goes while the parser waits on a silent stream, and the
+    /// parser ends: under the paused clock the deadline is reached at once
+    /// if it does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_receiver_ends_the_parser_while_the_stream_is_silent() {
+        let silent = futures::stream::pending::<std::result::Result<Vec<u8>, std::convert::Infallible>>();
+        let (tx, rx) = mpsc::channel(8);
+        let parser = tokio::spawn(pump(silent, tx));
+        tokio::task::yield_now().await;
+        assert!(!parser.is_finished(), "the parser waits on a silent stream while somebody listens");
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(3600), parser)
+            .await
+            .expect("the parser ends once nobody listens")
+            .expect("no panic")
+            .expect("a dropped receiver is not an error");
     }
 
     #[tokio::test]

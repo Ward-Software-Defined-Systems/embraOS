@@ -2424,11 +2424,11 @@ pub(super) async fn collect_response(
     loop {
         // Stop-aware receive: the select! wakes on the operator-stop watch
         // even while the provider is silent. On stop, returning drops
-        // `brain_rx` — the provider pumps exit on their next send (the
-        // receiver-gone contract) and the severed connection stops a local
-        // model's generation. The partial becomes a synthetic
-        // OperatorStop turn so the driver's terminal path (notice +
-        // persistence marker + Done) runs normally.
+        // `brain_rx`: the provider's parser ends at its next read, whatever
+        // the stream is doing (`provider::sse::next_chunk`), and the
+        // severed connection stops a local model's generation. The partial
+        // becomes a synthetic OperatorStop turn so the driver's terminal
+        // path (notice + persistence marker + Done) runs normally.
         let event = match stop.as_deref_mut() {
             Some(check) => {
                 tokio::select! {

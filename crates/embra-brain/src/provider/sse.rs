@@ -61,6 +61,40 @@ impl LineBuffer {
     }
 }
 
+/// What a parser's read of the response body came back with.
+pub(crate) enum Next<I> {
+    /// A chunk, or the error of the read.
+    Chunk(I),
+    /// The body ended.
+    Ended,
+    /// Nobody is listening: the receiver of the parser's events is gone.
+    Unheard,
+}
+
+/// The next chunk of a response body, unless nobody listens any more.
+///
+/// A parser notices a dropped receiver when a send fails, and it sends
+/// nothing while the arguments of a tool call arrive, while reasoning the
+/// operator switched off arrives, or while the server is silent. Through
+/// all of that a model server went on writing a reply nobody would read,
+/// after the operator's stop. The receiver is asked first, so a parser
+/// whose listener is gone reads nothing more. Returning from the parser
+/// drops the response, and that closes the connection.
+pub(crate) async fn next_chunk<S, T>(stream: &mut S, tx: &tokio::sync::mpsc::Sender<T>) -> Next<S::Item>
+where
+    S: futures::Stream + Unpin,
+{
+    use futures::StreamExt as _;
+    tokio::select! {
+        biased;
+        () = tx.closed() => Next::Unheard,
+        chunk = stream.next() => match chunk {
+            Some(chunk) => Next::Chunk(chunk),
+            None => Next::Ended,
+        },
+    }
+}
+
 /// A server's message in an error frame is cut here before it is shown.
 pub(crate) const ERROR_MESSAGE_MAX: usize = 1024;
 

@@ -55,7 +55,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
@@ -63,7 +63,7 @@ use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
 use crate::provider::openai_compat::conv::reasoning_block;
 use crate::provider::openai_compat::sanitize::sanitize_harmony_tokens;
 use crate::provider::openai_compat::wire::OpenAIChatChunk;
-use crate::provider::sse::{LineBuffer, in_stream_error};
+use crate::provider::sse::{LineBuffer, Next, in_stream_error, next_chunk};
 use crate::provider::StreamEvent;
 
 /// Drive an SSE stream from `/v1/chat/completions`, emitting neutral
@@ -101,8 +101,18 @@ where
     let mut lines = LineBuffer::default();
     let mut state = ParserState::new(model_id, include_reasoning);
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(Into::into)?;
+    loop {
+        let chunk = match next_chunk(&mut stream, &tx).await {
+            Next::Chunk(chunk) => chunk.map_err(Into::into)?,
+            Next::Ended => break,
+            Next::Unheard => {
+                // Nobody is listening (the turn dropped the stream: an
+                // operator's stop). Returning drops the response, which
+                // closes the connection and stops the server's reply.
+                tracing::debug!(target: "provider::openai_compat::streaming", "receiver dropped; the parser ends");
+                return Ok(());
+            }
+        };
         lines.push(chunk.as_ref());
         consume_sse_lines(&mut lines, &mut state, &tx).await?;
         if state.completed {
@@ -434,6 +444,7 @@ fn parse_tool_args(raw: &str) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use serde_json::json;
 
     /// The body in one chunk, reasoning off. Reasoning-on tests call
@@ -1177,11 +1188,13 @@ mod tests {
 
     /// The same contract one level up: with the flag set the parser
     /// returns, and with it goes the response body — the connection. It
-    /// must not read on.
+    /// must not read on. The receiver goes while the first chunk is being
+    /// read, after the parser asked whether anybody listens: the failed
+    /// send is what ends it here.
     #[tokio::test]
     async fn a_dropped_receiver_ends_the_parser_at_its_next_send() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+        use std::sync::{Arc, Mutex};
 
         let text = data_frame(assistant_chunk_with_text("one", None)).into_bytes();
         let reasoning = data_frame(json!({
@@ -1192,6 +1205,46 @@ mod tests {
             let read = Arc::new(AtomicUsize::new(0));
             let counter = read.clone();
             let chunks = vec![first.clone(), text.clone(), text.clone(), text.clone()];
+            let (tx, rx) = mpsc::channel(8);
+            let listener = Mutex::new(Some(rx));
+            let stream = futures::stream::iter(
+                chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
+            )
+            .inspect(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(listener.lock().unwrap().take());
+            });
+            pump(stream, tx, "test-model".to_string(), true)
+                .await
+                .expect("a dropped receiver is not an error");
+            assert_eq!(read.load(Ordering::SeqCst), 1, "read on after {checkpoint}");
+        }
+    }
+
+    /// The parser sends nothing while a tool call's arguments arrive, and
+    /// nothing for reasoning the operator switched off: a send that fails
+    /// never came, and a local model wrote the whole call after the
+    /// operator's stop. With nobody listening the parser reads nothing.
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_parser_though_nothing_is_sent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let shard = data_frame(json!({
+            "choices": [{"index": 0, "delta": {"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "file_write", "arguments": "{\"path\":"}
+            }]}, "finish_reason": null}]
+        }))
+        .into_bytes();
+        let hidden = data_frame(json!({
+            "choices": [{"delta": {"reasoning": "hm"}, "finish_reason": null}]
+        }))
+        .into_bytes();
+        for (what, chunk, include_reasoning) in [("a tool call's arguments", &shard, true), ("hidden reasoning", &hidden, false)] {
+            let read = Arc::new(AtomicUsize::new(0));
+            let counter = read.clone();
+            let chunks = vec![chunk.clone(); 4];
             let stream = futures::stream::iter(
                 chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
             )
@@ -1200,11 +1253,29 @@ mod tests {
             });
             let (tx, rx) = mpsc::channel(8);
             drop(rx);
-            pump(stream, tx, "test-model".to_string(), true)
+            pump(stream, tx, "test-model".to_string(), include_reasoning)
                 .await
                 .expect("a dropped receiver is not an error");
-            assert_eq!(read.load(Ordering::SeqCst), 1, "read on after {checkpoint}");
+            assert_eq!(read.load(Ordering::SeqCst), 0, "read on through {what}");
         }
+    }
+
+    /// A server that is silent sends the parser nothing to trip over. The
+    /// receiver goes while the parser waits, and the parser ends: under the
+    /// paused clock the deadline is reached at once if it does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_receiver_ends_the_parser_while_the_stream_is_silent() {
+        let silent = futures::stream::pending::<std::result::Result<Vec<u8>, std::convert::Infallible>>();
+        let (tx, rx) = mpsc::channel(8);
+        let parser = tokio::spawn(pump(silent, tx, "test-model".to_string(), true));
+        tokio::task::yield_now().await;
+        assert!(!parser.is_finished(), "the parser waits on a silent stream while somebody listens");
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(3600), parser)
+            .await
+            .expect("the parser ends once nobody listens")
+            .expect("no panic")
+            .expect("a dropped receiver is not an error");
     }
 
     #[tokio::test]
