@@ -22,6 +22,12 @@
 //! blocks with nothing). A stop that cut a reply mid-text keeps the
 //! assistant's words and their suffix: those are its words.
 //!
+//! A turn whose model call failed before any text had arrived leaves a
+//! marker alone in the same slot, and is folded the same way, with a note
+//! of its own. [`BARE_MARKERS`] is the list: a marker is matched whole,
+//! so none of them carries a variable part, and each is one more string a
+//! model could take for a reply of its own if it were shown as one.
+//!
 //! The stored history does not change; only what the model reads does.
 
 use crate::provider::ir::{ApiMessage, Block};
@@ -37,10 +43,30 @@ pub const OPERATOR_STOP_MARKER: &str = "(turn stopped by operator)";
 pub const OPERATOR_STOP_NOTE: &str =
     "[Your reply to the message above was stopped by the operator before you had written anything.]";
 
-/// Fold every no-text stop into the operator's next message.
+/// The assistant text persisted for a turn whose model call failed, after
+/// the text the turn had, or alone when it had none. `grpc_service`'s turn
+/// loop writes it; the server's own words are in the console and the log,
+/// never here.
+pub const STREAM_FAILED_MARKER: &str = "(turn ended by a provider error; see the error above)";
+
+/// What the model reads in the operator's next message in place of that
+/// marker standing alone. The turn's tool calls are on record whether or
+/// not a word was written.
+pub const STREAM_FAILED_NOTE: &str =
+    "[Your reply to the message above was cut by a provider error before you had written anything. Tool calls of that turn may have run; turn_trace shows them.]";
+
+/// Every marker that can stand alone in the assistant's slot, with the
+/// note the model reads in its place.
+const BARE_MARKERS: &[(&str, &str)] = &[
+    (OPERATOR_STOP_MARKER, OPERATOR_STOP_NOTE),
+    (STREAM_FAILED_MARKER, STREAM_FAILED_NOTE),
+];
+
+/// Fold every turn that ended without a word of the assistant's (a stop, a
+/// failed model call) into the operator's next message.
 ///
 /// `operator A, marker, operator B` becomes the one operator message
-/// `A, note, B`. Two stops in a row fold into one message with two
+/// `A, note, B`. Two such turns in a row fold into one message with two
 /// notes. A marker that is the last message, or that does not sit
 /// between two operator messages, stays as it is: the roles must keep
 /// alternating, and the brain never sends a list that does not end on
@@ -56,17 +82,19 @@ pub fn fold_stopped_turns(messages: Vec<ApiMessage>) -> Vec<ApiMessage> {
             }
         };
         let n = out.len();
-        let foldable = n >= 2
-            && is_stop_marker(&out[n - 1])
-            && matches!(out[n - 2], ApiMessage::User { .. });
-        if !foldable {
+        let note = if n >= 2 && matches!(out[n - 2], ApiMessage::User { .. }) {
+            bare_marker_note(&out[n - 1])
+        } else {
+            None
+        };
+        let Some(note) = note else {
             out.push(ApiMessage::User { content });
             continue;
-        }
+        };
         let marker = out.pop();
         match out.pop() {
             Some(ApiMessage::User { content: before }) => {
-                out.push(ApiMessage::User { content: merge(before, content) });
+                out.push(ApiMessage::User { content: merge(before, note, content) });
             }
             // `foldable` checked this message; kept total rather than
             // panicking in a turn.
@@ -80,21 +108,24 @@ pub fn fold_stopped_turns(messages: Vec<ApiMessage>) -> Vec<ApiMessage> {
     out
 }
 
-/// An assistant message that is the marker and nothing else.
-fn is_stop_marker(message: &ApiMessage) -> bool {
-    match message {
-        ApiMessage::Assistant { content } => {
-            matches!(content.as_slice(), [Block::Text(text)] if text.trim() == OPERATOR_STOP_MARKER)
-        }
-        ApiMessage::User { .. } => false,
-    }
+/// The note for an assistant message that is one of the markers and
+/// nothing else; `None` for any other message.
+fn bare_marker_note(message: &ApiMessage) -> Option<&'static str> {
+    let ApiMessage::Assistant { content } = message else {
+        return None;
+    };
+    let [Block::Text(text)] = content.as_slice() else {
+        return None;
+    };
+    let text = text.trim();
+    BARE_MARKERS.iter().find(|(marker, _)| *marker == text).map(|(_, note)| *note)
 }
 
 /// `before`, the note, `after`, with adjacent text blocks joined by a
 /// blank line: one text block per run; images and their labels stay
 /// where they were.
-fn merge(before: Vec<Block>, after: Vec<Block>) -> Vec<Block> {
-    let note = std::iter::once(Block::Text(OPERATOR_STOP_NOTE.to_string()));
+fn merge(before: Vec<Block>, note: &str, after: Vec<Block>) -> Vec<Block> {
+    let note = std::iter::once(Block::Text(note.to_string()));
     let mut out: Vec<Block> = Vec::with_capacity(before.len() + after.len() + 1);
     for block in before.into_iter().chain(note).chain(after) {
         if let Block::Text(text) = &block
@@ -166,17 +197,17 @@ mod tests {
     fn a_marker_with_no_operator_message_after_it_stays() {
         let out = fold_stopped_turns(vec![user("A"), marker()]);
         assert_eq!(out.len(), 2);
-        assert!(is_stop_marker(&out[1]));
+        assert!(bare_marker_note(&out[1]).is_some());
     }
 
     #[test]
     fn a_marker_that_does_not_follow_an_operator_message_stays() {
         let out = fold_stopped_turns(vec![marker(), user("A")]);
         assert_eq!(out.len(), 2);
-        assert!(is_stop_marker(&out[0]));
+        assert!(bare_marker_note(&out[0]).is_some());
         let out = fold_stopped_turns(vec![user("A"), assistant("hi"), marker(), user("B")]);
         assert_eq!(out.len(), 4);
-        assert!(is_stop_marker(&out[2]));
+        assert!(bare_marker_note(&out[2]).is_some());
     }
 
     #[test]
@@ -214,9 +245,54 @@ mod tests {
         assert!(!blocks.windows(2).any(|w| matches!(w, [Block::Text(_), Block::Text(_)])));
     }
 
+    /// A continuation that failed in a turn with tool calls and no text
+    /// left its marker alone in the assistant's slot, where a model reads
+    /// it as a reply of its own (the header's incident). It is told as a
+    /// note, like a stop; after text it stays the assistant's suffix.
     #[test]
-    fn the_note_never_reads_as_the_marker() {
-        assert!(!OPERATOR_STOP_NOTE.contains(OPERATOR_STOP_MARKER));
-        assert!(OPERATOR_STOP_NOTE.starts_with('[') && OPERATOR_STOP_NOTE.ends_with(']'));
+    fn a_turn_cut_by_a_provider_error_before_any_text_is_told_in_the_operators_next_message() {
+        let out = fold_stopped_turns(vec![
+            user("Read the three files"),
+            assistant(STREAM_FAILED_MARKER),
+            user("What happened?"),
+        ]);
+        assert_eq!(out.len(), 1);
+        let expected = format!("Read the three files\n\n{STREAM_FAILED_NOTE}\n\nWhat happened?");
+        assert_eq!(texts(&out[0]), vec![expected.as_str()]);
+
+        let partial = format!("I have read two of them.\n\n{STREAM_FAILED_MARKER}");
+        let out = fold_stopped_turns(vec![user("A"), assistant(&partial), user("B")]);
+        assert_eq!(out.len(), 3);
+        assert_eq!(texts(&out[1]), vec![partial.as_str()]);
+    }
+
+    #[test]
+    fn a_stop_and_a_failed_call_in_a_row_each_keep_their_own_note() {
+        let out = fold_stopped_turns(vec![
+            user("A"),
+            marker(),
+            user("B"),
+            assistant(STREAM_FAILED_MARKER),
+            user("C"),
+        ]);
+        assert_eq!(out.len(), 1);
+        let expected = format!("A\n\n{OPERATOR_STOP_NOTE}\n\nB\n\n{STREAM_FAILED_NOTE}\n\nC");
+        assert_eq!(texts(&out[0]), vec![expected.as_str()]);
+    }
+
+    /// A note sits in the operator's message and is never one of the
+    /// strings the fold looks for; no two markers are the same string.
+    #[test]
+    fn no_note_reads_as_a_marker() {
+        for (i, (marker, note)) in BARE_MARKERS.iter().enumerate() {
+            assert!(note.starts_with('[') && note.ends_with(']'), "{note}");
+            for (other, _) in BARE_MARKERS {
+                assert!(!note.contains(other), "{note} carries {other}");
+            }
+            assert!(
+                BARE_MARKERS.iter().skip(i + 1).all(|(later, _)| later != marker),
+                "{marker} is listed twice"
+            );
+        }
     }
 }

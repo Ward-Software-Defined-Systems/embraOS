@@ -2057,8 +2057,10 @@ pub(super) fn turn_text(turn: &AssistantTurn) -> String {
 /// The segment persisted after the text of a continuation whose stream
 /// ended without a result, so the operator on reload and the model on
 /// the next turn see that the reply was cut by the provider, not chosen.
-/// The server's words are in the console and the log, never here.
-pub(super) const STREAM_FAILED_MARKER: &str = "(turn ended by a provider error; see the error above)";
+/// The server's words are in the console and the log, never here. Alone in
+/// the assistant's slot it is told to the model as a note
+/// (`sessions::model_view`).
+pub(super) use crate::sessions::model_view::STREAM_FAILED_MARKER;
 
 #[derive(Default)]
 pub(super) struct TranscriptSegments(Vec<String>);
