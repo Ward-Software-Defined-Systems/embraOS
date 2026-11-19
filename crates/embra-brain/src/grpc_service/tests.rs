@@ -3698,3 +3698,56 @@ mod model_wait_tests {
         assert_eq!(written["model_wait_minutes"], serde_json::json!(240));
     }
 }
+
+#[cfg(test)]
+mod continue_tests {
+    use super::*;
+
+    const KEPT: Option<(&str, &str, &str)> = Some(("main", "ollama", "qwen3.8:27b"));
+
+    #[test]
+    fn continue_runs_for_the_kept_turn_of_this_session_on_its_own_model() {
+        assert_eq!(continue_decision(Some("main"), KEPT, "ollama", "qwen3.8:27b"), ContinueDecision::Run);
+        assert_eq!(continue_refusal(&ContinueDecision::Run), None);
+    }
+
+    #[test]
+    fn continue_is_refused_with_the_reason_and_the_way_on() {
+        let none = continue_decision(Some("main"), None, "ollama", "qwen3.8:27b");
+        assert_eq!(none, ContinueDecision::NothingCut);
+        assert!(continue_refusal(&none).unwrap().starts_with("Nothing to continue."));
+
+        let elsewhere = continue_decision(Some("notes"), KEPT, "ollama", "qwen3.8:27b");
+        assert_eq!(elsewhere, ContinueDecision::OtherSession("main".into()));
+        assert_eq!(
+            continue_refusal(&elsewhere).unwrap(),
+            "The turn that was cut is in session 'main'. /switch main, then /continue."
+        );
+
+        let detached = continue_decision(None, KEPT, "ollama", "qwen3.8:27b");
+        assert_eq!(detached, ContinueDecision::NoSession);
+        assert!(continue_refusal(&detached).unwrap().contains("No session is attached"));
+
+        // Another model of the same provider, and another provider.
+        for (provider, model, active) in [
+            ("ollama", "gemma4:12b", "Ollama gemma4:12b"),
+            ("anthropic", "opus-5", "Anthropic opus-5"),
+        ] {
+            let other = continue_decision(Some("main"), KEPT, provider, model);
+            assert_eq!(
+                other,
+                ContinueDecision::OtherModel { cut: "Ollama qwen3.8:27b".into(), active: active.into() }
+            );
+            let why = continue_refusal(&other).unwrap();
+            assert!(why.contains("ran on Ollama qwen3.8:27b") && why.contains(active), "{why}");
+        }
+    }
+
+    /// The row is the brain's own, and no command: a console that sent it
+    /// as a message would start an ordinary turn.
+    #[test]
+    fn the_row_of_a_continued_turn_is_bracketed_and_no_command() {
+        assert!(CONTINUE_ROW.starts_with('[') && CONTINUE_ROW.ends_with(']'));
+        assert!(!CONTINUE_ROW.contains('/'));
+    }
+}

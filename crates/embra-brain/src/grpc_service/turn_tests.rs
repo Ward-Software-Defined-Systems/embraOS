@@ -204,6 +204,16 @@ impl Respond for Kept {
     }
 }
 
+/// The stored configuration, read by its id; a test changes it in place.
+#[derive(Clone)]
+struct Config(Arc<StdMutex<Value>>);
+
+impl Respond for Config {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        data(self.0.lock().unwrap().clone())
+    }
+}
+
 /// A brain with one session, a database and a model server.
 struct Rig {
     server: MockServer,
@@ -212,6 +222,7 @@ struct Rig {
     meta: Stored,
     /// `tools.turn_trace`: one document per finished tool call.
     traces: Kept,
+    config: Config,
     ctx: ServiceCtx,
     /// The operator's stop: a turn in flight sees the counter move.
     stop_tx: watch::Sender<u64>,
@@ -221,13 +232,14 @@ struct Rig {
 impl Rig {
     async fn new() -> Self {
         let server = MockServer::start().await;
+        let config = Config(Arc::new(StdMutex::new(json!({
+            "name": "Embra", "api_key": "", "timezone": "UTC", "deployment_mode": "",
+            "created_at": "", "version": "", "api_provider": "lm_studio",
+            "openai_compat": {"lm_studio_endpoint": server.uri(), "lm_studio_model": "scripted"},
+        }))));
         Mock::given(method("GET"))
             .and(path("/config.system/docs/config"))
-            .respond_with(data(json!({
-                "name": "Embra", "api_key": "", "timezone": "UTC", "deployment_mode": "",
-                "created_at": "", "version": "", "api_provider": "lm_studio",
-                "openai_compat": {"lm_studio_endpoint": server.uri(), "lm_studio_model": "scripted"},
-            })))
+            .respond_with(config.clone())
             .mount(&server)
             .await;
         let history = Stored::new(
@@ -261,7 +273,7 @@ impl Rig {
             pending_backup_restore: Arc::new(Mutex::new(None)),
         };
         let (stop_tx, stop_rx) = watch::channel(0u64);
-        Self { server, script, history, meta, traces, ctx, stop_tx, stop_rx }
+        Self { server, script, history, meta, traces, config, ctx, stop_tx, stop_rx }
     }
 
     /// What the model answers to its next call that has no answer yet.
@@ -273,6 +285,24 @@ impl Rig {
     /// One message of the operator's, run to the end of its turn: the
     /// frames the client was sent, in order.
     async fn say(&self, text: &str) -> Vec<ResponseType> {
+        self.send(conversation_request::RequestType::UserMessage(UserMessage {
+            content: text.to_string(),
+            ..Default::default()
+        }))
+        .await
+    }
+
+    /// A slash command, run to its end, with the turn it starts if it
+    /// starts one.
+    async fn command(&self, command: &str, args: &str) -> Vec<ResponseType> {
+        self.send(conversation_request::RequestType::SlashCommand(SlashCommand {
+            command: command.to_string(),
+            args: args.to_string(),
+        }))
+        .await
+    }
+
+    async fn send(&self, request: conversation_request::RequestType) -> Vec<ResponseType> {
         let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
         // Read while the turn runs: a turn that sends more frames than the
         // channel holds would wait for a reader.
@@ -283,12 +313,7 @@ impl Rig {
             }
             frames
         });
-        let request = ConversationRequest {
-            request_type: Some(conversation_request::RequestType::UserMessage(UserMessage {
-                content: text.to_string(),
-                ..Default::default()
-            })),
-        };
+        let request = ConversationRequest { request_type: Some(request) };
         handle_request(request, &tx, &self.ctx, "UTC", "", &self.stop_rx)
             .await
             .expect("the turn returns without an error of its own");
@@ -661,6 +686,10 @@ async fn a_briefing_that_is_cut_saves_nothing() {
     assert_eq!(dones(&frames), [""]);
     assert_eq!(rig.saved(), [] as [(String, String); 0]);
     assert!(rig.meta.now()["turn_count"].is_null(), "the meta was not written");
+    let said = complaints(&frames);
+    assert!(!said.iter().any(|m| m.contains("/continue")), "nothing is kept of a briefing: {said:?}");
+    let after = rig.command("/continue", "").await;
+    assert!(self::said(&after).iter().any(|m| m.starts_with("Nothing to continue.")));
 }
 
 /// The memorize turn of a guided delete, cut after the model wrote the
@@ -840,4 +869,139 @@ async fn a_stream_that_ends_without_a_result_keeps_what_had_arrived() {
     assert_eq!(undelivered_after(&turn).as_deref(), Some("Two plus two is"));
     assert_eq!(complaints(&frames), ["Brain error: the slot was lost"]);
     assert_eq!(dones(&frames), [] as [&str; 0]);
+}
+
+/// What the brain says outside a turn: a command's answer.
+fn said(frames: &[ResponseType]) -> Vec<&str> {
+    frames
+        .iter()
+        .filter_map(|f| match f {
+            ResponseType::System(m) => Some(m.content.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The messages of a request that are not the system prompt, as JSON.
+fn conversation(request: &Value) -> Vec<Value> {
+    request["messages"].as_array().expect("messages").iter().filter(|m| m["role"] != "system").cloned().collect()
+}
+
+/// A turn is cut after a tool call. `/continue` sends the call that failed
+/// once more as it was: the operator's message, the model's own step with
+/// its tool call, and the tool's result, none of which a history keeps. The
+/// reply is saved after the cut turn, under the brain's own row.
+#[tokio::test]
+async fn continue_sends_the_cut_calls_messages_again() {
+    let rig = Rig::new().await;
+    rig.then(calculates("Let me work it out.", "2 ** 10"))
+        .then(refuses(400, "context length exceeded"))
+        .then(says("It is 1024."));
+
+    let cut = rig.say("two to the ten?").await;
+    assert!(
+        complaints(&cut).iter().any(|m| m.contains("/continue")),
+        "the cut's notice names the way on: {:?}",
+        complaints(&cut)
+    );
+    let frames = rig.command("/continue", "").await;
+
+    assert_eq!(dones(&frames), ["It is 1024."]);
+    assert_eq!(complaints(&frames), [] as [&str; 0]);
+    let asked = rig.asked().await;
+    assert_eq!(asked.len(), 3);
+    assert_eq!(asked[2]["messages"], asked[1]["messages"], "the same call, to the byte of its messages");
+    let sent = conversation(&asked[2]);
+    assert_eq!(sent.last().expect("messages")["role"], "tool", "it ends on the tool's result: {sent:?}");
+    assert_eq!(
+        rig.saved(),
+        [
+            row("user", "two to the ten?"),
+            row("assistant", &format!("Let me work it out.\n\n{CUT_AFTER_TEXT}")),
+            row("user", "[continue the turn that was cut]"),
+            row("assistant", "It is 1024."),
+        ]
+    );
+}
+
+/// A turn that is cut again is kept again, as it then stands.
+#[tokio::test]
+async fn a_continued_turn_that_is_cut_can_be_continued_again() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "busy")).then(refuses(400, "busy")).then(says("Four."));
+
+    rig.say("two plus two?").await;
+    let again = rig.command("/continue", "").await;
+    assert!(complaints(&again).iter().any(|m| m.contains("/continue")), "{:?}", complaints(&again));
+    let frames = rig.command("/continue", "").await;
+
+    assert_eq!(dones(&frames), ["Four."]);
+    let asked = rig.asked().await;
+    assert_eq!(asked[1]["messages"], asked[0]["messages"]);
+    assert_eq!(asked[2]["messages"], asked[0]["messages"]);
+}
+
+/// A message of the operator's after a cut goes on from where the session
+/// is; the cut turn is no longer one to continue, and the model was told
+/// of it by that message's turn.
+#[tokio::test]
+async fn continue_is_refused_once_the_operator_has_gone_on() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "no such model")).then(says("Never mind then."));
+
+    rig.say("two plus two?").await;
+    rig.say("never mind").await;
+    let frames = rig.command("/continue", "").await;
+
+    assert_eq!(rig.asked().await.len(), 2, "no call for a turn that is not kept");
+    assert!(said(&frames).iter().any(|m| m.starts_with("Nothing to continue.")), "{:?}", said(&frames));
+    assert_eq!(rig.saved().len(), 4);
+}
+
+#[tokio::test]
+async fn continue_with_no_turn_cut_says_so_and_calls_no_model() {
+    let rig = Rig::new().await;
+    let frames = rig.command("/continue", "").await;
+    assert!(said(&frames).iter().any(|m| m.starts_with("Nothing to continue.")), "{:?}", said(&frames));
+    assert_eq!(rig.asked().await.len(), 0);
+    assert_eq!(rig.saved().len(), 0);
+}
+
+/// The call is the same call only on the model it was made for. After a
+/// switch `/continue` is refused with both names, and the turn stays kept:
+/// back on its model it runs.
+#[tokio::test]
+async fn continue_is_refused_on_another_model_and_runs_back_on_its_own() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "busy")).then(says("Four."));
+
+    rig.say("two plus two?").await;
+    rig.config.0.lock().unwrap()["openai_compat"]["lm_studio_model"] = json!("another");
+    let refused = rig.command("/continue", "").await;
+    assert!(
+        said(&refused).iter().any(|m| m.contains("ran on LM Studio scripted") && m.contains("LM Studio another")),
+        "{:?}",
+        said(&refused)
+    );
+    assert_eq!(rig.asked().await.len(), 1);
+
+    rig.config.0.lock().unwrap()["openai_compat"]["lm_studio_model"] = json!("scripted");
+    let frames = rig.command("/continue", "").await;
+    assert_eq!(dones(&frames), ["Four."]);
+}
+
+/// An armed key step takes the operator's next message as an API key. The
+/// row a continued turn is saved under is the brain's own and is never
+/// read as one: the turn runs, and the step stays armed.
+#[tokio::test]
+async fn the_row_of_a_continued_turn_is_never_read_as_a_key() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "busy")).then(says("Four."));
+
+    rig.say("two plus two?").await;
+    *rig.ctx.pending_key_setup.lock().await = Some(KeySetupStep::Key(ProviderKind::Anthropic));
+    let frames = rig.command("/continue", "").await;
+
+    assert_eq!(dones(&frames), ["Four."]);
+    assert_eq!(*rig.ctx.pending_key_setup.lock().await, Some(KeySetupStep::Key(ProviderKind::Anthropic)));
 }

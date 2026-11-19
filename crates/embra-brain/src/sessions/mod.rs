@@ -226,6 +226,31 @@ pub struct SessionManager {
     /// images by the next operator turn. Runtime only, like the images;
     /// the files stay where they are.
     pending_files: std::collections::HashMap<String, Vec<crate::media::text::TextUpload>>,
+    /// The turn a failed model call cut last, kept for `/continue`. One
+    /// slot: it holds a whole turn's messages, images among them. Runtime
+    /// only; a brain restart drops it, and the history then carries what
+    /// is left of the turn.
+    cut_turn: Option<CutTurn>,
+}
+
+/// A turn that a failed model call cut, as `/continue` needs it: the call
+/// that failed, to send again with everything the turn held (the tool
+/// results, the model's earlier steps), which no history keeps.
+#[derive(Debug, Clone)]
+pub struct CutTurn {
+    pub session: String,
+    /// The messages of the call that failed, as they were sent.
+    pub messages: Vec<crate::provider::ir::ApiMessage>,
+    /// The provider the turn ran on (`api_provider`) and its model as the
+    /// operator reads it. The call is the same call only on the same
+    /// model: a provider's opaque blocks (thinking signatures) are its own.
+    pub provider: String,
+    pub model: String,
+    /// The tool iterations the turn had used: the cap counts on.
+    pub tool_iter: usize,
+    /// The turn's start: the events watermark of the turn that continues
+    /// it, which shows the model nothing that happened since.
+    pub turn_started: DateTime<Utc>,
 }
 
 /// A caller holding the manager reads and writes the documents through it.
@@ -271,6 +296,7 @@ impl SessionManager {
             briefing_attempts: std::collections::HashMap::new(),
             pending_media: std::collections::HashMap::new(),
             pending_files: std::collections::HashMap::new(),
+            cut_turn: None,
         }
     }
 
@@ -288,10 +314,39 @@ impl SessionManager {
     }
 
     /// Drop the runtime state of a session that was deleted: it is no
-    /// longer active, and its briefing attempt is forgotten.
+    /// longer active, and its briefing attempt and its cut turn are
+    /// forgotten.
     pub fn forget(&mut self, name: &str) {
         self.clear_active(name);
         self.briefing_attempts.remove(name);
+        self.drop_cut_turn(name);
+    }
+
+    /// Keep a cut turn for `/continue`, in place of any kept before.
+    pub fn keep_cut_turn(&mut self, turn: CutTurn) {
+        self.cut_turn = Some(turn);
+    }
+
+    /// The cut turn that is kept, if any, whatever its session.
+    pub fn cut_turn(&self) -> Option<&CutTurn> {
+        self.cut_turn.as_ref()
+    }
+
+    /// Take the kept cut turn out, when it is `session`'s.
+    pub fn take_cut_turn(&mut self, session: &str) -> Option<CutTurn> {
+        if self.cut_turn.as_ref().is_some_and(|cut| cut.session == session) {
+            self.cut_turn.take()
+        } else {
+            None
+        }
+    }
+
+    /// Forget `session`'s cut turn: the operator went on with a message of
+    /// their own, or the session is gone.
+    pub fn drop_cut_turn(&mut self, session: &str) {
+        if self.cut_turn.as_ref().is_some_and(|cut| cut.session == session) {
+            self.cut_turn = None;
+        }
     }
 
     /// Stage an image for `session`'s next operator turn. Returns the new

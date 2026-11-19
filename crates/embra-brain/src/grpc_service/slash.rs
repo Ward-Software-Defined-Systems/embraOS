@@ -2,6 +2,88 @@
 
 use super::*;
 
+/// A turn a slash command asks the stream to run: the text it is saved
+/// under as the operator's row, and for `/continue` the cut turn whose
+/// call it sends again. The cut turn travels with the request, never
+/// through a "next message" slot of the brain's: another console's message
+/// would take such a slot, and an armed key step would read the row as a
+/// key.
+pub(super) struct SlashTurn {
+    pub(super) content: String,
+    pub(super) resumed: Option<crate::sessions::CutTurn>,
+}
+
+impl SlashTurn {
+    fn message(content: String) -> Self {
+        Self { content, resumed: None }
+    }
+}
+
+/// The row a continued turn is saved under, in place of a message of the
+/// operator's.
+pub(super) const CONTINUE_ROW: &str = "[continue the turn that was cut]";
+
+/// What `/continue` comes to.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ContinueDecision {
+    /// The cut turn is this session's and was made for the active model.
+    Run,
+    /// No turn is kept: none was cut, or a message, a restart or a deleted
+    /// session ended it.
+    NothingCut,
+    /// No session is attached.
+    NoSession,
+    /// The cut turn is another session's.
+    OtherSession(String),
+    /// The cut turn ran on another provider or model than the active one.
+    OtherModel { cut: String, active: String },
+}
+
+/// `/continue` against what is kept: the active session, the kept turn's
+/// session, provider and model, and the active provider and model.
+pub(super) fn continue_decision(
+    active_session: Option<&str>,
+    kept: Option<(&str, &str, &str)>,
+    provider: &str,
+    model: &str,
+) -> ContinueDecision {
+    let Some(session) = active_session else {
+        return ContinueDecision::NoSession;
+    };
+    let Some((cut_session, cut_provider, cut_model)) = kept else {
+        return ContinueDecision::NothingCut;
+    };
+    if cut_session != session {
+        return ContinueDecision::OtherSession(cut_session.to_string());
+    }
+    if cut_provider != provider || cut_model != model {
+        return ContinueDecision::OtherModel {
+            cut: format!("{} {cut_model}", crate::provider::provider_label(cut_provider)),
+            active: format!("{} {model}", crate::provider::provider_label(provider)),
+        };
+    }
+    ContinueDecision::Run
+}
+
+/// What the operator reads when `/continue` does not run.
+pub(super) fn continue_refusal(decision: &ContinueDecision) -> Option<String> {
+    match decision {
+        ContinueDecision::Run => None,
+        ContinueDecision::NoSession => Some(
+            "No session is attached, so there is no turn to continue. /switch <name> or /new <name> first.".to_string(),
+        ),
+        ContinueDecision::NothingCut => Some(
+            "Nothing to continue. /continue sends the last call of a turn that a failed model call cut once more, with everything the turn held; no turn of this session is kept for it. A message of yours after the cut, a restart of the brain or a deleted session ends that: the next turn is then told what was cut.".to_string(),
+        ),
+        ContinueDecision::OtherSession(name) => Some(format!(
+            "The turn that was cut is in session '{name}'. /switch {name}, then /continue."
+        )),
+        ContinueDecision::OtherModel { cut, active } => Some(format!(
+            "The turn that was cut ran on {cut}; the active model is {active}. /continue sends the same call once more and needs the model it was made for. Switch back and /continue, or send a message: that turn is told what was cut."
+        )),
+    }
+}
+
 pub(super) async fn handle_slash_command(
     command: &str,
     args: &str,
@@ -9,7 +91,7 @@ pub(super) async fn handle_slash_command(
     ctx: &ServiceCtx,
     config_tz: &str,
     _api_key: &str,
-) -> Option<String> {
+) -> Option<SlashTurn> {
     let ServiceCtx { db, session_mgr, pending_openai_compat_setup, pending_session_delete, .. } = ctx;
     // Helper to send a system message
     let send_msg = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: String| {
@@ -64,11 +146,11 @@ pub(super) async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /reboot                            Say what a reboot does; /reboot now reboots embraOS through the boot menu (sessions are kept); /reboot halt stops embraOS and powers the machine off\n  /backup create [label]             Schedule a snapshot of STATE and DATA for the next boot (before the database starts; the boot then continues)\n  /backup list | delete <name>       The backups under /embra/data/backups (each with its download route), or remove one\n  /backup restore <name>             Schedule a restore for the next boot, after you type its confirmation; /backup status shows what is scheduled\n  /ca                                The certificate authorities this machine trusts beside the public ones: the image's and STATE's\n  /ca import <url|uploads/file>      Read a certificate and show it; with sha256:<fingerprint>, import it: the brain trusts it at once, git and the OS updater after the next boot\n  /ca remove <file>                  Remove one of STATE's certificates\n  /network                           The network cards, their links and addresses, the default route, the resolvers and the machine's name\n  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...]   That card keeps this address; /network dhcp <card> goes back to DHCP\n  /network hostname <name>|auto      The machine's name; auto takes the one a DHCP server assigns, or embraos\n  /network time <server> ...|default|off   The time servers the clock is checked against, every hour and when the network returns; blank shows the clock\n  /network wifi [join <name> --key <passphrase>|join <name> --open|forget <name>|country <CC>]   Wi-Fi: blank shows the card, its network and the ones in range\n  /update                            Check the release published at the update source against this one (its signature verified first)\n  /update apply | status | rollback  Write the release into the inactive slot and stage it for the next boot; show both slots; make the other slot the default again\n  /update [apply] --tag <v…>         One release of a GitHub releases source in place of the latest; apply --allow-downgrade takes an older release, or another build of this version\n  /update source [<url>|reset]       Show, set or reset the operator's own update source (default: the GitHub releases of the public mirror)\n  /update auto [on|off]              Show, or turn on or off, the check the brain runs by itself a few minutes after boot and once a day\n  /web-token                         Say what the web console's access token is; /web-token rotate makes a new one (every browser is signed out, the new URL is on the serial console and in the display console's menu)\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /model-wait                        Show how long embraOS waits while Ollama or LM Studio sends nothing (default 120 minutes)\n  /model-wait <minutes>|reset        Set that wait for both local presets, or go back to the default; Esc ends a wait\n  /local-ai-gateway                  Show WSDS Local AI Gateway's URL and whether requests go through it\n  /local-ai-gateway <url>|on|off|reset  Route every provider request through its unified listener (http(s)://host:4000, which must answer with its x-local-ai-gateway header); off keeps the URL, reset forgets it\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate the SSH key pair (its comment: the instance's name at embraos), or show the public key\n  /ssh-keygen remove|rotate          Delete the key pair after showing its public key and fingerprint, or replace it with a new one\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host on its port, 443 or the one in <host>:<port> (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /guardian connections [close <id>|all]   The WebSocket connections the tools hold open; close one, or all\n  /feedback-loop                     (EXPERIMENTAL) trigger the Phase 2 Continuity Engine self-evaluation protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /continue                          Send the last call of a turn that a failed model call cut once more, with everything the turn held\n  /status, /soul, /identity, /mode\n  /reboot                            Say what a reboot does; /reboot now reboots embraOS through the boot menu (sessions are kept); /reboot halt stops embraOS and powers the machine off\n  /backup create [label]             Schedule a snapshot of STATE and DATA for the next boot (before the database starts; the boot then continues)\n  /backup list | delete <name>       The backups under /embra/data/backups (each with its download route), or remove one\n  /backup restore <name>             Schedule a restore for the next boot, after you type its confirmation; /backup status shows what is scheduled\n  /ca                                The certificate authorities this machine trusts beside the public ones: the image's and STATE's\n  /ca import <url|uploads/file>      Read a certificate and show it; with sha256:<fingerprint>, import it: the brain trusts it at once, git and the OS updater after the next boot\n  /ca remove <file>                  Remove one of STATE's certificates\n  /network                           The network cards, their links and addresses, the default route, the resolvers and the machine's name\n  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...]   That card keeps this address; /network dhcp <card> goes back to DHCP\n  /network hostname <name>|auto      The machine's name; auto takes the one a DHCP server assigns, or embraos\n  /network time <server> ...|default|off   The time servers the clock is checked against, every hour and when the network returns; blank shows the clock\n  /network wifi [join <name> --key <passphrase>|join <name> --open|forget <name>|country <CC>]   Wi-Fi: blank shows the card, its network and the ones in range\n  /update                            Check the release published at the update source against this one (its signature verified first)\n  /update apply | status | rollback  Write the release into the inactive slot and stage it for the next boot; show both slots; make the other slot the default again\n  /update [apply] --tag <v…>         One release of a GitHub releases source in place of the latest; apply --allow-downgrade takes an older release, or another build of this version\n  /update source [<url>|reset]       Show, set or reset the operator's own update source (default: the GitHub releases of the public mirror)\n  /update auto [on|off]              Show, or turn on or off, the check the brain runs by itself a few minutes after boot and once a day\n  /web-token                         Say what the web console's access token is; /web-token rotate makes a new one (every browser is signed out, the new URL is on the serial console and in the display console's menu)\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /model-wait                        Show how long embraOS waits while Ollama or LM Studio sends nothing (default 120 minutes)\n  /model-wait <minutes>|reset        Set that wait for both local presets, or go back to the default; Esc ends a wait\n  /local-ai-gateway                  Show WSDS Local AI Gateway's URL and whether requests go through it\n  /local-ai-gateway <url>|on|off|reset  Route every provider request through its unified listener (http(s)://host:4000, which must answer with its x-local-ai-gateway header); off keeps the URL, reset forgets it\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate the SSH key pair (its comment: the instance's name at embraos), or show the public key\n  /ssh-keygen remove|rotate          Delete the key pair after showing its public key and fingerprint, or replace it with a new one\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host on its port, 443 or the one in <host>:<port> (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /guardian connections [close <id>|all]   The WebSocket connections the tools hold open; close one, or all\n  /feedback-loop                     (EXPERIMENTAL) trigger the Phase 2 Continuity Engine self-evaluation protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 2 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
-            return Some(build_feedback_loop_prompt());
+            return Some(SlashTurn::message(build_feedback_loop_prompt()));
         }
         "/provider" => {
             handle_provider_command(args, tx, ctx).await;
@@ -130,6 +212,36 @@ pub(super) async fn handle_slash_command(
         }
         "/web-token" => {
             super::web_token::handle_web_token_command(args, tx).await;
+        }
+        "/continue" => {
+            // The last call of a turn that a failed model call cut, once
+            // more, with everything the turn held. The kept turn is taken
+            // here and handed to the turn with the request.
+            let active = session_mgr.read().await.active_session.clone();
+            let cfg = config::load_config(db).await.ok();
+            let provider = cfg.as_ref().map(|c| c.api_provider.clone()).unwrap_or_default();
+            let model = cfg.as_ref().map(|c| display_model_for(&provider, c)).unwrap_or_default();
+            let decision = {
+                let mgr = session_mgr.read().await;
+                let kept = mgr.cut_turn().map(|cut| (cut.session.as_str(), cut.provider.as_str(), cut.model.as_str()));
+                continue_decision(active.as_deref(), kept, &provider, &model)
+            };
+            if let Some(why) = continue_refusal(&decision) {
+                send_msg(tx, why).await;
+                return None;
+            }
+            // Between the read and the take another console can have
+            // taken it: then there is nothing to continue.
+            let taken = match active.as_deref() {
+                Some(session) => session_mgr.write().await.take_cut_turn(session),
+                None => None,
+            };
+            match taken {
+                Some(cut) => return Some(SlashTurn { content: CONTINUE_ROW.to_string(), resumed: Some(cut) }),
+                None => {
+                    send_msg(tx, continue_refusal(&ContinueDecision::NothingCut).unwrap_or_default()).await;
+                }
+            }
         }
         "/stop" => {
             // In-band /stop can only ever be READ when no turn is running
@@ -243,7 +355,7 @@ pub(super) async fn handle_slash_command(
                         "Starting guided deletion of session '{}' — summarizing it first. (Any slash command cancels.)",
                         rest
                     )).await;
-                    return Some(build_delete_kickoff_prompt(rest));
+                    return Some(SlashTurn::message(build_delete_kickoff_prompt(rest)));
                 }
                 "restore" => {
                     if rest.is_empty() {
@@ -421,7 +533,7 @@ pub(super) async fn handle_slash_command(
                         mgr.pending_resume_briefing =
                             Some(crate::sessions::ResumeBriefing { away_since });
                         drop(mgr);
-                        return Some("[Session resumed]".to_string());
+                        return Some(SlashTurn::message("[Session resumed]".to_string()));
                     }
                 } else {
                     send_msg(tx, format!("Session '{}' does not exist", args)).await;

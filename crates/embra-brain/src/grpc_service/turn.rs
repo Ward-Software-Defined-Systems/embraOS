@@ -16,6 +16,23 @@ pub(super) async fn handle_request(
     api_key: &str,
     stop_rx: &watch::Receiver<u64>,
 ) -> anyhow::Result<()> {
+    handle_turn(req, None, tx, ctx, config_tz, api_key, stop_rx).await
+}
+
+/// `handle_request`, with the cut turn a `/continue` hands over. With one,
+/// the user message is the row the turn is saved under and the model is
+/// sent the cut call's messages as they were: nothing is built from the
+/// history, and nothing that waits for the operator's next message (a
+/// setup step, a briefing, a trigger) is taken.
+async fn handle_turn(
+    req: ConversationRequest,
+    resumed: Option<crate::sessions::CutTurn>,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    ctx: &ServiceCtx,
+    config_tz: &str,
+    api_key: &str,
+    stop_rx: &watch::Receiver<u64>,
+) -> anyhow::Result<()> {
     let ServiceCtx {
         db,
         session_mgr,
@@ -29,6 +46,14 @@ pub(super) async fn handle_request(
     let self_in_turn = in_turn.clone();
     match req.request_type {
         Some(conversation_request::RequestType::UserMessage(msg)) => {
+            // A turn `/continue` hands over: its message is the brain's own
+            // row, never an answer to a setup step, a restore's
+            // confirmation or a delete flow's reason.
+            let continuing = resumed.is_some();
+            let (resumed_messages, resumed_iter, resumed_started) = match resumed {
+                Some(cut) => (Some(cut.messages), cut.tool_iter, Some(cut.turn_started)),
+                None => (None, 0, None),
+            };
             // D2: intercept the user message as a candidate API key
             // when /provider --setup queued a target. Validates,
             // persists per-provider key + STATE file, clears flag.
@@ -39,7 +64,8 @@ pub(super) async fn handle_request(
             // Each message advances one step; on completion or error
             // the state is cleared.
             {
-                let mut state_opt = pending_openai_compat_setup.lock().await.take();
+                let mut state_opt =
+                    if continuing { None } else { pending_openai_compat_setup.lock().await.take() };
                 if let Some(mut state) = state_opt.take() {
                     let outcome = handle_pending_openai_compat_step(
                         &mut state,
@@ -67,12 +93,12 @@ pub(super) async fn handle_request(
 
             // A pending `/backup restore`: this message is the answer, the
             // exact confirmation or anything else; it never reaches the model.
-            if let Some(pending) = pending_backup_restore.lock().await.take() {
+            if !continuing && let Some(pending) = pending_backup_restore.lock().await.take() {
                 super::update::handle_restore_answer(&pending, &msg.content, tx).await;
                 return Ok(());
             }
 
-            let pending_step = *pending_key_setup.lock().await;
+            let pending_step = if continuing { None } else { *pending_key_setup.lock().await };
             match pending_step {
                 Some(KeySetupStep::Key(target)) => {
                     let candidate = msg.content.trim().to_string();
@@ -95,7 +121,9 @@ pub(super) async fn handle_request(
             // prompt and the post-persistence step executes the deletion
             // on the model's READY marker. Not an early-return intercept:
             // the reason must reach the model.
-            let delete_exec: Option<PendingSessionDelete> = {
+            let delete_exec: Option<PendingSessionDelete> = if continuing {
+                None
+            } else {
                 let mut guard = pending_session_delete.lock().await;
                 advance_delete_flow(&mut guard)
             };
@@ -337,14 +365,25 @@ pub(super) async fn handle_request(
             // Raw `msg.content` (`[Session resumed]`) is what the
             // persistence step at the end of this handler writes to
             // history, mirroring the auto-enrichment pattern below.
-            let pending_briefing = session_mgr.write().await.pending_resume_briefing.take();
+            let pending_briefing =
+                if continuing { None } else { session_mgr.write().await.pending_resume_briefing.take() };
             // A trigger turn (a reminder or job with act=true fired) carries
             // the same kind of marker: synthetic for the attachments, an
             // operator turn for the events block.
-            let pending_trigger = session_mgr.write().await.pending_trigger.take();
+            let pending_trigger =
+                if continuing { None } else { session_mgr.write().await.pending_trigger.take() };
+            // A message of the operator's own goes on from where the session
+            // is: a turn that was cut before it is no longer the one to
+            // continue (this turn is told what was cut). A briefing and a
+            // trigger are turns of the brain's own making and leave it kept.
+            if !continuing && pending_briefing.is_none() && pending_trigger.is_none() {
+                session_mgr.write().await.drop_cut_turn(&session_name);
+            }
             // Where the next events block starts: this turn's start, stamped
-            // on the session once the turn is saved (`sessions::events`).
-            let turn_started = chrono::Utc::now();
+            // on the session once the turn is saved (`sessions::events`). A
+            // continued turn keeps the start of the turn it continues: it
+            // is shown nothing that happened since.
+            let turn_started = resumed_started.unwrap_or_else(chrono::Utc::now);
 
             // Auto-KG-enrichment: wrap the user message in a <retrieved_context>
             // block when the knowledge graph has relevant prior knowledge. The
@@ -357,14 +396,15 @@ pub(super) async fn handle_request(
             // staging. An unknown id aborts the turn with an Error frame
             // and persists nothing; the staging is drained only on success.
             let media_store = media::MediaStore::default_store();
-            let synthetic_turn = pending_briefing.is_some() || delete_exec.is_some() || pending_trigger.is_some();
+            let synthetic_turn =
+                pending_briefing.is_some() || delete_exec.is_some() || pending_trigger.is_some() || continuing;
             // A briefing is a turn of the brain's own making: cut by a
             // failed call it saves nothing (the attach's cooldown counts on
             // a failed briefing leaving the session as it was).
             let is_briefing = pending_briefing.is_some();
             // The briefing carries <while_away> and the delete flow nothing;
             // every other turn, a trigger turn included, carries the events.
-            let carries_events = pending_briefing.is_none() && delete_exec.is_none();
+            let carries_events = pending_briefing.is_none() && delete_exec.is_none() && !continuing;
             let mut turn_media: Vec<media::MediaMeta> = Vec::new();
             // Text files on this turn, each with its text: the paths the
             // client named (jailed to the workspace) ∪ those `/attach
@@ -505,7 +545,10 @@ pub(super) async fn handle_request(
                 );
             }
 
-            let enriched = if let Some(ref del) = delete_exec {
+            let enriched = if continuing {
+                // Never sent: the model gets the cut call's messages.
+                msg.content.clone()
+            } else if let Some(ref del) = delete_exec {
                 // Delete-flow reason turn: the brain-facing message is the
                 // memorize prompt; the raw persisted content stays the
                 // operator's reason (same swap contract as the briefing).
@@ -581,7 +624,7 @@ pub(super) async fn handle_request(
             // A briefing and a trigger turn carry it too: it is said by the
             // first turn after the cut one, whichever that is. The delete
             // flow's turns carry nothing.
-            let cut = if delete_exec.is_none() {
+            let cut = if delete_exec.is_none() && !continuing {
                 crate::sessions::interrupted::cut_of(&history)
             } else {
                 None
@@ -647,7 +690,12 @@ pub(super) async fn handle_request(
             // a marker. The model reads it as a note inside the operator's
             // next message, never as a reply of its own
             // (`sessions::model_view`).
-            let mut api_messages = crate::sessions::model_view::fold_stopped_turns(api_messages);
+            let mut api_messages = match resumed_messages {
+                // `/continue`: the call that failed, as it was sent. What was
+                // just assembled from the history is not used.
+                Some(messages) => messages,
+                None => crate::sessions::model_view::fold_stopped_turns(api_messages),
+            };
 
             // Send thinking indicator.
             let _ = tx.send(Ok(ConversationResponse {
@@ -666,7 +714,8 @@ pub(super) async fn handle_request(
                 .max_tool_iterations
                 .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS)
                 .clamp(1, 1000);
-            let mut tool_iter: usize = 0;
+            // A continued turn goes on counting where the cut turn stood.
+            let mut tool_iter: usize = resumed_iter;
             // Assigned from the first response below, before any read.
             // The text of the LAST iteration only, and kept apart from the
             // accumulator below on purpose: the operator-stop `Done` frame,
@@ -1300,12 +1349,31 @@ pub(super) async fn handle_request(
             // exit path from the tool loop is covered; normal outcomes and
             // the stale-turn abort paths (`ToolUse`/`Pause`) yield no frame.
             let cut = is_cut(&current_turn);
+            // A cut turn is kept for `/continue`: the call that failed, as
+            // it was sent, with the tool results and the model's earlier
+            // steps that no history keeps. After the stop's override above,
+            // so a stop wins. Not a briefing (it saves nothing, and the next
+            // attach makes another) and not a turn of the delete flow, whose
+            // state is spent.
+            let kept_for_continue = cut && !is_briefing && delete_exec.is_none();
+            if kept_for_continue {
+                session_mgr.write().await.keep_cut_turn(crate::sessions::CutTurn {
+                    session: session_name.clone(),
+                    messages: std::mem::take(&mut api_messages),
+                    provider: loaded_config.api_provider.clone(),
+                    model: display_model_for(&loaded_config.api_provider, &loaded_config),
+                    tool_iter,
+                    turn_started,
+                });
+            }
             // A cut briefing saves nothing, and its notice says so.
             let notice = if cut && is_briefing {
                 Some((
                     SystemMessageType::Warning,
                     "The session briefing was cut by a failed model call (the error is above). Nothing was saved; your next message starts a turn as usual.".to_string(),
                 ))
+            } else if kept_for_continue {
+                Some((SystemMessageType::Warning, format!("{CUT_NOTICE} {CONTINUE_HINT}")))
             } else {
                 terminal_outcome_notice(current_turn.outcome, current_turn.stop_details.as_ref())
             };
@@ -1611,16 +1679,18 @@ pub(super) async fn handle_request(
             // A slash command cancels a pending backup restore as well: the
             // confirmation is a plain message, and a command is not it.
             super::update::cancel_pending_restore(pending_backup_restore, tx).await;
-            if let Some(synthetic_prompt) = handle_slash_command(
+            if let Some(turn) = handle_slash_command(
                 &cmd.command, &cmd.args, tx, ctx, config_tz, api_key
             ).await {
-                // Slash command requested a synthetic user turn — feed it through the Brain.
+                // Slash command requested a synthetic user turn — feed it
+                // through the Brain. `/continue` hands its cut turn over
+                // with it.
                 let synthetic = ConversationRequest {
                     request_type: Some(conversation_request::RequestType::UserMessage(
-                        UserMessage { content: synthetic_prompt, timestamp: None, attachment_ids: Vec::new(), file_paths: Vec::new() }
+                        UserMessage { content: turn.content, timestamp: None, attachment_ids: Vec::new(), file_paths: Vec::new() }
                     )),
                 };
-                Box::pin(handle_request(synthetic, tx, ctx, config_tz, api_key, stop_rx)).await?;
+                Box::pin(handle_turn(synthetic, turn.resumed, tx, ctx, config_tz, api_key, stop_rx)).await?;
             }
             Ok(())
         }
@@ -2056,6 +2126,15 @@ pub(super) fn render_tool_only_placeholder(names: &[String]) -> String {
     format!("[tool calls: {}{}]", head, suffix)
 }
 
+/// What the operator reads under a turn a failed model call cut: what is
+/// on record.
+pub(super) const CUT_NOTICE: &str =
+    "The turn was cut by a failed model call (the error is above). Your message and the reply so far are saved.";
+
+/// And what can be done about it, when the turn is kept for `/continue`.
+pub(super) const CONTINUE_HINT: &str =
+    "/continue sends that call once more with everything the turn held; a message of yours starts a new turn, which is told what was cut.";
+
 /// Operator-facing notice for a terminal turn outcome, emitted post-loop by
 /// the driver so a refusal or truncation can never end a turn silently.
 /// `None` for the normal outcomes — `EndTurn` needs no frame, and
@@ -2114,11 +2193,9 @@ pub(super) fn terminal_outcome_notice(
         )),
         // The call failed, and the operator was shown the error where it
         // happened. This says what the turn left behind.
-        TurnOutcome::EarlyStop(EarlyStopReason::CallFailed) => Some((
-            SystemMessageType::Warning,
-            "The turn was cut by a failed model call (the error is above). Your message and the reply so far are saved."
-                .to_string(),
-        )),
+        TurnOutcome::EarlyStop(EarlyStopReason::CallFailed) => {
+            Some((SystemMessageType::Warning, CUT_NOTICE.to_string()))
+        }
         // Operator interrupt — not an error and not a provider action; the
         // generic "Provider stopped..." wording below would misattribute it.
         TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop) => Some((

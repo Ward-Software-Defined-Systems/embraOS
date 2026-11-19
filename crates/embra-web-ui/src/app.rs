@@ -29,7 +29,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/sessions restore", "restore"),
     ]),
     ("Turn", &[
-        ("/ml", "multiline"), ("/stop", "stop turn"),
+        ("/ml", "multiline"), ("/stop", "stop turn"), ("/continue", "continue cut turn"),
         ("/iter-cap", "tool cap"), ("/show-reasoning", "reasoning"),
         ("/show-tools", "tool rows"),
     ]),

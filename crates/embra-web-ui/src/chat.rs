@@ -506,6 +506,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("Turn", &[
         ("/stop", "stop a stuck turn (use the \u{25a0} button mid-turn)"),
+        ("/continue", "send a cut turn's last call once more, with everything it held"),
         ("/iter-cap", "show / set tool iteration cap"),
         ("/show-reasoning", "toggle reasoning panel"),
     ]),
