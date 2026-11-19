@@ -3936,3 +3936,119 @@ mod wizard_stage_tests {
         wizard.abort();
     }
 }
+
+/// Session `main`, made when the consoles come out of Learning Mode.
+#[cfg(test)]
+mod main_session_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    /// A database that keeps what it is told, as far as a session's
+    /// creation goes: which collections exist, the documents written into
+    /// them, and how often it had to refuse a collection that was there.
+    #[derive(Clone, Default)]
+    struct Kept {
+        collections: Arc<StdMutex<Vec<String>>>,
+        docs: Arc<StdMutex<Vec<(String, Value)>>>,
+        refused: Arc<AtomicUsize>,
+    }
+
+    fn answer(status: u16, data: Value) -> ResponseTemplate {
+        ResponseTemplate::new(status).set_body_json(json!({"ok": status < 400, "data": data, "meta": {}}))
+    }
+
+    impl Respond for Kept {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let path = request.url.path().trim_start_matches('/').to_string();
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+            if request.method.as_str() == "GET" {
+                // `collection_exists`
+                let there = self.collections.lock().unwrap().contains(&path);
+                return if there { answer(200, json!({})) } else { ResponseTemplate::new(404) };
+            }
+            if path == "_collections" {
+                let name = body["name"].as_str().unwrap_or_default().to_string();
+                let mut collections = self.collections.lock().unwrap();
+                if collections.contains(&name) {
+                    self.refused.fetch_add(1, Ordering::SeqCst);
+                    return ResponseTemplate::new(409).set_body_json(
+                        json!({"error": {"code": "COLLECTION_EXISTS", "message": format!("Collection already exists: {name}")}}),
+                    );
+                }
+                collections.push(name);
+                return answer(201, json!({}));
+            }
+            match path.rsplit_once('/') {
+                Some((collection, "docs")) => {
+                    self.docs.lock().unwrap().push((collection.to_string(), body));
+                    answer(201, json!({"_id": "d1"}))
+                }
+                Some((collection, "query")) => {
+                    let docs: Vec<Value> =
+                        self.docs.lock().unwrap().iter().filter(|(c, _)| c == collection).map(|(_, d)| d.clone()).collect();
+                    answer(200, json!(docs))
+                }
+                _ => ResponseTemplate::new(404),
+            }
+        }
+    }
+
+    async fn database() -> (MockServer, Kept, crate::sessions::SessionStore) {
+        let server = MockServer::start().await;
+        let kept = Kept::default();
+        Mock::given(path_regex(r"^/(_collections|sessions\.main\.(meta|history)(/docs|/query)?)$"))
+            .respond_with(kept.clone())
+            .mount(&server)
+            .await;
+        let store = SessionManager::new(WardsonDbClient::from_url(&server.uri())).store();
+        (server, kept, store)
+    }
+
+    fn docs_in(kept: &Kept, collection: &str) -> usize {
+        kept.docs.lock().unwrap().iter().filter(|(c, _)| c == collection).count()
+    }
+
+    /// The web console's and the display console's come out of Learning
+    /// Mode in the same moment, and each looked for `main` and made it. On a
+    /// scratch VM the brain logged "Session 'main' not created: WardSONDB
+    /// returned error 409 ... COLLECTION_EXISTS" for the second, though the
+    /// session was there. One makes it and the other finds it.
+    #[tokio::test]
+    async fn two_consoles_that_come_out_of_learning_mode_together_make_main_once() {
+        let (_server, kept, store) = database().await;
+
+        let (first, second) = tokio::join!(ensure_main_session(&store), ensure_main_session(&store));
+
+        let mut ended = [first, second];
+        ended.sort_by_key(|e| format!("{e:?}"));
+        assert_eq!(ended, [MainSession::Created, MainSession::Existed]);
+        assert_eq!(kept.refused.load(Ordering::SeqCst), 0, "no collection was asked for twice");
+        assert_eq!(docs_in(&kept, "sessions.main.meta"), 1, "one meta document, and no second pair for the next boot to remove");
+        assert_eq!(docs_in(&kept, "sessions.main.history"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_main_that_is_there_is_left_alone_and_a_failure_is_said_as_what_it_is() {
+        let (_server, kept, store) = database().await;
+        assert_eq!(ensure_main_session(&store).await, MainSession::Created);
+        assert_eq!(ensure_main_session(&store).await, MainSession::Existed);
+        assert_eq!(docs_in(&kept, "sessions.main.meta"), 1);
+
+        // A database that answers the probe with an error: not an absence.
+        let failing = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/sessions.main.meta")).respond_with(ResponseTemplate::new(500)).mount(&failing).await;
+        let store = SessionManager::new(WardsonDbClient::from_url(&failing.uri())).store();
+        assert!(matches!(ensure_main_session(&store).await, MainSession::Unchecked(e) if e.contains("500")));
+
+        // One that says the session is absent and refuses to make it.
+        let refusing = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(404)).mount(&refusing).await;
+        Mock::given(method("POST")).and(path("/_collections")).respond_with(ResponseTemplate::new(507)).mount(&refusing).await;
+        let store = SessionManager::new(WardsonDbClient::from_url(&refusing.uri())).store();
+        assert!(matches!(ensure_main_session(&store).await, MainSession::NotCreated(e) if e.contains("507")));
+    }
+}

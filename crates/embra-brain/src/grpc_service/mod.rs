@@ -298,14 +298,12 @@ impl BrainService for BrainGrpcService {
                         // Ensure default session exists and is active
                         {
                             let store = session_mgr.read().await.store();
-                            match store.session_exists("main").await {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    if let Err(e) = store.create("main").await {
-                                        error!("Session 'main' not created: {e}");
-                                    }
+                            match ensure_main_session(&store).await {
+                                MainSession::Existed | MainSession::Created => {}
+                                MainSession::Unchecked(e) => {
+                                    error!("Session 'main' could not be checked: {e}; activating it as it is");
                                 }
-                                Err(e) => error!("Session 'main' could not be checked: {e}; activating it as it is"),
+                                MainSession::NotCreated(e) => error!("Session 'main' not created: {e}"),
                             }
                             session_mgr.write().await.active_session = Some("main".to_string());
                             info!("Session 'main' activated for Operational mode");
@@ -927,6 +925,41 @@ async fn send_system(
 
 // Bearer helpers live with the provider now (the health probe needs them
 // too); imported here for the setup flows and their tests.
+/// What became of session `main` when a console came out of Learning Mode.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum MainSession {
+    /// It was there: an earlier boot's, or another console's of this one.
+    Existed,
+    Created,
+    /// Whether it exists could not be read.
+    Unchecked(String),
+    NotCreated(String),
+}
+
+/// Make session `main` unless it is there, one console at a time.
+///
+/// Every console that is attached when the soul is sealed comes out of
+/// Learning Mode in the same moment (the web console and the display
+/// console's are two on any machine with a display), and each looked for
+/// `main` and made it. Looking and making are several round trips, so both
+/// looked before either had made it: the second was answered 409 for the
+/// collection, which the brain logged as an error though the session was
+/// there, and one that came between the first one's collections and its
+/// documents wrote a second pair of documents, which stayed until the next
+/// boot's `dedupe_session_docs`. The two steps are one under this lock.
+pub(super) async fn ensure_main_session(store: &crate::sessions::SessionStore) -> MainSession {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::const_new(());
+    let _one = ONE_AT_A_TIME.lock().await;
+    match store.session_exists("main").await {
+        Ok(true) => MainSession::Existed,
+        Ok(false) => match store.create("main").await {
+            Ok(_) => MainSession::Created,
+            Err(e) => MainSession::NotCreated(e.to_string()),
+        },
+        Err(e) => MainSession::Unchecked(e.to_string()),
+    }
+}
+
 /// How the first-run wizard's stage ended for one console.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum WizardEnd {
