@@ -16,8 +16,10 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | ESXi | VMware ESXi 8.0 U2 |
 | Hyper-V | a generation 2 VM with Secure Boot off |
 | Parallels | Parallels Desktop 26.5 on an Intel Mac |
+| Parallels on Apple Silicon | Parallels Desktop on an Apple Silicon Mac, an aarch64 VM |
 | Fusion | VMware Fusion on Apple Silicon |
-| Bare metal | one machine: a YouYeeToo X1 single-board computer (Intel Celeron N5105, 16 GB of memory, eMMC, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
+| Bare metal | a YouYeeToo X1 single-board computer (Intel Celeron N5105, 16 GB of memory, eMMC, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
+| The laptop | a second machine that is not a VM: a Lenovo ThinkPad E550 (Intel Core i7-5500U, 8 GB of memory, a SATA SSD, an Intel Ethernet port, an Intel Wireless-AC 7265 card, Intel graphics on its own panel) |
 
 ## Images and boot
 
@@ -30,7 +32,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `vmware/embraos.vmdk` | | Fusion and VirtualBox; the aarch64 VMDK |
 | `hyper-v/embraos.vhdx` | Hyper-V | the aarch64 VHDX |
 | `parallels/embraos.vmx` with its VMDK | Parallels | Parallels on Apple Silicon |
-| A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early | every other machine; an aarch64 machine |
+| A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early. The laptop: the installed disk boots from its SATA SSD, with its own panel, keyboard and pointer, and a lease on its wired port and over Wi-Fi | every other machine; an aarch64 machine |
 | `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it) | a machine that cannot power itself off; aarch64 |
 
 ## The installer (`embraos.iso`)
@@ -38,7 +40,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | What | Validated on | TBD |
 |---|---|---|
 | A clean install | QEMU (a DVD onto a virtio disk, a USB stick onto an AHCI disk); ESXi (the installed disk also boots behind the LSI Logic SAS and Parallel controllers); Hyper-V; Parallels; bare metal (a USB stick onto the eMMC, the prompts answered at the display) | a disk with 4096-byte sectors |
-| The aarch64 medium | QEMU on Apple Silicon (a DVD onto virtio-blk and virtio-scsi disks, a USB stick onto an NVMe disk); Fusion | every other Arm hypervisor |
+| The aarch64 medium | QEMU on Apple Silicon (a DVD onto virtio-blk and virtio-scsi disks, a USB stick onto an NVMe disk); Fusion; Parallels on Apple Silicon | every other Arm hypervisor |
 | An unattended install | QEMU; QEMU on Apple Silicon | |
 | A second install over an installed disk | QEMU | |
 | A stick that attaches as UAS | QEMU, from the medium's kernel on (OVMF reads no such stick) | a UAS stick booted by a machine's firmware |
@@ -49,7 +51,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI) | the pointer and a click on Parallels, where the page, the mode and the keyboard work |
+| The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click) | the pointer and a click on Parallels, where the page, the mode and the keyboard work |
 | A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA); bare metal (a held modifier) | |
 | A firmware framebuffer (`ramfb`): 800x600, and 1024x768 on request | QEMU; QEMU on Apple Silicon | |
 | `embra.kioskmode=` | QEMU (standard VGA, virtio-gpu, a firmware framebuffer), GRUB's Diagnostics entry among the ways in | |
@@ -61,7 +63,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A DHCP lease on every card: one card, several, a USB card, a card or a link that comes late, no card | QEMU; bare metal (the onboard port) | on a machine: a USB Ethernet adapter, and a cable plugged in after the boot |
+| A DHCP lease on every card: one card, several, a USB card, a card or a link that comes late, no card | QEMU; bare metal (the onboard port); the laptop (its wired port) | on a machine: a USB Ethernet adapter, and a cable plugged in after the boot |
 | `/network static` on a network without DHCP | QEMU; bare metal | |
 | `/network hostname` | QEMU | the name in a router's list |
 | The web console's certificate and its CA | QEMU, with curl as the client: by address and by name, a name set with `/network hostname`, an address that changes, the CA of an earlier release issued again once | a browser with the CA imported; a name a DNS server serves |
@@ -72,8 +74,8 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point | a join on a real card |
-| A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan | Wi-Fi on any machine, where embrad itself switches an adapter that arrives as a driver disk; every other card family; a card on an Arm machine; `EMBRA_USB_HOST` on a Mac |
+| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot) | |
+| A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan; the laptop: its built-in Intel Wireless-AC 7265 (`iwlwifi`) | on a machine, a USB adapter that arrives as a driver disk, which embrad itself switches; every other card family; a card on an Arm machine; `EMBRA_USB_HOST` on a Mac |
 
 ## The clock
 
@@ -87,11 +89,11 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A signed update with `/update apply`: the check, the download, the staged slot, the trial boot with its snapshot, the confirmation | QEMU (a test release); bare metal (the published releases: `v0.24.0-phase2`, then `v0.25.0-phase2` over it) | an aarch64 machine or VM |
+| A signed update with `/update apply`: the check, the download, the staged slot, the trial boot with its snapshot, the confirmation | QEMU (a test release); bare metal (the published releases: `v0.24.0-phase2`, then `v0.25.0-phase2` over it, then `v0.26.0-phase2`); the laptop (`v0.26.0-phase2`); Fusion (aarch64: `v0.26.0-phase2` over `v0.25.0-phase2`) | |
 | The same from the boot menu's Update entry | QEMU | |
 | A slot that does not come up: three tries, then the slot before it | QEMU | |
 | A manifest that was changed, or signed with another key, is refused | QEMU | |
-| The automatic check: the `update` block, the notice of a newer release, `/update auto` | QEMU; bare metal (the block) | |
+| The automatic check: the `update` block, the notice of a newer release, `/update auto` | QEMU; bare metal (the block, the notice); Fusion (the notice) | |
 | `/update rollback`; `--tag`; `--allow-downgrade` | | on any machine |
 
 ## Backups
