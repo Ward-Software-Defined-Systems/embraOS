@@ -155,6 +155,7 @@ pub fn stop_reason_to_outcome(reason: StopReason) -> TurnOutcome {
         StopReason::PauseTurn => TurnOutcome::Pause,
         StopReason::StopSequence => TurnOutcome::EarlyStop(EarlyStopReason::StopSequence),
         StopReason::Refusal => TurnOutcome::EarlyStop(EarlyStopReason::Refusal),
+        StopReason::StreamEnded => TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded),
         StopReason::ModelContextWindowExceeded => {
             TurnOutcome::EarlyStop(EarlyStopReason::ContextWindow)
         }
@@ -368,6 +369,10 @@ mod tests {
         assert_eq!(stop_reason_to_outcome(StopReason::ToolUse), TurnOutcome::ToolUse);
         assert_eq!(stop_reason_to_outcome(StopReason::MaxTokens), TurnOutcome::MaxTokens);
         assert_eq!(stop_reason_to_outcome(StopReason::PauseTurn), TurnOutcome::Pause);
+        assert_eq!(
+            stop_reason_to_outcome(StopReason::StreamEnded),
+            TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded)
+        );
         assert_eq!(
             stop_reason_to_outcome(StopReason::StopSequence),
             TurnOutcome::EarlyStop(EarlyStopReason::StopSequence)

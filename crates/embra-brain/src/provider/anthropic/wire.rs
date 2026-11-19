@@ -109,6 +109,11 @@ pub enum StopReason {
     /// Generation stopped because the conversation plus the reply no
     /// longer fits the model's context window.
     ModelContextWindowExceeded,
+    /// No value of the wire: the stream closed with no `message_delta` to
+    /// say why the model stopped, so the reply is whatever had arrived.
+    /// The parser sets it at the end of such a stream.
+    #[serde(skip)]
+    StreamEnded,
 }
 
 /// Structured detail accompanying `stop_reason: "refusal"` in the final

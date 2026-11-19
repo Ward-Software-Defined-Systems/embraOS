@@ -711,6 +711,20 @@ pub(super) async fn stream_brain_to_grpc(
                 if full_response.is_empty() {
                     full_response = full;
                 }
+                // A stream the server closed before it said why the model
+                // stopped is no whole answer: its `Done` is out, the
+                // operator is told, and the phase stays where it was, as
+                // after a failed call.
+                if turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded) {
+                    send_system(
+                        tx,
+                        "The answer was cut: the model server closed the stream before it was finished. The phase is where it was: write again to go on."
+                            .to_string(),
+                        SystemMessageType::Warning,
+                    )
+                    .await;
+                    return LearningAnswer { text: full_response, stopped: false, failed: true };
+                }
                 // A provider's last event: the answer is whole. Reading on
                 // waited for the stream to close with the stop still armed,
                 // and a stop in that window sent a second `Done`.
@@ -1019,6 +1033,59 @@ mod loop_tests {
                 format!("{kickoff}\n\n{}\n\nhello again", crate::sessions::model_view::CALL_FAILED_NOTE).as_str()
             )
         );
+
+        console.detach().await.expect("the loop went on, and ends when its console goes");
+    }
+
+    /// An answer whose stream the server closes before it says why the
+    /// model stopped: no finish reason and no `[DONE]`. It came back as a
+    /// whole answer, and its marker ended the phase from half a reply. It is
+    /// a cut answer: closed with its `Done`, said, and the phase stays open.
+    #[tokio::test]
+    async fn a_learning_answer_whose_stream_just_ends_ends_no_phase() {
+        let provider = MockServer::start().await;
+        let partial = json!({
+            "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "Noted. [PHASE_COMPLETE]"}, "finish_reason": null}],
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(format!("data: {partial}\n\n"), "text/event-stream"))
+            .up_to_n_times(1)
+            .mount(&provider)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(answer("What would you like me to be called?"))
+            .mount(&provider)
+            .await;
+        let db = MockServer::start().await;
+        let mut console = Console::attach(&provider, &db);
+
+        let frames = console.until("the notice", |f| system(f, SystemMessageType::Warning, "closed the stream")).await;
+        assert_eq!(
+            frames.iter().filter(|f| matches!(f, ResponseType::Done(_))).count(),
+            1,
+            "the answer's own Done, and no second one: {frames:?}"
+        );
+        assert!(frames.iter().any(|f| matches!(f, ResponseType::Done(d) if d.full_response == "Noted.")), "{frames:?}");
+        assert!(
+            !frames.iter().any(|f| system(f, SystemMessageType::Info, "advancing to")
+                || system(f, SystemMessageType::Error, "Error processing phase")),
+            "an answer that was cut completes no phase: {frames:?}"
+        );
+
+        console.message("go on").await;
+        console.until("the answer", |f| matches!(f, ResponseType::Done(d) if d.full_response.contains("called"))).await;
+        let requests = asked(&provider).await;
+        let replies: Vec<&str> = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .filter_map(|m| m["content"].as_str())
+            .collect();
+        assert_eq!(replies, [format!("Noted.\n\n{}", crate::sessions::model_view::CALL_FAILED_SUFFIX).as_str()]);
 
         console.detach().await.expect("the loop went on, and ends when its console goes");
     }

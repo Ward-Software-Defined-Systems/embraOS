@@ -2580,8 +2580,11 @@ mod terminal_outcome_tests {
     //! max_tokens produces a Warning frame. Pure-helper tests — the loop
     //! driver has no full fake-provider harness, so `terminal_outcome_notice`
     //! and `final_assistant_text` are the designed test seams.
-    use super::{final_assistant_text, terminal_outcome_notice};
-    use crate::provider::ir::{EarlyStopReason, StopDetails, TurnOutcome};
+    use super::{
+        CUT_NOTICE, STREAM_ENDED_NOTICE, cut_notice, final_assistant_text, is_cut, terminal_outcome_notice,
+        undelivered_after,
+    };
+    use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, StopDetails, TurnOutcome};
     use embra_common::proto::brain::SystemMessageType;
 
     #[test]
@@ -2671,15 +2674,49 @@ mod terminal_outcome_tests {
         }
     }
 
+    /// A stream the server closed before it said why the model stopped is
+    /// a cut turn, like a failed call: its notice says what happened (no
+    /// error was shown above it), and what is saved carries the marker, so
+    /// that the next turn does not read half a reply as a whole one.
     #[test]
-    fn a_stream_ended_turn_gets_a_warning_notice() {
+    fn a_stream_ended_turn_is_a_cut_turn_with_a_notice_of_its_own() {
         let outcome = TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded);
         let (kind, msg) =
             terminal_outcome_notice(outcome, None).expect("a closed stream must produce a frame");
         assert_eq!(kind, SystemMessageType::Warning);
-        assert!(msg.contains("closed the stream"), "{msg}");
-        // The partial text is persisted unmarked, like MaxTokens.
-        assert_eq!(final_assistant_text("partial", &[], outcome), "partial");
+        assert_eq!(msg, STREAM_ENDED_NOTICE);
+        assert!(msg.contains("closed the stream") && !msg.contains("the error is above"), "{msg}");
+        assert_eq!(cut_notice(outcome), STREAM_ENDED_NOTICE);
+        assert_eq!(cut_notice(TurnOutcome::EarlyStop(EarlyStopReason::CallFailed)), CUT_NOTICE);
+
+        let ended = AssistantTurn { content: vec![Block::Text("partial".into())], outcome, stop_details: None };
+        assert!(is_cut(&ended));
+        assert_eq!(
+            final_assistant_text("partial", &[], outcome),
+            format!("partial\n\n{}", crate::sessions::model_view::CALL_FAILED_SUFFIX)
+        );
+        assert_eq!(final_assistant_text(" ", &[], outcome), crate::sessions::model_view::CALL_FAILED_MARKER);
+        // Its `Done` went out with its `Complete`: nothing is left to deliver.
+        assert_eq!(undelivered_after(&ended), None);
+    }
+
+    /// A prompt Gemini blocked was read as an empty reply, `(no response)`.
+    /// It is said for what it is, with the reason, and is no cut turn: the
+    /// same request meets the same block.
+    #[test]
+    fn a_blocked_prompt_is_said_with_its_reason_and_is_no_cut_turn() {
+        let outcome = TurnOutcome::EarlyStop(EarlyStopReason::PromptBlocked);
+        let details = StopDetails { category: Some("SAFETY".into()), explanation: None };
+        let (kind, msg) = terminal_outcome_notice(outcome, Some(&details)).expect("a notice");
+        assert_eq!(kind, SystemMessageType::Warning);
+        assert!(msg.starts_with("Gemini blocked this prompt and generated nothing (block reason: SAFETY)."), "{msg}");
+        assert!(msg.contains("rephrase the message"), "{msg}");
+        let (_, bare) = terminal_outcome_notice(outcome, None).expect("a notice without details");
+        assert!(bare.contains("(block reason: no reason given)"), "{bare}");
+
+        let blocked = AssistantTurn { content: Vec::new(), outcome, stop_details: Some(details) };
+        assert!(!is_cut(&blocked));
+        assert_eq!(final_assistant_text("", &[], outcome), "(request declined by provider: refusal)");
     }
 
     #[test]

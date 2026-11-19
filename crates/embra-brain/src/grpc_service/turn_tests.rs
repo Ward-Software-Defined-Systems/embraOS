@@ -286,6 +286,46 @@ impl Rig {
         Self { server, script, history, meta, traces, config, ctx, stop_tx, stop_rx }
     }
 
+    /// The same brain on Anthropic or on Gemini. Both are reached through
+    /// the provider gateway's base URL, which is this rig's server: their
+    /// requests arrive under `/anthropic/` and `/gemini/` (`gateway::base_for`)
+    /// and are answered from the same script.
+    async fn on(provider: &str) -> Self {
+        let rig = Self::new().await;
+        {
+            let mut config = rig.config.0.lock().unwrap();
+            config["api_provider"] = json!(provider);
+            config["api_key"] = json!("sk-scripted");
+            config["gemini_api_key"] = json!("g-scripted");
+            config["provider_gateway"] = json!({"url": rig.server.uri(), "enabled": true});
+        }
+        Mock::given(method("POST"))
+            // A model call alone: Gemini's cache manager posts elsewhere
+            // under the same prefix, and is not the script's to answer.
+            .and(wiremock::matchers::path_regex(r"^/anthropic/v1/messages$|^/gemini/.*:streamGenerateContent$"))
+            .respond_with(rig.script.clone())
+            .mount(&rig.server)
+            .await;
+        rig
+    }
+
+    /// The model calls that arrived under `prefix` (`/anthropic/`, `/gemini/`).
+    async fn asked_at(&self, prefix: &str) -> Vec<Value> {
+        self.server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| {
+                let path = r.url.path();
+                r.method.as_str() == "POST"
+                    && path.starts_with(prefix)
+                    && (path.ends_with("/v1/messages") || path.ends_with(":streamGenerateContent"))
+            })
+            .map(|r| serde_json::from_slice(&r.body).expect("a JSON request"))
+            .collect()
+    }
+
     /// What the model answers to its next call that has no answer yet.
     fn then(&self, answer: ResponseTemplate) -> &Self {
         self.script.answers.lock().unwrap().push_back(Some(answer));
@@ -1233,4 +1273,170 @@ async fn a_cut_turn_has_data_written_out_at_its_save_too() {
 
     assert_eq!(crate::durable::asked() - before, 2);
     assert_eq!(rig.saved().len(), 2, "the message and the marker");
+}
+
+// ── The same turn loop on Anthropic and on Gemini ───────────────────
+
+/// An Anthropic stream that says `text`. A finished one closes with the
+/// model's reason to stop and `message_stop`; an unfinished one is a body
+/// that just ends.
+fn anthropic_says(text: &str, finished: bool) -> ResponseTemplate {
+    let mut events = vec![
+        json!({"type": "message_start", "message": {"id": "m1", "type": "message", "role": "assistant",
+            "content": [], "model": "scripted", "usage": {"input_tokens": 1, "output_tokens": 0}}}),
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}),
+    ];
+    if finished {
+        events.push(json!({"type": "content_block_stop", "index": 0}));
+        events.push(json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}));
+        events.push(json!({"type": "message_stop"}));
+    }
+    stream(events.iter().map(|e| format!("data: {e}\n\n")).collect())
+}
+
+/// A Gemini stream that says `text`: its one chunk carries `finishReason`
+/// when the reply is finished, and none when the body just ends.
+fn gemini_says(text: &str, finished: bool) -> ResponseTemplate {
+    let mut candidate = json!({"content": {"role": "model", "parts": [{"text": text}]}, "index": 0});
+    if finished {
+        candidate["finishReason"] = json!("STOP");
+    }
+    stream(format!("data: {}\n\n", json!({"candidates": [candidate]})))
+}
+
+fn rows(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs.iter().map(|(role, text)| (role.to_string(), text.to_string())).collect()
+}
+
+/// William asked whether the cut turn and `/continue` hold on Anthropic and
+/// on Gemini as on the local presets. The turn loop is one for every
+/// provider; this runs it on each of the two, end to end: a call that is
+/// refused is a cut turn, saved with its marker, and `/continue` sends the
+/// same messages again.
+#[tokio::test]
+async fn on_anthropic_and_on_gemini_a_refused_call_is_a_cut_turn_that_continue_sends_again() {
+    type Says = fn(&str, bool) -> ResponseTemplate;
+    let cases: [(&str, &str, Says, &str); 2] = [
+        ("anthropic", "/anthropic/", anthropic_says, "messages"),
+        ("gemini", "/gemini/", gemini_says, "contents"),
+    ];
+    for (provider, prefix, says, conversation) in cases {
+        let rig = Rig::on(provider).await;
+        rig.then(refuses(400, r#"{"error": {"code": 400, "type": "invalid_request_error", "message": "scripted refusal", "status": "INVALID_ARGUMENT"}}"#))
+            .then(says("Four.", true));
+
+        let frames = rig.say("two plus two?").await;
+
+        assert_eq!(dones(&frames), [""], "{provider}: one Done closes the cut turn");
+        let said = complaints(&frames);
+        assert_eq!(said.len(), 2, "{provider}: the error, then the notice: {said:?}");
+        assert!(said[0].starts_with("Brain error: ") && said[0].contains("scripted refusal"), "{provider}: {}", said[0]);
+        assert_eq!(said[1], format!("{CUT_NOTICE} {CONTINUE_HINT}"), "{provider}");
+        assert_eq!(
+            rig.saved(),
+            rows(&[("user", "two plus two?"), ("assistant", crate::sessions::model_view::CALL_FAILED_MARKER)]),
+            "{provider}"
+        );
+
+        let frames = rig.command("/continue", "").await;
+
+        assert_eq!(dones(&frames).last().copied(), Some("Four."), "{provider}: {frames:?}");
+        assert_eq!(complaints(&frames), [] as [&str; 0], "{provider}");
+        let asked = rig.asked_at(prefix).await;
+        assert_eq!(asked.len(), 2, "{provider}: the refused call and the continued one");
+        assert!(asked[0][conversation].is_array(), "{provider}: {}", asked[0]);
+        assert_eq!(asked[0][conversation], asked[1][conversation], "{provider}: the call that failed, sent again as it was");
+        assert_eq!(
+            rig.saved()[2..],
+            rows(&[("user", CONTINUE_ROW), ("assistant", "Four.")]),
+            "{provider}"
+        );
+    }
+}
+
+/// The gap on these two providers: a body that ended without the event
+/// that closes a reply (`message_delta` with the stop reason; the chunk
+/// with `finishReason`) was read as a finished turn. It is a cut turn like
+/// the refused call: the text that arrived is kept and marked, the notice
+/// says what happened, and `/continue` sends the call again.
+#[tokio::test]
+async fn on_anthropic_and_on_gemini_a_reply_whose_body_just_ends_is_a_cut_turn() {
+    type Says = fn(&str, bool) -> ResponseTemplate;
+    let cases: [(&str, &str, Says); 2] = [("anthropic", "/anthropic/", anthropic_says), ("gemini", "/gemini/", gemini_says)];
+    for (provider, prefix, says) in cases {
+        let rig = Rig::on(provider).await;
+        rig.then(says("The answer is", false)).then(says("The answer is four.", true));
+
+        let frames = rig.say("two plus two?").await;
+
+        assert_eq!(dones(&frames), ["The answer is"], "{provider}: the text that arrived, closed once");
+        assert_eq!(complaints(&frames), [format!("{STREAM_ENDED_NOTICE} {CONTINUE_HINT}").as_str()], "{provider}");
+        assert_eq!(
+            rig.saved(),
+            rows(&[
+                ("user", "two plus two?"),
+                ("assistant", &format!("The answer is\n\n{}", crate::sessions::model_view::CALL_FAILED_SUFFIX)),
+            ]),
+            "{provider}"
+        );
+
+        let frames = rig.command("/continue", "").await;
+
+        assert_eq!(dones(&frames).last().copied(), Some("The answer is four."), "{provider}: {frames:?}");
+        assert_eq!(rig.asked_at(prefix).await.len(), 2, "{provider}");
+    }
+}
+
+/// The local presets ended such a stream as `StreamEnded` already, with a
+/// warning and the half reply saved as if it were whole. It is the same
+/// cut turn now.
+#[tokio::test]
+async fn on_a_local_preset_a_reply_whose_stream_ends_without_its_finish_is_a_cut_turn() {
+    let rig = Rig::new().await;
+    // Text, then the body ends: no finish reason and no [DONE].
+    rig.then(stream(chunk(json!({"content": "The answer is"}), None))).then(says("The answer is four."));
+
+    let frames = rig.say("two plus two?").await;
+
+    assert_eq!(dones(&frames), ["The answer is"]);
+    assert_eq!(complaints(&frames), [format!("{STREAM_ENDED_NOTICE} {CONTINUE_HINT}").as_str()]);
+    assert_eq!(
+        rig.saved(),
+        rows(&[
+            ("user", "two plus two?"),
+            ("assistant", &format!("The answer is\n\n{}", crate::sessions::model_view::CALL_FAILED_SUFFIX)),
+        ])
+    );
+
+    let frames = rig.command("/continue", "").await;
+
+    assert_eq!(dones(&frames).last().copied(), Some("The answer is four."));
+    let asked = rig.asked().await;
+    assert_eq!(asked.len(), 2);
+    assert_eq!(asked[0]["messages"], asked[1]["messages"]);
+}
+
+/// A prompt Gemini blocked: no candidate comes back. It was saved as
+/// `(no response)` with nothing said. It is said with its reason, saved as
+/// a request the provider declined, and is nothing `/continue` could send
+/// again with another result.
+#[tokio::test]
+async fn a_prompt_gemini_blocked_is_said_with_its_reason_and_is_not_kept_for_continue() {
+    let rig = Rig::on("gemini").await;
+    rig.then(stream(format!("data: {}\n\n", json!({"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}}))));
+
+    let frames = rig.say("tell me that").await;
+
+    let said = complaints(&frames);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].starts_with("Gemini blocked this prompt and generated nothing (block reason: PROHIBITED_CONTENT)."), "{}", said[0]);
+    assert_eq!(rig.saved(), rows(&[("user", "tell me that"), ("assistant", "(request declined by provider: refusal)")]));
+
+    let frames = rig.command("/continue", "").await;
+    assert!(
+        frames.iter().any(|f| matches!(f, ResponseType::System(m) if m.content.starts_with("Nothing to continue."))),
+        "{frames:?}"
+    );
+    assert_eq!(rig.asked_at("/gemini/").await.len(), 1);
 }

@@ -835,7 +835,9 @@ async fn handle_turn(
                         // side-effectful success.
                         let ended_by_the_model = !matches!(
                             current_turn.outcome,
-                            TurnOutcome::EarlyStop(EarlyStopReason::CallFailed | EarlyStopReason::OperatorStop)
+                            TurnOutcome::EarlyStop(
+                                EarlyStopReason::CallFailed | EarlyStopReason::StreamEnded | EarlyStopReason::OperatorStop
+                            )
                         );
                         if ended_by_the_model && !current_turn.has_text() && !current_turn.has_tool_call() {
                             let side_effectful_count = trace_handle
@@ -1414,10 +1416,13 @@ async fn handle_turn(
             let notice = if cut && is_briefing {
                 Some((
                     SystemMessageType::Warning,
-                    "The session briefing was cut by a failed model call (the error is above). Nothing was saved; your next message starts a turn as usual.".to_string(),
+                    format!(
+                        "The session briefing was cut {}. Nothing was saved; your next message starts a turn as usual.",
+                        how_cut(current_turn.outcome)
+                    ),
                 ))
             } else if kept_for_continue {
-                Some((SystemMessageType::Warning, format!("{CUT_NOTICE} {CONTINUE_HINT}")))
+                Some((SystemMessageType::Warning, format!("{} {CONTINUE_HINT}", cut_notice(current_turn.outcome))))
             } else {
                 terminal_outcome_notice(current_turn.outcome, current_turn.stop_details.as_ref())
             };
@@ -1441,7 +1446,10 @@ async fn handle_turn(
             // add a row per non-empty `Done`. `closing_frames` decides.
             let stopped =
                 current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
-            for frame in closing_frames(stopped, cut, undelivered.take(), notice) {
+            // A failed call sent no `Done` and is owed one. A stream that
+            // ended came back as a `Complete`, whose `Done` is out.
+            let owed_a_done = current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::CallFailed);
+            for frame in closing_frames(stopped, owed_a_done, undelivered.take(), notice) {
                 let _ = tx
                     .send(Ok(ConversationResponse {
                         response_type: Some(frame),
@@ -2186,6 +2194,29 @@ pub(super) fn render_tool_only_placeholder(names: &[String]) -> String {
 pub(super) const CUT_NOTICE: &str =
     "The turn was cut by a failed model call (the error is above). Your message and the reply so far are saved.";
 
+/// The same for a reply whose stream the server closed before saying why
+/// the model stopped: no error was shown, so the notice says what happened.
+pub(super) const STREAM_ENDED_NOTICE: &str =
+    "The turn was cut: the model server closed the stream before the reply was finished. Your message and the reply so far are saved.";
+
+/// How a cut turn was cut, for a sentence that goes on.
+fn how_cut(outcome: TurnOutcome) -> &'static str {
+    match outcome {
+        TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded) => {
+            "(the model server closed the stream before it was finished)"
+        }
+        _ => "by a failed model call (the error is above)",
+    }
+}
+
+/// What is on record of a cut turn, by how it was cut.
+pub(super) fn cut_notice(outcome: TurnOutcome) -> &'static str {
+    match outcome {
+        TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded) => STREAM_ENDED_NOTICE,
+        _ => CUT_NOTICE,
+    }
+}
+
 /// And what can be done about it, when the turn is kept for `/continue`.
 pub(super) const CONTINUE_HINT: &str =
     "/continue sends that call once more with everything the turn held; a message of yours starts a new turn, which is told what was cut.";
@@ -2237,15 +2268,23 @@ pub(super) fn terminal_outcome_notice(
              window — the reply above may be cut off. Continue in a new session (/new <name>)."
                 .to_string(),
         )),
-        // The server closed the stream mid-reply (OpenAI-compat: neither a
-        // finish reason nor [DONE]). Like MaxTokens: incomplete, nothing
-        // declined, the partial text persisted unmarked.
-        TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded) => Some((
-            SystemMessageType::Warning,
-            "The model server closed the stream before finishing the reply — the text above \
-             may be incomplete."
-                .to_string(),
-        )),
+        // The server closed the stream before it said why the model
+        // stopped. A cut turn, like a failed call; this arm is the notice
+        // of one that is not kept for `/continue` (the delete flow's).
+        TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded) => {
+            Some((SystemMessageType::Warning, STREAM_ENDED_NOTICE.to_string()))
+        }
+        // Gemini blocked the prompt and answered nothing. Not a failure of
+        // the call: the same request meets the same block.
+        TurnOutcome::EarlyStop(EarlyStopReason::PromptBlocked) => {
+            let reason = stop_details.and_then(|d| d.category.as_deref()).unwrap_or("no reason given");
+            Some((
+                SystemMessageType::Warning,
+                format!(
+                    "Gemini blocked this prompt and generated nothing (block reason: {reason}). Sending it again meets the same block: rephrase the message. No other model was asked."
+                ),
+            ))
+        }
         // The call failed, and the operator was shown the error where it
         // happened. This says what the turn left behind.
         TurnOutcome::EarlyStop(EarlyStopReason::CallFailed) => {
@@ -2339,9 +2378,16 @@ fn goes_on(turn: &AssistantTurn) -> bool {
     matches!(turn.outcome, TurnOutcome::ToolUse | TurnOutcome::Pause)
 }
 
-/// Whether the turn is a model call that failed.
+/// Whether the turn is a model call that did not finish: one that failed
+/// (the turn loop's own `CallFailed`), or one whose stream the server
+/// closed before it said why the model stopped (a parser's `StreamEnded`).
+/// Either way the reply is not known to be whole, and the call can be sent
+/// again.
 pub(super) fn is_cut(turn: &AssistantTurn) -> bool {
-    turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::CallFailed)
+    matches!(
+        turn.outcome,
+        TurnOutcome::EarlyStop(EarlyStopReason::CallFailed | EarlyStopReason::StreamEnded)
+    )
 }
 
 /// The turn a failed call comes back as: the text that had arrived.
@@ -2401,9 +2447,17 @@ pub(super) fn final_assistant_text(
     tool_names: &[String],
     outcome: TurnOutcome,
 ) -> String {
-    let refused = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::Refusal));
+    // A prompt the provider blocked was declined like a refused one: the
+    // history says so in the same words (the markers are a closed set).
+    let refused = matches!(
+        outcome,
+        TurnOutcome::EarlyStop(EarlyStopReason::Refusal | EarlyStopReason::PromptBlocked)
+    );
     let stopped = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop));
-    let cut = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::CallFailed));
+    let cut = matches!(
+        outcome,
+        TurnOutcome::EarlyStop(EarlyStopReason::CallFailed | EarlyStopReason::StreamEnded)
+    );
     if !transcript_text.trim().is_empty() {
         if refused {
             format!("{transcript_text}\n\n(response interrupted by provider refusal)")

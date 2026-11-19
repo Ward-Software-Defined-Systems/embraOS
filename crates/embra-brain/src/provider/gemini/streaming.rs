@@ -185,6 +185,9 @@ where
 struct ParserState {
     parts: Vec<GeminiPart>,
     finish_reason: Option<String>,
+    /// `promptFeedback.blockReason`: the API reference says of it "If set,
+    /// the prompt was blocked and no candidates are returned."
+    block_reason: Option<String>,
     /// Set true once `process_chunk` sees a finishReason so the
     /// driver loop knows to emit Complete and exit.
     terminal: bool,
@@ -226,6 +229,14 @@ impl ParserState {
         chunk: GeminiStreamChunk,
         tx: &mpsc::Sender<StreamEvent>,
     ) {
+        if let Some(reason) = chunk
+            .prompt_feedback
+            .as_ref()
+            .and_then(|feedback| feedback.get("blockReason"))
+            .and_then(|reason| reason.as_str())
+        {
+            self.block_reason = Some(reason.to_string());
+        }
         let Some(candidate) = chunk.candidates.into_iter().next() else {
             return;
         };
@@ -366,16 +377,19 @@ impl ParserState {
             .iter()
             .any(|b| matches!(b, Block::ToolCall { .. }));
         let outcome = match self.finish_reason.as_deref() {
+            // No `finishReason` at all. A prompt the API blocked says so
+            // in `promptFeedback` and sends no candidate. Anything else is
+            // a body that ended before its last chunk: the reply is cut,
+            // and a tool call in it is not run (it may be half of one).
+            // Both were read as a finished turn until this said otherwise.
+            None if self.block_reason.is_some() => TurnOutcome::EarlyStop(EarlyStopReason::PromptBlocked),
             None => {
                 tracing::warn!(
                     target: "gemini::streaming",
-                    "stream closed without finishReason; defaulting to EndTurn"
+                    tool_call = has_tool_call,
+                    "stream closed without finishReason: the reply is cut short"
                 );
-                if has_tool_call {
-                    TurnOutcome::ToolUse
-                } else {
-                    TurnOutcome::EndTurn
-                }
+                TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded)
             }
             Some("STOP") => {
                 if has_tool_call {
@@ -398,7 +412,9 @@ impl ParserState {
             .send(StreamEvent::Complete(AssistantTurn {
                 content,
                 outcome,
-                stop_details: None,
+                // A blocked prompt's reason, for the operator's notice.
+                stop_details: (outcome == TurnOutcome::EarlyStop(EarlyStopReason::PromptBlocked))
+                    .then(|| crate::provider::ir::StopDetails { category: self.block_reason.take(), explanation: None }),
             }))
             .await;
     }
@@ -838,6 +854,30 @@ mod tests {
         }
     }
 
+    /// The API reference on `promptFeedback.blockReason`: "If set, the
+    /// prompt was blocked and no candidates are returned." Such an answer
+    /// was read as an empty reply.
+    #[tokio::test]
+    async fn a_blocked_prompt_is_a_turn_of_its_own_kind_with_the_reason() {
+        let blocked = [r#"{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":12}}"#];
+        let out = run_stream(&blocked).await;
+        let turn = complete_turn(&out);
+        assert_eq!(turn.outcome, TurnOutcome::EarlyStop(EarlyStopReason::PromptBlocked));
+        assert!(turn.content.is_empty());
+        let details = turn.stop_details.expect("the reason");
+        assert_eq!((details.category.as_deref(), details.explanation), (Some("PROHIBITED_CONTENT"), None));
+        assert_eq!(out.iter().filter(|e| matches!(e, StreamEvent::Complete(_))).count(), 1);
+
+        // Feedback that blocks nothing changes nothing: the candidate's own
+        // finish reason is the turn's.
+        let rated = [
+            r#"{"promptFeedback":{"safetyRatings":[]},"candidates":[{"content":{"role":"model","parts":[{"text":"fine"}]},"finishReason":"STOP","index":0}]}"#,
+        ];
+        let turn = complete_turn(&run_stream(&rated).await);
+        assert_eq!(turn.outcome, TurnOutcome::EndTurn);
+        assert!(turn.stop_details.is_none());
+    }
+
     #[tokio::test]
     async fn framing_noise_is_skipped() {
         let body = concat!(
@@ -857,6 +897,9 @@ mod tests {
         assert!(matches!(&turn.content[..], [Block::Text(t)] if t == "kept"));
     }
 
+    /// A body that just ends, with no `finishReason`, was read as a
+    /// finished turn, and a tool call in it was run. It is a stream that
+    /// ended: the text that arrived, and no tool call to run.
     #[tokio::test]
     async fn done_sentinel_and_a_bare_end_of_stream_both_complete() {
         let text = [
@@ -864,8 +907,19 @@ mod tests {
         ];
         // The body just ends: no finishReason.
         let turn = complete_turn(&run_stream(&text).await);
-        assert_eq!(turn.outcome, TurnOutcome::EndTurn);
+        assert_eq!(turn.outcome, TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded));
         assert!(matches!(&turn.content[..], [Block::Text(t)] if t == "hi"));
+        assert!(turn.stop_details.is_none());
+
+        let call = [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"fc1","name":"file_write","args":{"path":"a.md"}}}]},"index":0}]}"#,
+        ];
+        let turn = complete_turn(&run_stream(&call).await);
+        assert_eq!(
+            turn.outcome,
+            TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded),
+            "a tool call that may be half of one is not the turn loop's to run"
+        );
 
         let mut body = sse_body(&text);
         body.extend_from_slice(b"data: [DONE]\n\n");

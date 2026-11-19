@@ -179,6 +179,11 @@ pub struct GeminiStreamChunk {
     /// the finish reason, the last text and the tool calls.
     #[serde(default)]
     pub usage_metadata: Option<serde_json::Value>,
+    /// `GenerateContentResponse.promptFeedback`, kept as raw JSON like the
+    /// counts: its `blockReason` is read by hand, and nothing in it can
+    /// fail the chunk's parse.
+    #[serde(default)]
+    pub prompt_feedback: Option<serde_json::Value>,
 }
 
 /// The token counts of one model call, from `usageMetadata`

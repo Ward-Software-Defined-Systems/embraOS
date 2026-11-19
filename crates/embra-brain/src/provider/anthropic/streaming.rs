@@ -307,8 +307,9 @@ where
         }
     }
 
-    // Stream ended without message_stop — emit Complete anyway so
-    // consumers don't hang.
+    // The body ended without `message_stop`. With a `message_delta` before
+    // it the model's reason to stop is known and the reply is whole; with
+    // none the reply is cut (`emit_complete`).
     emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
     Ok(())
 }
@@ -324,16 +325,16 @@ async fn emit_complete(
         .map(|acc| acc.finalize())
         .collect();
     let effective_stop = stop_reason.unwrap_or_else(|| {
-        // A missing message_delta means the SSE stream ended without
-        // the final message_delta/message_stop pair — could be a
-        // dropped connection, a truncated response, or an API-side
-        // hiccup. Default to EndTurn for UX safety (otherwise the loop
-        // hangs), but surface the condition for debug.
+        // No `message_delta`: the stream ended without the pair that
+        // closes a message (a connection that a proxy closed cleanly, a
+        // truncated response). The reply is not known to be whole, and
+        // was read as a finished turn until this said otherwise: the turn
+        // loop takes `StreamEnded` as a cut turn.
         tracing::warn!(
             target: "streaming",
-            "stream closed without message_delta; defaulting stop_reason to EndTurn"
+            "stream closed without message_delta: the reply is cut short"
         );
-        StopReason::EndTurn
+        StopReason::StreamEnded
     });
     let response = AssistantResponse {
         content,
@@ -744,6 +745,9 @@ mod tests {
         assert!(complete(&out).is_none());
     }
 
+    /// A body that just ends, with no `message_delta` to say why the model
+    /// stopped, was read as a finished turn. It is a stream that ended: the
+    /// text that arrived, and a stop reason the wire never sends.
     #[tokio::test]
     async fn done_sentinel_and_a_bare_end_of_stream_both_complete() {
         let text = [
@@ -752,8 +756,16 @@ mod tests {
         ];
         // The body just ends: no message_delta, no message_stop.
         let response = complete(&run_stream(&text).await).expect("Complete event");
-        assert_eq!(response.stop_reason, StopReason::EndTurn);
+        assert_eq!(response.stop_reason, StopReason::StreamEnded);
         assert!(matches!(&response.content[0], MessageBlock::Text { text } if text == "hi"));
+        assert!(serde_json::from_str::<StopReason>("\"stream_ended\"").is_err(), "no value of the wire names it");
+
+        // With the model's reason to stop before the end, the reply is
+        // whole though `message_stop` never came.
+        let mut told = text.to_vec();
+        told.push(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#);
+        let response = complete(&run_stream(&told).await).expect("Complete event");
+        assert_eq!(response.stop_reason, StopReason::EndTurn);
 
         let mut body = sse_body(&text);
         body.extend_from_slice(b"data: [DONE]\n\n");

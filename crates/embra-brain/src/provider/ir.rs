@@ -168,11 +168,18 @@ pub enum EarlyStopReason {
     Recitation,
     /// Gemini `MALFORMED_FUNCTION_CALL`.
     Malformed,
-    /// OpenAI-compat: the stream ended with neither a finish reason nor
-    /// `[DONE]`, so the server closed mid-reply. `[DONE]` without a
-    /// finish reason stays a clean `EndTurn`. The reply is incomplete and
-    /// nothing was declined; the partial text is persisted unmarked.
+    /// The body ended before the provider said why the model stopped: no
+    /// `message_delta` on Anthropic, no `finishReason` on Gemini, neither
+    /// a finish reason nor `[DONE]` on the OpenAI-compatible presets
+    /// (there `[DONE]` without a finish reason stays a clean `EndTurn`).
+    /// The reply is whatever had arrived, and nothing was declined. The
+    /// turn loop counts it as a cut turn, like a failed call: saved with
+    /// its marker, and kept for `/continue`.
     StreamEnded,
+    /// Gemini `promptFeedback.blockReason`: the prompt was blocked, and no
+    /// candidate came back. The reason is the turn's `stop_details`
+    /// category. Sending the same request again meets the same block.
+    PromptBlocked,
     /// Operator-requested interrupt (`/stop` → the StopTurn RPC). Never
     /// produced by a provider wire mapper — the loop driver synthesizes it
     /// when the stop generation advances mid-turn.
@@ -189,8 +196,9 @@ pub enum EarlyStopReason {
 /// Structured detail accompanying a terminal early stop. Anthropic
 /// populates it only on `stop_reason: "refusal"` (category values seen:
 /// `cyber`, `bio`, `reasoning_extraction`, `frontier_llm`; both fields
-/// are optional even then — guard every read). Other providers leave it
-/// `None` today; Gemini safety detail could ride here later.
+/// are optional even then — guard every read). Gemini fills the category
+/// with the block reason of a prompt it blocked (`PromptBlocked`). Every
+/// other turn leaves it `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StopDetails {
     pub category: Option<String>,
