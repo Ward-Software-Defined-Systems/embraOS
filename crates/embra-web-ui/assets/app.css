@@ -32,6 +32,13 @@
   /* The keys and the strings of a JSON document. */
   --json-key: #6cb6c9;
   --json-str: #8db86a;
+  /* The terminal: its selection, the contrast it holds every character to
+     against its cell (xterm's `minimumContrastRatio`), and the sixteen
+     colours a console program names (0-7, then their bright forms). */
+  --term-selection: #ffffff5c;
+  --term-floor: 4.5;
+  --ansi-0: #2e3436; --ansi-1: #cc0000; --ansi-2: #4e9a06; --ansi-3: #c4a000; --ansi-4: #3465a4; --ansi-5: #75507b; --ansi-6: #06989a; --ansi-7: #d3d7cf;
+  --ansi-8: #555753; --ansi-9: #ef2929; --ansi-10: #8ae234; --ansi-11: #fce94f; --ansi-12: #729fcf; --ansi-13: #ad7fa8; --ansi-14: #34e2e2; --ansi-15: #eeeeec;
 
   /* Font-size hierarchy. Single source of truth for both the Leptos shell
      CSS and the xterm.js terminal (which reads `--term-fs` at init in

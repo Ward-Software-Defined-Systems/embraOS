@@ -92,7 +92,7 @@
     const cur = document.createElement("div");
     cur.id = "embra-kiosk-cursor";
     cur.style.cssText = "position:fixed;left:0;top:0;width:18px;height:26px;pointer-events:none;z-index:2147483647;display:none;";
-    cur.innerHTML = '<svg width="18" height="26" viewBox="0 0 18 26"><path d="M1 1 L1 20 L6 15.5 L9.5 24 L12.5 22.5 L9 14 L16 14 Z" fill="#ece2d8" stroke="#0c0907" stroke-width="1.5" stroke-linejoin="round"/></svg>';
+    cur.innerHTML = '<svg width="18" height="26" viewBox="0 0 18 26"><path d="M1 1 L1 20 L6 15.5 L9.5 24 L12.5 22.5 L9 14 L16 14 Z" style="fill:var(--txt);stroke:var(--bg)" stroke-width="1.5" stroke-linejoin="round"/></svg>';
     document.body.appendChild(cur);
     window.addEventListener("pointermove", (e) => {
       cur.style.transform = "translate(" + e.clientX + "px," + e.clientY + "px)";
@@ -473,9 +473,39 @@
     }, true);
   }
 
+  // The terminal's colours, read from the theme's tokens on the page's root
+  // (app.css: one block a theme). A token that is missing leaves xterm's
+  // own colour in its place.
+  const EMBRA_ANSI = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"];
+  function embraToken(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  // The activity strip draws on a canvas and asks for its colours here.
+  window.embraThemeToken = embraToken;
+  function embraTermTheme() {
+    const theme = {};
+    const put = (key, token) => { const v = embraToken(token); if (v) theme[key] = v; };
+    put("background", "--bg"); put("foreground", "--txt");
+    put("cursor", "--accent"); put("cursorAccent", "--bg");
+    put("selectionBackground", "--term-selection");
+    EMBRA_ANSI.forEach((key, i) => put(key, "--ansi-" + i));
+    return theme;
+  }
+  function embraTermFloor() {
+    const floor = parseFloat(embraToken("--term-floor"));
+    return floor >= 1 && floor <= 21 ? floor : 4.5;
+  }
   function embraLessMotion() {
     return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   }
+  // The page calls this when the theme on its root has changed: the
+  // terminal takes the new colours where it stands, with nothing typed.
+  window.embraTermApplyTheme = function () {
+    if (!term) return;
+    term.options.theme = embraTermTheme();
+    term.options.minimumContrastRatio = embraTermFloor();
+  };
 
   window.embraTermInit = function (elId) {
     if (term) return; // once
@@ -507,12 +537,11 @@
       // The cursor blinks neither on the display console nor for a reader
       // who asked the system for less motion.
       fontSize: termFs, cursorBlink: !kiosk && !embraLessMotion(), scrollback: 0,
-      // Warm brand bg + amber (flame) cursor to blend with the shell.
-      // The 16 ANSI colors are intentionally left at xterm defaults so
-      // the real ratatui TUI's own colors render true (parity-safe).
-      theme: { background: "#0c0907", foreground: "#ece2d8",
-               cursor: "#ff7a1a", cursorAccent: "#0c0907",
-               selectionBackground: "#3a2a18" },
+      // The colours are the theme's (app.css), and so is the contrast every
+      // character is held to against its own cell: a console program names
+      // sixteen colours and knows nothing of the ground they land on (a dim
+      // grey that is a bar's ground on one line is another line's text).
+      theme: embraTermTheme(), minimumContrastRatio: embraTermFloor(),
     });
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);

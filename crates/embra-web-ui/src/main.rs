@@ -4,6 +4,7 @@ mod chat;
 mod json_view;
 mod status;
 mod term;
+mod theme;
 mod tools;
 
 use leptos::prelude::*;

@@ -130,16 +130,69 @@ struct Retrieval {
 
 // ── The scene ────────────────────────────────────────────────────────
 
-/// Colors mirror the `:root` tokens of `assets/app.css`; a canvas cannot
-/// read them without more plumbing than they are worth.
-const TXT: (u8, u8, u8) = (0xec, 0xe2, 0xd8);
-const TXT_DIM: (u8, u8, u8) = (0x9c, 0x8b, 0x7c);
-const ACCENT: (u8, u8, u8) = (0xff, 0x7a, 0x1a);
-const ACCENT_2: (u8, u8, u8) = (0xf5, 0xa6, 0x23);
-const ACCENT_RED: (u8, u8, u8) = (0xd2, 0x44, 0x2a);
-const BAD: (u8, u8, u8) = (0xe5, 0x53, 0x3a);
-const PANEL_2: (u8, u8, u8) = (0x22, 0x17, 0x10);
-const LINE: (u8, u8, u8) = (0x33, 0x23, 0x1a);
+/// The strip's colours: eight tokens of the page's theme (`assets/app.css`).
+/// A canvas takes no colour from a stylesheet, so they are read from the
+/// page's root when the strip starts and again whenever the theme changes
+/// (`theme::epoch`). The default is ember's, for a token that cannot be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Palette {
+    txt: (u8, u8, u8),
+    txt_dim: (u8, u8, u8),
+    accent: (u8, u8, u8),
+    accent_2: (u8, u8, u8),
+    accent_red: (u8, u8, u8),
+    bad: (u8, u8, u8),
+    panel_2: (u8, u8, u8),
+    line: (u8, u8, u8),
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            txt: (0xec, 0xe2, 0xd8),
+            txt_dim: (0x9c, 0x8b, 0x7c),
+            accent: (0xff, 0x7a, 0x1a),
+            accent_2: (0xf5, 0xa6, 0x23),
+            accent_red: (0xd2, 0x44, 0x2a),
+            bad: (0xe5, 0x53, 0x3a),
+            panel_2: (0x22, 0x17, 0x10),
+            line: (0x33, 0x23, 0x1a),
+        }
+    }
+}
+
+impl Palette {
+    /// The palette of the theme now on the page's root.
+    fn from_page() -> Self {
+        let was = Self::default();
+        let read = |name: &str, or: (u8, u8, u8)| hex_rgb(&crate::theme::token(name)).unwrap_or(or);
+        Self {
+            txt: read("--txt", was.txt),
+            txt_dim: read("--txt-dim", was.txt_dim),
+            accent: read("--accent", was.accent),
+            accent_2: read("--accent-2", was.accent_2),
+            accent_red: read("--accent-red", was.accent_red),
+            bad: read("--bad", was.bad),
+            panel_2: read("--panel-2", was.panel_2),
+            line: read("--line", was.line),
+        }
+    }
+}
+
+/// A token's `#rgb` or `#rrggbb` as its three channels. The stylesheet writes
+/// every colour token so; anything else is no colour here.
+fn hex_rgb(value: &str) -> Option<(u8, u8, u8)> {
+    let hex = value.trim().strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |at: usize, len: usize| u8::from_str_radix(&hex[at..at + len], 16).ok();
+    match hex.len() {
+        3 => Some((channel(0, 1)? * 17, channel(1, 1)? * 17, channel(2, 1)? * 17)),
+        6 => Some((channel(0, 2)?, channel(2, 2)?, channel(4, 2)?)),
+        _ => None,
+    }
+}
 
 /// Below this width the readouts go; below `MIN_WIDTH` nothing is drawn.
 const READOUT_MIN_WIDTH: f64 = 520.0;
@@ -225,6 +278,9 @@ struct Viz {
     /// A frame is owed: the feed or the socket changed since the last draw
     /// (the display console draws nothing while idle and unchanged).
     dirty: bool,
+    /// The theme's colours, and the count of theme changes they were read at.
+    palette: Palette,
+    palette_epoch: Option<u32>,
 }
 
 /// The kind of a feed message, for the frame bookkeeping in `apply`.
@@ -562,6 +618,7 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
     if w < MIN_WIDTH {
         return;
     }
+    let pal = v.palette;
     let l = layout(w);
     let dim = if v.dimmed() { 0.4 } else { 1.0 };
     let t = now / 1000.0;
@@ -572,7 +629,7 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
         ctx.move_to(x0, l.link_y);
         ctx.line_to(x1, l.link_y);
         ctx.set_line_width(1.0);
-        ctx.set_stroke_style_str(&rgba(TXT_DIM, (0.10 + 0.5 * glow) * dim));
+        ctx.set_stroke_style_str(&rgba(pal.txt_dim, (0.10 + 0.5 * glow) * dim));
         ctx.stroke();
     };
     link(l.model_x + 8.0, l.brain_x - 10.0, v.link_model);
@@ -591,11 +648,11 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
         let x = x0 + (x1 - x0) * p.pos;
         let y = l.link_y + 2.0 * (p.pos * TAU * 1.5).sin();
         let (color, hollow) = match p.kind {
-            Kind::Text => (TXT, false),
-            Kind::Reasoning => (TXT_DIM, true),
-            Kind::Query => (ACCENT_2, false),
-            Kind::Write => (ACCENT, false),
-            Kind::Delete => (ACCENT_RED, false),
+            Kind::Text => (pal.txt, false),
+            Kind::Reasoning => (pal.txt_dim, true),
+            Kind::Query => (pal.accent_2, false),
+            Kind::Write => (pal.accent, false),
+            Kind::Delete => (pal.accent_red, false),
         };
         ctx.begin_path();
         let _ = ctx.arc(x, y, 1.8, 0.0, TAU);
@@ -616,8 +673,8 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
         ctx.set_fill_style_str(&rgba(color, a * dim));
         ctx.fill();
     };
-    dot(l.model_x, 9.0, TXT, 0.08 + 0.4 * v.model_pulse);
-    dot(l.model_x, 4.5, TXT, 0.9);
+    dot(l.model_x, 9.0, pal.txt, 0.08 + 0.4 * v.model_pulse);
+    dot(l.model_x, 4.5, pal.txt, 0.9);
 
     // The brain: breathes idle, glows in a turn, sweeps while a tool runs.
     let breath = if v.in_turn {
@@ -625,14 +682,14 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
     } else {
         0.15 + 0.12 * (0.5 + 0.5 * (t * TAU * 0.15).sin())
     };
-    dot(l.brain_x, 13.0, ACCENT, if v.reduced_motion { 0.2 } else { breath });
-    dot(l.brain_x, 6.5, ACCENT, 0.95);
+    dot(l.brain_x, 13.0, pal.accent, if v.reduced_motion { 0.2 } else { breath });
+    dot(l.brain_x, 6.5, pal.accent, 0.95);
     if v.tool_running.is_some() && !v.reduced_motion {
         let start = (t * TAU / 1.2) % TAU;
         ctx.begin_path();
         let _ = ctx.arc(l.brain_x, l.link_y, 10.5, start, start + TAU / 4.0);
         ctx.set_line_width(1.5);
-        ctx.set_stroke_style_str(&rgba(ACCENT_2, 0.9 * dim));
+        ctx.set_stroke_style_str(&rgba(pal.accent_2, 0.9 * dim));
         ctx.stroke();
     }
 
@@ -640,7 +697,7 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
     const OFFSETS: [(f64, f64); 5] = [(0.0, 0.0), (-9.0, -6.0), (9.0, -5.0), (-7.0, 7.0), (8.0, 7.0)];
     const EDGES: [(usize, usize); 5] = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 3)];
     ctx.set_line_width(1.0);
-    ctx.set_stroke_style_str(&rgba(ACCENT_2, 0.25 * dim));
+    ctx.set_stroke_style_str(&rgba(pal.accent_2, 0.25 * dim));
     for (a, b) in EDGES {
         ctx.begin_path();
         ctx.move_to(l.graph_x + OFFSETS[a].0, l.link_y + OFFSETS[a].1);
@@ -651,7 +708,7 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
         ctx.begin_path();
         let r = if i == 0 { 3.0 } else { 2.2 };
         let _ = ctx.arc(l.graph_x + dx, l.link_y + dy, r, 0.0, TAU);
-        ctx.set_fill_style_str(&rgba(ACCENT_2, (0.5 + 0.5 * v.twinkle[i]) * dim));
+        ctx.set_fill_style_str(&rgba(pal.accent_2, (0.5 + 0.5 * v.twinkle[i]) * dim));
         ctx.fill();
     }
 
@@ -667,11 +724,11 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
         let y = l.link_y - rise;
         let label = if chip.error { format!("! {}", chip.label) } else { chip.label.clone() };
         let width = 7.0 * label.chars().count() as f64 + 10.0;
-        ctx.set_fill_style_str(&rgba(PANEL_2, 0.9 * alpha * dim));
+        ctx.set_fill_style_str(&rgba(pal.panel_2, 0.9 * alpha * dim));
         ctx.fill_rect(x - width / 2.0, y - 8.0, width, 16.0);
-        ctx.set_stroke_style_str(&rgba(if chip.error { BAD } else { LINE }, alpha * dim));
+        ctx.set_stroke_style_str(&rgba(if chip.error { pal.bad } else { pal.line }, alpha * dim));
         ctx.stroke_rect(x - width / 2.0, y - 8.0, width, 16.0);
-        ctx.set_fill_style_str(&rgba(if chip.error { BAD } else { TXT }, alpha * dim));
+        ctx.set_fill_style_str(&rgba(if chip.error { pal.bad } else { pal.txt }, alpha * dim));
         let _ = ctx.fill_text(&label, x, y);
     }
 
@@ -682,8 +739,8 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
     ctx.set_font("13px Inter, system-ui, sans-serif");
     ctx.set_text_baseline("alphabetic");
     let snap = v.snapshot.as_ref();
-    let dim_text = rgba(TXT_DIM, dim);
-    let text = rgba(TXT, dim);
+    let dim_text = rgba(pal.txt_dim, dim);
+    let text = rgba(pal.txt, dim);
 
     ctx.set_text_align("left");
     let model = snap.map(|s| s.model.as_str()).unwrap_or("");
@@ -855,6 +912,16 @@ fn start_raf(canvas: HtmlCanvasElement, state: Rc<RefCell<Viz>>) {
         let now = now_ms();
         // The display console skips the frame of an idle, unchanged strip
         // and checks again later; a browser always draws.
+        // A theme change is a reason to draw: the colours are read again.
+        {
+            let epoch = crate::theme::epoch();
+            let mut v = state.borrow_mut();
+            if v.palette_epoch != Some(epoch) {
+                v.palette = Palette::from_page();
+                v.palette_epoch = Some(epoch);
+                v.dirty = true;
+            }
+        }
         let skip = kiosk && !state.borrow().animating();
         if !skip {
             {
@@ -966,5 +1033,42 @@ pub fn ActivityStrip(running: RwSignal<Option<String>>) -> impl IntoView {
                 <div class="activity-tip" style=style>{text}</div>
             })}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    #[test]
+    fn a_token_is_read_as_three_channels_and_anything_else_is_no_colour() {
+        assert_eq!(hex_rgb("#ece2d8"), Some((0xec, 0xe2, 0xd8)));
+        assert_eq!(hex_rgb("  #FFF "), Some((255, 255, 255)));
+        assert_eq!(hex_rgb("#0a0"), Some((0, 0xaa, 0)));
+        for not_a_colour in ["", "ece2d8", "#ece2d", "#ece2d8ff", "#gggggg", "rgb(1, 2, 3)", "#é"] {
+            assert_eq!(hex_rgb(not_a_colour), None, "{not_a_colour:?}");
+        }
+    }
+
+    /// The default is what the strip draws with before a token can be read,
+    /// and is the stylesheet's first block of colour tokens: the default
+    /// theme's. A value that moves there and not here would flash the old
+    /// colour at every start.
+    #[test]
+    fn the_default_palette_is_the_stylesheets_first_block_of_tokens() {
+        let css = include_str!("../assets/app.css");
+        let first = css.find("--txt: ").expect("a block of colour tokens");
+        let ember = &css[css[..first].rfind('{').expect("the block's start")..];
+        let ember = &ember[..ember.find('}').expect("its end")];
+        let token = |name: &str| {
+            let at = ember.find(&format!("--{name}: ")).unwrap_or_else(|| panic!("--{name} in ember's block"));
+            let value = &ember[at + name.len() + 4..];
+            hex_rgb(&value[..value.find(';').expect("a declaration's end")]).unwrap_or_else(|| panic!("--{name} is a hex colour"))
+        };
+        let p = Palette::default();
+        assert_eq!(
+            [p.txt, p.txt_dim, p.accent, p.accent_2, p.accent_red, p.bad, p.panel_2, p.line],
+            ["txt", "txt-dim", "accent", "accent-2", "accent-red", "bad", "panel-2", "line"].map(token)
+        );
     }
 }
