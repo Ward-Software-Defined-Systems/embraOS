@@ -245,66 +245,31 @@ impl BrainService for BrainGrpcService {
                     config::run_config_wizard_grpc(&wizard_grpc_tx, &mut wizard_rx, &wizard_db).await
                 });
 
-                // Watch for ANOTHER stream finishing the wizard (multiple
-                // clients can hit first-run concurrently, each spawning its
-                // own wizard). If one persists config first, this stream's
-                // wizard would otherwise block forever on input that never
-                // comes — the stage signal lets us abort and move on.
-                let mut stage_rx = onboarding_stage.subscribe();
-
-                // Feed user responses to wizard until it completes
-                loop {
-                    tokio::select! {
-                        msg = incoming.next() => {
-                            match msg {
-                                Some(Ok(req)) => {
-                                    // The operator's message is the wizard's
-                                    // answer; a command is the door's.
-                                    if let Some(answer) = setup_commands.take(req).await
-                                        && wizard_tx.send(answer).await.is_err()
-                                    {
-                                        break; // Wizard closed its receiver
-                                    }
-                                }
-                                Some(Err(e)) => { warn!("Stream error during wizard: {}", e); break; }
-                                None => { debug!("Client disconnected during wizard"); break; }
-                            }
-                        }
-                        result = &mut wizard_handle => {
-                            match result {
-                                Ok(Ok(new_config)) => {
-                                    info!("Config wizard completed: name={}", new_config.name);
-                                    api_key = new_config.api_key;
-                                    config_tz = new_config.timezone;
-                                    // We're the driver — config is persisted.
-                                    // Wake any other stream blocked in its own
-                                    // wizard loop so it can adopt the config and
-                                    // advance to the learning stage.
-                                    let _ = onboarding_stage
-                                        .send_replace(OperatingMode::Learning as i32);
-                                }
-                                Ok(Err(e)) => {
-                                    error!("Config wizard failed: {}", e);
-                                }
-                                Err(e) => {
-                                    error!("Config wizard task panicked: {}", e);
-                                }
-                            }
-                            break;
-                        }
-                        _ = stage_rx.changed() => {
-                            // Another stream finished the first-run wizard
-                            // (config now persisted). Our wizard task is still
-                            // blocked on input that will never arrive — abort
-                            // it, adopt the saved config, and fall through to
-                            // the learning stage.
-                            if let Ok(cfg) = config::load_config(&db).await {
-                                api_key = cfg.api_key;
-                                config_tz = cfg.timezone;
-                                wizard_handle.abort();
-                                break;
-                            }
-                        }
+                // The wizard has a configuration when it ends, or this
+                // console has no business in the stages that follow: one
+                // that closed its stream is gone, and a wizard that failed
+                // left nothing to learn or to talk on.
+                match drive_wizard(&mut incoming, &mut wizard_handle, &wizard_tx, &setup_commands, &db, &onboarding_stage).await {
+                    WizardEnd::Configured { api_key: key, timezone } => {
+                        api_key = key;
+                        config_tz = timezone;
+                    }
+                    WizardEnd::ConsoleLeft => {
+                        wizard_handle.abort();
+                        info!("The console left during the first-run setup; its conversation ends there");
+                        return;
+                    }
+                    WizardEnd::Failed(why) => {
+                        error!("Config wizard failed: {why}");
+                        let _ = tx
+                            .send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                                    content: wizard_failed_notice(&why),
+                                    msg_type: SystemMessageType::Error as i32,
+                                })),
+                            }))
+                            .await;
+                        return;
                     }
                 }
             }
@@ -315,7 +280,14 @@ impl BrainService for BrainGrpcService {
                 info!("Soul not sealed — entering Learning Mode");
                 let loaded_config = config::load_config(&db).await.unwrap_or_else(|_| config::SystemConfig::boot_fallback(api_key.clone(), config_tz.clone()));
                 match run_learning_loop(&mut incoming, &db, &loaded_config, &api_key, &onboarding_stage, TurnStop { in_turn: &in_turn, stop_rx: &stop_rx }, &setup_commands).await {
-                    Ok(()) => {
+                    // The console closed its stream in the middle of
+                    // Learning Mode. Nothing is complete: no session is
+                    // made before the seal, and its conversation ends.
+                    Ok(LearningEnd::ConsoleLeft) => {
+                        info!("The console left during Learning Mode; the soul is not sealed and its conversation ends there");
+                        return;
+                    }
+                    Ok(LearningEnd::Sealed) => {
                         info!("Learning Mode complete — transitioning to Operational");
                         // Reload config in case it was updated
                         if let Ok(cfg) = config::load_config(&db).await {
@@ -954,4 +926,94 @@ async fn send_system(
 
 // Bearer helpers live with the provider now (the health probe needs them
 // too); imported here for the setup flows and their tests.
+/// How the first-run wizard's stage ended for one console.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WizardEnd {
+    /// A configuration is stored: by this console's wizard, or by another
+    /// console's while this one waited at a question.
+    Configured { api_key: String, timezone: String },
+    /// The console closed its stream, or the stream failed.
+    ConsoleLeft,
+    /// The wizard ended without a configuration.
+    Failed(String),
+}
+
+/// What a console is told when its wizard ended without a configuration.
+pub(super) fn wizard_failed_notice(why: &str) -> String {
+    format!("The setup could not be completed: {why}. Nothing was configured. Reconnect to start it again.")
+}
+
+/// Feed the console's answers to the first-run wizard until the stage ends.
+///
+/// The stage used to end one way whatever had happened, and the caller went
+/// on into Learning Mode: a console that closed its stream at a question
+/// (a browser tab closed, a display console restarted) got Learning Mode
+/// with the built-in configuration, a model call for nobody, and session
+/// `main` made before any seal. How it ended is now the answer.
+///
+/// The console's stream is asked first: when a console has left, nothing
+/// its wizard did in the same moment matters.
+pub(super) async fn drive_wizard<S>(
+    incoming: &mut S,
+    wizard: &mut tokio::task::JoinHandle<anyhow::Result<config::SystemConfig>>,
+    wizard_tx: &mpsc::Sender<String>,
+    setup_commands: &SetupCommands,
+    db: &Arc<WardsonDbClient>,
+    onboarding_stage: &Arc<watch::Sender<i32>>,
+) -> WizardEnd
+where
+    S: Stream<Item = Result<ConversationRequest, Status>> + Unpin,
+{
+    // Another console can finish the wizard first (each console that meets
+    // a first run starts its own). This one's wizard would wait for an
+    // answer that never comes: the stage signal lets it adopt the stored
+    // configuration and move on.
+    let mut stage_rx = onboarding_stage.subscribe();
+    loop {
+        tokio::select! {
+            biased;
+            msg = incoming.next() => {
+                match msg {
+                    Some(Ok(req)) => {
+                        // The operator's message is the wizard's answer; a
+                        // command is the door's. A wizard that has closed
+                        // its receiver has ended: its result is read below.
+                        if let Some(answer) = setup_commands.take(req).await {
+                            let _ = wizard_tx.send(answer).await;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        warn!("Stream error during wizard: {}", e);
+                        return WizardEnd::ConsoleLeft;
+                    }
+                    None => {
+                        debug!("Client disconnected during wizard");
+                        return WizardEnd::ConsoleLeft;
+                    }
+                }
+            }
+            result = &mut *wizard => {
+                return match result {
+                    Ok(Ok(new_config)) => {
+                        info!("Config wizard completed: name={}", new_config.name);
+                        // This console is the driver: the configuration is
+                        // stored. Wake any other console waiting in its own
+                        // wizard so that it adopts it.
+                        let _ = onboarding_stage.send_replace(OperatingMode::Learning as i32);
+                        WizardEnd::Configured { api_key: new_config.api_key, timezone: new_config.timezone }
+                    }
+                    Ok(Err(e)) => WizardEnd::Failed(e.to_string()),
+                    Err(e) => WizardEnd::Failed(format!("the setup stopped ({e})")),
+                };
+            }
+            _ = stage_rx.changed() => {
+                if let Ok(cfg) = config::load_config(db).await {
+                    wizard.abort();
+                    return WizardEnd::Configured { api_key: cfg.api_key, timezone: cfg.timezone };
+                }
+            }
+        }
+    }
+}
+
 use crate::provider::openai_compat::{bearer_env_var, bearer_state_path};

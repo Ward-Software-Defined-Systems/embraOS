@@ -3751,3 +3751,151 @@ mod continue_tests {
         assert!(!CONTINUE_ROW.contains('/'));
     }
 }
+
+/// The first-run wizard's stage: how it ends for one console.
+#[cfg(test)]
+mod wizard_stage_tests {
+    use super::*;
+
+    /// What `drive_wizard` needs around it: a console's stream, the frames
+    /// it is sent, the door for commands, and a stage signal.
+    struct WizardRig {
+        say: mpsc::Sender<Result<ConversationRequest, Status>>,
+        said: tokio_stream::wrappers::ReceiverStream<Result<ConversationRequest, Status>>,
+        commands: SetupCommands,
+        stage: Arc<watch::Sender<i32>>,
+        db: Arc<WardsonDbClient>,
+        _frames: mpsc::Receiver<Result<ConversationResponse, Status>>,
+    }
+
+    impl WizardRig {
+        fn new() -> Self {
+            let (say, said) = mpsc::channel(8);
+            let (tx, frames) = mpsc::channel(64);
+            let pending = Arc::new(Mutex::new(None));
+            WizardRig {
+                say,
+                said: tokio_stream::wrappers::ReceiverStream::new(said),
+                commands: SetupCommands::new(&tx, &pending),
+                stage: Arc::new(watch::channel(OperatingMode::Setup as i32).0),
+                // No database answers here: a stage that reads the stored
+                // configuration finds none.
+                db: Arc::new(WardsonDbClient::from_url("http://127.0.0.1:1")),
+                _frames: frames,
+            }
+        }
+    }
+
+    fn operator_says(text: &str) -> Result<ConversationRequest, Status> {
+        Ok(ConversationRequest {
+            request_type: Some(conversation_request::RequestType::UserMessage(UserMessage {
+                content: text.to_string(),
+                ..Default::default()
+            })),
+        })
+    }
+
+    /// The finding: a console that closed its stream at a question of the
+    /// wizard went on into Learning Mode with the built-in configuration.
+    /// The stage now says that the console left, and its wizard is still
+    /// waiting, for the caller to end.
+    #[tokio::test]
+    async fn a_console_that_leaves_at_a_question_of_the_wizard_has_left_and_has_configured_nothing() {
+        let mut rig = WizardRig::new();
+        let (wizard_tx, mut wizard_rx) = mpsc::channel::<String>(1);
+        let mut wizard = tokio::spawn(async move {
+            // A wizard at its first question: it waits for an answer.
+            let _ = wizard_rx.recv().await;
+            std::future::pending::<anyhow::Result<config::SystemConfig>>().await
+        });
+        drop(rig.say);
+
+        let ended = drive_wizard(&mut rig.said, &mut wizard, &wizard_tx, &rig.commands, &rig.db, &rig.stage).await;
+
+        assert_eq!(ended, WizardEnd::ConsoleLeft);
+        assert!(!wizard.is_finished(), "the wizard is the caller's to end");
+        assert_eq!(*rig.stage.borrow(), OperatingMode::Setup as i32, "nothing was configured, and nobody is woken");
+        wizard.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_fails_during_the_wizard_is_a_console_that_left() {
+        let mut rig = WizardRig::new();
+        let (wizard_tx, _wizard_rx) = mpsc::channel::<String>(1);
+        let mut wizard = tokio::spawn(std::future::pending::<anyhow::Result<config::SystemConfig>>());
+        rig.say.send(Err(Status::unavailable("the connection was reset"))).await.unwrap();
+
+        let ended = drive_wizard(&mut rig.said, &mut wizard, &wizard_tx, &rig.commands, &rig.db, &rig.stage).await;
+
+        assert_eq!(ended, WizardEnd::ConsoleLeft);
+        wizard.abort();
+    }
+
+    /// The operator's answers reach the wizard, and its configuration ends
+    /// the stage and wakes the consoles that wait in a wizard of their own.
+    #[tokio::test]
+    async fn the_wizards_configuration_ends_the_stage_and_wakes_the_other_consoles() {
+        let mut rig = WizardRig::new();
+        let (wizard_tx, mut wizard_rx) = mpsc::channel::<String>(1);
+        let mut wizard = tokio::spawn(async move {
+            let name = wizard_rx.recv().await.expect("an answer");
+            let mut cfg = crate::config::tests_support::minimal_cfg();
+            cfg.name = name;
+            cfg.api_key = "sk-test".into();
+            cfg.timezone = "Europe/Berlin".into();
+            Ok(cfg)
+        });
+        let mut woken = rig.stage.subscribe();
+        rig.say.send(operator_says("Embra")).await.unwrap();
+
+        let ended = drive_wizard(&mut rig.said, &mut wizard, &wizard_tx, &rig.commands, &rig.db, &rig.stage).await;
+
+        assert_eq!(ended, WizardEnd::Configured { api_key: "sk-test".into(), timezone: "Europe/Berlin".into() });
+        assert!(woken.has_changed().unwrap());
+        assert_eq!(*woken.borrow_and_update(), OperatingMode::Learning as i32);
+    }
+
+    /// A wizard that ends without a configuration ends the stage as failed,
+    /// with its reason for the console; it used to fall through into
+    /// Learning Mode like the console that left.
+    #[tokio::test]
+    async fn a_wizard_that_fails_ends_the_stage_with_its_reason() {
+        let mut rig = WizardRig::new();
+        let (wizard_tx, _wizard_rx) = mpsc::channel::<String>(1);
+        let mut wizard = tokio::spawn(async { Err(anyhow::anyhow!("the database refused the configuration")) });
+
+        let ended = drive_wizard(&mut rig.said, &mut wizard, &wizard_tx, &rig.commands, &rig.db, &rig.stage).await;
+
+        assert_eq!(ended, WizardEnd::Failed("the database refused the configuration".into()));
+        assert_eq!(
+            wizard_failed_notice("the database refused the configuration"),
+            "The setup could not be completed: the database refused the configuration. Nothing was configured. Reconnect to start it again."
+        );
+        assert_eq!(*rig.stage.borrow(), OperatingMode::Setup as i32);
+        drop(rig.say);
+    }
+
+    /// A stage signal with no configuration behind it is no end: the
+    /// console's wizard goes on.
+    #[tokio::test]
+    async fn a_stage_signal_without_a_stored_configuration_ends_nothing() {
+        let mut rig = WizardRig::new();
+        let (wizard_tx, _wizard_rx) = mpsc::channel::<String>(1);
+        let mut wizard = tokio::spawn(std::future::pending::<anyhow::Result<config::SystemConfig>>());
+        let stage = rig.stage.clone();
+        let say = rig.say.clone();
+        let poke = tokio::spawn(async move {
+            let _ = stage.send_replace(OperatingMode::Learning as i32);
+            // Then the console leaves: that is what ends the stage.
+            tokio::task::yield_now().await;
+            drop(say);
+        });
+        drop(rig.say);
+
+        let ended = drive_wizard(&mut rig.said, &mut wizard, &wizard_tx, &rig.commands, &rig.db, &rig.stage).await;
+
+        poke.await.unwrap();
+        assert_eq!(ended, WizardEnd::ConsoleLeft);
+        wizard.abort();
+    }
+}

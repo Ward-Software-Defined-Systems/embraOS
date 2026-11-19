@@ -37,7 +37,7 @@ pub(super) async fn run_learning_loop<S>(
     onboarding_stage: &Arc<watch::Sender<i32>>,
     stop: TurnStop<'_>,
     commands: &SetupCommands,
-) -> anyhow::Result<()>
+) -> anyhow::Result<LearningEnd>
 where
     S: futures::Stream<Item = Result<ConversationRequest, Status>> + Unpin,
 {
@@ -88,7 +88,7 @@ where
     }
     // If soul is sealed, we shouldn't be here — but check anyway
     if learning::is_soul_sealed(db).await.unwrap_or(false) {
-        return Ok(());
+        return Ok(LearningEnd::Sealed);
     }
 
     // Send mode transition. Sprint 4: include Brain: <model> so the
@@ -136,7 +136,7 @@ where
         // left to do then: its model turn is not run and nothing is written.
         if before_the_seal(&state.phase) && learning::is_soul_sealed(db).await.unwrap_or(false) {
             let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-            return Ok(());
+            return Ok(LearningEnd::Sealed);
         }
 
         if state.phase == learning::LearningPhase::IdentityFormation && !import_offered {
@@ -150,11 +150,11 @@ where
                     // Mirror the wait-block handling: announce Operational
                     // on OUR stream and hand off.
                     let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-                    return Ok(());
+                    return Ok(LearningEnd::Sealed);
                 }
                 ImportOutcome::Disconnected => {
                     debug!("Client disconnected during import dialogue");
-                    return Ok(());
+                    return Ok(LearningEnd::ConsoleLeft);
                 }
                 ImportOutcome::Imported { renamed_to, summary_line } => {
                     if let Some(new_name) = renamed_to {
@@ -224,7 +224,7 @@ where
                 PhaseEnd::Advanced => {}
                 PhaseEnd::SealedElsewhere => {
                     let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-                    return Ok(());
+                    return Ok(LearningEnd::Sealed);
                 }
                 PhaseEnd::Open | PhaseEnd::Failed => {
                     // The registry was not written, and this phase has no
@@ -235,11 +235,11 @@ where
                         Wait::Line(_) => continue,
                         Wait::Sealed => {
                             let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-                            return Ok(());
+                            return Ok(LearningEnd::Sealed);
                         }
                         Wait::Disconnected => {
                             debug!("Client disconnected during learning");
-                            return Ok(());
+                            return Ok(LearningEnd::ConsoleLeft);
                         }
                     }
                 }
@@ -333,11 +333,11 @@ where
                 Wait::Line(content) => content,
                 Wait::Sealed => {
                     let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-                    return Ok(());
+                    return Ok(LearningEnd::Sealed);
                 }
                 Wait::Disconnected => {
                     debug!("Client disconnected during learning");
-                    return Ok(());
+                    return Ok(LearningEnd::ConsoleLeft);
                 }
             };
             state.conversation_history.push(Message::user(&content));
@@ -385,7 +385,7 @@ where
 
         if matches!(ended, PhaseEnd::SealedElsewhere) {
             let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
-            return Ok(());
+            return Ok(LearningEnd::Sealed);
         }
 
         if state.phase == learning::LearningPhase::Complete {
@@ -410,7 +410,18 @@ where
         })).await;
     }
 
-    Ok(())
+    Ok(LearningEnd::Sealed)
+}
+
+/// How Learning Mode ended for one console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LearningEnd {
+    /// The soul is sealed, by this console or by another while this one
+    /// waited: the console goes on into its session.
+    Sealed,
+    /// The console closed its stream. Nothing is complete, and nothing
+    /// that follows a seal (a session, the operational loop) is its due.
+    ConsoleLeft,
 }
 
 /// The phases a console runs before the soul is sealed. A console that
@@ -818,7 +829,7 @@ mod loop_tests {
     struct Console {
         say: mpsc::Sender<Result<ConversationRequest, Status>>,
         frames: mpsc::Receiver<Result<ConversationResponse, Status>>,
-        task: tokio::task::JoinHandle<anyhow::Result<()>>,
+        task: tokio::task::JoinHandle<anyhow::Result<LearningEnd>>,
     }
 
     impl Console {
@@ -883,7 +894,7 @@ mod loop_tests {
         }
 
         /// The console goes away; how the loop ended.
-        async fn detach(self) -> anyhow::Result<()> {
+        async fn detach(self) -> anyhow::Result<LearningEnd> {
             drop(self.say);
             tokio::time::timeout(Duration::from_secs(10), self.task).await.expect("the loop ends").expect("no panic")
         }
@@ -1128,6 +1139,25 @@ mod loop_tests {
         db.verify().await;
     }
 
+    /// A console that closes its stream in Learning Mode has completed
+    /// nothing. The loop used to end the same way as after a seal, and its
+    /// caller went on: "Learning Mode complete" in the log, and session
+    /// `main` made with no soul sealed.
+    #[tokio::test]
+    async fn a_console_that_leaves_learning_mode_has_left_and_has_sealed_nothing() {
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(answer("What would you like me to be called?"))
+            .mount(&provider)
+            .await;
+        let db = MockServer::start().await;
+        let mut console = Console::attach(&provider, &db);
+        console.until("the kickoff's answer", |f| matches!(f, ResponseType::Done(_))).await;
+
+        assert_eq!(console.detach().await.expect("no error"), LearningEnd::ConsoleLeft);
+    }
+
     /// Another console seals the soul while this one is in a turn of a
     /// phase before the seal. The answer that calls the phase complete
     /// writes nothing; this console announces the sealed soul and hands
@@ -1156,7 +1186,8 @@ mod loop_tests {
             !frames.iter().any(|f| matches!(f, ResponseType::System(m) if m.msg_type == SystemMessageType::Error as i32)),
             "{frames:?}"
         );
-        tokio::time::timeout(Duration::from_secs(10), console.task).await.expect("the loop ends").unwrap().unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(10), console.task).await.expect("the loop ends").unwrap().unwrap();
+        assert_eq!(ended, LearningEnd::Sealed, "a seal made elsewhere is a seal: this console goes on into its session");
         assert_eq!(asked(&provider).await.len(), 1);
         db.verify().await;
     }
