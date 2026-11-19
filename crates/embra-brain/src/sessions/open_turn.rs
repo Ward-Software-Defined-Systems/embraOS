@@ -220,12 +220,74 @@ async fn recover_session(db: &WardsonDbClient, name: &str, meta: &mut SessionMet
     }
 }
 
+/// How long ago, in the words of a notice: seconds under a minute, minutes
+/// under an hour, hours and minutes after.
+fn ago(since: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - since).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("{secs} s"),
+        60..=3599 => format!("{} min", secs / 60),
+        _ => format!("{} h {} min", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
+/// Bytes of the operator's message quoted in the notice.
+const MESSAGE_SHOWN: usize = 160;
+
+/// What a console is told when it attaches to a session in which a turn is
+/// running. The turn's frames go to the console that started it, and that
+/// console may be gone (a phone that lost its connection, a browser tab
+/// that was reloaded): the one that attaches now saw neither the running
+/// turn nor, later, its end. The record of the open turn says what runs.
+pub(crate) fn running_notice(open: &OpenTurn, now: DateTime<Utc>) -> String {
+    let message: String = open.message.content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let quoted = if message.len() > MESSAGE_SHOWN {
+        format!("{}…", crate::tools::sessions::truncate_str(&message, MESSAGE_SHOWN))
+    } else {
+        message
+    };
+    let progress = match open.calls {
+        0 => "The model has not answered yet".to_string(),
+        1 => "One model call of it is done".to_string(),
+        n => format!("{n} model calls of it are done"),
+    };
+    format!(
+        "A turn is running in this session. It began {} ago with: {quoted}\n{progress}. This console was not attached when it began: the reply appears here when the turn ends, and a stop (Esc, /stop) ends it from here too.",
+        ago(open.started_at, now)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{Value, json};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// What a console that attaches during a turn is told: when the turn
+    /// began, with which message, how far it is, and what the console can
+    /// do.
+    #[test]
+    fn a_running_turns_notice_says_when_it_began_with_what_and_how_far_it_is() {
+        let at = |t: &str| -> DateTime<Utc> { t.parse().unwrap() };
+        let open = record("Read the three files\n  and compare them", 4, "", 0);
+        let said = running_notice(&open, at("2026-11-19T10:00:42Z"));
+        assert_eq!(
+            said,
+            "A turn is running in this session. It began 42 s ago with: Read the three files and compare them\nThe model has not answered yet. This console was not attached when it began: the reply appears here when the turn ends, and a stop (Esc, /stop) ends it from here too."
+        );
+        let said = running_notice(&record("hello", 4, "Two are read.", 1), at("2026-11-19T10:12:30Z"));
+        assert!(said.contains("It began 12 min ago with: hello\nOne model call of it is done."), "{said}");
+        let said = running_notice(&record("hello", 4, "Two are read.", 7), at("2026-11-19T11:20:00Z"));
+        assert!(said.contains("It began 1 h 20 min ago") && said.contains("7 model calls of it are done."), "{said}");
+        // A long message is cut, on a character's boundary.
+        let long = "é".repeat(400);
+        let said = running_notice(&record(&long, 4, "", 0), at("2026-11-19T10:00:01Z"));
+        let quoted = said.split("with: ").nth(1).unwrap().split('\n').next().unwrap();
+        assert!(quoted.ends_with('…') && quoted.len() <= MESSAGE_SHOWN + '…'.len_utf8(), "{}", quoted.len());
+        // A clock that reads earlier than the start counts no negative time.
+        assert!(running_notice(&open, at("2026-11-19T09:59:00Z")).contains("It began 0 s ago"));
+    }
 
     fn record(message: &str, base_len: usize, text: &str, calls: u32) -> OpenTurn {
         OpenTurn {

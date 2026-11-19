@@ -1929,6 +1929,48 @@ async fn handle_turn(
                 )),
             })).await;
 
+            // A turn may be running in this session. It is another console's
+            // (a stream handles its requests one at a time, so this one is
+            // running none), and that console may be gone: a phone that lost
+            // its connection, a tab that was reloaded. The one that attaches
+            // saw neither the turn nor, later, its end. It is told what
+            // runs (the open turn's record), shown as busy, so that its stop
+            // reaches the turn, and sent the reply when the turn ends.
+            //
+            // The bus is listened to before the record is read: a turn that
+            // ends between the read and the task's first run is heard.
+            let turn_events = activity::subscribe();
+            let running = if in_turn.load(Ordering::SeqCst) {
+                store.get_meta(&session_name).await.ok().flatten().and_then(|meta| meta.open_turns.into_iter().next_back())
+            } else {
+                None
+            };
+            if let Some(open) = &running {
+                send_system(
+                    tx,
+                    crate::sessions::open_turn::running_notice(open, chrono::Utc::now()),
+                    SystemMessageType::Info,
+                )
+                .await;
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Thinking(ThinkingState {
+                            is_thinking: true,
+                            name: name.clone(),
+                            current_tool: String::new(),
+                        })),
+                    }))
+                    .await;
+                tokio::spawn(tell_when_the_turn_ends(
+                    turn_events,
+                    tx.clone(),
+                    store.clone(),
+                    session_name.clone(),
+                    open.id.clone(),
+                    open.base_len,
+                ));
+            }
+
             // Resume-briefing trigger: existing session, prior history,
             // Operational mode only. Mirrors the slash-command synthetic-turn
             // precedent above (`handle_slash_command` → `Box::pin(handle_request(...))`).
@@ -1944,7 +1986,11 @@ async fn handle_turn(
             // mid-recap briefing from restarting on every re-attach. A
             // missing/unreadable meta fires — preserves pre-gate behavior
             // on broken-meta paths (history already loaded fine).
-            if !new_session && is_sealed && history_len > 0 {
+            //
+            // Not beside a running turn: a briefing is a turn, and a turn
+            // that has waited half an hour for a local model made the
+            // session look idle to the gate below.
+            if !new_session && is_sealed && history_len > 0 && running.is_none() {
                 let meta = store.get_meta(&session_name).await.ok().flatten();
                 let (idle_ok, idle_secs) = match &meta {
                     Some(m) => resume_briefing_idle_ok(m.last_active, chrono::Utc::now()),
@@ -2301,6 +2347,86 @@ pub(super) fn terminal_outcome_notice(
             format!("Provider stopped this response early ({reason:?})."),
         )),
     }
+}
+
+/// How often a console that waits for a running turn's end looks at the
+/// turn's record without having heard that a turn ended.
+const RUNNING_TURN_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A turn's running mark goes when its loop ends, and its save follows:
+/// the record is removed by the save's last write, a moment later. After a
+/// turn's end is heard the record is read this often, this many times.
+const SAVE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const SAVE_POLLS: u32 = 50;
+
+/// Send a console that attached during a turn the turn's reply when it has
+/// ended. The turn's own frames went to the console that started it. The
+/// end is heard on the activity bus (`TurnEnded`, any session's) and read
+/// from the record: a record that is gone is a turn that is saved, or one
+/// that saved nothing. Ends when the console goes.
+pub(super) async fn tell_when_the_turn_ends(
+    mut events: tokio::sync::broadcast::Receiver<activity::Event>,
+    tx: mpsc::Sender<Result<ConversationResponse, Status>>,
+    store: crate::sessions::SessionStore,
+    session: String,
+    open_id: String,
+    base_len: usize,
+) {
+    // A record that cannot be read right now is no reason to say that the
+    // turn ended: it counts as there.
+    let record_is_gone = async || match store.get_meta(&session).await {
+        Ok(Some(meta)) => !meta.open_turns.iter().any(|open| open.id == open_id),
+        Ok(None) => true,
+        Err(_) => false,
+    };
+    'turn: loop {
+        if record_is_gone().await {
+            break;
+        }
+        // Until a turn ends somewhere, or the slow look.
+        loop {
+            tokio::select! {
+                () = tx.closed() => return,
+                event = events.recv() => match event {
+                    Ok(activity::Event::TurnEnded) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                },
+                () = tokio::time::sleep(RUNNING_TURN_RECHECK) => continue 'turn,
+            }
+        }
+        // A turn ended. If it was this one, its record goes with its save.
+        for _ in 0..SAVE_POLLS {
+            if record_is_gone().await {
+                break 'turn;
+            }
+            tokio::select! {
+                () = tx.closed() => return,
+                () = tokio::time::sleep(SAVE_POLL) => {}
+            }
+        }
+    }
+    // The turn's reply is the history's last entry, when the history grew.
+    let reply = match store.load_history(&session).await {
+        Ok(history) if history.len() > base_len => {
+            history.last().filter(|last| last.role == "assistant").map(|last| last.content.clone())
+        }
+        _ => None,
+    };
+    let said = match &reply {
+        Some(_) => "The turn that was running has ended. Its reply:",
+        None => "The turn that was running has ended and saved no reply.",
+    };
+    send_system(&tx, said.to_string(), SystemMessageType::Info).await;
+    // The `Done` ends the busy state this console was given at its attach,
+    // and carries the reply as a row.
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Done(StreamDone {
+                full_response: reply.unwrap_or_default(),
+            })),
+        }))
+        .await;
 }
 
 /// Tells one client that the frames that follow replay a session's history:

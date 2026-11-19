@@ -1478,3 +1478,100 @@ async fn a_guardian_command_that_asks_for_the_check_runs_as_a_turn_and_the_other
         assert!(!guardian_runs_the_check(other), "{other:?}");
     }
 }
+
+// ── A console that attaches while a turn runs ───────────────────────
+
+/// The rig's session answers the probe an attach starts with, and is
+/// recorded under the provider the rig runs on (an attach refuses a session
+/// of another provider's).
+async fn session_is_there(rig: &Rig) {
+    rig.meta.doc.lock().unwrap()["provider"] = json!("lm_studio");
+    Mock::given(method("GET"))
+        .and(path(format!("/sessions.{SESSION}.meta")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&rig.server)
+        .await;
+}
+
+fn attach_to(session: &str) -> ConversationRequest {
+    ConversationRequest {
+        request_type: Some(conversation_request::RequestType::SessionAttach(SessionAttach {
+            session_name: session.to_string(),
+        })),
+    }
+}
+
+/// A turn's frames go to the console that started it. One that attaches
+/// while the turn runs (a phone that reconnects, a reloaded tab) saw
+/// neither the running turn nor its end. It is told what runs, shown as
+/// busy so that its stop reaches the turn, given no briefing beside the
+/// turn, and sent the reply when the turn has ended.
+#[tokio::test]
+async fn a_console_that_attaches_while_a_turn_runs_is_told_and_is_sent_the_reply_when_it_ends() {
+    let rig = Rig::new().await;
+    session_is_there(&rig).await;
+    rig.then_holds();
+    let (tx2, mut rx2) = mpsc::channel::<Result<ConversationResponse, Status>>(256);
+
+    // The first console's turn waits at its model call; the second attaches; the turn is stopped.
+    rig.say_and_stop_at_the_held_call("a question that takes long", async || {
+        handle_request(attach_to(SESSION), &tx2, &rig.ctx, "UTC", "", &rig.stop_rx).await.expect("the attach");
+    })
+    .await;
+
+    let mut second = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(20), rx2.recv())
+            .await
+            .unwrap_or_else(|_| panic!("the second console is sent the turn's end; it got {second:?}"))
+            .expect("its stream is open")
+            .expect("a frame")
+            .response_type
+            .expect("a typed frame");
+        let done = matches!(frame, ResponseType::Done(_));
+        second.push(frame);
+        if done {
+            break;
+        }
+    }
+    let told = second
+        .iter()
+        .position(|f| matches!(f, ResponseType::System(m) if m.content.starts_with("A turn is running in this session. It began ")))
+        .unwrap_or_else(|| panic!("the second console is told that a turn runs: {second:?}"));
+    let ResponseType::System(notice) = &second[told] else { unreachable!() };
+    assert!(notice.content.contains("with: a question that takes long\n"), "{}", notice.content);
+    assert!(notice.content.contains("The model has not answered yet."), "{}", notice.content);
+    assert!(
+        matches!(&second[told + 1], ResponseType::Thinking(t) if t.is_thinking && t.current_tool.is_empty()),
+        "it is shown as busy, which is when a console sends a stop: {second:?}"
+    );
+    let n = second.len();
+    assert!(
+        matches!(&second[n - 2], ResponseType::System(m) if m.content == "The turn that was running has ended. Its reply:"),
+        "{second:?}"
+    );
+    assert!(
+        matches!(&second[n - 1], ResponseType::Done(d) if d.full_response == crate::sessions::model_view::OPERATOR_STOP_MARKER),
+        "the turn's saved reply, which ends the busy state: {second:?}"
+    );
+    assert_eq!(rig.asked().await.len(), 1, "the attach asked the model nothing beside the running turn");
+}
+
+#[tokio::test]
+async fn a_console_that_attaches_to_a_quiet_session_is_told_of_no_turn() {
+    let rig = Rig::new().await;
+    session_is_there(&rig).await;
+
+    let frames = rig.send(attach_to(SESSION).request_type.expect("an attach")).await;
+
+    assert!(
+        frames.iter().any(|f| matches!(f, ResponseType::System(m) if m.content.starts_with("Session 'main' attached"))),
+        "the attach went through: {frames:?}"
+    );
+
+    assert!(
+        !frames.iter().any(|f| matches!(f, ResponseType::System(m) if m.content.contains("A turn is running"))),
+        "{frames:?}"
+    );
+    assert!(!frames.iter().any(|f| matches!(f, ResponseType::Thinking(t) if t.is_thinking)), "{frames:?}");
+}
