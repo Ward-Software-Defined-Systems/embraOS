@@ -648,6 +648,10 @@ pub(super) async fn stream_brain_to_grpc(
                 if full_response.is_empty() {
                     full_response = full;
                 }
+                // A provider's last event: the answer is whole. Reading on
+                // waited for the stream to close with the stop still armed,
+                // and a stop in that window sent a second `Done`.
+                break;
             }
             StreamEvent::BlockComplete => {}
             StreamEvent::ReasoningDelta(text) => {

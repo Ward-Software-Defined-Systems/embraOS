@@ -3200,6 +3200,90 @@ mod operator_stop_tests {
         );
     }
 
+    /// `Complete` is a provider's last event and ends the call. The
+    /// collector read on until the stream closed, with the stop still
+    /// armed: a stop in that window made a finished reply a stopped one,
+    /// sent its text in a second `Done` and dropped its tool calls. The
+    /// stream here stays open after `Complete`; under the paused clock a
+    /// collector that reads on is at its deadline at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_complete_ends_the_call_though_the_stream_stays_open() {
+        use crate::provider::{AssistantTurn, Block};
+        use embra_common::proto::brain::conversation_response::ResponseType;
+        use futures::StreamExt;
+
+        let complete = AssistantTurn {
+            content: vec![
+                Block::Text("Working.".to_string()),
+                Block::ToolCall {
+                    id: "t1".to_string(),
+                    name: "time".to_string(),
+                    args: serde_json::json!({}),
+                    provider_opaque: None,
+                },
+            ],
+            outcome: TurnOutcome::ToolUse,
+            stop_details: None,
+        };
+        let events = futures::stream::iter(vec![
+            StreamEvent::TextDelta("Working.".to_string()),
+            StreamEvent::Complete(complete),
+        ])
+        .chain(futures::stream::pending());
+        let (_stop_tx, stop_rx) = watch::channel(0u64);
+        let mut check = StopCheck::new(stop_rx);
+        let (tx, mut rx) = mpsc::channel(8);
+        let turn = tokio::time::timeout(
+            std::time::Duration::from_secs(3600),
+            super::collect_response(events.boxed(), &tx, "Embra", Some(&mut check)),
+        )
+        .await
+        .expect("the call ends at Complete")
+        .expect("no error")
+        .expect("the turn the provider completed");
+        assert_eq!(turn.outcome, TurnOutcome::ToolUse);
+        assert!(turn.has_tool_call(), "the tool call is the loop's to run");
+
+        drop(tx);
+        let mut dones = Vec::new();
+        while let Some(Ok(frame)) = rx.recv().await {
+            if let Some(ResponseType::Done(d)) = frame.response_type {
+                dones.push(d.full_response);
+            }
+        }
+        assert_eq!(dones, ["Working."]);
+    }
+
+    /// The same for a learning turn: its answer is whole at `Complete`.
+    #[tokio::test(start_paused = true)]
+    async fn a_learning_answer_ends_at_complete_though_the_stream_stays_open() {
+        use crate::provider::{AssistantTurn, Block};
+        use futures::StreamExt;
+
+        let complete = AssistantTurn {
+            content: vec![Block::Text("Noted.".to_string())],
+            outcome: TurnOutcome::EndTurn,
+            stop_details: None,
+        };
+        let mut events: BoxStream<'static, StreamEvent> = futures::stream::iter(vec![
+            StreamEvent::TextDelta("Noted.".to_string()),
+            StreamEvent::Complete(complete),
+        ])
+        .chain(futures::stream::pending())
+        .boxed();
+        let (_stop_tx, stop_rx) = watch::channel(0u64);
+        let mut check = StopCheck::new(stop_rx);
+        let (tx, _rx) = mpsc::channel(8);
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(3600),
+            stream_brain_to_grpc(&mut events, &tx, "Embra", Some(&mut check)),
+        )
+        .await
+        .expect("the answer ends at Complete");
+        assert!(!answer.stopped);
+        assert_eq!(answer.text, "Noted.");
+    }
+
     fn stop_notice() -> Option<(SystemMessageType, String)> {
         super::terminal_outcome_notice(
             TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),

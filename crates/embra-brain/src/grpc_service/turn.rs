@@ -2535,6 +2535,11 @@ pub(super) async fn collect_response(
                     }))
                     .await;
                 full_turn = Some(turn);
+                // A provider's last event. Reading on waited for the stream
+                // to close with the stop still armed: a stop in that window
+                // made a finished reply a stopped one, sent its text in a
+                // second `Done` and dropped its tool calls.
+                break;
             }
         }
     }
