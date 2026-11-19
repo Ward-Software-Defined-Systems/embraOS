@@ -10,6 +10,7 @@ pub use serde_json::Value as JsonValue;
 
 pub mod json_tokens;
 pub mod mask;
+pub mod theme;
 pub use json_tokens::{JsonToken, JsonTokenKind, tokenize_line};
 pub use mask::{
     CREDENTIAL_HEADERS, MASK_CHAR, MASKED_HEADERS, MASKED_VALUE, mask_credential_headers, mask_secret_argument,
