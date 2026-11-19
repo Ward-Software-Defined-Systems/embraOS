@@ -3388,12 +3388,34 @@ mod operator_stop_tests {
         }
     }
 
+    /// A learning turn whose model call failed: what had arrived of it is
+    /// a partial, and the marker that ends a phase in it was not the
+    /// model's last word. It completed the phase.
+    #[test]
+    fn a_cut_learning_turn_ends_no_phase_and_is_marked() {
+        let (entry, done) = learning_turn_outcome(&LearningAnswer {
+            text: "Here is what I understood so far. [PHASE_COMPLETE]".into(),
+            stopped: false,
+            failed: true,
+        });
+        assert!(!done, "a cut answer ends no phase");
+        assert_eq!(
+            entry,
+            "Here is what I understood so far.\n\n(response interrupted by a failed model call)"
+        );
+        let (entry, done) =
+            learning_turn_outcome(&LearningAnswer { text: String::new(), stopped: false, failed: true });
+        assert!(!done);
+        assert_eq!(entry, crate::sessions::model_view::CALL_FAILED_MARKER);
+    }
+
     #[test]
     fn a_stopped_learning_turn_ends_no_phase_and_is_marked() {
         // Stopped after the marker had arrived: the phase is not over.
         let (entry, done) = learning_turn_outcome(&LearningAnswer {
             text: "Here is what I understood so far. [PHASE_COMPLETE]".into(),
             stopped: true,
+            failed: false,
         });
         assert!(!done);
         assert_eq!(
@@ -3402,7 +3424,7 @@ mod operator_stop_tests {
         );
 
         // Stopped before anything arrived.
-        let (entry, done) = learning_turn_outcome(&LearningAnswer { text: String::new(), stopped: true });
+        let (entry, done) = learning_turn_outcome(&LearningAnswer { text: String::new(), stopped: true, failed: false });
         assert!(!done);
         assert_eq!(entry, "(turn stopped by operator)");
     }
@@ -3412,12 +3434,14 @@ mod operator_stop_tests {
         let (entry, done) = learning_turn_outcome(&LearningAnswer {
             text: "Tell me more about that.".into(),
             stopped: false,
+            failed: false,
         });
         assert_eq!((entry.as_str(), done), ("Tell me more about that.", false));
 
         let (entry, done) = learning_turn_outcome(&LearningAnswer {
             text: "That completes it.\n[PHASE_COMPLETE]".into(),
             stopped: false,
+            failed: false,
         });
         assert_eq!((entry.as_str(), done), ("That completes it.", true));
 
@@ -3425,6 +3449,7 @@ mod operator_stop_tests {
         let (entry, done) = learning_turn_outcome(&LearningAnswer {
             text: "[PHASE_COMPLETE]".into(),
             stopped: false,
+            failed: false,
         });
         assert_eq!((entry.as_str(), done), ("(phase complete)", true));
     }

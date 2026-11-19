@@ -293,19 +293,19 @@ where
         // A turn of the learning loop is a turn: marked as running from
         // here to the end of its stream, so that an operator stop reaches it.
         let (in_turn_guard, mut stop_check) = stop.begin("learning");
-        let mut brain_rx = provider
-            .stream_turn(
-                &messages,
-                &system_bundle,
-                &empty_manifest,
-                LlmRequestOptions {
-                    include_reasoning: config.show_reasoning(),
-                },
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Brain call failed in learning: {}", e))?;
-
-        let answer = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
+        let answer = learning_answer(
+            provider.as_ref(),
+            &messages,
+            &system_bundle,
+            &empty_manifest,
+            LlmRequestOptions {
+                include_reasoning: config.show_reasoning(),
+            },
+            tx,
+            &config.name,
+            &mut stop_check,
+        )
+        .await;
         drop(in_turn_guard);
 
         // What goes into the conversation history, and whether the phase is
@@ -359,19 +359,19 @@ where
                 state.conversation_history.iter().map(legacy_message_to_api).collect(),
             );
             let (in_turn_guard, mut stop_check) = stop.begin("learning");
-            let mut brain_rx = provider
-                .stream_turn(
-                    &messages,
-                    &system_bundle,
-                    &empty_manifest,
-                    LlmRequestOptions {
-                        include_reasoning: config.show_reasoning(),
-                    },
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
-
-            let answer = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
+            let answer = learning_answer(
+                provider.as_ref(),
+                &messages,
+                &system_bundle,
+                &empty_manifest,
+                LlmRequestOptions {
+                    include_reasoning: config.show_reasoning(),
+                },
+                tx,
+                &config.name,
+                &mut stop_check,
+            )
+            .await;
             drop(in_turn_guard);
 
             let (history_entry, phase_complete) = learning_turn_outcome(&answer);
@@ -529,6 +529,74 @@ pub(super) struct LearningAnswer {
     pub(super) text: String,
     /// The operator stopped the turn; `text` is what had arrived by then.
     pub(super) stopped: bool,
+    /// The model call failed: the request was refused or lost, or its
+    /// stream ended without a result; `text` is what had arrived by then.
+    pub(super) failed: bool,
+}
+
+/// One model call of a learning turn, and its answer however the call
+/// ended. A request that was refused or lost before its stream was an
+/// error out of the loop: Learning Mode ended for that console, which went
+/// on into the session loop with no session and no seal. It is a turn that
+/// was cut: said, closed with its `Done`, and the phase stays open.
+#[expect(clippy::too_many_arguments, reason = "the call's eight inputs, each used once; a struct would name them twice")]
+async fn learning_answer(
+    provider: &dyn LlmProvider,
+    messages: &[ApiMessage],
+    system: &SystemPromptBundle,
+    tools: &ToolManifest,
+    options: LlmRequestOptions,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    name: &str,
+    stop: &mut StopCheck,
+) -> LearningAnswer {
+    match open_model_stream(provider, messages, system, tools, options, stop).await {
+        Opened::Stream(mut brain_rx) => stream_brain_to_grpc(&mut brain_rx, tx, name, Some(stop)).await,
+        Opened::Stopped => {
+            close_stopped_answer(tx, String::new()).await;
+            LearningAnswer { text: String::new(), stopped: true, failed: false }
+        }
+        Opened::Failed(e) => {
+            error!("Brain call failed in learning: {e}");
+            send_system(tx, format!("Brain error: {e}"), SystemMessageType::Error).await;
+            close_cut_answer(tx, String::new()).await;
+            LearningAnswer { text: String::new(), stopped: false, failed: true }
+        }
+    }
+}
+
+/// The frames that end a learning turn the operator stopped: the `Done`
+/// first, which turns the partial the operator watched into a row, then
+/// the Warning under it, where "above" is true.
+async fn close_stopped_answer(tx: &mpsc::Sender<Result<ConversationResponse, Status>>, partial: String) {
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Done(StreamDone { full_response: partial })),
+        }))
+        .await;
+    send_system(
+        tx,
+        "Turn stopped by operator — any partial response above is incomplete.".to_string(),
+        SystemMessageType::Warning,
+    )
+    .await;
+}
+
+/// The frames that end a learning turn whose model call failed: the `Done`
+/// with what had arrived, then what the operator does next.
+async fn close_cut_answer(tx: &mpsc::Sender<Result<ConversationResponse, Status>>, partial: String) {
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Done(StreamDone { full_response: partial })),
+        }))
+        .await;
+    send_system(
+        tx,
+        "The answer was cut by a failed model call (the error is above). The phase is where it was: write again to go on."
+            .to_string(),
+        SystemMessageType::Warning,
+    )
+    .await;
 }
 
 /// What a learning turn leaves in the conversation history, and whether it
@@ -538,15 +606,13 @@ pub(super) struct LearningAnswer {
 /// without text is written as `(phase complete)`: an empty assistant message
 /// is rejected by the API, and a model may send the marker alone. A turn the
 /// operator stopped ends no phase, whatever had arrived of it, and is marked
-/// as the operational loop marks one.
+/// as the operational loop marks one. So is a turn whose model call failed:
+/// a marker that arrived in a partial was not the model's last word.
 pub(super) fn learning_turn_outcome(answer: &LearningAnswer) -> (String, bool) {
     let clean = answer.text.replace("[PHASE_COMPLETE]", "").trim().to_string();
-    if answer.stopped {
-        let entry = final_assistant_text(
-            &clean,
-            &[],
-            TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),
-        );
+    if answer.stopped || answer.failed {
+        let reason = if answer.stopped { EarlyStopReason::OperatorStop } else { EarlyStopReason::CallFailed };
+        let entry = final_assistant_text(&clean, &[], TurnOutcome::EarlyStop(reason));
         return (entry, false);
     }
     let phase_complete = answer.text.contains("[PHASE_COMPLETE]");
@@ -560,7 +626,7 @@ pub(super) fn learning_turn_outcome(answer: &LearningAnswer) -> (String, bool) {
 
 /// Stream a provider response to gRPC for the learning loop, return
 /// the full response text (concatenation of all `TextDelta`s) and whether
-/// the operator stopped it.
+/// the operator stopped it or the stream ended without its result.
 pub(super) async fn stream_brain_to_grpc(
     brain_rx: &mut BoxStream<'static, StreamEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -569,6 +635,7 @@ pub(super) async fn stream_brain_to_grpc(
 ) -> LearningAnswer {
     let mut full_response = String::new();
     let mut first_token = true;
+    let mut completed = false;
 
     loop {
         // Same stop-aware receive as collect_response: on operator stop,
@@ -581,23 +648,8 @@ pub(super) async fn stream_brain_to_grpc(
                 tokio::select! {
                     ev = brain_rx.next() => ev,
                     _ = check.triggered() => {
-                        // The Done first: it turns the partial the operator
-                        // watched into a row; the Warning lands under it,
-                        // where "above" is true.
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::Done(
-                                StreamDone { full_response: full_response.clone() }
-                            )),
-                        })).await;
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::System(
-                                SystemMessage {
-                                    content: "Turn stopped by operator — any partial response above is incomplete.".to_string(),
-                                    msg_type: SystemMessageType::Warning as i32,
-                                }
-                            )),
-                        })).await;
-                        return LearningAnswer { text: full_response, stopped: true };
+                        close_stopped_answer(tx, full_response.clone()).await;
+                        return LearningAnswer { text: full_response, stopped: true, failed: false };
                     }
                 }
             }
@@ -651,6 +703,7 @@ pub(super) async fn stream_brain_to_grpc(
                 // A provider's last event: the answer is whole. Reading on
                 // waited for the stream to close with the stop still armed,
                 // and a stop in that window sent a second `Done`.
+                completed = true;
                 break;
             }
             StreamEvent::BlockComplete => {}
@@ -674,7 +727,15 @@ pub(super) async fn stream_brain_to_grpc(
         }
     }
 
-    LearningAnswer { text: full_response, stopped: false }
+    if !completed {
+        // The stream ended without its result (the error was shown as it
+        // arrived): no `Done` went out, and the client waited on. The
+        // partial is closed as a row, without the phase's marker.
+        let partial = full_response.replace("[PHASE_COMPLETE]", "").trim().to_string();
+        close_cut_answer(tx, partial).await;
+        return LearningAnswer { text: full_response, stopped: false, failed: true };
+    }
+    LearningAnswer { text: full_response, stopped: false, failed: false }
 }
 
 /// Save learning conversation history to WardSONDB
@@ -892,6 +953,115 @@ mod loop_tests {
         assert_eq!(texts, [learning::phase_kickoff(&learning::LearningPhase::UserConfiguration).as_str(), "try again"]);
 
         console.detach().await.expect("a console that goes away ends the loop without an error");
+    }
+
+    /// A learning turn's call is refused before any stream. On Gemini and
+    /// the local presets that was an error out of the loop: Learning Mode
+    /// ended for this console, which went on into the session loop with no
+    /// session and no seal. The failure is said, the phase stays where it
+    /// was, and the operator's next message is one more turn of it, sent
+    /// the cut as a note and never as a reply of the model's own.
+    #[tokio::test]
+    async fn a_learning_call_that_fails_ends_no_phase_and_keeps_the_loop() {
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("no such model"))
+            .up_to_n_times(1)
+            .mount(&provider)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(answer("What would you like me to be called?"))
+            .mount(&provider)
+            .await;
+        let db = MockServer::start().await;
+        let mut console = Console::attach(&provider, &db);
+
+        let frames = console.until("the cut turn's Done", |f| matches!(f, ResponseType::Done(_))).await;
+        assert!(frames.iter().any(|f| system(f, SystemMessageType::Error, "HTTP 400")), "{frames:?}");
+        console.until("the notice", |f| system(f, SystemMessageType::Warning, "failed model call")).await;
+
+        console.message("hello again").await;
+        let frames = console
+            .until("the answer", |f| matches!(f, ResponseType::Done(d) if d.full_response.contains("called")))
+            .await;
+        assert!(
+            !frames.iter().any(|f| system(f, SystemMessageType::Info, "advancing to")),
+            "a cut turn ends no phase: {frames:?}"
+        );
+        let requests = asked(&provider).await;
+        assert_eq!(requests.len(), 2, "the kickoff's turn, and the operator's");
+        let sent: Vec<(&str, &str)> = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] != "system")
+            .map(|m| (m["role"].as_str().unwrap(), m["content"].as_str().unwrap()))
+            .collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let kickoff = learning::phase_kickoff(&learning::LearningPhase::UserConfiguration);
+        assert_eq!(
+            sent[0],
+            (
+                "user",
+                format!("{kickoff}\n\n{}\n\nhello again", crate::sessions::model_view::CALL_FAILED_NOTE).as_str()
+            )
+        );
+
+        console.detach().await.expect("the loop went on, and ends when its console goes");
+    }
+
+    /// An answer that is cut inside its stream after the marker that ends
+    /// a phase had arrived. A cut answer decides nothing: it completed the
+    /// phase from a partial.
+    #[tokio::test]
+    async fn a_learning_answer_cut_in_its_stream_ends_no_phase() {
+        let provider = MockServer::start().await;
+        let partial = json!({
+            "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "Noted. [PHASE_COMPLETE]"}, "finish_reason": null}],
+        });
+        let broken = format!("data: {partial}\n\ndata: {}\n\n", json!({"error": {"message": "the slot was lost"}}));
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(broken, "text/event-stream"))
+            .up_to_n_times(1)
+            .mount(&provider)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(answer("What would you like me to be called?"))
+            .mount(&provider)
+            .await;
+        let db = MockServer::start().await;
+        let mut console = Console::attach(&provider, &db);
+
+        let frames = console.until("the notice", |f| system(f, SystemMessageType::Warning, "failed model call")).await;
+        assert!(frames.iter().any(|f| system(f, SystemMessageType::Error, "the slot was lost")), "{frames:?}");
+        assert!(
+            frames.iter().any(|f| matches!(f, ResponseType::Done(d) if d.full_response == "Noted.")),
+            "the partial is closed as a row, without the marker: {frames:?}"
+        );
+        assert!(
+            !frames.iter().any(|f| system(f, SystemMessageType::Info, "advancing to")
+                || system(f, SystemMessageType::Error, "Error processing phase")),
+            "a cut answer completes no phase: {frames:?}"
+        );
+
+        console.message("go on").await;
+        console.until("the answer", |f| matches!(f, ResponseType::Done(d) if d.full_response.contains("called"))).await;
+        let requests = asked(&provider).await;
+        let replies: Vec<&str> = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .filter_map(|m| m["content"].as_str())
+            .collect();
+        assert_eq!(replies, [format!("Noted.\n\n{}", crate::sessions::model_view::CALL_FAILED_SUFFIX).as_str()]);
+
+        console.detach().await.expect("the loop went on");
     }
 
     /// Two consoles finish the first phase together: the web console keeps

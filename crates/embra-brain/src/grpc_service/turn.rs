@@ -2356,6 +2356,40 @@ impl StopCheck {
     }
 }
 
+/// What asking a provider for its stream came to.
+pub(super) enum Opened {
+    Stream(BoxStream<'static, StreamEvent>),
+    /// The operator's stop came while the request waited for its answer to
+    /// begin; the request was dropped with it.
+    Stopped,
+    /// The request was refused or lost before any stream.
+    Failed(crate::provider::ProviderError),
+}
+
+/// Ask `provider` for its stream, raced against the operator's stop.
+/// Gemini and the local presets send their request inside `stream_turn`,
+/// and a local model can take the whole model wait to begin its answer:
+/// awaited alone, that wait could not be ended. Dropping the request
+/// closes its connection, which is what stops a local model server. The
+/// turn loop and Learning Mode both open their calls here.
+pub(super) async fn open_model_stream(
+    provider: &dyn LlmProvider,
+    messages: &[ApiMessage],
+    system: &SystemPromptBundle,
+    tools: &ToolManifest,
+    options: LlmRequestOptions,
+    stop: &mut StopCheck,
+) -> Opened {
+    tokio::select! {
+        biased;
+        () = stop.triggered() => Opened::Stopped,
+        opened = provider.stream_turn(messages, system, tools, options) => match opened {
+            Ok(stream) => Opened::Stream(stream),
+            Err(e) => Opened::Failed(e),
+        },
+    }
+}
+
 /// One model call of a turn: what every call of the turn is asked with,
 /// and where its frames go.
 pub(super) struct ModelCall<'a> {
@@ -2375,22 +2409,12 @@ impl ModelCall<'_> {
     /// with the text that had arrived), whether the request was refused or
     /// lost before its stream or the stream ended without a result. Nothing
     /// comes back as an error, because the caller has a turn to close and
-    /// to save whatever happened.
-    ///
-    /// The request is raced against the stop. Gemini and the local presets
-    /// send inside `stream_turn`, and a local model can take the whole
-    /// model wait to begin its answer: awaited alone, that wait could not
-    /// be ended. Dropping the request closes its connection, which is what
-    /// stops a local model server.
+    /// to save whatever happened. The request is raced against the stop
+    /// (`open_model_stream`).
     pub(super) async fn run(&self, messages: &[ApiMessage], stop: &mut StopCheck) -> AssistantTurn {
         activity::emit(activity::Event::ModelCallStarted);
-        let opened = tokio::select! {
-            biased;
-            () = stop.triggered() => None,
-            opened = self.provider.stream_turn(messages, self.system, self.tools, self.options) => Some(opened),
-        };
-        match opened {
-            None => {
+        match open_model_stream(self.provider, messages, self.system, self.tools, self.options, stop).await {
+            Opened::Stopped => {
                 activity::emit(activity::Event::ModelCallEnded { error: false });
                 AssistantTurn {
                     content: Vec::new(),
@@ -2398,7 +2422,7 @@ impl ModelCall<'_> {
                     stop_details: None,
                 }
             }
-            Some(Err(e)) => {
+            Opened::Failed(e) => {
                 error!(
                     target: "dispatch",
                     config = %self.config_name,
@@ -2408,7 +2432,7 @@ impl ModelCall<'_> {
                 activity::emit(activity::Event::ModelCallEnded { error: true });
                 cut_turn(String::new())
             }
-            Some(Ok(stream)) => collect_response(stream, self.tx, self.config_name, Some(stop)).await,
+            Opened::Stream(stream) => collect_response(stream, self.tx, self.config_name, Some(stop)).await,
         }
     }
 }
