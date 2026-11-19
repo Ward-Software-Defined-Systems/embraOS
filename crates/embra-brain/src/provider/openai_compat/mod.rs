@@ -80,11 +80,12 @@ pub(super) fn silent_sentence(waited: Duration, in_the_answer: bool) -> String {
         (false, _, 1) => "1 second".to_string(),
         (false, _, secs) => format!("{secs} seconds"),
     };
-    if in_the_answer {
-        format!("the model server sent nothing for {length} in the middle of its answer; the connection was closed")
+    let what = if in_the_answer {
+        "in the middle of its answer; the connection was closed"
     } else {
-        format!("the model server sent nothing for {length} before its answer began; the request was dropped")
-    }
+        "before its answer began; the request was dropped"
+    };
+    format!("the model server sent nothing for {length} {what}. /model-wait sets how long embraOS waits")
 }
 
 /// Preset variant within the OpenAI-compat module. Ollama and LM Studio
@@ -169,8 +170,8 @@ impl OpenAICompatProvider {
         }
     }
 
-    /// The model wait in place of the default (`/model-wait`).
-    #[cfg_attr(not(test), expect(dead_code, reason = "the stored wait reaches the provider with the command, in the commit after this one"))]
+    /// The model wait in place of the default: the one the operator set
+    /// with `/model-wait` (`OpenAiCompatConfig::model_wait`).
     pub fn with_model_wait(mut self, wait: Duration) -> Self {
         self.model_wait = wait;
         self
@@ -441,6 +442,11 @@ impl LlmProvider for OpenAICompatProvider {
     #[cfg(test)]
     fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    #[cfg(test)]
+    fn model_wait(&self) -> Option<Duration> {
+        Some(self.model_wait)
     }
 
     /// Validate a candidate bearer (or no auth) against the endpoint
@@ -1987,7 +1993,7 @@ mod tests {
         let ProviderError::Silent(text) = &err else { panic!("a silent server: {err:?}") };
         assert_eq!(
             text,
-            "the model server sent nothing for 120 minutes before its answer began; the request was dropped"
+            "the model server sent nothing for 120 minutes before its answer began; the request was dropped. /model-wait sets how long embraOS waits"
         );
         assert!(paused_at.elapsed() >= Duration::from_secs(119 * 60), "not before the wait's end");
         assert_eq!(server.connections.load(Ordering::SeqCst), 1, "a wait that ran out is not tried again");
@@ -2025,11 +2031,11 @@ mod tests {
     fn the_silence_is_said_in_minutes_and_where_it_fell() {
         assert_eq!(
             silent_sentence(Duration::from_secs(60), false),
-            "the model server sent nothing for 1 minute before its answer began; the request was dropped"
+            "the model server sent nothing for 1 minute before its answer began; the request was dropped. /model-wait sets how long embraOS waits"
         );
         assert_eq!(
             silent_sentence(Duration::from_secs(240 * 60), true),
-            "the model server sent nothing for 240 minutes in the middle of its answer; the connection was closed"
+            "the model server sent nothing for 240 minutes in the middle of its answer; the connection was closed. /model-wait sets how long embraOS waits"
         );
         // A wait that is not whole minutes exists in tests alone.
         assert!(silent_sentence(Duration::from_secs(90), false).contains("for 90 seconds"));

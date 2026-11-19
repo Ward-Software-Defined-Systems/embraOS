@@ -47,6 +47,8 @@ Model:
   /effort                                Show the active provider's effort level and what is sent
   /effort <low|medium|high|xhigh|max>    Set effort for the active provider (Anthropic default max; Gemini high; local presets verbatim, model-validated)
   /effort reset                          Clear the active provider's stored level
+  /model-wait                            Show how long embraOS waits while Ollama or LM Studio sends nothing (default 120 minutes)
+  /model-wait <minutes>|reset            Set that wait for both local presets, or go back to the default; Esc ends a wait
   /local-ai-gateway                      Show WSDS Local AI Gateway's URL and whether requests go through it
   /local-ai-gateway <url>|on|off|reset   Route every provider request through its unified listener (http(s)://host:4000,
                                          which must answer with its x-local-ai-gateway header); off keeps the URL

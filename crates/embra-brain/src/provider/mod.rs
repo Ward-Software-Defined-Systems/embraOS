@@ -208,6 +208,14 @@ pub trait LlmProvider: Send + Sync {
     #[cfg(test)]
     fn base_url(&self) -> &str;
 
+    /// The model wait this provider's calls run under, for the providers
+    /// that have one (the two local presets). Test-only: the tests of the
+    /// provider factory read it to see the stored wait arrive.
+    #[cfg(test)]
+    fn model_wait(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Probe the provider's model-listing endpoint with the given key.
     /// Called by the config wizard; never on the hot path.
     async fn validate_key(&self, key: &str) -> ValidationResult;

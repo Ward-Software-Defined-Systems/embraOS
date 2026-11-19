@@ -297,9 +297,27 @@ pub struct OpenAiCompatConfig {
     pub ollama_effort_by_model: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub lm_studio_effort_by_model: std::collections::BTreeMap<String, String>,
+    /// The model wait the operator set (`/model-wait`), in minutes, for
+    /// both presets: how long a call waits while the model server sends
+    /// nothing. `None` is the default
+    /// (`provider::openai_compat::DEFAULT_MODEL_WAIT_MINUTES`).
+    /// Serde-additive, absent when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_wait_minutes: Option<u64>,
 }
 
 impl OpenAiCompatConfig {
+    /// The model wait in force: the one the operator set, else the default.
+    /// A stored 0 reads as unset: it would end every request before the
+    /// server could answer, and `/model-wait` never writes one.
+    pub fn model_wait(&self) -> std::time::Duration {
+        let minutes = self
+            .model_wait_minutes
+            .filter(|minutes| *minutes > 0)
+            .unwrap_or(crate::provider::openai_compat::DEFAULT_MODEL_WAIT_MINUTES);
+        std::time::Duration::from_secs(minutes.saturating_mul(60))
+    }
+
     /// The stored endpoint and model of a preset as they are; either may be
     /// empty. [`Self::for_preset_routed`] is the rule for whether the preset
     /// can answer.

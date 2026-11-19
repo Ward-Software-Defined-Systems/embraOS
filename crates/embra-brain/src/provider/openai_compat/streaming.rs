@@ -1272,7 +1272,7 @@ mod tests {
         assert_eq!(began.elapsed(), WAIT, "at the wait's end, on the brain's own clock");
         assert_eq!(
             err.to_string(),
-            "the model server sent nothing for 120 minutes in the middle of its answer; the connection was closed"
+            "the model server sent nothing for 120 minutes in the middle of its answer; the connection was closed. /model-wait sets how long embraOS waits"
         );
         assert!(rx.recv().await.is_none(), "nothing was emitted, a Complete least of all");
     }

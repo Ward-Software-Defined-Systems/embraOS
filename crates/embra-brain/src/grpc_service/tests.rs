@@ -3580,3 +3580,121 @@ mod session_listing_tests {
         assert_eq!(other_provider_footer(&[], "anthropic", true), None);
     }
 }
+
+#[cfg(test)]
+mod model_wait_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn presets(stored: Option<u64>) -> config::OpenAiCompatConfig {
+        config::OpenAiCompatConfig { model_wait_minutes: stored, ..Default::default() }
+    }
+
+    #[test]
+    fn model_wait_takes_minutes_reset_or_nothing() {
+        assert_eq!(parse_model_wait(""), Ok(ModelWaitAction::Show));
+        assert_eq!(parse_model_wait("  "), Ok(ModelWaitAction::Show));
+        assert_eq!(parse_model_wait("240"), Ok(ModelWaitAction::Set(240)));
+        assert_eq!(parse_model_wait(" 1 "), Ok(ModelWaitAction::Set(1)));
+        assert_eq!(parse_model_wait("reset"), Ok(ModelWaitAction::Reset));
+        assert_eq!(parse_model_wait("Default"), Ok(ModelWaitAction::Reset));
+        // No upper end: the operator knows the machine the model runs on.
+        assert_eq!(parse_model_wait("100000"), Ok(ModelWaitAction::Set(100_000)));
+    }
+
+    #[test]
+    fn a_wait_of_zero_or_not_a_number_is_refused_with_the_reason() {
+        let zero = parse_model_wait("0").unwrap_err();
+        assert!(zero.contains("before the server can answer") && zero.contains("1 or more"), "{zero}");
+        for bad in ["two hours", "-5", "1.5", "120m"] {
+            let why = parse_model_wait(bad).unwrap_err();
+            assert!(why.contains(bad) && why.contains("whole number of minutes"), "{bad}: {why}");
+        }
+        // What is echoed back is cut.
+        let long = "x".repeat(200);
+        assert!(parse_model_wait(&long).unwrap_err().len() < 120);
+    }
+
+    #[test]
+    fn the_wait_in_force_is_the_stored_one_or_the_default() {
+        assert_eq!(presets(None).model_wait(), Duration::from_secs(120 * 60));
+        assert_eq!(presets(Some(240)).model_wait(), Duration::from_secs(240 * 60));
+        // A document edited by hand: 0 would end every request at once.
+        assert_eq!(presets(Some(0)).model_wait(), Duration::from_secs(120 * 60));
+        assert_eq!(model_wait_words(&presets(None)), "120 minutes (the default)");
+        assert_eq!(model_wait_words(&presets(Some(0))), "120 minutes (the default)");
+        assert_eq!(model_wait_words(&presets(Some(240))), "240 minutes");
+        assert_eq!(model_wait_words(&presets(Some(1))), "1 minute");
+        // Far past anything a clock holds: no overflow, a wait that never ends.
+        assert!(presets(Some(u64::MAX)).model_wait() > Duration::from_secs(u64::MAX / 2));
+    }
+
+    #[test]
+    fn the_command_sets_shows_and_resets_and_says_which_providers_it_is_for() {
+        let mut stored = presets(None);
+        let (changed, said) = apply_model_wait(ModelWaitAction::Show, &mut stored, ProviderKind::Ollama);
+        assert!(!changed);
+        assert!(said.starts_with("Model wait: 120 minutes (the default)."), "{said}");
+        assert!(said.contains("Esc ends a wait") && said.contains("/model-wait reset"), "{said}");
+        assert!(!said.contains("active provider"), "on a local preset there is nothing to add: {said}");
+
+        let (changed, said) = apply_model_wait(ModelWaitAction::Set(240), &mut stored, ProviderKind::LmStudio);
+        assert!(changed);
+        assert_eq!(stored.model_wait_minutes, Some(240));
+        assert_eq!(said, "Model wait set to 240 minutes. It applies from the next message.");
+
+        // On a cloud provider the value is kept for a later switch, and the
+        // reply says whom it is for.
+        let (changed, said) = apply_model_wait(ModelWaitAction::Set(1), &mut stored, ProviderKind::Anthropic);
+        assert!(changed);
+        assert_eq!(stored.model_wait_minutes, Some(1));
+        assert_eq!(
+            said,
+            "Model wait set to 1 minute. It applies from the next message. It applies to Ollama and LM Studio; the active provider is Anthropic, whose waits are fixed."
+        );
+
+        let (changed, said) = apply_model_wait(ModelWaitAction::Reset, &mut stored, ProviderKind::Gemini);
+        assert!(changed);
+        assert_eq!(stored.model_wait_minutes, None);
+        assert!(said.starts_with("Model wait back to the default, 120 minutes."), "{said}");
+        assert!(said.ends_with("the active provider is Gemini, whose waits are fixed."), "{said}");
+    }
+
+    /// The stored wait reaches the provider a turn is built on, for both
+    /// presets and through the one builder; a cloud provider has none.
+    #[test]
+    fn the_stored_wait_reaches_both_local_presets_through_the_one_builder() {
+        let mut cfg = config::tests_support::minimal_cfg();
+        cfg.openai_compat.ollama_endpoint = "http://mac:11434".into();
+        cfg.openai_compat.ollama_model = "qwen3.8:27b".into();
+        cfg.openai_compat.lm_studio_endpoint = "http://mac:1234".into();
+        cfg.openai_compat.lm_studio_model = "qwen/qwen3.8-27b".into();
+        for kind in ["ollama", "lm_studio"] {
+            cfg.api_provider = kind.to_string();
+            cfg.openai_compat.model_wait_minutes = None;
+            let built = build_provider_from_config(&cfg, "", None).unwrap();
+            assert_eq!(built.model_wait(), Some(Duration::from_secs(120 * 60)), "{kind}: the default");
+            cfg.openai_compat.model_wait_minutes = Some(300);
+            let built = build_provider_from_config(&cfg, "", None).unwrap();
+            assert_eq!(built.model_wait(), Some(Duration::from_secs(300 * 60)), "{kind}: the operator's");
+        }
+        for kind in ["anthropic", "gemini"] {
+            cfg.api_provider = kind.to_string();
+            let built = build_provider_from_config(&cfg, "k", None).unwrap();
+            assert_eq!(built.model_wait(), None, "{kind} keeps its own bounds");
+        }
+    }
+
+    /// Serde-additive: a document from before the field has none, and an
+    /// unset wait writes none.
+    #[test]
+    fn the_model_wait_is_absent_from_json_when_unset() {
+        let read: config::OpenAiCompatConfig =
+            serde_json::from_value(serde_json::json!({"ollama_endpoint": "http://mac:11434"})).unwrap();
+        assert_eq!(read.model_wait_minutes, None);
+        let written = serde_json::to_value(&read).unwrap();
+        assert!(written.get("model_wait_minutes").is_none(), "{written}");
+        let written = serde_json::to_value(presets(Some(240))).unwrap();
+        assert_eq!(written["model_wait_minutes"], serde_json::json!(240));
+    }
+}

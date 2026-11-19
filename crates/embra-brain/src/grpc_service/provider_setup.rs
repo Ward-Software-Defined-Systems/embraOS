@@ -226,10 +226,17 @@ pub(super) async fn handle_provider_command(
                 .as_ref()
                 .map(crate::provider::gateway::provider_line_suffix)
                 .unwrap_or_default();
+            // The model wait is a local preset's matter: said while one
+            // is the active provider.
+            let wait = cfg
+                .as_ref()
+                .filter(|_| matches!(provider.as_str(), "ollama" | "lm_studio"))
+                .map(|c| format!(" Model wait: {}.", super::slash::model_wait_words(&c.openai_compat)))
+                .unwrap_or_default();
             send_msg(
                 format!(
-                    "Active provider: {}. Model: {}. Session: {}.{}",
-                    provider, model, session, gateway
+                    "Active provider: {}. Model: {}. Session: {}.{}{}",
+                    provider, model, session, gateway, wait
                 ),
                 SystemMessageType::Info,
             )
@@ -596,9 +603,12 @@ pub(super) fn build_openai_compat_provider(
         }
     };
     // `/effort` override for this preset, sent verbatim when set; `None`
-    // keeps the per-model auto-map (byte-identical default).
+    // keeps the per-model auto-map (byte-identical default). The model
+    // wait is the operator's (`/model-wait`), else the default.
     Ok(Arc::new(
-        provider.with_reasoning_effort(resolve_provider_effort(kind, config)),
+        provider
+            .with_reasoning_effort(resolve_provider_effort(kind, config))
+            .with_model_wait(config.openai_compat.model_wait()),
     ))
 }
 

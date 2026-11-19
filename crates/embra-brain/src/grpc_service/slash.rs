@@ -64,7 +64,7 @@ pub(super) async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /reboot                            Say what a reboot does; /reboot now reboots embraOS through the boot menu (sessions are kept); /reboot halt stops embraOS and powers the machine off\n  /backup create [label]             Schedule a snapshot of STATE and DATA for the next boot (before the database starts; the boot then continues)\n  /backup list | delete <name>       The backups under /embra/data/backups (each with its download route), or remove one\n  /backup restore <name>             Schedule a restore for the next boot, after you type its confirmation; /backup status shows what is scheduled\n  /ca                                The certificate authorities this machine trusts beside the public ones: the image's and STATE's\n  /ca import <url|uploads/file>      Read a certificate and show it; with sha256:<fingerprint>, import it: the brain trusts it at once, git and the OS updater after the next boot\n  /ca remove <file>                  Remove one of STATE's certificates\n  /network                           The network cards, their links and addresses, the default route, the resolvers and the machine's name\n  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...]   That card keeps this address; /network dhcp <card> goes back to DHCP\n  /network hostname <name>|auto      The machine's name; auto takes the one a DHCP server assigns, or embraos\n  /network time <server> ...|default|off   The time servers the clock is checked against, every hour and when the network returns; blank shows the clock\n  /network wifi [join <name> --key <passphrase>|join <name> --open|forget <name>|country <CC>]   Wi-Fi: blank shows the card, its network and the ones in range\n  /update                            Check the release published at the update source against this one (its signature verified first)\n  /update apply | status | rollback  Write the release into the inactive slot and stage it for the next boot; show both slots; make the other slot the default again\n  /update [apply] --tag <v…>         One release of a GitHub releases source in place of the latest; apply --allow-downgrade takes an older release, or another build of this version\n  /update source [<url>|reset]       Show, set or reset the operator's own update source (default: the GitHub releases of the public mirror)\n  /update auto [on|off]              Show, or turn on or off, the check the brain runs by itself a few minutes after boot and once a day\n  /web-token                         Say what the web console's access token is; /web-token rotate makes a new one (every browser is signed out, the new URL is on the serial console and in the display console's menu)\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /local-ai-gateway                  Show WSDS Local AI Gateway's URL and whether requests go through it\n  /local-ai-gateway <url>|on|off|reset  Route every provider request through its unified listener (http(s)://host:4000, which must answer with its x-local-ai-gateway header); off keeps the URL, reset forgets it\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate the SSH key pair (its comment: the instance's name at embraos), or show the public key\n  /ssh-keygen remove|rotate          Delete the key pair after showing its public key and fingerprint, or replace it with a new one\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host on its port, 443 or the one in <host>:<port> (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /guardian connections [close <id>|all]   The WebSocket connections the tools hold open; close one, or all\n  /feedback-loop                     (EXPERIMENTAL) trigger the Phase 2 Continuity Engine self-evaluation protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /reboot                            Say what a reboot does; /reboot now reboots embraOS through the boot menu (sessions are kept); /reboot halt stops embraOS and powers the machine off\n  /backup create [label]             Schedule a snapshot of STATE and DATA for the next boot (before the database starts; the boot then continues)\n  /backup list | delete <name>       The backups under /embra/data/backups (each with its download route), or remove one\n  /backup restore <name>             Schedule a restore for the next boot, after you type its confirmation; /backup status shows what is scheduled\n  /ca                                The certificate authorities this machine trusts beside the public ones: the image's and STATE's\n  /ca import <url|uploads/file>      Read a certificate and show it; with sha256:<fingerprint>, import it: the brain trusts it at once, git and the OS updater after the next boot\n  /ca remove <file>                  Remove one of STATE's certificates\n  /network                           The network cards, their links and addresses, the default route, the resolvers and the machine's name\n  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...]   That card keeps this address; /network dhcp <card> goes back to DHCP\n  /network hostname <name>|auto      The machine's name; auto takes the one a DHCP server assigns, or embraos\n  /network time <server> ...|default|off   The time servers the clock is checked against, every hour and when the network returns; blank shows the clock\n  /network wifi [join <name> --key <passphrase>|join <name> --open|forget <name>|country <CC>]   Wi-Fi: blank shows the card, its network and the ones in range\n  /update                            Check the release published at the update source against this one (its signature verified first)\n  /update apply | status | rollback  Write the release into the inactive slot and stage it for the next boot; show both slots; make the other slot the default again\n  /update [apply] --tag <v…>         One release of a GitHub releases source in place of the latest; apply --allow-downgrade takes an older release, or another build of this version\n  /update source [<url>|reset]       Show, set or reset the operator's own update source (default: the GitHub releases of the public mirror)\n  /update auto [on|off]              Show, or turn on or off, the check the brain runs by itself a few minutes after boot and once a day\n  /web-token                         Say what the web console's access token is; /web-token rotate makes a new one (every browser is signed out, the new URL is on the serial console and in the display console's menu)\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /model-wait                        Show how long embraOS waits while Ollama or LM Studio sends nothing (default 120 minutes)\n  /model-wait <minutes>|reset        Set that wait for both local presets, or go back to the default; Esc ends a wait\n  /local-ai-gateway                  Show WSDS Local AI Gateway's URL and whether requests go through it\n  /local-ai-gateway <url>|on|off|reset  Route every provider request through its unified listener (http(s)://host:4000, which must answer with its x-local-ai-gateway header); off keeps the URL, reset forgets it\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate the SSH key pair (its comment: the instance's name at embraos), or show the public key\n  /ssh-keygen remove|rotate          Delete the key pair after showing its public key and fingerprint, or replace it with a new one\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host on its port, 443 or the one in <host>:<port> (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /guardian connections [close <id>|all]   The WebSocket connections the tools hold open; close one, or all\n  /feedback-loop                     (EXPERIMENTAL) trigger the Phase 2 Continuity Engine self-evaluation protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 2 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -87,6 +87,9 @@ pub(super) async fn handle_slash_command(
         }
         "/effort" => {
             handle_effort_command(args, tx, db).await;
+        }
+        "/model-wait" => {
+            handle_model_wait_command(args, tx, db).await;
         }
         "/attach" => {
             handle_attach_command(args, tx, db, session_mgr).await;
@@ -885,6 +888,121 @@ pub(super) async fn handle_iter_cap_command(
             .await;
         }
     }
+}
+
+/// What `/model-wait` was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ModelWaitAction {
+    Show,
+    Set(u64),
+    Reset,
+}
+
+/// `/model-wait`'s argument as an action, or the sentence that says why
+/// not. A wait is whole minutes, 1 or more: 0 would end every request
+/// before the server could answer. There is no upper end; the operator
+/// knows the machine the model runs on.
+pub(super) fn parse_model_wait(args: &str) -> Result<ModelWaitAction, String> {
+    let arg = args.trim();
+    if arg.is_empty() {
+        return Ok(ModelWaitAction::Show);
+    }
+    if arg.eq_ignore_ascii_case("reset") || arg.eq_ignore_ascii_case("default") {
+        return Ok(ModelWaitAction::Reset);
+    }
+    match arg.parse::<u64>() {
+        Ok(0) => Err("0 minutes would end every request before the server can answer. Give 1 or more.".to_string()),
+        Ok(minutes) => Ok(ModelWaitAction::Set(minutes)),
+        Err(_) => {
+            let shown: String = arg.chars().take(40).collect();
+            Err(format!("'{shown}' is not a whole number of minutes. Give a number, or reset."))
+        }
+    }
+}
+
+/// The wait in force, as the operator reads it.
+pub(super) fn model_wait_words(presets: &config::OpenAiCompatConfig) -> String {
+    let minutes = presets.model_wait().as_secs() / 60;
+    let unit = if minutes == 1 { "minute" } else { "minutes" };
+    if presets.model_wait_minutes.is_some_and(|set| set > 0) {
+        format!("{minutes} {unit}")
+    } else {
+        format!("{minutes} {unit} (the default)")
+    }
+}
+
+/// What `/model-wait` does to the stored presets and says: the change, if
+/// any, is made in `presets`; `true` when there is one to save. The wait is
+/// the local presets'; on Anthropic or Gemini the reply says so and the
+/// value is kept for a later switch.
+pub(super) fn apply_model_wait(
+    action: ModelWaitAction,
+    presets: &mut config::OpenAiCompatConfig,
+    active: ProviderKind,
+) -> (bool, String) {
+    let scope = match active {
+        ProviderKind::Ollama | ProviderKind::LmStudio => String::new(),
+        cloud => format!(
+            " It applies to Ollama and LM Studio; the active provider is {}, whose waits are fixed.",
+            cloud.label()
+        ),
+    };
+    match action {
+        ModelWaitAction::Show => (
+            false,
+            format!(
+                "Model wait: {}. embraOS waits that long while Ollama or LM Studio sends nothing: before an answer begins, and again between the pieces of it. Esc ends a wait. /model-wait <minutes> sets it; /model-wait reset goes back to the default.{scope}",
+                model_wait_words(presets)
+            ),
+        ),
+        ModelWaitAction::Set(minutes) => {
+            presets.model_wait_minutes = Some(minutes);
+            let unit = if minutes == 1 { "minute" } else { "minutes" };
+            (true, format!("Model wait set to {minutes} {unit}. It applies from the next message.{scope}"))
+        }
+        ModelWaitAction::Reset => {
+            presets.model_wait_minutes = None;
+            (
+                true,
+                format!(
+                    "Model wait back to the default, {} minutes. It applies from the next message.{scope}",
+                    crate::provider::openai_compat::DEFAULT_MODEL_WAIT_MINUTES
+                ),
+            )
+        }
+    }
+}
+
+/// `/model-wait [<minutes>|reset]`: show or set how long a call waits while
+/// a local model server sends nothing (`OpenAiCompatConfig::model_wait`).
+/// The provider is built from the configuration at each turn, so a change
+/// applies from the next message.
+pub(super) async fn handle_model_wait_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+) {
+    let action = match parse_model_wait(args) {
+        Ok(action) => action,
+        Err(why) => {
+            send_system(tx, format!("/model-wait: {why} Nothing was changed."), SystemMessageType::Error).await;
+            return;
+        }
+    };
+    let mut cfg = match config::load_config(db).await {
+        Ok(c) => c,
+        Err(e) => {
+            send_system(tx, format!("/model-wait: failed to load config: {e}"), SystemMessageType::Error).await;
+            return;
+        }
+    };
+    let active = ProviderKind::from_str(&cfg.api_provider).unwrap_or(ProviderKind::Anthropic);
+    let (changed, said) = apply_model_wait(action, &mut cfg.openai_compat, active);
+    if changed && let Err(e) = config::save_config(db, &cfg).await {
+        send_system(tx, format!("/model-wait: failed to save: {e}"), SystemMessageType::Error).await;
+        return;
+    }
+    send_system(tx, said, SystemMessageType::Info).await;
 }
 
 /// `/show-reasoning [on|off]` — show, set, or reset whether reasoning
