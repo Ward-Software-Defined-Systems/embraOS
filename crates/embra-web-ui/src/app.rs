@@ -470,6 +470,17 @@ fn severity_load(load1: f64, cpu_count: Option<u32>) -> &'static str {
     }
 }
 
+/// The word a service pill carries beside its dot: nothing while the
+/// service is up, and its state otherwise, so that the state is not told by
+/// the dot's colour alone.
+fn pill_state_word(state: &str) -> &'static str {
+    match state {
+        "up" => "",
+        "off" => "off",
+        _ => "down",
+    }
+}
+
 /// Bar+number meter pill — used for CPU and memory utilization.
 fn meter_pill(label: &'static str, pct: f64, tooltip: String) -> impl IntoView {
     let sev = severity_pct(pct);
@@ -858,9 +869,13 @@ pub fn App() -> impl IntoView {
                             "off" => "pill off",
                             _ => "pill down",
                         };
+                        // The dot's colour says the state, and so does a word
+                        // for a state that is not `up`.
+                        let word = pill_state_word(&s.state);
                         view! {
                             <span class=cls title=s.detail.clone()>
                                 <span class="dot"></span>{s.name}
+                                {(!word.is_empty()).then(|| view! { <span class="pill-state">{word}</span> })}
                             </span>
                         }
                     }).collect_view()}

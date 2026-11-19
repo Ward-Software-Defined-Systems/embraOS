@@ -473,6 +473,10 @@
     }, true);
   }
 
+  function embraLessMotion() {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+
   window.embraTermInit = function (elId) {
     if (term) return; // once
     // The display console (cog on the machine's own display, `?kiosk=1`):
@@ -500,7 +504,9 @@
       // every cell: it re-diffs every ~200ms and repaints in full on
       // attach and resize. Any scrollback would just be stale snapshots
       // the user could wheel away into.
-      fontSize: termFs, cursorBlink: !kiosk, scrollback: 0,
+      // The cursor blinks neither on the display console nor for a reader
+      // who asked the system for less motion.
+      fontSize: termFs, cursorBlink: !kiosk && !embraLessMotion(), scrollback: 0,
       // Warm brand bg + amber (flame) cursor to blend with the shell.
       // The 16 ANSI colors are intentionally left at xterm defaults so
       // the real ratatui TUI's own colors render true (parity-safe).

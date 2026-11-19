@@ -639,6 +639,38 @@ fn thinking_text(tool: &str, waited_ms: Option<f64>) -> String {
     }
 }
 
+/// What the health chip's class says in words, for a reader who does not
+/// see its dot.
+fn health_words(class: &str) -> &'static str {
+    match class {
+        "ct-health up" => "all up",
+        "ct-health warn" => "some are down, or their state is not known yet",
+        _ => "all are down, or the page is not connected",
+    }
+}
+
+/// The mark the health chip carries beside its dot: none while all is up,
+/// so that a fault is not told by the dot's colour alone.
+fn health_mark(class: &str) -> &'static str {
+    match class {
+        "ct-health up" => "",
+        "ct-health warn" => "!",
+        _ => "×",
+    }
+}
+
+/// The word in front of a system bubble: an error and a warning are told
+/// by their colour, and by this word as well. A message that already
+/// begins by saying what it is ("Brain error: …") gets none.
+fn system_kind_word(kind: &str, content: &str) -> &'static str {
+    let head: String = content.chars().take(24).collect::<String>().to_ascii_lowercase();
+    match kind {
+        "error" if !head.contains("error") => "Error: ",
+        "warning" if !head.contains("warning") => "Warning: ",
+        _ => "",
+    }
+}
+
 /// Aggregate health from a [`StatusData`] snapshot. Returns one of
 /// "up" / "warn" / "down" — drives the topbar health-chip color.
 fn services_health(s: &StatusData) -> &'static str {
@@ -1516,8 +1548,12 @@ fn ChatTopBar(
             </div>
             <button class=health_class
                 title="Tap for service detail"
+                aria-label=move || format!("Services: {}", health_words(health_class()))
                 on:click=move |_| services_open.set(true)>
                 <span class="ct-dot"></span>
+                // A mark beside the dot, so that its colour is not all that
+                // tells a fault.
+                <span class="ct-mark" aria-hidden="true">{move || health_mark(health_class())}</span>
             </button>
             {move || {
                 if reasoning.with(|r| r.is_empty()) {
@@ -1705,7 +1741,9 @@ fn BubbleView(idx: usize, bubble: Arc<Bubble>) -> impl IntoView {
         Bubble::Assistant(t) => view! { <div class="bubble assistant">{t}</div> }.into_any(),
         Bubble::System { content, kind } => {
             let cls = format!("bubble system {kind}");
-            view! { <div class=cls>{content}</div> }.into_any()
+            // An error and a warning are coloured, and say what they are.
+            let word = system_kind_word(&kind, &content);
+            view! { <div class=cls><span class="sys-kind">{word}</span>{content}</div> }.into_any()
         }
         Bubble::Tool {
             name,
@@ -2084,5 +2122,35 @@ mod thinking_text_tests {
         assert_eq!(thinking_text("", Some(90.5 * 60_000.0)), "thinking… 90 min");
         // A tool that runs is named; its time is the tool's own.
         assert_eq!(thinking_text("shell", Some(600_000.0)), "shell…");
+    }
+}
+
+#[cfg(test)]
+mod state_word_tests {
+    use super::*;
+
+    /// A state the page colours is said beside the colour as well.
+    #[test]
+    fn the_health_chip_carries_a_mark_and_words_for_every_state_but_up() {
+        assert_eq!((health_mark("ct-health up"), health_words("ct-health up")), ("", "all up"));
+        assert_eq!(health_mark("ct-health warn"), "!");
+        assert_eq!(health_mark("ct-health down"), "×");
+        for class in ["ct-health warn", "ct-health down"] {
+            assert!(health_words(class).contains("down"), "{class}");
+        }
+    }
+
+    #[test]
+    fn an_error_and_a_warning_say_what_they_are_once() {
+        assert_eq!(system_kind_word("error", "stop failed: no answer"), "Error: ");
+        assert_eq!(system_kind_word("warning", "The turn was cut by a failed model call"), "Warning: ");
+        // Said already at the head of the message: not said twice.
+        assert_eq!(system_kind_word("error", "Brain error: HTTP 400"), "");
+        assert_eq!(system_kind_word("warning", "Warning: the disk is nearly full"), "");
+        // The word far into a message is no heading.
+        assert_eq!(system_kind_word("error", "The request was refused by the server with an error"), "Error: ");
+        for kind in ["info", "reconnection", "reset", ""] {
+            assert_eq!(system_kind_word(kind, "anything"), "", "{kind}");
+        }
     }
 }
