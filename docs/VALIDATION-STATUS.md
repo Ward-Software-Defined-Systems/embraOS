@@ -53,6 +53,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA); bare metal (a held modifier) | |
 | A firmware framebuffer (`ramfb`): 800x600, and 1024x768 on request | QEMU; QEMU on Apple Silicon | |
 | `embra.kioskmode=` | QEMU (standard VGA, virtio-gpu, a firmware framebuffer), GRUB's Diagnostics entry among the ways in | |
+| The page's scale: 2 on a mode 2560 pixels wide, 1 below, and `embra.kioskscale=` for either | QEMU (standard VGA, at 1920x1080 and at 2560x1440) | bare metal |
 | The menu: Copy, Paste, This console's URL | QEMU; QEMU on an Intel Mac and on Apple Silicon | |
 | The dropdowns, and the notices for what needs a browser | QEMU (standard VGA); bare metal | |
 
