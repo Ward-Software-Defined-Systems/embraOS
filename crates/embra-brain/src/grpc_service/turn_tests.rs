@@ -93,15 +93,25 @@ impl Respond for Held {
 }
 
 /// The model server's answers, in the order its calls arrive. A call past
-/// the script's end is refused with a 4xx, which no retry follows.
+/// the script's end is refused with a 4xx, which no retry follows. An
+/// answer that is held is one the server has not begun an hour later; the
+/// script says when such a call arrived.
 #[derive(Clone, Default)]
-struct Script(Arc<StdMutex<VecDeque<ResponseTemplate>>>);
+struct Script {
+    answers: Arc<StdMutex<VecDeque<Option<ResponseTemplate>>>>,
+    held: Arc<tokio::sync::Notify>,
+}
 
 impl Respond for Script {
     fn respond(&self, _: &Request) -> ResponseTemplate {
-        self.0.lock().unwrap().pop_front().unwrap_or_else(|| {
-            ResponseTemplate::new(418).set_body_string("the script has no further answer")
-        })
+        match self.answers.lock().unwrap().pop_front() {
+            Some(Some(answer)) => answer,
+            Some(None) => {
+                self.held.notify_one();
+                ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3600))
+            }
+            None => ResponseTemplate::new(418).set_body_string("the script has no further answer"),
+        }
     }
 }
 
@@ -278,8 +288,43 @@ impl Rig {
 
     /// What the model answers to its next call that has no answer yet.
     fn then(&self, answer: ResponseTemplate) -> &Self {
-        self.script.0.lock().unwrap().push_back(answer);
+        self.script.answers.lock().unwrap().push_back(Some(answer));
         self
+    }
+
+    /// The model server takes its next call and does not answer it.
+    fn then_holds(&self) -> &Self {
+        self.script.answers.lock().unwrap().push_back(None);
+        self
+    }
+
+    /// Run `text` as a turn whose last scripted call is held; `during` is
+    /// run once that call has arrived, and the operator's stop then ends
+    /// the turn. The deadline is one no loaded machine reaches when the
+    /// stop is heard.
+    async fn say_and_stop_at_the_held_call(&self, text: &str, during: impl AsyncFnOnce()) -> Vec<ResponseType> {
+        let stop = async {
+            self.script.held.notified().await;
+            during().await;
+            self.stop_tx.send_modify(|v| *v += 1);
+        };
+        let (frames, ()) =
+            tokio::time::timeout(std::time::Duration::from_secs(120), async { tokio::join!(self.say(text), stop) })
+                .await
+                .expect("the stop ends the held call");
+        frames
+    }
+
+    /// The writes of one document the database saw, as their bodies.
+    async fn writes_of(&self, document: &str) -> Vec<Value> {
+        self.server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == document)
+            .map(|r| serde_json::from_slice(&r.body).unwrap_or(Value::Null))
+            .collect()
     }
 
     /// One message of the operator's, run to the end of its turn: the
@@ -1004,4 +1049,135 @@ async fn the_row_of_a_continued_turn_is_never_read_as_a_key() {
 
     assert_eq!(dones(&frames), ["Four."]);
     assert_eq!(*rig.ctx.pending_key_setup.lock().await, Some(KeySetupStep::Key(ProviderKind::Anthropic)));
+}
+
+const META: &str = "/sessions.main.meta/docs/m1";
+const HISTORY: &str = "/sessions.main.history/docs/h1";
+
+/// A turn's message and reply are written when the turn ends, and a process
+/// that ends first left nothing. The message is on the session's meta
+/// document before the first model call, and off it once the turn is saved.
+#[tokio::test]
+async fn a_turn_is_on_record_before_its_first_call_and_off_it_once_saved() {
+    let rig = Rig::new().await;
+    rig.then_holds();
+
+    rig.say_and_stop_at_the_held_call("two plus two?", async || {
+        let open = rig.meta.now()["open_turns"].clone();
+        let records = open.as_array().expect("a record while the turn runs");
+        assert_eq!(records.len(), 1, "{open}");
+        assert_eq!(records[0]["message"]["content"], json!("two plus two?"));
+        assert_eq!(records[0]["message"]["role"], json!("user"));
+        assert_eq!(records[0]["base_len"], json!(0));
+        assert_eq!(records[0]["calls"], json!(0), "no call has completed");
+        assert_eq!(rig.saved().len(), 0, "the history holds nothing of the turn yet");
+    })
+    .await;
+
+    let meta = rig.meta.now();
+    assert!(meta.get("open_turns").is_none(), "saved, and no longer open: {meta}");
+    assert_eq!(rig.saved().len(), 2);
+}
+
+/// As the turn goes on, its record takes the reply so far: what a restart
+/// in the middle of the tool loop leaves behind.
+#[tokio::test]
+async fn the_record_of_a_turn_that_goes_on_takes_the_reply_so_far() {
+    let rig = Rig::new().await;
+    rig.then(calculates("Let me work it out.", "2 ** 10")).then_holds();
+
+    rig.say_and_stop_at_the_held_call("two to the ten?", async || {
+        let open = rig.meta.now()["open_turns"].clone();
+        assert_eq!(open[0]["text"], json!("Let me work it out."), "{open}");
+        assert_eq!(open[0]["calls"], json!(1), "{open}");
+    })
+    .await;
+
+    assert!(rig.meta.now().get("open_turns").is_none());
+}
+
+/// What the record costs an ordinary turn: one write of the meta at the
+/// start. The write that saves the turn removes it.
+#[tokio::test]
+async fn an_ordinary_turn_writes_its_record_once_and_the_save_removes_it() {
+    let rig = Rig::new().await;
+    rig.then(says("Four."));
+
+    rig.say("two plus two?").await;
+
+    let meta_writes = rig.writes_of(META).await;
+    assert_eq!(meta_writes.len(), 2, "the record, then the save");
+    assert_eq!(meta_writes[0]["open_turns"].as_array().map(Vec::len), Some(1));
+    assert!(meta_writes[0].get("turn_count").is_none(), "the record's write saves nothing of the turn");
+    assert!(meta_writes[1].get("open_turns").is_none());
+    assert_eq!(meta_writes[1]["turn_count"], json!(2));
+    assert_eq!(rig.writes_of(HISTORY).await.len(), 1, "the history is written once, as before");
+}
+
+/// The record is a precaution. A database that refuses its write costs the
+/// turn nothing: it runs, and is saved at its end as it always was.
+#[tokio::test]
+async fn a_record_that_cannot_be_written_does_not_fail_the_turn() {
+    let rig = Rig::new().await;
+    Mock::given(method("PUT"))
+        .and(path(META))
+        .respond_with(ResponseTemplate::new(503).set_body_string("busy"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&rig.server)
+        .await;
+    rig.then(says("Four."));
+
+    let frames = rig.say("two plus two?").await;
+
+    assert_eq!(dones(&frames), ["Four."]);
+    assert_eq!(complaints(&frames), [] as [&str; 0]);
+    assert_eq!(rig.saved(), [row("user", "two plus two?"), row("assistant", "Four.")]);
+}
+
+/// A cut turn is saved, so its record goes with the save like any other's.
+#[tokio::test]
+async fn a_cut_turn_leaves_no_record_behind() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "no such model"));
+
+    rig.say("two plus two?").await;
+
+    assert!(rig.meta.now().get("open_turns").is_none(), "{}", rig.meta.now());
+    assert_eq!(rig.saved().len(), 2);
+}
+
+/// The two halves together. What the database holds while a turn runs is
+/// what a power cut leaves; the step that runs at the next boot is run on
+/// it here. The session then holds the turn: the operator's message, the
+/// reply as far as it got, and the restart's marker.
+#[tokio::test]
+async fn a_turn_in_flight_when_the_process_ends_is_in_its_session_at_the_next_boot() {
+    let rig = Rig::new().await;
+    Mock::given(method("GET"))
+        .and(path("/_collections"))
+        .respond_with(data(json!([
+            {"name": format!("sessions.{SESSION}.meta"), "doc_count": 1},
+            {"name": format!("sessions.{SESSION}.history"), "doc_count": 1},
+        ])))
+        .mount(&rig.server)
+        .await;
+    rig.then(calculates("Let me work it out.", "2 ** 10")).then_holds();
+
+    rig.say_and_stop_at_the_held_call("two to the ten?", async || {
+        crate::sessions::open_turn::recover(&rig.ctx.db).await;
+
+        assert_eq!(
+            rig.saved(),
+            [
+                row("user", "two to the ten?"),
+                row("assistant", "Let me work it out.\n\n(response interrupted by an embraOS restart)"),
+            ]
+        );
+        let meta = rig.meta.now();
+        assert!(meta.get("open_turns").is_none(), "{meta}");
+        assert_eq!(meta["turn_count"], json!(2));
+        assert!(meta["events_seen_at"].is_string(), "a call had completed: {meta}");
+    })
+    .await;
 }

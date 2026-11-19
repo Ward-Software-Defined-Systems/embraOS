@@ -60,6 +60,20 @@ pub const CALL_FAILED_SUFFIX: &str = "(response interrupted by a failed model ca
 pub const CALL_FAILED_NOTE: &str =
     "[Your reply to the message above was cut by a failed model call before you had written anything. Tool calls of that turn may have run; turn_trace shows them.]";
 
+/// The assistant text a turn is saved with when the process ended while
+/// it was running, before any text: a reboot, a restart of the brain, the
+/// power. `open_turn::recover` writes it at the next boot.
+pub const RESTART_MARKER: &str = "(turn interrupted by an embraOS restart)";
+
+/// What follows the text such a turn had.
+pub const RESTART_SUFFIX: &str = "(response interrupted by an embraOS restart)";
+
+/// What the model reads in the operator's next message in place of
+/// [`RESTART_MARKER`]. A tool call that was running when the process ended
+/// left no record.
+pub const RESTART_NOTE: &str =
+    "[Your reply to the message above was cut by a restart of embraOS before you had written anything. Tool calls of that turn may have run; turn_trace shows the ones that finished.]";
+
 /// The marker a failed continuation left until the turn loop wrote
 /// [`CALL_FAILED_MARKER`]: after the turn's text, or alone when the turn
 /// had none. No code writes it any more; histories hold it.
@@ -75,6 +89,7 @@ pub const STREAM_FAILED_NOTE: &str =
 const BARE_MARKERS: &[(&str, &str)] = &[
     (OPERATOR_STOP_MARKER, OPERATOR_STOP_NOTE),
     (CALL_FAILED_MARKER, CALL_FAILED_NOTE),
+    (RESTART_MARKER, RESTART_NOTE),
     (STREAM_FAILED_MARKER, STREAM_FAILED_NOTE),
 ];
 
@@ -282,6 +297,21 @@ mod tests {
         assert_eq!(texts(&out[1]), vec![partial.as_str()]);
     }
 
+    /// A turn the process did not live to finish, written at the next
+    /// boot: its marker alone is told as a note like the others.
+    #[test]
+    fn a_turn_cut_by_a_restart_before_any_text_is_told_in_the_operators_next_message() {
+        let out = fold_stopped_turns(vec![user("Read the three files"), assistant(RESTART_MARKER), user("Hello?")]);
+        assert_eq!(out.len(), 1);
+        let expected = format!("Read the three files\n\n{RESTART_NOTE}\n\nHello?");
+        assert_eq!(texts(&out[0]), vec![expected.as_str()]);
+
+        let partial = format!("Two are read.\n\n{RESTART_SUFFIX}");
+        let out = fold_stopped_turns(vec![user("A"), assistant(&partial), user("B")]);
+        assert_eq!(out.len(), 3);
+        assert_eq!(texts(&out[1]), vec![partial.as_str()]);
+    }
+
     /// The marker the turn loop wrote before: histories hold it, alone
     /// where the turn had no text and after the text where it had.
     #[test]
@@ -325,6 +355,7 @@ mod tests {
                 assert!(!note.contains(other), "{note} carries {other}");
             }
             assert!(!note.contains(CALL_FAILED_SUFFIX), "{note} carries the suffix");
+            assert!(!note.contains(RESTART_SUFFIX), "{note} carries the suffix");
             assert!(
                 BARE_MARKERS.iter().skip(i + 1).all(|(later, _)| later != marker),
                 "{marker} is listed twice"

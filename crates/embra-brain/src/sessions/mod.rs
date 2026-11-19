@@ -13,6 +13,7 @@ pub(crate) mod events;
 pub(crate) mod interrupted;
 
 pub(crate) mod model_view;
+pub(crate) mod open_turn;
 /// Session document format version.
 ///
 /// Set to `CURRENT_SESSION_FORMAT` on every session created post-v7
@@ -90,6 +91,12 @@ pub struct SessionMeta {
     /// it, when `last_active` stands in. Serde-additive, no schema bump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events_seen_at: Option<DateTime<Utc>>,
+    /// The turns of this session that have started and are not saved yet
+    /// (`open_turn`): one while a turn runs, none between turns. A record
+    /// still here when the brain starts is a turn the process did not live
+    /// to finish. Serde-additive, absent when empty, no schema bump.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_turns: Vec<open_turn::OpenTurn>,
 }
 
 /// The provider of a session that records none: every session before
@@ -492,6 +499,7 @@ impl SessionStore {
             deleted_at: None,
             deleted_reason: None,
             events_seen_at: None,
+            open_turns: Vec::new(),
         };
 
         let history = SessionHistory {
@@ -529,11 +537,16 @@ impl SessionStore {
     /// lock, so two streams of one session never rewrite the history from
     /// stale reads (#59). A history that cannot be written leaves the meta
     /// as it was, and the caller says the turn was not saved.
+    ///
+    /// `closes` names the record the turn left when it started
+    /// (`open_turn`): the meta write removes it, so a turn is on record as
+    /// open or as saved and never as both.
     pub async fn append_turn(
         &self,
         name: &str,
         messages: &[Message],
         events_seen_at: Option<DateTime<Utc>>,
+        closes: Option<&str>,
     ) -> Result<(), SessionError> {
         let lock = self.write_lock(name);
         let _held = lock.lock().await;
@@ -587,11 +600,57 @@ impl SessionStore {
             if let Some(at) = events_seen_at {
                 meta.events_seen_at = Some(at);
             }
+            if let Some(id) = closes {
+                meta.open_turns.retain(|open| open.id != id);
+            }
         })
         .await
         .map_err(SessionError::Io)?;
 
         Ok(())
+    }
+
+    /// Put a turn on record before its first model call: the operator's
+    /// message, on the session's meta document. The id names the record for
+    /// the writes that follow. A record that cannot be written is said in
+    /// the log and nothing else: the turn runs, and is saved at its end as
+    /// it always was.
+    pub async fn open_turn(&self, name: &str, message: &Message, base_len: usize) -> Option<String> {
+        let record = open_turn::OpenTurn::new(message.clone(), base_len);
+        let id = record.id.clone();
+        match self.rewrite_meta(name, |meta| meta.open_turns.push(record)).await {
+            Ok(true) => Some(id),
+            Ok(false) => None,
+            Err(e) => {
+                tracing::warn!(target: "sessions", session = %name, "the turn was not put on record at its start: {e}");
+                None
+            }
+        }
+    }
+
+    /// A model call of the open turn `id` completed: its record takes the
+    /// reply so far.
+    pub async fn progress_open_turn(&self, name: &str, id: &str, text: &str) {
+        let written = self
+            .rewrite_meta(name, |meta| {
+                if let Some(open) = meta.open_turns.iter_mut().find(|open| open.id == id) {
+                    open.text = text.to_string();
+                    open.calls = open.calls.saturating_add(1);
+                    open.updated_at = Utc::now();
+                }
+            })
+            .await;
+        if let Err(e) = written {
+            tracing::warn!(target: "sessions", session = %name, "the open turn's record was not brought up to date: {e}");
+        }
+    }
+
+    /// Remove the record of the open turn `id`: the turn ended and nothing
+    /// was saved of it by the write that would have removed it.
+    pub async fn close_open_turn(&self, name: &str, id: &str) {
+        if let Err(e) = self.rewrite_meta(name, |meta| meta.open_turns.retain(|open| open.id != id)).await {
+            tracing::warn!(target: "sessions", session = %name, "the open turn's record was not removed: {e}");
+        }
     }
 
     /// Mark the session detached. The manager's active session is the
@@ -972,7 +1031,7 @@ mod append_turn_tests {
         let mgr = SessionManager::new(WardsonDbClient::from_url(&server.uri()));
         let at = DateTime::parse_from_rfc3339("2026-10-29T10:00:00Z").unwrap().with_timezone(&Utc);
 
-        mgr.append_turn("s", &[Message::user("q"), Message::assistant("a")], Some(at))
+        mgr.append_turn("s", &[Message::user("q"), Message::assistant("a")], Some(at), None)
             .await
             .expect("saved");
 
@@ -1002,7 +1061,7 @@ mod append_turn_tests {
         let mgr = SessionManager::new(WardsonDbClient::from_url(&server.uri()));
 
         let err = mgr
-            .append_turn("s", &[Message::user("q"), Message::assistant("a")], Some(Utc::now()))
+            .append_turn("s", &[Message::user("q"), Message::assistant("a")], Some(Utc::now()), None)
             .await
             .expect_err("the history write failed");
         assert!(matches!(err, SessionError::Io(_)), "{err}");
@@ -1018,7 +1077,7 @@ mod append_turn_tests {
         let held = lock.lock().await;
 
         let writer = Arc::clone(&mgr);
-        let task = tokio::spawn(async move { writer.append_turn("s", &[Message::user("q")], None).await });
+        let task = tokio::spawn(async move { writer.append_turn("s", &[Message::user("q")], None, None).await });
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(
             server.received_requests().await.unwrap_or_default().is_empty(),
@@ -1061,7 +1120,7 @@ mod append_turn_tests {
         let created = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             store.session_exists("s").await.expect("checked");
             store.create("s").await.expect("created");
-            store.append_turn("s", &[Message::user("q")], None).await.expect("written")
+            store.append_turn("s", &[Message::user("q")], None, None).await.expect("written")
         })
         .await;
         assert!(created.is_ok(), "the store handle waited for the manager's lock");

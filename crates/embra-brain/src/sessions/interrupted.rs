@@ -19,7 +19,9 @@ use crate::brain::Message;
 use crate::db::WardsonDbClient;
 use crate::tools::sessions::truncate_str;
 
-use super::model_view::{CALL_FAILED_MARKER, CALL_FAILED_SUFFIX, STREAM_FAILED_MARKER};
+use super::model_view::{
+    CALL_FAILED_MARKER, CALL_FAILED_SUFFIX, RESTART_MARKER, RESTART_SUFFIX, STREAM_FAILED_MARKER,
+};
 
 /// Tool calls read of the cut turn. A full window makes the count a lower
 /// bound.
@@ -37,6 +39,9 @@ pub(crate) enum Cut {
     /// A model call failed: the request was refused or lost, the server
     /// sent nothing for the whole wait, or the stream broke.
     FailedCall,
+    /// The process ended while the turn was running, and the turn was
+    /// written into the session at the next boot (`open_turn::recover`).
+    Restart,
 }
 
 /// One tool call of the cut turn.
@@ -59,6 +64,9 @@ pub(crate) fn cut_of(history: &[Message]) -> Option<Cut> {
     let ends_with = |marker: &str| {
         reply == marker || reply.strip_suffix(marker).is_some_and(|before| before.ends_with("\n\n"))
     };
+    if [RESTART_MARKER, RESTART_SUFFIX].into_iter().any(ends_with) {
+        return Some(Cut::Restart);
+    }
     [CALL_FAILED_MARKER, CALL_FAILED_SUFFIX, STREAM_FAILED_MARKER]
         .into_iter()
         .any(ends_with)
@@ -115,6 +123,7 @@ fn shown(input: &str) -> String {
 pub(crate) fn render(cut: Cut, calls: &[CutCall], may_be_more: bool) -> String {
     let how = match cut {
         Cut::FailedCall => "a model call failed",
+        Cut::Restart => "embraOS restarted while it was running",
     };
     let mut out = format!(
         "<interrupted_turn>\nYour last turn in this session was cut before it finished: {how}. The message it was answering is above, with what you had written of the reply. The tool results of that turn are no longer in your context.\n"
@@ -136,6 +145,9 @@ pub(crate) fn render(cut: Cut, calls: &[CutCall], may_be_more: bool) -> String {
             out.push_str(&format!("- and {at_least}{rest} more\n"));
         }
         out.push_str("turn_trace with turn_index_back=1 shows a preview of each result; run a tool again when you need the whole of one.\n");
+    }
+    if cut == Cut::Restart {
+        out.push_str("A tool call that was running when embraOS restarted is not on record, and may have done part of its work.\n");
     }
     out.push_str("Take the work up from there if the operator's message below asks for it.\n</interrupted_turn>");
     out
@@ -167,6 +179,19 @@ mod tests {
             cut_of(&history(&format!("I have read two.\n\n{STREAM_FAILED_MARKER}"))),
             Some(Cut::FailedCall)
         );
+    }
+
+    #[test]
+    fn a_reply_written_at_boot_for_a_turn_the_process_did_not_finish_is_a_restart() {
+        assert_eq!(cut_of(&history(RESTART_MARKER)), Some(Cut::Restart));
+        assert_eq!(cut_of(&history(&format!("Two are read.\n\n{RESTART_SUFFIX}"))), Some(Cut::Restart));
+        let block = render(Cut::Restart, &[call("file_read", "{}", "ok")], false);
+        assert!(block.contains("was cut before it finished: embraOS restarted while it was running."), "{block}");
+        assert!(
+            block.contains("A tool call that was running when embraOS restarted is not on record"),
+            "{block}"
+        );
+        assert!(!render(Cut::FailedCall, &[], false).contains("restarted"));
     }
 
     #[test]

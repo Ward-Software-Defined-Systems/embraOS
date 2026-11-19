@@ -697,6 +697,21 @@ async fn handle_turn(
                 None => crate::sessions::model_view::fold_stopped_turns(api_messages),
             };
 
+            // The turn goes on record before its first model call: the
+            // operator's message, on the session's meta document
+            // (`sessions::open_turn`). A turn's message and reply are
+            // written when it ends, and a process that ends first (a reboot,
+            // the power) left nothing: the record is what the next boot
+            // writes into the session. A briefing saves nothing when it is
+            // cut and leaves no record.
+            let store = session_mgr.read().await.store();
+            let open_turn = if is_briefing {
+                None
+            } else {
+                let message = Message::user_with_attachments(&msg.content, turn_refs.clone());
+                store.open_turn(&session_name, &message, history.len()).await
+            };
+
             // Send thinking indicator.
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::Thinking(
@@ -788,6 +803,11 @@ async fn handle_turn(
             // messages stay the request as it was sent.
             if !is_cut(&current_turn) {
                 api_messages.push(ApiMessage::assistant_blocks(current_turn.content.clone()));
+            }
+            // The turn goes on (tools, or a resumed pause): its record takes
+            // the reply so far. A turn that ends here is saved next.
+            if let Some(id) = open_turn.as_deref().filter(|_| goes_on(&current_turn)) {
+                store.progress_open_turn(&session_name, id, &persisted_segments.joined()).await;
             }
 
             loop {
@@ -884,6 +904,9 @@ async fn handle_turn(
                             api_messages.push(ApiMessage::assistant_blocks(
                                 current_turn.content.clone(),
                             ));
+                        }
+                        if let Some(id) = open_turn.as_deref().filter(|_| goes_on(&current_turn)) {
+                            store.progress_open_turn(&session_name, id, &persisted_segments.joined()).await;
                         }
                         continue;
                     }
@@ -1331,6 +1354,9 @@ async fn handle_turn(
                                 current_turn.content.clone(),
                             ));
                         }
+                        if let Some(id) = open_turn.as_deref().filter(|_| goes_on(&current_turn)) {
+                            store.progress_open_turn(&session_name, id, &persisted_segments.joined()).await;
+                        }
                     }
                 }
             }
@@ -1472,9 +1498,14 @@ async fn handle_turn(
                     Message::assistant_with_attachments(&final_text, turn_assistant_refs.clone()),
                 ];
                 let events_seen_at = first_call_completed.then_some(turn_started);
-                match mgr.append_turn(&session_name, &turn, events_seen_at).await {
+                // The meta write that follows the history write removes the
+                // turn's record: open, or saved, never both.
+                match mgr.append_turn(&session_name, &turn, events_seen_at, open_turn.as_deref()).await {
                     Ok(()) => {}
                     Err(crate::sessions::SessionError::LegacyReadOnly(sess)) => {
+                        if let Some(id) = open_turn.as_deref() {
+                            store.close_open_turn(&session_name, id).await;
+                        }
                         warn!(
                             target: "sessions",
                             session = %sess,
@@ -1498,6 +1529,12 @@ async fn handle_turn(
                         // reply went out, so the operator is told the history
                         // does not carry this turn.
                         warn!(target: "sessions", session = %session_name, "the turn was not saved: {e}");
+                        // The operator is told below. A record left here
+                        // would be written into the session at the next
+                        // boot as a turn a restart cut, which this was not.
+                        if let Some(id) = open_turn.as_deref() {
+                            store.close_open_turn(&session_name, id).await;
+                        }
                         send_system(
                             tx,
                             format!(
@@ -2276,6 +2313,12 @@ pub(super) fn undelivered_after(turn: &AssistantTurn) -> Option<String> {
         TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop | EarlyStopReason::CallFailed)
     )
     .then(|| turn_text(turn))
+}
+
+/// Whether the loop goes on after this turn of the model's: tools to run,
+/// or a pause to resume. Any other turn is the loop's last.
+fn goes_on(turn: &AssistantTurn) -> bool {
+    matches!(turn.outcome, TurnOutcome::ToolUse | TurnOutcome::Pause)
 }
 
 /// Whether the turn is a model call that failed.

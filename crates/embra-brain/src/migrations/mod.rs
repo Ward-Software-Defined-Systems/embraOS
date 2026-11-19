@@ -216,6 +216,12 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     // reasoning sees it.
     dedupe_session_docs(db).await;
 
+    // A turn that was running when the process ended left a record on its
+    // session: it is written into the session as a turn cut by a restart.
+    // After the dedupe, which leaves each session its one meta document,
+    // and before the brain listens, so every record found is a dead one.
+    crate::sessions::open_turn::recover(db).await;
+
     // Ghost-sweep for TTL-reaped soft-deleted sessions — also every boot.
     sweep_reaped_sessions(db).await;
 
