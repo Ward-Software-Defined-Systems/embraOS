@@ -61,6 +61,11 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 
 [dev-dependencies]
 wiremock = "0.6"
+# Tests of a wait run under tokio's paused clock (`start_paused`), so that
+# none of them is bound by the wall clock. A feature of a package the tree
+# has (`rt`, `sync` and `time`, all on already): no package and no edge in
+# the lock, and no part of a build that is not a test.
+tokio = { workspace = true, features = ["test-util"] }
 # net.rs proves that a client built there trusts an operator CA drop-in: a
 # CA and a leaf minted with rcgen, served by tokio-rustls. All three are in
 # the tree already (trustd, embra-web, reqwest): edges in the lock, no package.

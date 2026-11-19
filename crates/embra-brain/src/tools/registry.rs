@@ -364,12 +364,10 @@ mod timeout_tests {
         assert!(matches!(res, Err(DispatchError::Handler(m)) if m == "boom"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn enforce_timeout_returns_timeout_when_exceeded() {
-        // Real-time short durations — workspace tokio doesn't have the
-        // `test-util` feature enabled, so `start_paused` isn't available.
-        // 50ms timeout vs 500ms sleep is well above the scheduler tick so
-        // the timeout fires reliably without being flaky.
+        // Under the paused clock: the 50 ms bound is the first timer due,
+        // whatever the machine is doing.
         let slow = async {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             Ok::<_, DispatchError>("never".to_string())
