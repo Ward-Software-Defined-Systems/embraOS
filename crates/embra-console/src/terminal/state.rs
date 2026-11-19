@@ -356,6 +356,14 @@ pub struct AppState {
     /// frame's marker row takes the duration from here (`ToolExecution`
     /// arm). Consumed by that frame; a stash for another tool is dropped.
     pub last_tool_run: Option<(String, std::time::Duration)>,
+    /// When the wait for the model began: the last announcement of a model
+    /// call (a `Thinking` frame that names no tool). `None` while nothing
+    /// is waited for.
+    pub thinking_since: Option<std::time::Instant>,
+    /// Whether the indicator says how long that wait has lasted
+    /// (`ui::thinking_label`): under the web console, the display console
+    /// included. The serial console's line stays as it was.
+    pub thinking_minutes: bool,
     /// How tool rows render (`/show-tools`); set per transport at start.
     pub show_tools: ShowTools,
     pub status_message: String,
@@ -449,6 +457,8 @@ impl AppState {
             thinking_name: "Embra".to_string(),
             current_tool: None,
             current_tool_started: None,
+            thinking_since: None,
+            thinking_minutes: false,
             last_tool_run: None,
             show_tools: ShowTools::Full,
             status_message: String::new(),

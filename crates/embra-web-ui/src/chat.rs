@@ -625,6 +625,20 @@ async fn fetch_sessions() -> Result<Vec<Session>, String> {
     Ok(parsed.sessions)
 }
 
+/// What the top bar says while the model works: the tool that runs, or that
+/// the model is thinking, with the minutes it has been waited for once one
+/// has passed. A local model can read a long prompt for many minutes, and
+/// the label read the same at one minute and at ninety.
+fn thinking_text(tool: &str, waited_ms: Option<f64>) -> String {
+    if !tool.is_empty() {
+        return format!("{tool}…");
+    }
+    match waited_ms.map(|ms| (ms / 60_000.0).floor()) {
+        Some(minutes) if minutes >= 1.0 => format!("thinking… {minutes:.0} min"),
+        _ => "thinking…".to_string(),
+    }
+}
+
 /// Aggregate health from a [`StatusData`] snapshot. Returns one of
 /// "up" / "warn" / "down" — drives the topbar health-chip color.
 fn services_health(s: &StatusData) -> &'static str {
@@ -1459,6 +1473,27 @@ fn ChatTopBar(
         }
     };
 
+    // How long the model has been waited for: from each announcement of a
+    // model call (a Thinking frame that names no tool) and from the end of
+    // a tool. The label below reads the clock again every ten seconds.
+    let waiting_since = RwSignal::new(None::<f64>);
+    Effect::new(move |_| {
+        let on = thinking.get();
+        let names_tool = !thinking_tool.get().is_empty();
+        if !on {
+            waiting_since.set(None);
+        } else if !names_tool {
+            waiting_since.set(Some(js_sys::Date::now()));
+        }
+    });
+    let tick = RwSignal::new(0u32);
+    spawn_local(async move {
+        loop {
+            TimeoutFuture::new(10_000).await;
+            tick.update(|t| *t = t.wrapping_add(1));
+        }
+    });
+
     // Health summary: WS disconnect overrides services (red); otherwise
     // the services aggregate (up / warn / down) drives the dot color.
     let health_class = move || {
@@ -1497,9 +1532,9 @@ fn ChatTopBar(
             }}
             <div class="ct-thinking">
                 {move || if thinking.get() {
-                    let t = thinking_tool.get();
-                    let label = if t.is_empty() { "thinking…".to_string() }
-                                else { format!("{t}…") };
+                    let _ = tick.get();
+                    let waited = waiting_since.get().map(|since| js_sys::Date::now() - since);
+                    let label = thinking_text(&thinking_tool.get(), waited);
                     view! { <span class="ct-state">{label}</span> }.into_any()
                 } else if !connected.get() {
                     view! { <span class="ct-state down">"reconnecting…"</span> }.into_any()
@@ -2034,5 +2069,20 @@ where
             </button>
         </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod thinking_text_tests {
+    use super::thinking_text;
+
+    #[test]
+    fn the_top_bar_says_how_long_the_model_has_been_waited_for() {
+        assert_eq!(thinking_text("", None), "thinking…");
+        assert_eq!(thinking_text("", Some(59_999.0)), "thinking…");
+        assert_eq!(thinking_text("", Some(60_000.0)), "thinking… 1 min");
+        assert_eq!(thinking_text("", Some(90.5 * 60_000.0)), "thinking… 90 min");
+        // A tool that runs is named; its time is the tool's own.
+        assert_eq!(thinking_text("shell", Some(600_000.0)), "shell…");
     }
 }

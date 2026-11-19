@@ -158,6 +158,7 @@ async fn run_tui(
     // Tool rows: one marker line per call on the web PTY, where the Tools
     // tab keeps every call; the serial console keeps the full rows.
     app.show_tools = ShowTools::default_for(web_pty);
+    app.thinking_minutes = web_pty;
     app.status_message = "OK".to_string();
     app.viewport_cols = use_cols;
     app.viewport_rows = use_rows;
@@ -356,6 +357,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
     match event {
         ConsoleEvent::Token(text) => {
             app.thinking = false;
+            app.thinking_since = None;
             match &mut app.streaming_text {
                 Some(s) => s.push_str(&text),
                 None => app.streaming_text = Some(text),
@@ -364,6 +366,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         ConsoleEvent::ResponseDone(full) => {
             app.streaming_text = None;
             app.thinking = false;
+            app.thinking_since = None;
             // Live reasoning is intentionally NOT cleared here — the
             // operator can keep reading the last turn's reasoning until
             // they submit their next message (clear sites: user submit,
@@ -437,6 +440,15 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         }
         ConsoleEvent::ThinkingState { is_thinking, name, current_tool } => {
             app.thinking = is_thinking;
+            // The wait for the model starts at each announcement of a
+            // model call, which names no tool, and at the end of a tool
+            // (the frame that clears its name): the indicator counts the
+            // wait for this call, not the length of the turn.
+            if !is_thinking {
+                app.thinking_since = None;
+            } else if current_tool.is_none() {
+                app.thinking_since = Some(std::time::Instant::now());
+            }
             if !name.is_empty() {
                 app.thinking_name = name;
             }
@@ -1219,6 +1231,39 @@ mod reasoning_tests {
         app.live_reasoning = "kept across the gap".to_string();
         handle_console_event(ConsoleEvent::ResponseDone("ok".to_string()), &mut app);
         assert_eq!(app.live_reasoning, "kept across the gap");
+    }
+
+    /// The web console's indicator says how long the model has been waited
+    /// for. The wait is timed from each announcement of a model call and
+    /// from the end of a tool, and ends with the answer's first token.
+    #[test]
+    fn the_wait_for_the_model_is_timed_from_each_announcement_of_a_call() {
+        let mut app = AppState::new();
+        assert!(app.thinking_since.is_none());
+        assert!(!app.thinking_minutes, "off until the web console turns it on: the serial line stays as it was");
+        let think = |tool: Option<&str>, on: bool| ConsoleEvent::ThinkingState {
+            is_thinking: on,
+            name: "Embra".to_string(),
+            current_tool: tool.map(str::to_string),
+        };
+
+        handle_console_event(think(None, true), &mut app);
+        let first = app.thinking_since.expect("a model call is waited for");
+        // A tool runs: the tool's line has its own clock, and the wait keeps its start.
+        handle_console_event(think(Some("calculate"), true), &mut app);
+        assert_eq!(app.thinking_since, Some(first));
+        // The tool is cleared and the model is asked again: the wait is this call's.
+        handle_console_event(think(None, true), &mut app);
+        assert!(app.thinking_since.expect("still waited for") >= first);
+
+        handle_console_event(ConsoleEvent::Token("Four".to_string()), &mut app);
+        assert!(app.thinking_since.is_none(), "the answer began");
+        handle_console_event(think(None, true), &mut app);
+        handle_console_event(think(None, false), &mut app);
+        assert!(app.thinking_since.is_none(), "the brain said the wait is over");
+        handle_console_event(think(None, true), &mut app);
+        handle_console_event(ConsoleEvent::ResponseDone(String::new()), &mut app);
+        assert!(app.thinking_since.is_none(), "the turn closed");
     }
 
     #[test]

@@ -286,6 +286,18 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
 /// the intelligence's configured name. Every message, oldest first: the
 /// frame itself walks from the newest (`frame_rows`); this whole walk is
 /// what the tests compare it with.
+/// The line shown while the model is waited for. With `waited` (the web
+/// console) it says how long, once a minute has passed: a local model can
+/// read a long prompt for many minutes, the wait is bounded at two hours by
+/// default, and the line read the same at one minute and at ninety. The
+/// time stands before the dots, which move, as on a running tool's line.
+pub(crate) fn thinking_label(name: &str, dots: &str, waited: Option<std::time::Duration>) -> String {
+    match waited.map(|waited| waited.as_secs() / 60) {
+        Some(minutes) if minutes >= 1 => format!("  {name} is thinking ({minutes} min){dots}"),
+        _ => format!("  {name} is thinking{dots}"),
+    }
+}
+
 #[cfg(test)]
 fn conversation_lines(app: &AppState) -> Vec<StyledLine> {
     app.messages.iter().flat_map(|msg| message_lines(app, msg)).collect()
@@ -411,7 +423,11 @@ fn tail_lines(app: &AppState) -> Vec<StyledLine> {
                 let secs = started.elapsed().as_secs();
                 format!("  {} is running {} ({}s){}", app.thinking_name, tool, secs, dots)
             }
-            _ => format!("  {} is thinking{}", app.thinking_name, dots),
+            _ => thinking_label(
+                &app.thinking_name,
+                dots,
+                app.thinking_since.filter(|_| app.thinking_minutes).map(|since| since.elapsed()),
+            ),
         };
         styled_lines.push(vec![StyledSegment::new(
             label,
@@ -1005,5 +1021,20 @@ mod expression_window_tests {
     fn zero_cols_or_rows_returns_empty() {
         assert_eq!(window_to_visible_rows("x", 0, 6, 0), "");
         assert_eq!(window_to_visible_rows("x", 80, 0, 3), "");
+    }
+}
+
+#[cfg(test)]
+mod thinking_label_tests {
+    use super::thinking_label;
+
+    #[test]
+    fn the_thinking_line_says_how_long_after_a_minute_and_only_where_it_is_asked() {
+        let secs = std::time::Duration::from_secs;
+        // The serial console passes no wait: its line is the one it had.
+        assert_eq!(thinking_label("Embra", "..", None), "  Embra is thinking..");
+        assert_eq!(thinking_label("Embra", "..", Some(secs(59))), "  Embra is thinking..");
+        assert_eq!(thinking_label("Embra", ".", Some(secs(60))), "  Embra is thinking (1 min).");
+        assert_eq!(thinking_label("Embra", "...", Some(secs(90 * 60 + 30))), "  Embra is thinking (90 min)...");
     }
 }
