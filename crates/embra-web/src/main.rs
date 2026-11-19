@@ -27,6 +27,8 @@ mod pty_bridge;
 mod server;
 mod sessions;
 mod stop;
+#[cfg(test)]
+mod theme_contract;
 mod state;
 mod status;
 mod tls;

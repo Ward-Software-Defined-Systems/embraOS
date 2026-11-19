@@ -1,37 +1,31 @@
-:root {
-  /* Warm embraOS brand palette (from embraos-banner.png / Embra flame). */
-  --bg: #0c0907;          /* warm near-black */
-  --bg-2: #140d09;        /* lifted warm */
-  --panel: #1b120c;
-  --panel-2: #221710;
-  --line: #33231a;        /* warm border */
-  --txt: #ece2d8;         /* warm off-white */
-  --txt-dim: #9c8b7c;     /* warm gray */
-  --accent: #ff7a1a;      /* flame orange (primary) */
-  --accent-2: #f5a623;    /* amber / gold */
-  --accent-red: #d2442a;  /* deep ember red */
-  --warn: #f5a623;
-  --bad: #e5533a;         /* warm red — still clearly "down" */
-  --good: #43d17a;        /* conventional green — "up" (kept for legibility) */
+/* Colour tokens: one block a theme.
+   The page's root carries `data-theme`: embra-web writes the machine's stored
+   theme into the page it serves, and the page follows a change at its next
+   status poll. A card of the theme picker carries the attribute too, and so
+   shows its own theme's colours. A root with no attribute, or with a name
+   this stylesheet does not know, is ember.
+   The names are `embra_tools_core::theme::THEMES`. Every block defines the
+   same tokens, and every pair that is read as text holds the contrast of
+   WCAG 2.1: 4.5:1, and 7:1 in the two high-contrast themes. embra-web's
+   `theme_contract` tests read this file and compute it. */
+:root, [data-theme="ember"] {
+  color-scheme: dark;
+  /* The page's ground: the page, its panels, the glow behind its top. */
+  --bg: #0c0907; --bg-2: #140d09; --panel: #1b120c; --panel-2: #221710; --bg-glow: #241208;
+  /* Lines: one that divides, a field's edge (3:1 against the page), two tinted by what they frame. */
+  --line: #33231a; --control-line: #80624c; --accent-line: #4a2a12; --bad-line: #3a201a;
+  /* Text, and dimmer text. Both are read on every ground above. */
+  --txt: #ece2d8; --txt-dim: #9c8b7c;
+  /* The accents. The first two are read as text too; the third closes the wordmark's gradient. */
+  --accent: #ff7a1a; --accent-2: #f5a623; --accent-red: #d2442a;
+  /* States, read as text and as a dot or a bar. */
+  --good: #43d17a; --warn: #f5a623; --bad: #e5533a;
   /* What is written on an accent, a good or a danger fill. */
-  --on-accent: #1a0e06;
-  --on-good: #0c2a14;
-  --danger: #c0392b;
-  --on-danger: #fff;
-  /* Borders tinted by what they frame. */
-  --accent-line: #4a2a12;
-  --bad-line: #3a201a;
-  /* A field's edge, and the ring around what the keyboard is on: both are
-     read against the page and hold 3:1 against it. */
-  --control-line: #80624c;
-  --focus: #ffd9a0;
-  /* The glow behind the page, the veil under a modal, a shadow's colour. */
-  --bg-glow: #241208;
-  --scrim: #080503;
-  --shadow: #000;
-  /* The keys and the strings of a JSON document. */
-  --json-key: #6cb6c9;
-  --json-str: #8db86a;
+  --on-accent: #1a0e06; --on-good: #0c2a14; --danger: #c0392b; --on-danger: #ffffff;
+  /* A JSON document's keys and strings. */
+  --json-key: #6cb6c9; --json-str: #8db86a;
+  /* The veil under a modal, a shadow's colour, the ring around what the keyboard is on. */
+  --scrim: #080503; --shadow: #000000; --focus: #ffd9a0;
   /* The terminal: its selection, the contrast it holds every character to
      against its cell (xterm's `minimumContrastRatio`), and the sixteen
      colours a console program names (0-7, then their bright forms). */
@@ -39,7 +33,120 @@
   --term-floor: 4.5;
   --ansi-0: #2e3436; --ansi-1: #cc0000; --ansi-2: #4e9a06; --ansi-3: #c4a000; --ansi-4: #3465a4; --ansi-5: #75507b; --ansi-6: #06989a; --ansi-7: #d3d7cf;
   --ansi-8: #555753; --ansi-9: #ef2929; --ansi-10: #8ae234; --ansi-11: #fce94f; --ansi-12: #729fcf; --ansi-13: #ad7fa8; --ansi-14: #34e2e2; --ansi-15: #eeeeec;
+}
 
+[data-theme="nebula"] {
+  color-scheme: dark;
+  --bg: #0d0a17; --bg-2: #140f22; --panel: #1b152e; --panel-2: #221a38; --bg-glow: #2a1650;
+  --line: #33284f; --control-line: #7d6fa8; --accent-line: #5a2a6e; --bad-line: #5a2238;
+  --txt: #ece8f7; --txt-dim: #a69dc2;
+  --accent: #ff5fb0; --accent-2: #7ad7ff; --accent-red: #a45bff;
+  --good: #4ee3a0; --warn: #ffcc5c; --bad: #ff6b7a;
+  --on-accent: #23061a; --on-good: #062a1a; --danger: #d6336c; --on-danger: #ffffff;
+  --json-key: #7ad7ff; --json-str: #b6e08a;
+  --scrim: #07050f; --shadow: #000000; --focus: #ffe45c;
+  --term-selection: #ffffff5c;
+  --term-floor: 4.5;
+  --ansi-0: #1b152e; --ansi-1: #ff6b7a; --ansi-2: #4ee3a0; --ansi-3: #ffcc5c; --ansi-4: #7aa2ff; --ansi-5: #d28bff; --ansi-6: #5fd7ff; --ansi-7: #cfc8e8;
+  --ansi-8: #62578f; --ansi-9: #ff8f9a; --ansi-10: #7df0b8; --ansi-11: #ffdd8a; --ansi-12: #9dbbff; --ansi-13: #e3b0ff; --ansi-14: #8ee6ff; --ansi-15: #f6f3ff;
+}
+
+[data-theme="lagoon"] {
+  color-scheme: dark;
+  --bg: #06141a; --bg-2: #0a1c24; --panel: #0f252f; --panel-2: #142e3a; --bg-glow: #0d3a47;
+  --line: #1f4250; --control-line: #5e8c9c; --accent-line: #1f5a5a; --bad-line: #5a2a2a;
+  --txt: #e3f3f5; --txt-dim: #8fb3bd;
+  --accent: #2fe0c8; --accent-2: #ff9e7a; --accent-red: #ff6f91;
+  --good: #6ee07a; --warn: #ffd166; --bad: #ff7b72;
+  --on-accent: #04201c; --on-good: #06260c; --danger: #c93a4a; --on-danger: #ffffff;
+  --json-key: #6fd3ff; --json-str: #a8e08a;
+  --scrim: #030c10; --shadow: #000000; --focus: #ffd166;
+  --term-selection: #ffffff5c;
+  --term-floor: 4.5;
+  --ansi-0: #0f252f; --ansi-1: #ff7b72; --ansi-2: #6ee07a; --ansi-3: #ffd166; --ansi-4: #6fb7ff; --ansi-5: #f29bd4; --ansi-6: #2fe0c8; --ansi-7: #c4dde2;
+  --ansi-8: #3f6b7c; --ansi-9: #ff9d96; --ansi-10: #94ec9d; --ansi-11: #ffe08f; --ansi-12: #96cbff; --ansi-13: #f7b8e1; --ansi-14: #74efdc; --ansi-15: #f2fbfc;
+}
+
+[data-theme="forest"] {
+  color-scheme: dark;
+  --bg: #0a120b; --bg-2: #0f1a10; --panel: #152316; --panel-2: #1b2c1c; --bg-glow: #1d3a1a;
+  --line: #2a4229; --control-line: #6c8f66; --accent-line: #44591f; --bad-line: #5a2a22;
+  --txt: #e9f2e3; --txt-dim: #9db59a;
+  --accent: #a3e635; --accent-2: #ffc857; --accent-red: #ff8a4c;
+  --good: #5fe08a; --warn: #ffc857; --bad: #ff7a6b;
+  --on-accent: #142104; --on-good: #06250f; --danger: #c4432b; --on-danger: #ffffff;
+  --json-key: #7fd6c2; --json-str: #c5e478;
+  --scrim: #050a05; --shadow: #000000; --focus: #ffe9b0;
+  --term-selection: #ffffff5c;
+  --term-floor: 4.5;
+  --ansi-0: #152316; --ansi-1: #ff7a6b; --ansi-2: #7fdc6b; --ansi-3: #ffc857; --ansi-4: #7fb4ff; --ansi-5: #e59bf0; --ansi-6: #6fdcc8; --ansi-7: #cbdcc6;
+  --ansi-8: #4d6f4c; --ansi-9: #ff9d91; --ansi-10: #a6ec96; --ansi-11: #ffd985; --ansi-12: #a3c9ff; --ansi-13: #efbaf6; --ansi-14: #9aeadb; --ansi-15: #f4faf0;
+}
+
+[data-theme="cobalt"] {
+  color-scheme: dark;
+  --bg: #07101f; --bg-2: #0b172b; --panel: #101f38; --panel-2: #152745; --bg-glow: #14306a;
+  --line: #233a63; --control-line: #6f8fc4; --accent-line: #5a4a1f; --bad-line: #5a3a1a;
+  --txt: #e6eefb; --txt-dim: #9ab0d0;
+  --accent: #ffc600; --accent-2: #6fd3ff; --accent-red: #ff7847;
+  --good: #5cb8ff; --warn: #ffe14d; --bad: #ff7847;
+  --on-accent: #221a00; --on-good: #04182a; --danger: #b5451b; --on-danger: #ffffff;
+  --json-key: #6fd3ff; --json-str: #ffd98a;
+  --scrim: #040a14; --shadow: #000000; --focus: #ffffff;
+  --term-selection: #ffffff5c;
+  --term-floor: 4.5;
+  --ansi-0: #101f38; --ansi-1: #ff7847; --ansi-2: #5cb8ff; --ansi-3: #ffe14d; --ansi-4: #a5a9ff; --ansi-5: #ff9ad5; --ansi-6: #6fe3ff; --ansi-7: #c5d3ea;
+  --ansi-8: #4a629c; --ansi-9: #ff9a75; --ansi-10: #8dcdff; --ansi-11: #ffeb85; --ansi-12: #c3c6ff; --ansi-13: #ffbce4; --ansi-14: #a5eeff; --ansi-15: #f3f7ff;
+}
+
+[data-theme="daylight"] {
+  color-scheme: light;
+  --bg: #f6f1e7; --bg-2: #efe8da; --panel: #fffdf8; --panel-2: #ffffff; --bg-glow: #fff3dc;
+  --line: #d9cfbd; --control-line: #857a68; --accent-line: #e6b98a; --bad-line: #e6b0a8;
+  --txt: #1f1a14; --txt-dim: #5c5347;
+  --accent: #963b00; --accent-2: #7a5200; --accent-red: #b3261e;
+  --good: #156c2e; --warn: #8a5a00; --bad: #b3261e;
+  --on-accent: #ffffff; --on-good: #ffffff; --danger: #b3261e; --on-danger: #ffffff;
+  --json-key: #0a6c74; --json-str: #3d6b00;
+  --scrim: #2a2118; --shadow: #4a3f2f; --focus: #0b57d0;
+  --term-selection: #00000075;
+  --term-floor: 4.5;
+  --ansi-0: #1f1a14; --ansi-1: #b3261e; --ansi-2: #156c2e; --ansi-3: #7d5200; --ansi-4: #0b57d0; --ansi-5: #8a3ea8; --ansi-6: #0a6c74; --ansi-7: #5c5347;
+  --ansi-8: #d9cfbd; --ansi-9: #9a1c15; --ansi-10: #0f5a25; --ansi-11: #6f4800; --ansi-12: #0842a0; --ansi-13: #6f2f8a; --ansi-14: #07565c; --ansi-15: #1f1a14;
+}
+
+[data-theme="contrast-dark"] {
+  color-scheme: dark;
+  --bg: #000000; --bg-2: #0a0a0a; --panel: #121212; --panel-2: #1a1a1a; --bg-glow: #000000;
+  --line: #6b6b6b; --control-line: #a0a0a0; --accent-line: #8a7400; --bad-line: #a04040;
+  --txt: #ffffff; --txt-dim: #c8c8c8;
+  --accent: #ffd400; --accent-2: #5ce1ff; --accent-red: #ff8a80;
+  --good: #5cff8a; --warn: #ffd400; --bad: #ff8a80;
+  --on-accent: #000000; --on-good: #000000; --danger: #ff8a80; --on-danger: #000000;
+  --json-key: #5ce1ff; --json-str: #5cff8a;
+  --scrim: #000000; --shadow: #000000; --focus: #ffffff;
+  --term-selection: #ffffff52;
+  --term-floor: 7;
+  --ansi-0: #000000; --ansi-1: #ff8a80; --ansi-2: #5cff8a; --ansi-3: #ffd400; --ansi-4: #8ab4ff; --ansi-5: #ff9cf5; --ansi-6: #5ce1ff; --ansi-7: #e0e0e0;
+  --ansi-8: #555555; --ansi-9: #ffb3ad; --ansi-10: #9dffb8; --ansi-11: #ffe566; --ansi-12: #b3ceff; --ansi-13: #ffc2f9; --ansi-14: #9cecff; --ansi-15: #ffffff;
+}
+
+[data-theme="contrast-light"] {
+  color-scheme: light;
+  --bg: #ffffff; --bg-2: #f2f2f2; --panel: #ffffff; --panel-2: #ffffff; --bg-glow: #ffffff;
+  --line: #8c8c8c; --control-line: #595959; --accent-line: #6b2d00; --bad-line: #8f0f0f;
+  --txt: #000000; --txt-dim: #333333;
+  --accent: #002b88; --accent-2: #6b2d00; --accent-red: #8f0f0f;
+  --good: #0a5a1c; --warn: #604200; --bad: #8f0f0f;
+  --on-accent: #ffffff; --on-good: #ffffff; --danger: #8f0f0f; --on-danger: #ffffff;
+  --json-key: #004a59; --json-str: #1f4d00;
+  --scrim: #000000; --shadow: #000000; --focus: #b0006e;
+  --term-selection: #00000061;
+  --term-floor: 7;
+  --ansi-0: #000000; --ansi-1: #8f0f0f; --ansi-2: #0a5a1c; --ansi-3: #604200; --ansi-4: #002b88; --ansi-5: #6a1b7a; --ansi-6: #004a59; --ansi-7: #333333;
+  --ansi-8: #d0d0d0; --ansi-9: #6e0b0b; --ansi-10: #074414; --ansi-11: #4a3300; --ansi-12: #00267a; --ansi-13: #4f145c; --ansi-14: #003844; --ansi-15: #000000;
+}
+:root {
   /* Font-size hierarchy. Single source of truth for both the Leptos shell
      CSS and the xterm.js terminal (which reads `--term-fs` at init in
      embra-term.js — keep these aligned). */

@@ -28,11 +28,16 @@ pub struct Theme {
 }
 
 /// The themes, in the order a listing shows them. The first is the default.
-pub const THEMES: &[Theme] = &[Theme {
-    name: "ember",
-    note: "flame orange on warm black",
-    aaa: false,
-}];
+pub const THEMES: &[Theme] = &[
+    Theme { name: "ember", note: "flame orange on warm black", aaa: false },
+    Theme { name: "nebula", note: "pink and cyan on deep violet", aaa: false },
+    Theme { name: "lagoon", note: "turquoise and coral on deep teal", aaa: false },
+    Theme { name: "forest", note: "lime and gold on dark green", aaa: false },
+    Theme { name: "cobalt", note: "yellow and sky blue on navy; no state is told by red against green", aaa: false },
+    Theme { name: "daylight", note: "dark ink on warm paper", aaa: false },
+    Theme { name: "contrast-dark", note: "high contrast on black (WCAG AAA)", aaa: true },
+    Theme { name: "contrast-light", note: "high contrast on white (WCAG AAA)", aaa: true },
+];
 
 /// The theme of a machine that has stored none.
 pub const DEFAULT: &str = THEMES[0].name;

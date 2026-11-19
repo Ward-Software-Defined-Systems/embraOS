@@ -1583,6 +1583,7 @@ dependencies = [
  "bytes",
  "embra-boot",
  "embra-common",
+ "embra-tools-core",
  "futures-util",
  "libc",
  "portable-pty",
