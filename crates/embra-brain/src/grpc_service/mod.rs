@@ -13,6 +13,8 @@ mod update;
 mod web_token;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod turn_tests;
 
 pub(crate) use attach::*;
 use learning_loop::*;
