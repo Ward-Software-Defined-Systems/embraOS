@@ -63,6 +63,27 @@ In Learning Mode a call that fails ends no phase: the phase stays where it was, 
 | `Ctrl+A C` | Switch between serial console and QEMU monitor |
 | `Ctrl+A H` | Show all QEMU escape sequences |
 
+## Themes and Accessibility
+
+The web console has eight themes. A theme is the look of the web console in every browser, of the phone's page and of the display console, which are one page: one theme is in force for the whole machine. The serial console keeps the colours of the terminal it runs in.
+
+| Theme | What it is |
+|---|---|
+| `ember` | Flame orange on warm black. The default |
+| `nebula` | Pink and cyan on deep violet |
+| `lagoon` | Turquoise and coral on deep teal |
+| `forest` | Lime and gold on dark green |
+| `cobalt` | Yellow and sky blue on navy. No state is told by red against green |
+| `daylight` | Dark ink on warm paper |
+| `contrast-dark` | High contrast on black |
+| `contrast-light` | High contrast on white |
+
+- **Choosing one.** In the web console, `/theme` in the sidebar's System group (on the phone: `/theme` in the command list) opens a picker that shows each theme in its own colours. A press shows a theme on that page alone; **Apply** keeps it for the machine; **Cancel**, Escape or a press beside the picker puts back what was shown. Typed, `/theme` lists the themes, `/theme <name>` sets one and `/theme reset` goes back to `ember`. Both ways work before the first session. The picker types nothing into the console, so it also works from a browser that only observes.
+- **Where it is kept.** The theme's name is one file on STATE (`/embra/state/theme`), so it travels with a backup. A page is drawn in the stored theme from its first paint, and an open page and the display follow a change within a few seconds.
+- **Contrast.** In every theme, text holds at least 4.5:1 against what it is read on, the contrast WCAG 2.1 asks at level AA. In `contrast-dark` and `contrast-light` it holds 7:1, level AAA. A field's edge and the ring around the control the keyboard is on hold 3:1. The terminal holds every character to the theme's figure against its own cell, whatever colour a program named: a coloured word on a bar is drawn lighter or darker than the program asked. Tests compute the figures from the stylesheet (`crates/embra-web/src/theme_contract.rs`).
+- **Beyond colour.** The control the keyboard is on is always ringed. A service pill that is not up says `down` or `off` beside its dot, the phone's health dot carries a mark, and an error or a warning on the phone's page begins with the word. A reader who has asked the system for less motion gets none from the page. No text is set under 12 pixels.
+- **What is not claimed.** The figures above are computed and are measured on the page. The rest of WCAG 2.1 (what a screen reader says of each control, every path of the keyboard, text spacing, reflow at 400%) has not been audited.
+
 ## Current Limitations
 
 - **API or remote LLM** — Anthropic Claude / Google Gemini require internet + a paid API key. The Ollama and LM Studio presets connect to an OpenAI-compatible server: a local one you operate (typically a Mac Studio or similar) or any hosted one — vLLM, Together, Fireworks, OpenRouter — via `/provider --setup <ollama|lm_studio>` (base URL without `/v1`, key at the Bearer step; https endpoints keep their implicit 443). Inference still happens on a separate host — on-device inference inside embraOS itself belongs to Phase 5's sovereign-intelligence options ([ROADMAP.md](../ROADMAP.md)).
