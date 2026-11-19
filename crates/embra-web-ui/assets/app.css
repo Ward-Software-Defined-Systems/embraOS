@@ -1216,3 +1216,30 @@ body.kiosk .emoji { display: none; }
     transition-duration: .01ms !important; scroll-behavior: auto !important;
   }
 }
+
+/* ── The theme picker ─────────────────────────────────────── */
+/* One card a theme. A card carries its theme's `data-theme`, so the tokens
+   inside it are that theme's own: it is drawn in the colours it offers. */
+.modal.themes { width: min(760px, 94vw); }
+.theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+.sheet .theme-grid { padding: 10px 14px 4px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.theme-card { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px;
+  font: inherit; text-align: left; cursor: pointer; border-radius: 10px;
+  background: var(--bg); color: var(--txt); border: 2px solid var(--control-line); }
+.theme-card[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.theme-card .tc-chips { display: flex; gap: 4px; }
+.theme-card .tc-chips i { width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--control-line); }
+.theme-card .tc-chips .c-panel { background: var(--panel-2); }
+.theme-card .tc-chips .c-accent { background: var(--accent); }
+.theme-card .tc-chips .c-accent-2 { background: var(--accent-2); }
+.theme-card .tc-chips .c-good { background: var(--good); }
+.theme-card .tc-chips .c-bad { background: var(--bad); }
+.theme-card .tc-name { font-weight: 600; font-size: var(--text-sm); }
+/* The note is in the card's full text colour, not its dim one: a reader on a
+   high-contrast theme reads every card, and each card's text on its ground
+   holds 7:1 in every theme, which its dim text does not. */
+.theme-card .tc-note { font-size: var(--text-xs); color: var(--txt); }
+.theme-card .tc-mark { font-size: var(--text-xs); color: var(--accent); min-height: 1.2em; }
+.themes .m-error { padding: 0 16px 10px; color: var(--bad); font-size: var(--text-xs); }
+.sheet .theme-actions { display: flex; align-items: center; gap: 8px; padding: 10px 14px 6px; }
+.sheet .theme-actions .m-hint { flex: 1; font-size: var(--text-xs); color: var(--txt-dim); }

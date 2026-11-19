@@ -705,6 +705,7 @@ pub fn ChatApp() -> impl IntoView {
     let sessions_open = RwSignal::new(false);
     let slashes_open = RwSignal::new(false);
     let services_open = RwSignal::new(false);
+    let theme_open = RwSignal::new(false);
     // Phase 3b — live reasoning shard accumulator + sheet toggle.
     // Cleared on Done / Error / Mode / user submit / reconnect (matches
     // the TUI expression-panel contract; never persisted client-side per
@@ -1003,8 +1004,14 @@ pub fn ChatApp() -> impl IntoView {
                                         view! {
                                             <div class="sheet-row slash"
                                                 on:click=move |_| {
-                                                    input.set(format!("{cmd} "));
                                                     slashes_open.set(false);
+                                                    // The theme has a picker of its own, which
+                                                    // types nothing.
+                                                    if cmd == "/theme" {
+                                                        theme_open.set(true);
+                                                        return;
+                                                    }
+                                                    input.set(format!("{cmd} "));
                                                     focus_chat_textarea();
                                                 }>
                                                 <span class="row-cmd">{cmd}</span>
@@ -1018,6 +1025,9 @@ pub fn ChatApp() -> impl IntoView {
                     </div>
                 </div>
             })}
+
+            // ── Theme sheet ────────────────────────────────────────
+            {move || theme_open.get().then(|| view! { <crate::theme::ThemePicker open=theme_open sheet=true /> })}
 
             // ── Services sheet ─────────────────────────────────────
             {move || services_open.get().then(|| view! {

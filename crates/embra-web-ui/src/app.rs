@@ -565,6 +565,7 @@ pub fn App() -> impl IntoView {
     // an in-app sheet (centred modal on desktop; mobile work picks up
     // the bottom-sheet variant in the chat UI branch).
     let takeover_open = RwSignal::new(false);
+    let theme_open = RwSignal::new(false);
     // Sidebar: expanded groups (remembered per browser; everything starts
     // collapsed) + the filter box.
     let expanded = RwSignal::new(load_expanded());
@@ -593,6 +594,14 @@ pub fn App() -> impl IntoView {
             editor_text.set(String::new());
             modal.set(None); // mutual exclusivity
             editor_open.set(true);
+            return;
+        }
+        // The theme is chosen in a picker, which stores it through the web
+        // console and types nothing: it works for a browser that observes,
+        // while a turn runs and before the first session.
+        if c == "/theme" {
+            modal.set(None);
+            theme_open.set(true);
             return;
         }
         match spec_idx(c) {
@@ -648,6 +657,7 @@ pub fn App() -> impl IntoView {
                         modal.set(None);
                         editor_open.set(false);
                         takeover_open.set(false);
+                        theme_open.set(false);
                         tool_open.set(None);
                     }
                 },
@@ -669,6 +679,7 @@ pub fn App() -> impl IntoView {
             || modal.get().is_some()
             || editor_open.get()
             || takeover_open.get()
+            || theme_open.get()
             || tool_open.get().is_some();
         if prev == Some(true) && !any_open {
             term::focus();
@@ -1105,6 +1116,7 @@ pub fn App() -> impl IntoView {
             })}
 
             // ── Takeover confirmation sheet ───────────────────────────
+            {move || theme_open.get().then(|| view! { <crate::theme::ThemePicker open=theme_open /> })}
             {move || takeover_open.get().then(|| view! {
                 <div class="palette-bg"
                     on:click=move |_| takeover_open.set(false)>

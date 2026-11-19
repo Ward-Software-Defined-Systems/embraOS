@@ -59,6 +59,9 @@ pub struct StatusData {
     pub version: Option<String>,
     #[serde(default)]
     pub system: Option<SystemMetrics>,
+    /// The machine's theme. A web console from before the themes names none.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 /// Create the status signal and start the 5 s poll loop.
@@ -69,6 +72,9 @@ pub fn use_status() -> RwSignal<StatusData> {
             if let Ok(resp) = gloo_net::http::Request::get("/api/status").send().await
                 && let Ok(data) = resp.json::<StatusData>().await
             {
+                if let Some(theme) = data.theme.as_deref() {
+                    crate::theme::follow(theme);
+                }
                 sig.set(data);
             }
             gloo_timers::future::TimeoutFuture::new(5_000).await;
