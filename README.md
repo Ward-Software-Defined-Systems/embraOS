@@ -15,7 +15,7 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20673525.svg)](https://doi.org/10.5281/zenodo.20673525)
 
 <p align="center">
-  <img src="assets/embra-web.png" alt="embraOS web console (embra-web) — the conversational TUI in the browser over a PTY→WebSocket bridge, with the service and meter pills, the activity strip showing the model, the brain and the knowledge graph live, and the sidebar's Tools tab listing this boot's calls" width="100%">
+  <img src="assets/embra-kiosk-parallels.png" alt="embraOS display console in a Parallels VM window — the web console on the machine's own display, with the service and meter pills, the activity strip showing the model, the brain and the knowledge graph live, the sidebar's commands by group, and in the transcript a generated image in the media pane with one marker line per tool call" width="100%">
 </p>
 
 <p align="center">
