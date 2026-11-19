@@ -206,7 +206,7 @@ The runtime services that implement those layers:
 | `embra-trustd` | 50001 | Soul SHA-256 verification + PKI (Root CA 10y, service certs 1y). |
 | `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. |
 | `embra-brain` | 50002 | LLM runtime — provider abstraction, 120 tools, session manager, knowledge graph, Learning Mode. |
-| `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
+| `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. Eight themes, one for the whole machine (`/theme`); each holds WCAG 2.1 AA contrast for text, two hold AAA. |
 | `udevd` | — | eudev, for the display console's keyboard and mouse. Not essential: a boot goes on without it. |
 | `embra-kiosk` | — | The display console: the web console rendered on the machine's own display by cog (WPE WebKit), drawn in software. Started where the machine has a display; not essential. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
