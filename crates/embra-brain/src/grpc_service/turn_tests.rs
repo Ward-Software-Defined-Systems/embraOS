@@ -149,12 +149,69 @@ impl Respond for Stored {
     }
 }
 
+/// A collection kept as the database keeps one: a write adds a document,
+/// and a query answers the documents whose fields equal its filter's, in
+/// the order of `started_at`. It counts its writes, for a test to wait on
+/// one that the turn does not wait for.
+#[derive(Clone)]
+struct Kept {
+    docs: Arc<StdMutex<Vec<Value>>>,
+    written: Arc<watch::Sender<usize>>,
+}
+
+impl Kept {
+    fn new() -> Self {
+        Self { docs: Arc::default(), written: Arc::new(watch::channel(0).0) }
+    }
+
+    async fn mount(&self, server: &MockServer, collection: &str) {
+        for route in ["docs", "query"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/{collection}/{route}")))
+                .respond_with(self.clone())
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// Returns once `n` documents have been written. The deadline is one no
+    /// loaded machine reaches when the write comes.
+    async fn holds(&self, n: usize) {
+        let mut written = self.written.subscribe();
+        tokio::time::timeout(std::time::Duration::from_secs(120), written.wait_for(|count| *count >= n))
+            .await
+            .expect("the document is written")
+            .expect("the collection is there");
+    }
+}
+
+impl Respond for Kept {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+        let mut docs = self.docs.lock().unwrap();
+        if request.url.path().ends_with("/docs") {
+            docs.push(body);
+            // On record before the answer: a test that waits for the count
+            // reads a collection that already holds the document.
+            self.written.send_replace(docs.len());
+            return data(json!({"_id": format!("d{}", docs.len())}));
+        }
+        let wanted = body["filter"].as_object().cloned().unwrap_or_default();
+        let mut found: Vec<Value> =
+            docs.iter().filter(|doc| wanted.iter().all(|(k, v)| doc.get(k) == Some(v))).cloned().collect();
+        found.sort_by_key(|doc| doc["started_at"].as_str().unwrap_or_default().to_string());
+        data(Value::Array(found))
+    }
+}
+
 /// A brain with one session, a database and a model server.
 struct Rig {
     server: MockServer,
     script: Script,
     history: Stored,
     meta: Stored,
+    /// `tools.turn_trace`: one document per finished tool call.
+    traces: Kept,
     ctx: ServiceCtx,
     /// The operator's stop: a turn in flight sees the counter move.
     stop_tx: watch::Sender<u64>,
@@ -186,6 +243,8 @@ impl Rig {
             }),
         );
         meta.mount(&server, &format!("sessions.{SESSION}.meta")).await;
+        let traces = Kept::new();
+        traces.mount(&server, "tools.turn_trace").await;
         let script = Script::default();
         Mock::given(method("POST")).and(path(CHAT)).respond_with(script.clone()).mount(&server).await;
 
@@ -202,7 +261,7 @@ impl Rig {
             pending_backup_restore: Arc::new(Mutex::new(None)),
         };
         let (stop_tx, stop_rx) = watch::channel(0u64);
-        Self { server, script, history, meta, ctx, stop_tx, stop_rx }
+        Self { server, script, history, meta, traces, ctx, stop_tx, stop_rx }
     }
 
     /// What the model answers to its next call that has no answer yet.
@@ -486,6 +545,71 @@ async fn the_turn_after_a_cut_one_reads_the_cut_as_a_note_in_the_operators_messa
     assert!(sent[0].1.ends_with("and now?"), "{}", sent[0].1);
     assert!(!sent[0].1.contains(CUT_ALONE));
     assert_eq!(rig.saved().len(), 4);
+}
+
+/// A turn is cut after a tool call had finished. The history keeps its
+/// text; the call and its result were in memory. The next turn is told, at
+/// the head of its message: that the turn was cut, and the call on record.
+/// The turn after that is told nothing: the block is said once.
+#[tokio::test]
+async fn the_turn_after_a_cut_one_carries_the_interrupted_block_once() {
+    let rig = Rig::new().await;
+    rig.then(calculates("Let me work it out.", "2 ** 10"))
+        .then(refuses(400, "context length exceeded"))
+        .then(says("It was 1024."))
+        .then(says("Yes."));
+
+    rig.say("two to the ten?").await;
+    // The call's record is written beside the turn, not within it.
+    rig.traces.holds(1).await;
+    rig.say("where were we?").await;
+    rig.say("and then?").await;
+
+    let asked = rig.asked().await;
+    assert_eq!(asked.len(), 4);
+    let told = last_of(&asked[2], "user");
+    let block = "<interrupted_turn>\n\
+        Your last turn in this session was cut before it finished: a model call failed. The message it was answering is above, with what you had written of the reply. The tool results of that turn are no longer in your context.\n\
+        Tool calls of that turn, in order:\n\
+        - calculate {\"expression\":\"2 ** 10\"}: ok\n\
+        turn_trace with turn_index_back=1 shows a preview of each result; run a tool again when you need the whole of one.\n\
+        Take the work up from there if the operator's message below asks for it.\n\
+        </interrupted_turn>";
+    assert_eq!(told, format!("{block}\nwhere were we?"));
+    // What it follows in the history: the operator's message, and the
+    // reply as far as it got.
+    let before: Vec<(&str, &str)> = asked[2]["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|m| m["role"] != "system")
+        .map(|m| (m["role"].as_str().unwrap(), m["content"].as_str().unwrap()))
+        .take(2)
+        .collect();
+    assert_eq!(
+        before,
+        [("user", "two to the ten?"), ("assistant", format!("Let me work it out.\n\n{CUT_AFTER_TEXT}").as_str())]
+    );
+
+    assert_eq!(last_of(&asked[3], "user"), "and then?", "said once");
+    // Nothing of the block is kept: the history holds the operator's words.
+    assert_eq!(rig.saved()[2], row("user", "where were we?"));
+}
+
+/// A turn cut at its first call ran no tool: the next turn is told the cut
+/// and that nothing is on record, inside the one message the cut folded
+/// into.
+#[tokio::test]
+async fn a_turn_cut_before_any_tool_call_is_told_without_a_list() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "no such model")).then(says("Four."));
+
+    rig.say("two plus two?").await;
+    rig.say("and now?").await;
+
+    let told = last_of(&rig.asked().await[1], "user");
+    assert!(told.contains("<interrupted_turn>") && told.contains("No tool call of that turn is on record."), "{told}");
+    assert!(told.ends_with("</interrupted_turn>\nand now?"), "{told}");
 }
 
 /// The operator's stop while the model server has the request and has not

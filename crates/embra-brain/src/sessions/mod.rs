@@ -10,6 +10,7 @@ pub(crate) mod away;
 pub(crate) mod delete_record;
 
 pub(crate) mod events;
+pub(crate) mod interrupted;
 
 pub(crate) mod model_view;
 /// Session document format version.

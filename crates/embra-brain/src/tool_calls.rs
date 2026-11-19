@@ -198,6 +198,18 @@ pub fn list_query_body(limit: u32, before: &str, session: &str) -> serde_json::V
     body
 }
 
+/// The `tools.turn_trace` query for one turn's calls, in the order they
+/// started: the `turn_trace` tool's, and the one the turn after a cut turn
+/// reads that turn's calls with (`sessions::interrupted`). `session` leads
+/// the filter, the indexed key.
+pub fn turn_query_body(session: &str, turn_index: usize, limit: usize) -> serde_json::Value {
+    serde_json::json!({
+        "filter": {"session": session, "turn_index": turn_index},
+        "limit": limit,
+        "sort": [{"started_at": "asc"}],
+    })
+}
+
 /// A `tools.turn_trace` document read back as a record: the previews are
 /// the content, the byte totals are unknown (zero), `from_record` is set.
 /// A document without a readable `started_at` is skipped.

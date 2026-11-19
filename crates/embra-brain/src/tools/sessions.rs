@@ -2345,11 +2345,7 @@ impl TurnTraceArgs {
             .session
             .unwrap_or_else(|| ctx.session_name.to_string());
         let target_index = ctx.turn_index.saturating_sub(back);
-        let filter = serde_json::json!({
-            "filter": {"session": sess, "turn_index": target_index},
-            "limit": n,
-            "sort": [{"started_at": "asc"}],
-        });
+        let filter = crate::tool_calls::turn_query_body(&sess, target_index, n);
         let docs = match ctx.db.query("tools.turn_trace", &filter).await {
             Ok(d) => d,
             Err(e) => {

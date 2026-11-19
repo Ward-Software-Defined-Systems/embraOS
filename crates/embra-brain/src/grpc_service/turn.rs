@@ -575,26 +575,60 @@ pub(super) async fn handle_request(
             // reminders, cron runs — ahead of the files and the words,
             // rendered once and never persisted. A briefing carries
             // <while_away> instead, and the delete flow carries nothing.
-            let events_block = if !carries_events {
-                None
+            // The turn before this one was cut by a failed model call: the
+            // model is told so, and which of that turn's tool calls are on
+            // record, ahead of everything else (`sessions::interrupted`).
+            // A briefing and a trigger turn carry it too: it is said by the
+            // first turn after the cut one, whichever that is. The delete
+            // flow's turns carry nothing.
+            let cut = if delete_exec.is_none() {
+                crate::sessions::interrupted::cut_of(&history)
             } else {
-                let cutoff = session_mgr
+                None
+            };
+            // The session's watermark: where the events block starts, and
+            // the earliest a call of the cut turn can have started (the
+            // turn's own start, once its first call had completed).
+            let cutoff = if carries_events || cut.is_some() {
+                session_mgr
                     .read()
                     .await
                     .get_meta(&session_name)
                     .await
                     .ok()
                     .flatten()
-                    .map(|m| crate::sessions::events::cutoff(&m));
-                match cutoff {
-                    Some(since) => {
-                        let digest = crate::sessions::events::gather(db.as_ref(), since).await;
-                        crate::sessions::events::render(&digest, since, &loaded_config.timezone)
-                    }
-                    None => None,
+                    .map(|m| crate::sessions::events::cutoff(&m))
+            } else {
+                None
+            };
+            let interrupted_block = match (cut, cutoff) {
+                (Some(cut), Some(since)) => {
+                    let cut_turn_index = (history.len() / 2).saturating_sub(1);
+                    let (calls, may_be_more) = crate::sessions::interrupted::gather(
+                        db.as_ref(),
+                        &session_name,
+                        cut_turn_index,
+                        since,
+                    )
+                    .await;
+                    Some(crate::sessions::interrupted::render(cut, &calls, may_be_more))
                 }
+                // Without the session's meta there is no telling whose the
+                // calls on record are: the cut is said without them.
+                (Some(cut), None) => Some(crate::sessions::interrupted::render(cut, &[], false)),
+                (None, _) => None,
+            };
+            let events_block = match cutoff {
+                Some(since) if carries_events => {
+                    let digest = crate::sessions::events::gather(db.as_ref(), since).await;
+                    crate::sessions::events::render(&digest, since, &loaded_config.timezone)
+                }
+                _ => None,
             };
             let mut parts: Vec<String> = Vec::new();
+            if let Some(interrupted) = interrupted_block {
+                parts.push(interrupted);
+            }
             if let Some(events) = events_block {
                 parts.push(events);
             }
