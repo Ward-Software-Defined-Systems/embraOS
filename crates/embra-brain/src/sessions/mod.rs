@@ -607,6 +607,8 @@ impl SessionStore {
         .await
         .map_err(SessionError::Io)?;
 
+        // The turn is saved once a power cut cannot take it (`durable`).
+        crate::durable::sync_data().await;
         Ok(())
     }
 
@@ -619,7 +621,12 @@ impl SessionStore {
         let record = open_turn::OpenTurn::new(message.clone(), base_len);
         let id = record.id.clone();
         match self.rewrite_meta(name, |meta| meta.open_turns.push(record)).await {
-            Ok(true) => Some(id),
+            Ok(true) => {
+                // On record means on the disk: the operator's message is
+                // what a power cut in the next seconds must not take.
+                crate::durable::sync_data().await;
+                Some(id)
+            }
             Ok(false) => None,
             Err(e) => {
                 tracing::warn!(target: "sessions", session = %name, "the turn was not put on record at its start: {e}");
@@ -640,8 +647,11 @@ impl SessionStore {
                 }
             })
             .await;
-        if let Err(e) = written {
-            tracing::warn!(target: "sessions", session = %name, "the open turn's record was not brought up to date: {e}");
+        match written {
+            Ok(_) => crate::durable::sync_data().await,
+            Err(e) => {
+                tracing::warn!(target: "sessions", session = %name, "the open turn's record was not brought up to date: {e}");
+            }
         }
     }
 

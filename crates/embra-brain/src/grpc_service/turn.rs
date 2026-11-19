@@ -1008,6 +1008,10 @@ async fn handle_turn(
                         tool_iter += 1;
 
                         let mut result_blocks: Vec<Block> = Vec::new();
+                        // The writes of this batch's trace documents, which
+                        // run beside the tools and are waited for before
+                        // the next model call (below).
+                        let mut trace_writes: Vec<tokio::task::JoinHandle<()>> = Vec::new();
                         for block in &current_turn.content {
                             let Block::ToolCall { id, name, args, .. } = block else {
                                 continue;
@@ -1118,9 +1122,9 @@ async fn handle_turn(
                                         "result_preview": tool_calls::STOPPED_RESULT,
                                     });
                                     let db_clone = db.clone();
-                                    tokio::spawn(async move {
+                                    trace_writes.push(tokio::spawn(async move {
                                         let _ = db_clone.write("tools.turn_trace", &stopped_doc).await;
-                                    });
+                                    }));
                                     break;
                                 }
                             };
@@ -1209,9 +1213,9 @@ async fn handle_turn(
                                 "result_preview": result_preview,
                             });
                             let db_clone = db.clone();
-                            tokio::spawn(async move {
+                            trace_writes.push(tokio::spawn(async move {
                                 let _ = db_clone.write("tools.turn_trace", &persist_doc).await;
-                            });
+                            }));
 
                             // The live record for the Tools tab
                             // (`tool_calls`); the cuts and copies run only
@@ -1307,6 +1311,20 @@ async fn handle_turn(
                                 is_error,
                                 images: media::tool_images_to_ir(tool_images),
                             });
+                        }
+
+                        // What this batch's tools did is on record before
+                        // the model is asked again, and on the disk: the
+                        // next call can take minutes on a local model, and a
+                        // turn that the power cuts in that time tells the
+                        // one after it which tool calls had finished
+                        // (`sessions::interrupted`). A briefing leaves no
+                        // record and is not waited on.
+                        for write in trace_writes {
+                            let _ = write.await;
+                        }
+                        if open_turn.is_some() {
+                            crate::durable::sync_data().await;
                         }
 
                         // Operator stop during the dispatch pass (mid-tool

@@ -1181,3 +1181,56 @@ async fn a_turn_in_flight_when_the_process_ends_is_in_its_session_at_the_next_bo
     })
     .await;
 }
+
+// ── A turn on the disk ──────────────────────────────────────────────
+
+/// The database answers a write that the kernel still holds, and a power
+/// cut takes what the kernel holds (`durable`). A turn has DATA written out
+/// when it goes on record and when it is saved: two requests for a turn of
+/// one call.
+#[tokio::test]
+async fn a_turn_has_data_written_out_at_its_start_and_at_its_save() {
+    let rig = Rig::new().await;
+    rig.then(says("Four."));
+    let before = crate::durable::asked();
+
+    rig.say("two plus two?").await;
+
+    assert_eq!(crate::durable::asked() - before, 2);
+}
+
+/// And twice for each call that goes on: with the record of the reply so
+/// far, before its tools run, and with what the tools did, before the model
+/// is asked again. A long turn cut by the power is in its session up to its
+/// last finished call, and the turn after it is told which tool calls had
+/// finished.
+#[tokio::test]
+async fn a_turn_that_goes_on_has_data_written_out_after_each_call() {
+    let rig = Rig::new().await;
+    rig.then(calculates("Let me work it out.", "2 ** 10")).then(says("It is 1024."));
+    let before = crate::durable::asked();
+
+    rig.say("two to the ten?").await;
+
+    assert_eq!(
+        crate::durable::asked() - before,
+        4,
+        "the record, the record after the first call, the tool call's trace before the second call, the save"
+    );
+    // The trace's write is not left running beside the turn: it was waited
+    // for before the model was asked again, and is there when the turn ends.
+    assert_eq!(rig.traces.docs.lock().unwrap().len(), 1);
+}
+
+/// A cut turn is saved like any other, and as durably.
+#[tokio::test]
+async fn a_cut_turn_has_data_written_out_at_its_save_too() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "no such model"));
+    let before = crate::durable::asked();
+
+    rig.say("hello?").await;
+
+    assert_eq!(crate::durable::asked() - before, 2);
+    assert_eq!(rig.saved().len(), 2, "the message and the marker");
+}

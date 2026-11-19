@@ -139,7 +139,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | A turn cut by a failed model call (a request refused, an error inside the answer, the model wait run out, the network card's link taken away before an answer and inside one): the error named, the turn saved with its marker, `/continue`, the next turn told what was cut | QEMU, with a stand-in model server on the LM Studio preset | |
 | A stop before the answer begins and inside a silent answer: the request's connection closed with the stop | QEMU, with a stand-in model server | Ollama and LM Studio: the server's own log showing that it left the request |
 | The model wait: `/model-wait`, a call ended when the wait ran out | QEMU, with a wait of one minute | a local model whose answer begins after more than 15 minutes |
-| A turn that was running at a restart: in its session after the boot, the next turn told | QEMU: `/reboot now`; a power cut 38 seconds and more into the turn, on the RocksDB engine | a power cut on the fjall engine |
+| A turn that was running at a restart: in its session after the boot, the next turn told | QEMU: `/reboot now`; a power cut one second into a turn's held model call, and two seconds after a turn's end, on the RocksDB engine | a power cut on the fjall engine |
 | Learning Mode through a refused model call: the phase stays open | QEMU, with a stand-in model server | |
 
 ## First boot and identity

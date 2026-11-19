@@ -17,6 +17,7 @@ mod brain;
 mod ca;
 mod tools;
 mod db;
+mod durable;
 mod sessions;
 mod proactive;
 mod migrations;
