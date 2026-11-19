@@ -334,10 +334,9 @@ impl LlmProvider for AnthropicProvider {
                         if let Err(e) =
                             streaming::process_sse_stream(response, tx_clone.clone()).await
                         {
-                            error!("SSE stream error: {}", e);
-                            let _ = tx_clone
-                                .send(wire::AnthropicStreamEvent::Error(e.to_string()))
-                                .await;
+                            let said = crate::provider::sse::stream_failure_text(&e);
+                            error!("SSE stream error: {}", said);
+                            let _ = tx_clone.send(wire::AnthropicStreamEvent::Error(said)).await;
                         }
                     }
                     Err(err) => {

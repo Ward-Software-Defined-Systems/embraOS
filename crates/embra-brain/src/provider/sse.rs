@@ -95,6 +95,21 @@ where
     }
 }
 
+/// What a parser's failure is to the operator. A read of the body that
+/// failed is reqwest's "error decoding response body", which says nothing
+/// of what happened; the cause is behind it, and it is the connection:
+/// reset, closed with the body unfinished, timed out. Any other failure of
+/// a parser (the server's error inside the stream) is its own sentence.
+pub(crate) fn stream_failure_text(e: &anyhow::Error) -> String {
+    match e.downcast_ref::<reqwest::Error>() {
+        Some(read) => format!(
+            "the connection to the model server was lost in the middle of its answer: {}",
+            crate::net::error_chain(read)
+        ),
+        None => e.to_string(),
+    }
+}
+
 /// A server's message in an error frame is cut here before it is shown.
 pub(crate) const ERROR_MESSAGE_MAX: usize = 1024;
 

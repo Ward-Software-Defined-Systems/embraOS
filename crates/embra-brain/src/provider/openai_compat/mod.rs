@@ -214,8 +214,25 @@ impl OpenAICompatProvider {
                     body: body_text,
                 })
             }
-            Err(e) => Err(ProviderError::Network(e.to_string())),
+            Err(e) => Err(request_error(&self.base_url, e)),
         }
+    }
+}
+
+/// What a request that got no answer is, to the operator and to the one
+/// retry. reqwest's own line is "error sending request for url (…)": it
+/// says nothing of what happened, and it carries the whole URL, of which a
+/// stored endpoint keeps whatever was typed after the host. So the server
+/// is named by its host and the cause by the error's chain, and the kind
+/// is read from the error, never from its text.
+fn request_error(base_url: &str, e: reqwest::Error) -> ProviderError {
+    let server = crate::provider::gateway::host_label(base_url);
+    let reached = !e.is_connect();
+    let cause = crate::net::error_chain(&e.without_url());
+    if reached {
+        ProviderError::Network(format!("the model server at {server} gave no answer: {cause}"))
+    } else {
+        ProviderError::Connect(format!("could not connect to the model server at {server}: {cause}"))
     }
 }
 
@@ -330,13 +347,14 @@ pub(crate) fn known_effort_ladder(model_id: &str) -> Option<&'static [&'static s
     None
 }
 
-/// Decide whether a failed attempt warrants one retry. Connection
-/// errors and 5xx responses retry once after a 1s delay; everything
-/// else propagates immediately.
+/// Decide whether a failed attempt warrants one retry. A server that
+/// could not be reached and a 5xx answer are tried once more after a
+/// second; everything else is said as it is. A request that got through
+/// and was lost is not sent again: the server may be working on it.
 fn should_retry(attempt: &Result<reqwest::Response, ProviderError>) -> bool {
     match attempt {
-        Err(ProviderError::Http { status, .. }) if (500..600).contains(status) => true,
-        Err(ProviderError::Network(msg)) => msg.contains("connection refused") || msg.contains("timeout"),
+        Err(ProviderError::Http { status, .. }) => (500..600).contains(status),
+        Err(ProviderError::Connect(_)) => true,
         _ => false,
     }
 }
@@ -449,8 +467,9 @@ impl LlmProvider for OpenAICompatProvider {
             )
             .await
             {
-                error!(target: "provider::openai_compat", "SSE stream error: {e}");
-                let _ = tx_clone.send(StreamEvent::Error(e.to_string())).await;
+                let said = crate::provider::sse::stream_failure_text(&e);
+                error!(target: "provider::openai_compat", "SSE stream error: {said}");
+                let _ = tx_clone.send(StreamEvent::Error(said)).await;
             }
         });
 
@@ -1808,34 +1827,140 @@ mod tests {
         assert!(p.reasoning_effort_override.is_none());
     }
 
+    /// The kind of the failure decides the one retry, never its text. The
+    /// rule this replaces looked for `connection refused` and `timeout` in
+    /// reqwest's own line, which carries neither: no network error was
+    /// tried again, though the comment said a refused connection was.
     #[test]
-    fn should_retry_handles_5xx_and_connect_only() {
-        // 5xx → retry.
-        assert!(should_retry(&Err(ProviderError::Http {
-            status: 503,
-            body: String::new()
-        })));
-        // 4xx → no retry.
-        assert!(!should_retry(&Err(ProviderError::Http {
-            status: 401,
-            body: String::new()
-        })));
-        // Network "connection refused" → retry.
-        assert!(should_retry(&Err(ProviderError::Network(
-            "connection refused: x".to_string()
-        ))));
-        // Network "timeout" → retry.
-        assert!(should_retry(&Err(ProviderError::Network(
-            "timeout connecting to x".to_string()
-        ))));
-        // Other network error → no retry.
-        assert!(!should_retry(&Err(ProviderError::Network(
-            "DNS resolution failed".to_string()
-        ))));
-        // Decode error → no retry.
-        assert!(!should_retry(&Err(ProviderError::Decode(
-            "json".to_string()
-        ))));
+    fn should_retry_follows_the_kind_of_the_failure() {
+        let http = |status| Err(ProviderError::Http { status, body: String::new() });
+        assert!(should_retry(&http(503)), "a 5xx is tried once more");
+        assert!(!should_retry(&http(401)), "a 4xx is the server's answer");
+        assert!(
+            should_retry(&Err(ProviderError::Connect("could not connect".to_string()))),
+            "a server that could not be reached is tried once more"
+        );
+        assert!(
+            !should_retry(&Err(ProviderError::Network("timeout: connection refused".to_string()))),
+            "a request that got through and was lost is not sent again, whatever its text says"
+        );
+        assert!(!should_retry(&Err(ProviderError::Decode("json".to_string()))));
+    }
+
+    fn any_request() -> OpenAIChatRequest {
+        OpenAIChatRequest {
+            model: "m".to_string(),
+            messages: Vec::new(),
+            stream: true,
+            tools: None,
+            tool_choice: None,
+            reasoning_effort: None,
+            max_tokens: None,
+        }
+    }
+
+    /// A port nothing listens on.
+    async fn closed_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a listener");
+        listener.local_addr().expect("its address").port()
+    }
+
+    /// The server is not there. The operator read "error sending request
+    /// for url (…)": nothing of what happened, and the whole URL, of which
+    /// a stored endpoint keeps whatever was typed after the host. The
+    /// failure is a `Connect`, named by the server's host and the cause.
+    #[tokio::test]
+    async fn a_refused_connection_is_a_connect_error_that_names_the_host_and_the_cause() {
+        let port = closed_port().await;
+        let base = format!("http://127.0.0.1:{port}/proxy?token=SECRET");
+        let provider = OpenAICompatProvider::ollama(base.clone(), None, "m".to_string());
+        let url = format!("{base}/v1/chat/completions");
+
+        let err = provider.post_once(&url, &any_request()).await.expect_err("nothing listens there");
+
+        let ProviderError::Connect(text) = &err else { panic!("a connect error: {err:?}") };
+        assert!(text.starts_with(&format!("could not connect to the model server at 127.0.0.1:{port}: ")), "{text}");
+        assert!(text.to_lowercase().contains("refused"), "the cause is said: {text}");
+        for part in ["SECRET", "token=", "/proxy", "/v1/chat"] {
+            assert!(!text.contains(part), "{text} carries {part}");
+        }
+        assert_eq!(err.to_string(), *text, "said as it is, with no label in front");
+        assert!(should_retry(&Err(err)));
+    }
+
+    /// The server took the connection and closed it without an answer: the
+    /// request got through, so it is not sent again.
+    #[tokio::test]
+    async fn a_connection_closed_without_an_answer_is_said_and_not_tried_again() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a listener");
+        let port = listener.local_addr().expect("its address").port();
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut socket, _) = listener.accept().await.expect("the request's connection");
+            // Read the request's head, then go without a word.
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let provider = OpenAICompatProvider::lm_studio(base.clone(), None, "m".to_string());
+
+        let err = provider
+            .post_once(&format!("{base}/v1/chat/completions"), &any_request())
+            .await
+            .expect_err("the server said nothing");
+        server.await.expect("the server task");
+
+        let ProviderError::Network(text) = &err else { panic!("a lost request: {err:?}") };
+        assert!(text.starts_with(&format!("the model server at 127.0.0.1:{port} gave no answer: ")), "{text}");
+        assert!(!text.contains("/v1/chat"), "{text}");
+        assert!(!should_retry(&Err(err)));
+    }
+
+    /// The connection goes in the middle of the answer. The operator read
+    /// "error decoding response body"; the cause was behind it.
+    #[tokio::test]
+    async fn a_connection_lost_in_the_middle_of_the_answer_is_said_with_its_cause() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a listener");
+        let port = listener.local_addr().expect("its address").port();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.expect("the request's connection");
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            // The head and one chunk of a chunked body, then the connection
+            // goes with the body unfinished.
+            let frame = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Half\"},\"finish_reason\":null}]}\n\n";
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+            let _ = socket.write_all(format!("{head}{:x}\r\n{frame}\r\n", frame.len()).as_bytes()).await;
+            let _ = socket.flush().await;
+        });
+        let provider = OpenAICompatProvider::lm_studio(format!("http://127.0.0.1:{port}"), None, "m".to_string());
+
+        let stream = provider
+            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
+            .await
+            .expect("the answer began");
+        let events = collect_events(stream).await;
+        server.await.expect("the server task");
+
+        let said: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderStreamEvent::Error(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said.len(), 1, "{events:?}");
+        assert!(
+            said[0].starts_with("the connection to the model server was lost in the middle of its answer: "),
+            "{}",
+            said[0]
+        );
+        assert!(!said[0].contains("error decoding response body"), "{}", said[0]);
+        assert!(
+            !events.iter().any(|e| matches!(e, ProviderStreamEvent::Complete(_))),
+            "a lost answer is not a finished one: {events:?}"
+        );
     }
 
     // EarlyStopReason is referenced via the imports for clarity.

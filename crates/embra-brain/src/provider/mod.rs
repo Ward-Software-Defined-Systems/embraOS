@@ -149,6 +149,11 @@ pub enum ValidationResult {
 pub enum ProviderError {
     #[error("HTTP {status}: {body}")]
     Http { status: u16, body: String },
+    /// The server could not be reached: refused, unreachable, or not there
+    /// within the connect bound. Nothing was sent, so a provider may try
+    /// once more. The text is the whole sentence the operator reads.
+    #[error("{0}")]
+    Connect(String),
     #[error("network: {0}")]
     Network(String),
     #[error("decode: {0}")]

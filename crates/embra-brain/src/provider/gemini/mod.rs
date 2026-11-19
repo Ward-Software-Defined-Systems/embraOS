@@ -356,8 +356,9 @@ impl LlmProvider for GeminiProvider {
                 ),
                 Ok(None) => {}
                 Err(e) => {
-                    error!("Gemini SSE stream error: {}", e);
-                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                    let said = crate::provider::sse::stream_failure_text(&e);
+                    error!("Gemini SSE stream error: {}", said);
+                    let _ = tx.send(StreamEvent::Error(said)).await;
                 }
             }
         });
