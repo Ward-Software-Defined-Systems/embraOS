@@ -51,7 +51,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click) | the pointer and a click on Parallels, where the page, the mode and the keyboard work |
+| The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; Parallels; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click) | |
 | A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA); bare metal (a held modifier) | |
 | A firmware framebuffer (`ramfb`): 800x600, and 1024x768 on request | QEMU; QEMU on Apple Silicon | |
 | `embra.kioskmode=` | QEMU (standard VGA, virtio-gpu, a firmware framebuffer), GRUB's Diagnostics entry among the ways in | |
@@ -64,7 +64,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | What | Validated on | TBD |
 |---|---|---|
 | A DHCP lease on every card: one card, several, a USB card, a card or a link that comes late, no card | QEMU; bare metal (the onboard port); the laptop (its wired port) | on a machine: a USB Ethernet adapter, and a cable plugged in after the boot |
-| `/network static` on a network without DHCP | QEMU; bare metal | |
+| `/network static` on a network without DHCP | QEMU; bare metal; the laptop (an address of its own on a card) | |
 | `/network hostname` | QEMU | the name in a router's list |
 | The web console's certificate and its CA | QEMU, with curl as the client: by address and by name, a name set with `/network hostname`, an address that changes, the CA of an earlier release issued again once | a browser with the CA imported; a name a DNS server serves |
 | The web console at the leased address | QEMU on an Intel Mac and on Apple Silicon (bridged); Hyper-V; Parallels; bare metal | |
