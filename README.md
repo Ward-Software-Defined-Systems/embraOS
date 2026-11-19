@@ -29,8 +29,9 @@
 > installed from the ISO. Validated so far: QEMU on x86_64 Linux, on an Intel Mac and on
 > Apple Silicon; VMware ESXi 8.0 U2 (the OVA and the ISO); Microsoft Hyper-V generation 2
 > (the VHDX and the ISO); VMware Fusion on Apple Silicon (the ISO); Parallels Desktop 26.5
-> on an Intel Mac (the machine it imports and the ISO); and bare metal on one machine so
-> far, a YouYeeToo X1 single-board computer installed from the ISO. The drivers of wired
+> on an Intel Mac (the machine it imports and the ISO) and Parallels Desktop on Apple
+> Silicon (the ISO); and bare metal on two machines so far: a YouYeeToo X1 single-board
+> computer installed from the ISO, and a Lenovo ThinkPad E550 laptop. The drivers of wired
 > hardware and of the common Wi-Fi card families, with their firmware, and the CPU
 > microcode are in the image. The latest release,
 > `v0.26.0-phase2`, publishes the installer ISOs (x86_64 and aarch64, one per storage
