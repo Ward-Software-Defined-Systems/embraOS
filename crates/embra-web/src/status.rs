@@ -165,6 +165,8 @@ pub async fn api_status(State(state): State<AppState>) -> Json<Value> {
         "version": version,
         "ts": ts,
         "system": system,
+        // The machine's theme: an open page follows it at its next poll.
+        "theme": embra_tools_core::theme::read(&state.theme_file).name,
     }))
 }
 

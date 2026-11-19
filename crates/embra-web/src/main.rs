@@ -27,6 +27,7 @@ mod pty_bridge;
 mod server;
 mod sessions;
 mod stop;
+mod theme;
 #[cfg(test)]
 mod theme_contract;
 mod state;
@@ -105,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         tools: ToolFeed::spawn(cfg.apid_addr.clone()),
         token,
         backups_root: Arc::from(std::path::Path::new(backups::BACKUPS_ROOT)),
+        theme_file: Arc::from(std::path::Path::new(embra_tools_core::theme::STATE_FILE)),
         updater: Arc::from(std::path::Path::new(backups::UPDATER)),
         backup_upload: Arc::new(tokio::sync::Mutex::new(())),
         trust_addr: cfg.trust_addr.clone(),

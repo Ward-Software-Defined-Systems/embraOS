@@ -141,6 +141,7 @@ pub async fn serve(
         .route("/api/tools", get(api_tools_list))
         .route("/api/sessions", get(api_sessions_list))
         .route("/api/stop", post(api_stop))
+        .route("/api/theme", post(crate::theme::api_theme_set))
         // Media store door. Registered explicitly — the SPA fallback
         // below answers any unknown path with index.html/200. The body
         // limit overrides axum's 2 MiB default so the brain's own size

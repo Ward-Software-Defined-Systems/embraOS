@@ -7,9 +7,12 @@
 //! for iteration.
 
 use axum::body::Body;
+use axum::extract::State;
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
+
+use crate::state::AppState;
 
 // rust-embed resolves `folder` relative to CARGO_MANIFEST_DIR
 // (crates/embra-web), so this points at crates/embra-web-ui/dist.
@@ -39,7 +42,33 @@ fn content_type(path: &str) -> &'static str {
 
 fn serve(path: &str) -> Option<Response> {
     let file = Assets::get(path)?;
-    Some(
+    Some(respond(path, Body::from(file.data)))
+}
+
+/// The app page with the machine's theme on its root element, so that the
+/// first paint is in that theme on every browser and on the display, and no
+/// script has to run first. `theme` is a name of
+/// `embra_tools_core::theme::THEMES`.
+fn serve_app(theme: &str) -> Option<Response> {
+    let file = Assets::get("index.html")?;
+    let page = with_theme(&String::from_utf8_lossy(&file.data), theme);
+    Some(respond("index.html", Body::from(page)))
+}
+
+/// `page` with `data-theme="<theme>"` on its `<html>` element. A page with
+/// no such element is returned as it is.
+fn with_theme(page: &str, theme: &str) -> String {
+    const ROOT: &str = "<html";
+    match page.find(ROOT) {
+        Some(at) => {
+            let (head, rest) = page.split_at(at + ROOT.len());
+            format!("{head} data-theme=\"{theme}\"{rest}")
+        }
+        None => page.to_string(),
+    }
+}
+
+fn respond(path: &str, body: Body) -> Response {
         (
             [
                 (header::CONTENT_TYPE, content_type(path)),
@@ -56,10 +85,9 @@ fn serve(path: &str) -> Option<Response> {
                 (header::CONTENT_SECURITY_POLICY, FRAME_ANCESTORS_NONE),
                 (header::X_FRAME_OPTIONS, "DENY"),
             ],
-            Body::from(file.data),
+            body,
         )
-            .into_response(),
-    )
+            .into_response()
 }
 
 /// Where a path goes. The app lives at `/embraOS` alone (William's
@@ -87,10 +115,10 @@ pub fn route(path: &str) -> Route {
 
 /// Router fallback: the app under `/embraOS`, a real embedded asset at
 /// its own path, 404 for everything else.
-pub async fn static_handler(uri: Uri) -> Response {
+pub async fn static_handler(State(st): State<AppState>, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let served = match route(path) {
-        Route::App => serve("index.html"),
+        Route::App => serve_app(embra_tools_core::theme::read(&st.theme_file).name),
         Route::Lookup => serve(path),
         Route::NotFound => None,
     };
@@ -102,11 +130,21 @@ mod tests {
     use super::*;
 
     async fn get(path: &'static str) -> (StatusCode, header::HeaderMap, Vec<u8>) {
-        let resp = static_handler(Uri::from_static(path)).await;
+        let resp = static_handler(State(AppState::stub().0), Uri::from_static(path)).await;
         let status = resp.status();
         let headers = resp.headers().clone();
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
         (status, headers, body)
+    }
+
+    #[test]
+    fn the_theme_goes_onto_the_pages_root_and_a_page_without_one_is_left_alone() {
+        assert_eq!(
+            with_theme("<!doctype html>\n<html lang=\"en\">\n<head></head></html>", "nebula"),
+            "<!doctype html>\n<html data-theme=\"nebula\" lang=\"en\">\n<head></head></html>"
+        );
+        assert_eq!(with_theme("<html>", "ember"), "<html data-theme=\"ember\">");
+        assert_eq!(with_theme("no page here", "ember"), "no page here");
     }
 
     /// The handler over the embedded `dist/`: the app page at `/embraOS` and

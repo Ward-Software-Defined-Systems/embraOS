@@ -47,9 +47,22 @@ pub struct AppState {
     /// The trust service's gRPC endpoint: `GET /api/ca.crt` asks it for
     /// the CA certificate (`ca.rs`). Nothing listens there in a test.
     pub trust_addr: String,
+    /// The file that names the machine's theme (`embra_tools_core::theme`).
+    pub theme_file: Arc<std::path::Path>,
 }
 
 impl AppState {
+    /// A theme file of a test's own, in a directory nothing else writes.
+    #[cfg(test)]
+    pub(crate) fn scratch_theme_file() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("embra-web-theme-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir.join("theme")
+    }
+
     /// A state with no console, no feed subscriptions and an apid nothing
     /// listens on (`127.0.0.1:1`), for a handler test. The PTY bridge's
     /// input queue comes with it, so a test can read what reached the PTY.
@@ -68,6 +81,7 @@ impl AppState {
             updater: Arc::from(std::path::Path::new("/nonexistent/embra-update")),
             backup_upload: Arc::new(tokio::sync::Mutex::new(())),
             trust_addr: "http://127.0.0.1:1".to_string(),
+            theme_file: Arc::from(Self::scratch_theme_file().as_path()),
         };
         (state, input_rx)
     }
