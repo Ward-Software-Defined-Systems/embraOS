@@ -13,6 +13,24 @@
   --warn: #f5a623;
   --bad: #e5533a;         /* warm red — still clearly "down" */
   --good: #43d17a;        /* conventional green — "up" (kept for legibility) */
+  /* What is written on an accent, a good or a danger fill. */
+  --on-accent: #1a0e06;
+  --on-good: #0c2a14;
+  --danger: #c0392b;
+  --on-danger: #fff;
+  /* Borders tinted by what they frame. */
+  --accent-line: #4a2a12;
+  --bad-line: #3a201a;
+  --writer-line: #3a2a14;
+  --observer-line: #3a221a;
+  --tool-error-line: #5a2a1c;
+  /* The glow behind the page, the veil under a modal, a shadow's colour. */
+  --bg-glow: #241208;
+  --scrim: #080503;
+  --shadow: #000;
+  /* The keys and the strings of a JSON document. */
+  --json-key: #6cb6c9;
+  --json-str: #8db86a;
 
   /* Font-size hierarchy. Single source of truth for both the Leptos shell
      CSS and the xterm.js terminal (which reads `--term-fs` at init in
@@ -28,7 +46,7 @@ html, body { margin: 0; height: 100%; color: var(--txt);
   font-family: 'Inter', system-ui, -apple-system, sans-serif; font-size: var(--text-sm); }
 /* Subtle ember glow from top-center fading to warm-black (echoes banner). */
 body { background:
-  radial-gradient(1100px 560px at 50% -8%, #241208 0%, var(--bg) 58%) fixed; }
+  radial-gradient(1100px 560px at 50% -8%, var(--bg-glow) 0%, var(--bg) 58%) fixed; }
 /* `100dvh` is the dynamic viewport height — accounts for iOS Safari's
    collapsing address bar. Plain `100vh` reserves space for chrome that
    actually hides on scroll, over-extending the page. `100vh` first as
@@ -50,7 +68,7 @@ body { background:
 }
 .brand { display: flex; align-items: center; gap: 10px; letter-spacing: .5px; }
 .brand .logo { height: 26px; width: 26px; object-fit: contain; display: block;
-  filter: drop-shadow(0 0 6px rgba(255, 122, 26, .35)); }
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 35%, transparent)); }
 .brand .wordmark {
   font-weight: 800; font-size: var(--text-lg); line-height: 1;
   background: linear-gradient(95deg, var(--accent-2) 0%, var(--accent) 46%, var(--accent-red) 100%);
@@ -66,7 +84,7 @@ body { background:
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--txt-dim); }
 .pill.up .dot { background: var(--good); box-shadow: 0 0 7px var(--good); }
 .pill.down .dot { background: var(--bad); box-shadow: 0 0 7px var(--bad); }
-.pill.down { color: var(--bad); border-color: #3a201a; }
+.pill.down { color: var(--bad); border-color: var(--bad-line); }
 /* A service switched off on purpose (the provider gateway): dim, not red. */
 .pill.off .dot { background: var(--txt-dim); }
 
@@ -83,22 +101,22 @@ body { background:
 }
 .pill.meter.warn   .meter-fill { background: var(--warn); }
 .pill.meter.danger .meter-fill { background: var(--bad); }
-.pill.meter.danger { color: var(--bad); border-color: #3a201a; }
+.pill.meter.danger { color: var(--bad); border-color: var(--bad-line); }
 .pill .meter-num { font-variant-numeric: tabular-nums; }
 
 /* Load-average pill — dot + value, severity colored relative to cores. */
 .pill.load .dot { background: var(--good); box-shadow: 0 0 7px var(--good); }
 .pill.load.warn   .dot { background: var(--warn); box-shadow: 0 0 7px var(--warn); }
 .pill.load.danger .dot { background: var(--bad);  box-shadow: 0 0 7px var(--bad);  }
-.pill.load.danger { color: var(--bad); border-color: #3a201a; }
+.pill.load.danger { color: var(--bad); border-color: var(--bad-line); }
 
 .role { display: flex; align-items: center; gap: 10px; }
 .role .badge { font-size: var(--text-xs); padding: 4px 10px; border-radius: 6px;
   border: 1px solid var(--line); }
-.role .badge.writer { color: var(--accent-2); border-color: #3a2a14; }
-.role .badge.observer { color: var(--accent-red); border-color: #3a221a; }
+.role .badge.writer { color: var(--accent-2); border-color: var(--writer-line); }
+.role .badge.observer { color: var(--accent-red); border-color: var(--observer-line); }
 button.btn {
-  font: inherit; font-size: var(--text-xs); cursor: pointer; color: #1a0e06;
+  font: inherit; font-size: var(--text-xs); cursor: pointer; color: var(--on-accent);
   background: var(--accent); border: 0; padding: 6px 12px; border-radius: 6px;
   font-weight: 600;
 }
@@ -191,7 +209,7 @@ button.btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
 .activity-tip { position: absolute; top: 44px; z-index: 40; pointer-events: none;
   font-size: var(--text-xs); line-height: 1.45; color: var(--txt); background: var(--panel-2);
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; white-space: pre;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--shadow) 45%, transparent); }
 
 /* ── Main / terminal ───────────────────────────────────── */
 .main { grid-area: main; display: flex; flex-direction: column;
@@ -202,7 +220,7 @@ button.btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
 .tool-sheet { position: absolute; top: 0; bottom: 0; left: 0; width: 560px; max-width: 100%;
   z-index: 30; display: flex; flex-direction: column; overflow-y: auto;
   background: var(--panel-2); border-right: 1px solid var(--line);
-  box-shadow: 8px 0 24px rgba(0, 0, 0, .45);
+  box-shadow: 8px 0 24px color-mix(in srgb, var(--shadow) 45%, transparent);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
 .ts-head { position: sticky; top: 0; z-index: 1; background: var(--panel-2);
   border-bottom: 1px solid var(--line); padding: 12px 14px;
@@ -223,37 +241,37 @@ button.btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
    the result; a short one keeps a readable floor. */
 .tool-sheet .t-pre { max-height: 60%; min-height: 4rem; flex: 0 1 auto; }
 .term-wrap {
-  flex: 1; min-height: 0; background: #0c0907; border: 1px solid var(--line);
+  flex: 1; min-height: 0; background: var(--bg); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px;
-  box-shadow: inset 0 0 70px rgba(255, 122, 26, .05), 0 0 0 1px rgba(255, 122, 26, .05);
+  box-shadow: inset 0 0 70px color-mix(in srgb, var(--accent) 5%, transparent), 0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent);
 }
 body.is-observer .term-wrap {
-  box-shadow: inset 0 0 70px rgba(245, 166, 35, .08), 0 0 0 1px rgba(245, 166, 35, .12);
+  box-shadow: inset 0 0 70px color-mix(in srgb, var(--accent-2) 8%, transparent), 0 0 0 1px color-mix(in srgb, var(--accent-2) 12%, transparent);
 }
 #embra-term { width: 100%; height: 100%; }
 .term-hint { font-size: var(--text-xs); color: var(--txt-dim); }
 
 /* ── Command palette ───────────────────────────────────── */
-.palette-bg { position: fixed; inset: 0; background: rgba(8, 5, 3, .68);
+.palette-bg { position: fixed; inset: 0; background: color-mix(in srgb, var(--scrim) 68%, transparent);
   display: flex; align-items: flex-start; justify-content: center;
   padding-top: 12vh; z-index: 50; }
 .palette { width: 540px; max-width: 92vw; background: var(--panel-2);
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
+  box-shadow: 0 24px 60px color-mix(in srgb, var(--shadow) 55%, transparent); }
 .palette input { width: 100%; font: inherit; font-size: var(--text-md); padding: 14px 16px;
   background: var(--bg-2); color: var(--txt); border: 0;
   border-bottom: 1px solid var(--line); outline: none; }
 .palette .list { max-height: 46vh; overflow-y: auto; }
 .palette .row { padding: 10px 16px; cursor: pointer; display: flex;
   justify-content: space-between; }
-.palette .row:hover { background: var(--accent); color: #1a0e06; }
+.palette .row:hover { background: var(--accent); color: var(--on-accent); }
 .palette .row .d { color: var(--txt-dim); font-size: var(--text-xs); }
-.palette .row:hover .d { color: #1a0e06; }
+.palette .row:hover .d { color: var(--on-accent); }
 
 /* ── Parameter modal ───────────────────────────────────── */
 .modal { width: 460px; max-width: 92vw; background: var(--panel-2);
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
+  box-shadow: 0 24px 60px color-mix(in srgb, var(--shadow) 55%, transparent); }
 .modal .m-head { display: flex; align-items: baseline; gap: 10px;
   padding: 14px 16px 0; }
 .modal .m-head b { font-size: var(--text-md); color: var(--txt); }
@@ -287,8 +305,8 @@ body.is-observer .term-wrap {
 
 /* ── Guided-setup banner ───────────────────────────────── */
 .banner { display: flex; align-items: center; gap: 12px;
-  background: linear-gradient(90deg, rgba(255, 122, 26, .14), rgba(255, 122, 26, .04));
-  border: 1px solid #4a2a12; color: var(--txt);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent), color-mix(in srgb, var(--accent) 4%, transparent));
+  border: 1px solid var(--accent-line); color: var(--txt);
   border-radius: 8px; padding: 9px 12px; font-size: var(--text-sm); }
 .banner span { flex: 1; }
 
@@ -322,7 +340,7 @@ body.is-observer .term-wrap {
 .ct-brand { display: flex; align-items: center; gap: 8px; }
 .ct-logo {
   height: 22px; width: 22px; object-fit: contain;
-  filter: drop-shadow(0 0 6px rgba(255, 122, 26, .35));
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 35%, transparent));
 }
 .ct-name {
   font-weight: 800; font-size: 17px; letter-spacing: .3px;
@@ -379,7 +397,7 @@ body.is-observer .term-wrap {
 .bubble.user {
   align-self: flex-end;
   background: var(--accent);
-  color: #1a0e06;
+  color: var(--on-accent);
   border-bottom-right-radius: 4px;
 }
 .bubble.assistant {
@@ -425,7 +443,7 @@ body.is-observer .term-wrap {
   padding: 0;
   overflow: hidden;
 }
-.bubble.tool.error { border-color: #5a2a1c; }
+.bubble.tool.error { border-color: var(--tool-error-line); }
 
 .bubble.tool .tool-head {
   display: flex;
@@ -481,8 +499,8 @@ body.is-observer .term-wrap {
 .bubble.tool .t-pre { max-height: 40dvh; }
 /* JSON syntax colors — mirror the serial TUI (keys cyan, strings green,
    numbers + true/false/null amber). Default text keeps --txt. */
-.t-pre .jk { color: #6cb6c9; }
-.t-pre .js { color: #8db86a; }
+.t-pre .jk { color: var(--json-key); }
+.t-pre .js { color: var(--json-str); }
 .t-pre .jn { color: var(--accent-2); }
 .t-pre .jb { color: var(--accent-2); }
 
@@ -506,8 +524,8 @@ body.is-observer .term-wrap {
    bar. Brand-warm accent so it reads as "the system needs your
    attention here", not background chatter. */
 .setup-overlay {
-  background: linear-gradient(90deg, rgba(255, 122, 26, .14), rgba(255, 122, 26, .04));
-  border-top: 1px solid #4a2a12;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent), color-mix(in srgb, var(--accent) 4%, transparent));
+  border-top: 1px solid var(--accent-line);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -540,7 +558,7 @@ body.is-observer .term-wrap {
   min-width: 80px;
   min-height: 44px;
   background: var(--accent);
-  color: #1a0e06;
+  color: var(--on-accent);
   border: 0;
   border-radius: 8px;
   font: inherit;
@@ -569,12 +587,12 @@ body.is-observer .term-wrap {
 }
 .setup-opt:active {
   background: var(--accent);
-  color: #1a0e06;
+  color: var(--on-accent);
   border-color: var(--accent);
 }
 .setup-opt.yes {
   background: var(--good);
-  color: #0c2a14;
+  color: var(--on-good);
   border-color: var(--good);
 }
 .setup-opt.no {
@@ -610,7 +628,7 @@ body.is-observer .term-wrap {
   min-width: 44px;
   min-height: 44px;
   background: var(--accent);
-  color: #1a0e06;
+  color: var(--on-accent);
   border: 0;
   border-radius: 10px;
   font-weight: 700;
@@ -625,8 +643,8 @@ body.is-observer .term-wrap {
 /* Dual-role composer button in stop mode (turn busy): ■ on the error hue
    so "interrupt" reads at a glance. */
 .ci-send.ci-stop {
-  background: var(--error, #c0392b);
-  color: #fff;
+  background: var(--danger);
+  color: var(--on-danger);
 }
 
 /* Phase 2 — topbar buttons replace the static status row. Health chip
@@ -739,7 +757,7 @@ body.is-observer .term-wrap {
 .sheet-bg {
   position: fixed;
   inset: 0;
-  background: rgba(8, 5, 3, .55);
+  background: color-mix(in srgb, var(--scrim) 55%, transparent);
   z-index: 60;
   display: flex;
   align-items: flex-end;
@@ -753,7 +771,7 @@ body.is-observer .term-wrap {
   border-radius: 16px 16px 0 0;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, .4);
+  box-shadow: 0 -8px 24px color-mix(in srgb, var(--shadow) 40%, transparent);
   animation: sheet-slide .18s ease-out;
   padding-bottom: env(safe-area-inset-bottom);
 }
@@ -801,7 +819,7 @@ body.is-observer .term-wrap {
   padding: 12px 16px;
   min-height: 48px;
   cursor: pointer;
-  border-top: 1px solid rgba(51, 35, 26, .35);
+  border-top: 1px solid color-mix(in srgb, var(--line) 35%, transparent);
   font-size: 15px;
   color: var(--txt);
 }
@@ -815,7 +833,7 @@ body.is-observer .term-wrap {
    stable next to its peers, so the highlight reads as "marked" rather
    than "shifted". */
 .sheet-row.session.active {
-  background: linear-gradient(90deg, rgba(255, 122, 26, .14), rgba(255, 122, 26, .04));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent), color-mix(in srgb, var(--accent) 4%, transparent));
   border-left: 3px solid var(--accent);
   padding-left: 13px;
 }
@@ -862,7 +880,7 @@ body.is-observer .term-wrap {
   font: inherit;
   font-size: 14px;
   background: var(--accent);
-  color: #1a0e06;
+  color: var(--on-accent);
   border: 0;
   border-radius: 8px;
   padding: 10px 14px;
@@ -954,7 +972,7 @@ body.is-observer .term-wrap {
 .bubble.user.has-files { padding: 6px; }
 .bubble.user .user-file {
   font-size: 12px; border-radius: 8px; padding: 2px 8px;
-  background: rgba(0,0,0,.18); white-space: nowrap;
+  background: color-mix(in srgb, var(--shadow) 18%, transparent); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; max-width: 100%;
 }
 .bubble.file {
@@ -996,7 +1014,7 @@ body.kiosk .mobile-toggle { display: none; }
 .kiosk-menu button { display: block; width: 100%; padding: 8px 12px; text-align: left;
   font: inherit; font-size: var(--text-sm); color: var(--txt); background: transparent;
   border: 0; border-radius: 5px; cursor: default; }
-.kiosk-menu button:hover:not(:disabled) { background: var(--accent); color: #1a0e06; }
+.kiosk-menu button:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); }
 .kiosk-menu button:disabled { color: var(--txt-dim); opacity: .6; }
 .kiosk-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 2px; }
 
@@ -1016,7 +1034,7 @@ body.kiosk select { -webkit-appearance: none; appearance: none; padding-right: 3
   border: 1px solid var(--line); border-radius: 8px; }
 .kiosk-select .ks-opt { padding: 8px 12px; font-size: var(--text-sm); color: var(--txt);
   border-radius: 5px; white-space: nowrap; cursor: default; }
-.kiosk-select .ks-opt.active { background: var(--accent); color: #1a0e06; }
+.kiosk-select .ks-opt.active { background: var(--accent); color: var(--on-accent); }
 .kiosk-select .ks-opt.off { color: var(--txt-dim); opacity: .6; }
 /* The Attach button's paperclip: the display has no font that draws it. */
 body.kiosk .emoji { display: none; }
@@ -1027,7 +1045,7 @@ body.kiosk .emoji { display: none; }
 .backup-card { position: fixed; right: 18px; bottom: 18px; z-index: 45; display: none;
   flex-direction: column; gap: 8px; width: min(460px, 92vw); padding: 14px 16px;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, .55); font-size: var(--text-sm); color: var(--txt); }
+  box-shadow: 0 16px 40px color-mix(in srgb, var(--shadow) 55%, transparent); font-size: var(--text-sm); color: var(--txt); }
 .backup-card.ok { border-color: var(--good); }
 .backup-card.bad { border-color: var(--bad); }
 .backup-card .bc-title { font-weight: 600; overflow-wrap: anywhere; }
@@ -1035,7 +1053,7 @@ body.kiosk .emoji { display: none; }
 .backup-card .bc-bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
 .backup-card .bc-fill { width: 0; height: 100%; background: var(--accent); }
 .backup-card .bc-btn { align-self: flex-end; padding: 6px 16px; font: inherit;
-  font-size: var(--text-sm); color: #1a0e06; background: var(--accent); border: 0;
+  font-size: var(--text-sm); color: var(--on-accent); background: var(--accent); border: 0;
   border-radius: 6px; cursor: pointer; }
 
 /* What the display console has to say, over the page (`embraKioskSheet`):
@@ -1044,7 +1062,7 @@ body.kiosk .emoji { display: none; }
    terminal's face and large enough to be read off the display and typed on
    another machine. */
 .kiosk-sheet-bg { position: fixed; inset: 0; z-index: 2147482000; display: none;
-  align-items: center; justify-content: center; background: rgba(8, 5, 3, .8); }
+  align-items: center; justify-content: center; background: color-mix(in srgb, var(--scrim) 80%, transparent); }
 .kiosk-sheet { width: min(980px, 92vw); padding: 22px 24px; display: flex;
   flex-direction: column; gap: 14px; background: var(--panel-2);
   border: 1px solid var(--line); border-radius: 10px; }
@@ -1057,5 +1075,5 @@ body.kiosk .emoji { display: none; }
 .kiosk-sheet .ks-note { padding-top: 12px; border-top: 1px solid var(--line);
   font-size: var(--text-sm); color: var(--txt-dim); }
 .kiosk-sheet .ks-close { align-self: flex-end; padding: 8px 18px; font: inherit;
-  font-size: var(--text-sm); color: #1a0e06; background: var(--accent); border: 0;
+  font-size: var(--text-sm); color: var(--on-accent); background: var(--accent); border: 0;
   border-radius: 6px; cursor: default; }
