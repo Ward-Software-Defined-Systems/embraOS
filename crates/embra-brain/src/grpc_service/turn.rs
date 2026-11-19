@@ -358,6 +358,10 @@ pub(super) async fn handle_request(
             // and persists nothing; the staging is drained only on success.
             let media_store = media::MediaStore::default_store();
             let synthetic_turn = pending_briefing.is_some() || delete_exec.is_some() || pending_trigger.is_some();
+            // A briefing is a turn of the brain's own making: cut by a
+            // failed call it saves nothing (the attach's cooldown counts on
+            // a failed briefing leaving the session as it was).
+            let is_briefing = pending_briefing.is_some();
             // The briefing carries <while_away> and the delete flow nothing;
             // every other turn, a trigger turn included, carries the events.
             let carries_events = pending_briefing.is_none() && delete_exec.is_none();
@@ -641,11 +645,6 @@ pub(super) async fn handle_request(
             // persisted only the final segment; narration the operator
             // watched live never reached history).
             let mut persisted_segments = TranscriptSegments::default();
-            // Set when a continuation's stream ended without a result (the
-            // server answered with an error, or the connection went): the
-            // turn ends like a stop, with a Done frame, and persists what
-            // it has plus the marker.
-            let mut stream_failed = false;
             // Text the operator saw stream in as tokens that no `Done` closed:
             // the partial of a stop that cut the stream, or a synthetic token
             // (the silent-end diagnostic, the cap fallbacks). The turn's
@@ -682,39 +681,31 @@ pub(super) async fn handle_request(
             let request_options = LlmRequestOptions {
                 include_reasoning: loaded_config.show_reasoning(),
             };
-            let first_stream = provider
-                .stream_turn(
-                    &api_messages,
-                    &system_bundle,
-                    &tool_manifest,
-                    request_options,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
-            let Some(mut current_turn) =
-                collect_response(first_stream, tx, &config_name, Some(&mut stop_check)).await?
-            else {
-                // Stream closed without Complete — treat as error and save
-                // nothing. collect_response showed the error; the Done frame
-                // ends the turn for the clients (the typing indicator, the
-                // live text), as it does after an operator stop.
-                let _ = tx
-                    .send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::Done(
-                            StreamDone {
-                                full_response: String::new(),
-                            },
-                        )),
-                    }))
-                    .await;
-                drop(in_turn_guard);
-                return Ok(());
+            // Every model call of the turn goes through `call`, and comes
+            // back as a turn whatever happened: the provider's, a stop's, or
+            // a failed call's (`CallFailed`). Nothing below leaves this
+            // function before the turn is closed and saved.
+            let call = ModelCall {
+                provider: provider.as_ref(),
+                system: &system_bundle,
+                tools: &tool_manifest,
+                options: request_options,
+                tx,
+                config_name: &config_name,
             };
+            let mut current_turn = call.run(&api_messages, &mut stop_check).await;
+            // A first call that failed showed the model nothing: what
+            // happened since the last turn is shown again next time.
+            let first_call_completed = !is_cut(&current_turn);
             // Track text from the most recent turn for persistence fallback.
             last_response_text = turn_text(&current_turn);
             persisted_segments.push(&last_response_text);
             undelivered = undelivered_after(&current_turn);
-            api_messages.push(ApiMessage::assistant_blocks(current_turn.content.clone()));
+            // A cut turn's partial is not part of the conversation: the
+            // messages stay the request as it was sent.
+            if !is_cut(&current_turn) {
+                api_messages.push(ApiMessage::assistant_blocks(current_turn.content.clone()));
+            }
 
             loop {
                 // Operator stop observed between round-trips (after a
@@ -739,7 +730,11 @@ pub(super) async fn handle_request(
                         // legitimately ends turn silently on pure-read
                         // flows, so the guard requires at least one
                         // side-effectful success.
-                        if !current_turn.has_text() && !current_turn.has_tool_call() {
+                        let ended_by_the_model = !matches!(
+                            current_turn.outcome,
+                            TurnOutcome::EarlyStop(EarlyStopReason::CallFailed | EarlyStopReason::OperatorStop)
+                        );
+                        if ended_by_the_model && !current_turn.has_text() && !current_turn.has_tool_call() {
                             let side_effectful_count = trace_handle
                                 .lock()
                                 .map(|g| {
@@ -791,32 +786,22 @@ pub(super) async fn handle_request(
                             session = %session_name,
                             "stop_reason=pause_turn; resuming conversation"
                         );
-                        let stream = provider
-                            .stream_turn(
-                                &api_messages,
-                                &system_bundle,
-                                &tool_manifest,
-                                request_options,
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Brain pause-resume failed: {}", e))?;
-                        let Some(resp) = collect_response(stream, tx, &config_name, Some(&mut stop_check)).await? else {
+                        current_turn = call.run(&api_messages, &mut stop_check).await;
+                        if is_cut(&current_turn) {
                             error!(
                                 target: "dispatch",
                                 session = %session_name,
-                                "Brain pause-resume failed: the stream ended without a result"
+                                "Brain pause-resume failed"
                             );
-                            persisted_segments.push(STREAM_FAILED_MARKER);
-                            stream_failed = true;
-                            break;
-                        };
-                        current_turn = resp;
+                        }
                         last_response_text = turn_text(&current_turn);
                         persisted_segments.push(&last_response_text);
                         undelivered = undelivered_after(&current_turn);
-                        api_messages.push(ApiMessage::assistant_blocks(
-                            current_turn.content.clone(),
-                        ));
+                        if !is_cut(&current_turn) {
+                            api_messages.push(ApiMessage::assistant_blocks(
+                                current_turn.content.clone(),
+                            ));
+                        }
                         continue;
                     }
 
@@ -863,114 +848,54 @@ pub(super) async fn handle_request(
                                 api_messages
                                     .push(ApiMessage::user_tool_results(synthetic));
                             }
-                            match provider
-                                .stream_turn(
-                                    &api_messages,
-                                    &system_bundle,
-                                    &tool_manifest,
-                                    request_options,
-                                )
-                                .await
-                            {
-                                Ok(stream) => {
-                                    if let Some(final_turn) =
-                                        collect_response(stream, tx, &config_name, Some(&mut stop_check)).await?
-                                    {
-                                        let final_text = turn_text(&final_turn);
-                                        let stopped_in_stream = final_turn.outcome
-                                            == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
-                                        api_messages.push(ApiMessage::assistant_blocks(
-                                            final_turn.content,
-                                        ));
-                                        persisted_segments.push(&final_text);
-                                        if !final_text.is_empty() {
-                                            undelivered = stopped_in_stream.then(|| final_text.clone());
-                                            last_response_text = final_text;
-                                        } else {
-                                            // Model produced no text on the final
-                                            // summary turn (another ToolUse, or
-                                            // pure thinking). Stream a synthetic
-                                            // token so the UI doesn't go silent
-                                            // after the Warning frame.
-                                            let fallback = format!(
-                                                "(tool iteration cap of {max_tool_iterations} reached; model did not produce a final summary)"
-                                            );
-                                            let _ = tx
-                                                .send(Ok(ConversationResponse {
-                                                    response_type: Some(
-                                                        conversation_response::ResponseType::Token(
-                                                            StreamToken {
-                                                                text: fallback.clone(),
-                                                            },
-                                                        ),
-                                                    ),
-                                                }))
-                                                .await;
-                                            persisted_segments.push(&fallback);
-                                            undelivered = Some(fallback.clone());
-                                            last_response_text = fallback;
-                                        }
-                                    } else {
-                                        let fallback = format!(
-                                            "(tool iteration cap of {max_tool_iterations} reached; no final response received)"
-                                        );
-                                        let _ = tx
-                                            .send(Ok(ConversationResponse {
-                                                response_type: Some(
-                                                    conversation_response::ResponseType::Token(
-                                                        StreamToken {
-                                                            text: fallback.clone(),
-                                                        },
-                                                    ),
-                                                ),
-                                            }))
-                                            .await;
-                                        // The fallback token was streamed
-                                        // unconditionally above — record it
-                                        // in the transcript unconditionally
-                                        // too (the guarded single-slot
-                                        // assignment predates the
-                                        // accumulator).
-                                        persisted_segments.push(&fallback);
-                                        undelivered = Some(fallback.clone());
-                                        if last_response_text.is_empty() {
-                                            last_response_text = fallback;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        target: "dispatch",
-                                        session = %session_name,
-                                        error = %e,
-                                        "final summary call failed after iteration cap"
-                                    );
-                                    let _ = tx
-                                        .send(Ok(ConversationResponse {
-                                            response_type: Some(
-                                                conversation_response::ResponseType::System(
-                                                    SystemMessage {
-                                                        content: format!(
-                                                            "Final summary call failed after iteration cap: {e}"
-                                                        ),
-                                                        msg_type: SystemMessageType::Error as i32,
-                                                    },
-                                                ),
+                            let final_turn = call.run(&api_messages, &mut stop_check).await;
+                            if is_cut(&final_turn) {
+                                // The summary call failed: the turn is cut
+                                // here, like a cut at any other call. The
+                                // messages stay the request as it was sent,
+                                // the cap's answers to the model included.
+                                warn!(
+                                    target: "dispatch",
+                                    session = %session_name,
+                                    "final summary call failed after iteration cap"
+                                );
+                                current_turn = final_turn;
+                                last_response_text = turn_text(&current_turn);
+                                persisted_segments.push(&last_response_text);
+                                undelivered = undelivered_after(&current_turn);
+                                break;
+                            }
+                            let final_text = turn_text(&final_turn);
+                            let stopped_in_stream = final_turn.outcome
+                                == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
+                            api_messages.push(ApiMessage::assistant_blocks(final_turn.content));
+                            persisted_segments.push(&final_text);
+                            if !final_text.is_empty() {
+                                undelivered = stopped_in_stream.then(|| final_text.clone());
+                                last_response_text = final_text;
+                            } else if !stopped_in_stream {
+                                // Model produced no text on the final
+                                // summary turn (another ToolUse, or pure
+                                // thinking). Stream a synthetic token so the
+                                // UI doesn't go silent after the Warning
+                                // frame. A stop says what happened itself.
+                                let fallback = format!(
+                                    "(tool iteration cap of {max_tool_iterations} reached; model did not produce a final summary)"
+                                );
+                                let _ = tx
+                                    .send(Ok(ConversationResponse {
+                                        response_type: Some(
+                                            conversation_response::ResponseType::Token(
+                                                StreamToken {
+                                                    text: fallback.clone(),
+                                                },
                                             ),
-                                        }))
-                                        .await;
-                                    let marker = format!(
-                                        "(tool iteration cap of {max_tool_iterations} reached; final summary call errored)"
-                                    );
-                                    // Recorded next to the Error frame the
-                                    // operator saw; unconditional — the
-                                    // guarded assignment predates the
-                                    // accumulator.
-                                    persisted_segments.push(&marker);
-                                    if last_response_text.is_empty() {
-                                        last_response_text = marker;
-                                    }
-                                }
+                                        ),
+                                    }))
+                                    .await;
+                                persisted_segments.push(&fallback);
+                                undelivered = Some(fallback.clone());
+                                last_response_text = fallback;
                             }
                             break;
                         }
@@ -1294,35 +1219,16 @@ pub(super) async fn handle_request(
                         }
 
                         api_messages.push(ApiMessage::user_tool_results(result_blocks));
-                        let stream = provider
-                            .stream_turn(
-                                &api_messages,
-                                &system_bundle,
-                                &tool_manifest,
-                                request_options,
-                            )
-                            .await
-                            .map_err(|e| {
-                                // A prompt too long for the model is the
-                                // usual cause; name the results that were
-                                // just appended, with their sizes, so the
-                                // culprit is in the log (Embra#13).
-                                let sizes = tool_result_sizes(
-                                    &current_turn.content,
-                                    api_messages.last().map(ApiMessage::content).unwrap_or(&[]),
-                                );
-                                anyhow::anyhow!(
-                                    "Brain continuation failed (iter {tool_iter}; tool results this iteration: {sizes}): {e}"
-                                )
-                            })?;
-                        let Some(resp) = collect_response(stream, tx, &config_name, Some(&mut stop_check)).await? else {
-                            // The stream ended without a result: the server
-                            // answered with an error inside it (LM Studio does
-                            // so for a prompt over its context length; shown by
-                            // collect_response) or the connection went. The
-                            // same log line as the pre-stream failure above,
-                            // with the results that went out (Embra#13); the
-                            // turn ends like a stop and persists what it has.
+                        let next = call.run(&api_messages, &mut stop_check).await;
+                        if is_cut(&next) {
+                            // The request was refused or lost, or its stream
+                            // ended without a result (LM Studio answers a
+                            // prompt over its context length inside the
+                            // stream). A prompt too long for the model is the
+                            // usual cause: the results that were just
+                            // appended are named with their sizes, so the
+                            // culprit is in the log (Embra#13). The operator
+                            // was shown the error where it happened.
                             let sizes = tool_result_sizes(
                                 &current_turn.content,
                                 api_messages.last().map(ApiMessage::content).unwrap_or(&[]),
@@ -1330,19 +1236,18 @@ pub(super) async fn handle_request(
                             error!(
                                 target: "dispatch",
                                 session = %session_name,
-                                "Brain continuation failed (iter {tool_iter}; tool results this iteration: {sizes}): the stream ended without a result"
+                                "Brain continuation failed (iter {tool_iter}; tool results this iteration: {sizes})"
                             );
-                            persisted_segments.push(STREAM_FAILED_MARKER);
-                            stream_failed = true;
-                            break;
-                        };
-                        current_turn = resp;
+                        }
+                        current_turn = next;
                         last_response_text = turn_text(&current_turn);
                         persisted_segments.push(&last_response_text);
                         undelivered = undelivered_after(&current_turn);
-                        api_messages.push(ApiMessage::assistant_blocks(
-                            current_turn.content.clone(),
-                        ));
+                        if !is_cut(&current_turn) {
+                            api_messages.push(ApiMessage::assistant_blocks(
+                                current_turn.content.clone(),
+                            ));
+                        }
                     }
                 }
             }
@@ -1360,8 +1265,16 @@ pub(super) async fn handle_request(
             // `terminal_outcome_notice`). Single post-loop site so every
             // exit path from the tool loop is covered; normal outcomes and
             // the stale-turn abort paths (`ToolUse`/`Pause`) yield no frame.
-            let notice =
-                terminal_outcome_notice(current_turn.outcome, current_turn.stop_details.as_ref());
+            let cut = is_cut(&current_turn);
+            // A cut briefing saves nothing, and its notice says so.
+            let notice = if cut && is_briefing {
+                Some((
+                    SystemMessageType::Warning,
+                    "The session briefing was cut by a failed model call (the error is above). Nothing was saved; your next message starts a turn as usual.".to_string(),
+                ))
+            } else {
+                terminal_outcome_notice(current_turn.outcome, current_turn.stop_details.as_ref())
+            };
             if current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::Refusal) {
                 warn!(
                     target: "dispatch",
@@ -1376,13 +1289,13 @@ pub(super) async fn handle_request(
             }
             // The turn closes with one `Done` first — the text the operator
             // saw stream in without its `Done`, or an empty one after a stop
-            // or a failed stream so the clients end their live state — and
+            // or a failed call so the clients end their live state — and
             // the notice after it, under the text it talks about. Text that
             // a `Complete` already closed is never sent again: both clients
             // add a row per non-empty `Done`. `closing_frames` decides.
             let stopped =
                 current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
-            for frame in closing_frames(stopped, stream_failed, undelivered.take(), notice) {
+            for frame in closing_frames(stopped, cut, undelivered.take(), notice) {
                 let _ = tx
                     .send(Ok(ConversationResponse {
                         response_type: Some(frame),
@@ -1432,7 +1345,13 @@ pub(super) async fn handle_request(
             // Stage 5; the model doesn't require cross-turn thinking
             // preservation, and tool results are dropped silently (they reconstruct
             // on re-runs if the user asks again).
-            {
+            if cut && is_briefing {
+                info!(
+                    target: "sessions",
+                    session = %session_name,
+                    "the resume briefing was cut by a failed model call; nothing was saved"
+                );
+            } else {
                 let mgr = session_mgr.read().await;
                 let final_text = final_assistant_text(
                     &persisted_segments.joined(),
@@ -1443,12 +1362,15 @@ pub(super) async fn handle_request(
                 // the reply land together or not at all, and the events
                 // watermark rides the meta write that follows the history
                 // write, so what happened during the turn is shown next
-                // time only once the turn is on record.
+                // time only once the turn is on record. A turn whose first
+                // call failed showed the model nothing of it: the watermark
+                // stays, and the next turn carries the same events.
                 let turn = [
                     Message::user_with_attachments(&msg.content, turn_refs.clone()),
                     Message::assistant_with_attachments(&final_text, turn_assistant_refs.clone()),
                 ];
-                match mgr.append_turn(&session_name, &turn, Some(turn_started)).await {
+                let events_seen_at = first_call_completed.then_some(turn_started);
+                match mgr.append_turn(&session_name, &turn, events_seen_at).await {
                     Ok(()) => {}
                     Err(crate::sessions::SessionError::LegacyReadOnly(sess)) => {
                         warn!(
@@ -1497,7 +1419,14 @@ pub(super) async fn handle_request(
             // already consumed, so a retry is a fresh /sessions delete).
             if let Some(del) = delete_exec {
                 let was_active = session_name == del.name;
-                let verdict = delete_flow_verdict(&last_response_text);
+                // A reply that was cut or stopped decides nothing: its text
+                // is a partial, and a marker in it was not the model's last
+                // word.
+                let verdict = if cut || stopped {
+                    DeleteVerdict::NoMarker
+                } else {
+                    delete_flow_verdict(&last_response_text)
+                };
                 let (kind, note) = match verdict {
                     DeleteVerdict::Ready => {
                         let store = session_mgr.read().await.store();
@@ -2054,14 +1983,6 @@ pub(super) fn turn_text(turn: &AssistantTurn) -> String {
 /// `last_response_text` keeps its final-segment semantics for the
 /// operator-stop Done frame, Gemini telemetry, and
 /// `delete_flow_verdict`.
-/// The segment persisted after the text of a continuation whose stream
-/// ended without a result, so the operator on reload and the model on
-/// the next turn see that the reply was cut by the provider, not chosen.
-/// The server's words are in the console and the log, never here. Alone in
-/// the assistant's slot it is told to the model as a note
-/// (`sessions::model_view`).
-pub(super) use crate::sessions::model_view::STREAM_FAILED_MARKER;
-
 #[derive(Default)]
 pub(super) struct TranscriptSegments(Vec<String>);
 
@@ -2157,6 +2078,13 @@ pub(super) fn terminal_outcome_notice(
              may be incomplete."
                 .to_string(),
         )),
+        // The call failed, and the operator was shown the error where it
+        // happened. This says what the turn left behind.
+        TurnOutcome::EarlyStop(EarlyStopReason::CallFailed) => Some((
+            SystemMessageType::Warning,
+            "The turn was cut by a failed model call (the error is above). Your message and the reply so far are saved."
+                .to_string(),
+        )),
         // Operator interrupt — not an error and not a provider action; the
         // generic "Provider stopped..." wording below would misattribute it.
         TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop) => Some((
@@ -2229,22 +2157,39 @@ pub(super) async fn replay_history(
 }
 
 /// The text of a response whose `Done` never went out. A stop that cuts the
-/// stream comes back from `collect_response` as an `OperatorStop` turn with
-/// the partial and no `Done`; every `Complete` sends its own.
+/// stream, and a call that fails, come back from the model call as a turn
+/// with the partial and no `Done`; every `Complete` sends its own.
 pub(super) fn undelivered_after(turn: &AssistantTurn) -> Option<String> {
-    (turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop))
-        .then(|| turn_text(turn))
+    matches!(
+        turn.outcome,
+        TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop | EarlyStopReason::CallFailed)
+    )
+    .then(|| turn_text(turn))
+}
+
+/// Whether the turn is a model call that failed.
+pub(super) fn is_cut(turn: &AssistantTurn) -> bool {
+    turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::CallFailed)
+}
+
+/// The turn a failed call comes back as: the text that had arrived.
+fn cut_turn(partial: String) -> AssistantTurn {
+    AssistantTurn {
+        content: if partial.is_empty() { Vec::new() } else { vec![Block::Text(partial)] },
+        outcome: TurnOutcome::EarlyStop(EarlyStopReason::CallFailed),
+        stop_details: None,
+    }
 }
 
 /// The frames that close a turn, in order: a `Done` first — carrying text the
 /// operator saw stream in without its `Done`, or empty after a stop or a
-/// failed stream so the clients end their live state — then the notice,
+/// failed call so the clients end their live state — then the notice,
 /// under the text it talks about. A normal end whose text was closed by its
 /// own `Done` sends nothing. Text a `Complete` already closed is never sent
 /// again: the console and the mobile chat add a row per non-empty `Done`.
 pub(super) fn closing_frames(
     stopped: bool,
-    stream_failed: bool,
+    cut: bool,
     undelivered: Option<String>,
     notice: Option<(SystemMessageType, String)>,
 ) -> Vec<conversation_response::ResponseType> {
@@ -2253,7 +2198,7 @@ pub(super) fn closing_frames(
         Some(text) => frames.push(conversation_response::ResponseType::Done(StreamDone {
             full_response: text,
         })),
-        None if stopped || stream_failed => {
+        None if stopped || cut => {
             frames.push(conversation_response::ResponseType::Done(StreamDone {
                 full_response: String::new(),
             }))
@@ -2286,11 +2231,14 @@ pub(super) fn final_assistant_text(
 ) -> String {
     let refused = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::Refusal));
     let stopped = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop));
+    let cut = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::CallFailed));
     if !transcript_text.trim().is_empty() {
         if refused {
             format!("{transcript_text}\n\n(response interrupted by provider refusal)")
         } else if stopped {
             format!("{transcript_text}\n\n(response interrupted by operator stop)")
+        } else if cut {
+            format!("{transcript_text}\n\n{}", crate::sessions::model_view::CALL_FAILED_SUFFIX)
         } else {
             transcript_text.to_string()
         }
@@ -2301,6 +2249,10 @@ pub(super) fn final_assistant_text(
         // the refusal marker does: the stop frame + turn_trace carry the
         // tool detail, and the next turn must see the interruption.
         crate::sessions::model_view::OPERATOR_STOP_MARKER.to_string()
+    } else if cut {
+        // Before the tool placeholder, like the stop: the turn did not end
+        // of the model's own accord, and `turn_trace` carries the tools.
+        crate::sessions::model_view::CALL_FAILED_MARKER.to_string()
     } else if !tool_names.is_empty() {
         render_tool_only_placeholder(tool_names)
     } else {
@@ -2404,21 +2356,78 @@ impl StopCheck {
     }
 }
 
+/// One model call of a turn: what every call of the turn is asked with,
+/// and where its frames go.
+pub(super) struct ModelCall<'a> {
+    pub(super) provider: &'a dyn LlmProvider,
+    pub(super) system: &'a SystemPromptBundle,
+    pub(super) tools: &'a ToolManifest,
+    pub(super) options: LlmRequestOptions,
+    pub(super) tx: &'a mpsc::Sender<Result<ConversationResponse, Status>>,
+    pub(super) config_name: &'a str,
+}
+
+impl ModelCall<'_> {
+    /// Ask the model with `messages` and hand back its turn. Every way the
+    /// call can end is a turn: the provider's own; the operator's stop
+    /// (`OperatorStop`, with the text that had arrived, or none when the
+    /// stop came before the answer began); a failed call (`CallFailed`,
+    /// with the text that had arrived), whether the request was refused or
+    /// lost before its stream or the stream ended without a result. Nothing
+    /// comes back as an error, because the caller has a turn to close and
+    /// to save whatever happened.
+    ///
+    /// The request is raced against the stop. Gemini and the local presets
+    /// send inside `stream_turn`, and a local model can take the whole
+    /// model wait to begin its answer: awaited alone, that wait could not
+    /// be ended. Dropping the request closes its connection, which is what
+    /// stops a local model server.
+    pub(super) async fn run(&self, messages: &[ApiMessage], stop: &mut StopCheck) -> AssistantTurn {
+        activity::emit(activity::Event::ModelCallStarted);
+        let opened = tokio::select! {
+            biased;
+            () = stop.triggered() => None,
+            opened = self.provider.stream_turn(messages, self.system, self.tools, self.options) => Some(opened),
+        };
+        match opened {
+            None => {
+                activity::emit(activity::Event::ModelCallEnded { error: false });
+                AssistantTurn {
+                    content: Vec::new(),
+                    outcome: TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),
+                    stop_details: None,
+                }
+            }
+            Some(Err(e)) => {
+                error!(
+                    target: "dispatch",
+                    config = %self.config_name,
+                    "Brain call failed: {e}"
+                );
+                send_system(self.tx, format!("Brain error: {e}"), SystemMessageType::Error).await;
+                activity::emit(activity::Event::ModelCallEnded { error: true });
+                cut_turn(String::new())
+            }
+            Some(Ok(stream)) => collect_response(stream, self.tx, self.config_name, Some(stop)).await,
+        }
+    }
+}
+
 /// Drive a provider stream, forwarding `TextDelta` events to the gRPC
-/// UX channel (`tx`) and returning the final neutral `AssistantTurn`
-/// when the stream completes. Synthesizes a gRPC `Done` from the
-/// terminal `Complete(turn)` event so the TUI's typing animation
-/// behavior matches pre-refactor.
+/// UX channel (`tx`) and returning the neutral `AssistantTurn` the stream
+/// ends in. Synthesizes a gRPC `Done` from the terminal `Complete(turn)`
+/// event so the TUI's typing animation behavior matches pre-refactor.
 ///
-/// Returns `Ok(None)` when the stream ended without a `Complete` event
-/// (e.g. connection dropped or fatal error mid-stream).
+/// A stream that ends without a `Complete` (the connection dropped, or the
+/// server answered with an error inside it, which is shown here) is a
+/// failed call: the turn is `CallFailed` with the text that had arrived,
+/// and no `Done` has gone out for it.
 pub(super) async fn collect_response(
     mut brain_rx: BoxStream<'static, StreamEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     config_name: &str,
     mut stop: Option<&mut StopCheck>,
-) -> anyhow::Result<Option<AssistantTurn>> {
-    activity::emit(activity::Event::ModelCallStarted);
+) -> AssistantTurn {
     let mut first_token = true;
     let mut full_turn: Option<AssistantTurn> = None;
     let mut accum_text = String::new();
@@ -2441,11 +2450,11 @@ pub(super) async fn collect_response(
                         if !accum_text.is_empty() {
                             content.push(Block::Text(std::mem::take(&mut accum_text)));
                         }
-                        return Ok(Some(AssistantTurn {
+                        return AssistantTurn {
                             content,
                             outcome: TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),
                             stop_details: None,
-                        }));
+                        };
                     }
                 }
             }
@@ -2547,7 +2556,7 @@ pub(super) async fn collect_response(
     }
 
     // A stream that ended without `Complete` is a failed call: a provider
-    // error, or the connection gone.
+    // error, or the connection gone. What had arrived of it comes back.
     activity::emit(activity::Event::ModelCallEnded { error: full_turn.is_none() });
-    Ok(full_turn)
+    full_turn.unwrap_or_else(|| cut_turn(accum_text))
 }

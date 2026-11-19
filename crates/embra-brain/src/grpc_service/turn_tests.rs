@@ -64,6 +64,34 @@ fn calculates(text: &str, expression: &str) -> ResponseTemplate {
     ))
 }
 
+/// The server refuses the call before any stream. A 4xx: a 5xx is tried
+/// again after a second.
+fn refuses(status: u16, body: &str) -> ResponseTemplate {
+    ResponseTemplate::new(status).set_body_string(body)
+}
+
+/// The model says `text`, then the server answers with an error inside the
+/// stream and closes, as LM Studio does for a prompt over its context.
+fn breaks_after(text: &str, error: &str) -> ResponseTemplate {
+    stream(format!(
+        "{}data: {}\n\n",
+        chunk(json!({"content": text}), None),
+        json!({"error": {"message": error}})
+    ))
+}
+
+/// A model server that takes the call and has not answered an hour later.
+/// It says when the call arrived.
+#[derive(Clone, Default)]
+struct Held(Arc<tokio::sync::Notify>);
+
+impl Respond for Held {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        self.0.notify_one();
+        ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3600))
+    }
+}
+
 /// The model server's answers, in the order its calls arrive. A call past
 /// the script's end is refused with a 4xx, which no retry follows.
 #[derive(Clone, Default)]
@@ -128,8 +156,8 @@ struct Rig {
     history: Stored,
     meta: Stored,
     ctx: ServiceCtx,
-    /// Held so that the turn's stop observer has a live sender.
-    _stop_tx: watch::Sender<u64>,
+    /// The operator's stop: a turn in flight sees the counter move.
+    stop_tx: watch::Sender<u64>,
     stop_rx: watch::Receiver<u64>,
 }
 
@@ -174,7 +202,7 @@ impl Rig {
             pending_backup_restore: Arc::new(Mutex::new(None)),
         };
         let (stop_tx, stop_rx) = watch::channel(0u64);
-        Self { server, script, history, meta, ctx, _stop_tx: stop_tx, stop_rx }
+        Self { server, script, history, meta, ctx, stop_tx, stop_rx }
     }
 
     /// What the model answers to its next call that has no answer yet.
@@ -338,4 +366,354 @@ async fn a_second_turn_reads_what_the_first_one_saved() {
         .collect();
     assert_eq!(second, [("user", "two plus two?"), ("assistant", "Four."), ("user", "and plus two?")]);
     assert_eq!(rig.saved().len(), 4);
+}
+
+/// What stands alone in the assistant's slot for a turn cut before any
+/// text, and what follows the text of one cut later. Written out: these
+/// are in stored histories.
+const CUT_ALONE: &str = "(turn interrupted by a failed model call)";
+const CUT_AFTER_TEXT: &str = "(response interrupted by a failed model call)";
+
+fn row(role: &str, text: &str) -> (String, String) {
+    (role.to_string(), text.to_string())
+}
+
+/// The first call is refused before any stream. The turn ended there with
+/// nothing on record: the operator's message was written only with a reply,
+/// and on this provider the failure left the handler as an error, with no
+/// `Done` to end the client's wait.
+#[tokio::test]
+async fn a_first_call_refused_before_its_stream_saves_the_message_and_the_marker() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "no such model"));
+
+    let frames = rig.say("two plus two?").await;
+
+    assert_eq!(dones(&frames), [""], "one Done ends the client's wait");
+    let said = complaints(&frames);
+    assert!(said.iter().any(|m| m.contains("HTTP 400") && m.contains("no such model")), "{said:?}");
+    assert!(said.iter().any(|m| m.contains("saved")), "the operator is told what is on record: {said:?}");
+    assert_eq!(rig.saved(), [row("user", "two plus two?"), row("assistant", CUT_ALONE)]);
+    let meta = rig.meta.now();
+    assert_eq!(meta["turn_count"], json!(2));
+    assert!(
+        meta["events_seen_at"].is_null(),
+        "no call completed, so nothing that happened was shown to the model: {meta}"
+    );
+}
+
+/// The first call breaks inside its stream. The text the operator watched
+/// was dropped; it closes with its `Done` and is saved with the marker.
+#[tokio::test]
+async fn a_first_call_that_breaks_in_its_stream_closes_with_its_partial() {
+    let rig = Rig::new().await;
+    rig.then(breaks_after("Two plus two is", "the slot was lost"));
+
+    let frames = rig.say("two plus two?").await;
+
+    assert_eq!(dones(&frames), ["Two plus two is"]);
+    let said = complaints(&frames);
+    assert!(said.iter().any(|m| m.contains("the slot was lost")), "{said:?}");
+    assert_eq!(
+        rig.saved(),
+        [row("user", "two plus two?"), row("assistant", &format!("Two plus two is\n\n{CUT_AFTER_TEXT}"))]
+    );
+}
+
+/// A continuation is refused before its stream. On Gemini and the local
+/// presets this left the handler as an error from any step of the loop,
+/// and the whole turn went with it.
+#[tokio::test]
+async fn a_continuation_cut_before_its_stream_keeps_every_segment() {
+    let rig = Rig::new().await;
+    rig.then(calculates("Let me work it out.", "2 ** 10")).then(refuses(400, "context length exceeded"));
+
+    let frames = rig.say("two to the ten?").await;
+
+    assert_eq!(dones(&frames), ["Let me work it out.", ""]);
+    assert_eq!(rig.asked().await.len(), 2);
+    assert_eq!(
+        rig.saved(),
+        [
+            row("user", "two to the ten?"),
+            row("assistant", &format!("Let me work it out.\n\n{CUT_AFTER_TEXT}")),
+        ]
+    );
+    assert!(
+        rig.meta.now()["events_seen_at"].is_string(),
+        "the first call completed: what it was shown is not shown again"
+    );
+}
+
+#[tokio::test]
+async fn a_continuation_cut_inside_its_stream_keeps_every_segment_and_its_partial() {
+    let rig = Rig::new().await;
+    rig.then(calculates("Let me work it out.", "2 ** 10")).then(breaks_after("It is 10", "the slot was lost"));
+
+    let frames = rig.say("two to the ten?").await;
+
+    assert_eq!(dones(&frames), ["Let me work it out.", "It is 10"]);
+    assert_eq!(
+        rig.saved(),
+        [
+            row("user", "two to the ten?"),
+            row("assistant", &format!("Let me work it out.\n\nIt is 10\n\n{CUT_AFTER_TEXT}")),
+        ]
+    );
+}
+
+/// The turn after one that was cut before any text: the marker is never
+/// the model's own reply in what it is sent.
+#[tokio::test]
+async fn the_turn_after_a_cut_one_reads_the_cut_as_a_note_in_the_operators_message() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "no such model")).then(says("Four."));
+
+    rig.say("two plus two?").await;
+    rig.say("and now?").await;
+
+    let asked = rig.asked().await;
+    let sent: Vec<(&str, &str)> = asked[1]["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|m| m["role"] != "system")
+        .map(|m| (m["role"].as_str().unwrap(), m["content"].as_str().unwrap()))
+        .collect();
+    assert_eq!(sent.len(), 1, "one operator message, the cut turn folded into it: {sent:?}");
+    assert_eq!(sent[0].0, "user");
+    assert!(sent[0].1.starts_with("two plus two?\n\n[Your reply to the message above was cut by a failed model call"), "{}", sent[0].1);
+    assert!(sent[0].1.ends_with("and now?"), "{}", sent[0].1);
+    assert!(!sent[0].1.contains(CUT_ALONE));
+    assert_eq!(rig.saved().len(), 4);
+}
+
+/// The operator's stop while the model server has the request and has not
+/// begun to answer. The request was awaited outside every stop checkpoint
+/// on Gemini and the local presets: Esc did nothing until the first byte.
+/// The deadline is one no loaded machine reaches when the stop is heard.
+#[tokio::test]
+async fn a_stop_ends_the_wait_for_an_answer_to_begin() {
+    let rig = Rig::new().await;
+    let held = Held::default();
+    Mock::given(method("POST"))
+        .and(path(CHAT))
+        .respond_with(held.clone())
+        .with_priority(1)
+        .mount(&rig.server)
+        .await;
+
+    let stop = async {
+        held.0.notified().await;
+        rig.stop_tx.send_modify(|v| *v += 1);
+    };
+    let (frames, ()) = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        tokio::join!(rig.say("wait for it"), stop)
+    })
+    .await
+    .expect("the stop ends the wait for the answer");
+
+    assert_eq!(dones(&frames), [""]);
+    let said = complaints(&frames);
+    assert!(said.iter().any(|m| m.contains("stopped by operator")), "{said:?}");
+    assert_eq!(
+        rig.saved(),
+        [row("user", "wait for it"), row("assistant", crate::sessions::model_view::OPERATOR_STOP_MARKER)]
+    );
+}
+
+/// A resume briefing is a turn of the brain's own making. Cut, it saves
+/// nothing: the attach's cooldown counts on a failed briefing leaving the
+/// session as it was.
+#[tokio::test]
+async fn a_briefing_that_is_cut_saves_nothing() {
+    let rig = Rig::new().await;
+    rig.then(refuses(400, "no such model"));
+    rig.ctx.session_mgr.write().await.pending_resume_briefing =
+        Some(crate::sessions::ResumeBriefing { away_since: None });
+
+    let frames = rig.say("[Session resumed]").await;
+
+    assert_eq!(dones(&frames), [""]);
+    assert_eq!(rig.saved(), [] as [(String, String); 0]);
+    assert!(rig.meta.now()["turn_count"].is_null(), "the meta was not written");
+}
+
+/// The memorize turn of a guided delete, cut after the model wrote the
+/// marker that executes the deletion. A reply that was cut decides nothing.
+#[tokio::test]
+async fn a_cut_reply_that_carries_the_delete_marker_deletes_nothing() {
+    let rig = Rig::new().await;
+    rig.then(breaks_after("Kept what matters. [SESSION_DELETE_READY]", "the slot was lost"));
+    *rig.ctx.pending_session_delete.lock().await = Some(PendingSessionDelete {
+        name: SESSION.to_string(),
+        phase: DeleteFlowPhase::AwaitingReason,
+    });
+
+    let frames = rig.say("it is finished").await;
+
+    let meta = rig.meta.now();
+    assert!(meta["deleted_at"].is_null(), "the session stands: {meta}");
+    let said = complaints(&frames);
+    assert!(said.iter().any(|m| m.contains("not executed")), "{said:?}");
+}
+
+/// A provider whose request never comes back: it says when it was asked
+/// and when its request was dropped.
+struct Waits {
+    asked: Arc<tokio::sync::Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+struct SaysWhenDropped(Arc<AtomicBool>);
+
+impl Drop for SaysWhenDropped {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A provider that answers what it is scripted with.
+struct Answers(std::result::Result<Vec<StreamEvent>, &'static str>);
+
+macro_rules! scripted_provider {
+    ($provider:ty, |$this:ident| $stream_turn:expr) => {
+        #[tonic::async_trait]
+        impl LlmProvider for $provider {
+            fn display_name(&self) -> &str {
+                "scripted"
+            }
+
+            fn kind(&self) -> ProviderKind {
+                ProviderKind::LmStudio
+            }
+
+            fn base_url(&self) -> &str {
+                "http://scripted.invalid"
+            }
+
+            async fn validate_key(&self, _key: &str) -> crate::provider::ValidationResult {
+                crate::provider::ValidationResult::Valid
+            }
+
+            async fn stream_turn(
+                &self,
+                _messages: &[ApiMessage],
+                _system: &SystemPromptBundle,
+                _tools: &ToolManifest,
+                _options: LlmRequestOptions,
+            ) -> std::result::Result<BoxStream<'static, StreamEvent>, crate::provider::ProviderError> {
+                let $this = self;
+                $stream_turn
+            }
+
+            fn build_tool_manifest(
+                &self,
+                _descriptors: &[&'static tools::registry::ToolDescriptor],
+            ) -> ToolManifest {
+                ToolManifest { wire_json: json!([]) }
+            }
+        }
+    };
+}
+
+scripted_provider!(Waits, |this| {
+    let _request = SaysWhenDropped(this.dropped.clone());
+    this.asked.notify_one();
+    std::future::pending().await
+});
+
+scripted_provider!(Answers, |this| {
+    use futures::StreamExt;
+    match &this.0 {
+        Ok(events) => Ok(futures::stream::iter(events.clone()).boxed()),
+        Err(refusal) => Err(crate::provider::ProviderError::Http { status: 400, body: refusal.to_string() }),
+    }
+});
+
+/// One model call on `provider`, with a stop observer: the turn it comes
+/// back as, and the frames it sent.
+async fn one_call(
+    provider: &dyn LlmProvider,
+    stop_rx: watch::Receiver<u64>,
+) -> (crate::provider::AssistantTurn, Vec<ResponseType>) {
+    let system = SystemPromptBundle { text: "s".into(), session_name: SESSION.into() };
+    let tools = ToolManifest { wire_json: json!([]) };
+    let (tx, mut rx) = mpsc::channel(64);
+    let call = ModelCall {
+        provider,
+        system: &system,
+        tools: &tools,
+        options: LlmRequestOptions::default(),
+        tx: &tx,
+        config_name: "Embra",
+    };
+    let mut stop = StopCheck::new(stop_rx);
+    let turn = call.run(&[ApiMessage::user_text("hi")], &mut stop).await;
+    drop(tx);
+    let mut frames = Vec::new();
+    while let Some(Ok(frame)) = rx.recv().await {
+        frames.push(frame.response_type.expect("a typed frame"));
+    }
+    (turn, frames)
+}
+
+/// The stop while the request waits: the call ends as a stop with nothing
+/// written, and the request is dropped, which is what closes its
+/// connection and stops a local model server.
+#[tokio::test(start_paused = true)]
+async fn a_stop_during_the_wait_for_an_answer_ends_the_call_and_drops_the_request() {
+    let provider = Waits { asked: Arc::default(), dropped: Arc::default() };
+    let (stop_tx, stop_rx) = watch::channel(0u64);
+    let asked = provider.asked.clone();
+    let stop = async {
+        asked.notified().await;
+        stop_tx.send_modify(|v| *v += 1);
+    };
+    let ((turn, frames), ()) = tokio::time::timeout(std::time::Duration::from_secs(3600), async {
+        tokio::join!(one_call(&provider, stop_rx), stop)
+    })
+    .await
+    .expect("the stop ends the call");
+
+    assert_eq!(turn.outcome, TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop));
+    assert!(turn.content.is_empty());
+    assert!(provider.dropped.load(Ordering::SeqCst), "the request was dropped");
+    assert_eq!(complaints(&frames), [] as [&str; 0], "the loop says the stop, once, at the turn's end");
+}
+
+/// A request that fails before its stream comes back as a turn, with the
+/// provider's words shown to the operator; it was an error that left the
+/// turn's function.
+#[tokio::test]
+async fn a_request_that_fails_before_its_stream_is_a_cut_call_with_no_text() {
+    let provider = Answers(Err("no such model"));
+    let (_stop_tx, stop_rx) = watch::channel(0u64);
+
+    let (turn, frames) = one_call(&provider, stop_rx).await;
+
+    assert!(is_cut(&turn));
+    assert!(turn.content.is_empty());
+    assert_eq!(complaints(&frames), ["Brain error: HTTP 400: no such model"]);
+    assert_eq!(dones(&frames), [] as [&str; 0], "the turn's closing frames send the Done");
+}
+
+/// A stream that ends without its result: the text that had arrived comes
+/// back with the turn, and no `Done` has closed it yet.
+#[tokio::test]
+async fn a_stream_that_ends_without_a_result_keeps_what_had_arrived() {
+    let provider = Answers(Ok(vec![
+        StreamEvent::TextDelta("Two plus ".into()),
+        StreamEvent::TextDelta("two is".into()),
+        StreamEvent::Error("the slot was lost".into()),
+    ]));
+    let (_stop_tx, stop_rx) = watch::channel(0u64);
+
+    let (turn, frames) = one_call(&provider, stop_rx).await;
+
+    assert!(is_cut(&turn));
+    assert_eq!(turn_text(&turn), "Two plus two is");
+    assert_eq!(undelivered_after(&turn).as_deref(), Some("Two plus two is"));
+    assert_eq!(complaints(&frames), ["Brain error: the slot was lost"]);
+    assert_eq!(dones(&frames), [] as [&str; 0]);
 }

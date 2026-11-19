@@ -134,7 +134,7 @@ Every turn replays the whole session: the system prompt, the history, the turn's
 
 | Server | At the limit | What the operator sees |
 |---|---|---|
-| LM Studio with the preset | Refuses: the stream opens and answers inside it with one error frame, then closes. | `Brain error: the model server answered with an error: Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.` The turn ends and its text is persisted with the marker `(turn ended by a provider error; see the error above)`. |
+| LM Studio with the preset | Refuses: the stream opens and answers inside it with one error frame, then closes. | `Brain error: the model server answered with an error: Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.` The turn ends there. The operator's message and the reply so far are saved, and the saved reply ends with `(response interrupted by a failed model call)`, or is `(turn interrupted by a failed model call)` when nothing had been written. |
 | Ollama, an MLX build | Refuses: HTTP 400 before any stream opens (`input length (N tokens) exceeds the model's maximum context length (M tokens)`; read from Ollama's source, `mlxrunner/pipeline.go`, not yet seen live). | The same error, the same marker. |
 | Ollama, a GGUF build | Trims. First the oldest messages go, keeping the system prompt and the latest message, logged at debug level only (`truncating input messages which exceed context length`, with `OLLAMA_DEBUG=1`). If the system prompt, the tool list and the latest message still do not fit, the prompt itself is cut: the first few tokens and the last ones, about half the window in all, logged at WARN (`truncating input prompt`; `server/prompt.go` and `llm/llama_server.go` in Ollama's source). | Nothing. The model answers from what is left and the turn ends normally. |
 
@@ -191,4 +191,4 @@ See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 
 ---
 
-*Last updated: 2026-11-17.*
+*Last updated: 2026-11-19.*

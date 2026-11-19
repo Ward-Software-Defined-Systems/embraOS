@@ -44,7 +44,7 @@ mod tool_only_placeholder_tests {
 
 #[cfg(test)]
 mod transcript_segments_tests {
-    use super::{final_assistant_text, turn_text, TranscriptSegments, STREAM_FAILED_MARKER};
+    use super::{final_assistant_text, turn_text, TranscriptSegments};
     use crate::provider::{AssistantTurn, Block, EarlyStopReason, StreamEvent, TurnOutcome};
     use futures::stream;
     use tokio::sync::mpsc;
@@ -84,16 +84,29 @@ mod transcript_segments_tests {
 
     #[test]
     fn a_failed_continuation_persists_its_marker_after_the_text() {
-        // The loop pushes the marker as a segment and breaks with the
-        // previous turn's outcome (ToolUse): no suffix, the marker last.
+        // Every segment the turn had, the failed call's partial among
+        // them, then the suffix, once.
+        let cut = TurnOutcome::EarlyStop(EarlyStopReason::CallFailed);
         let mut segs = TranscriptSegments::default();
         segs.push("Reading the dump now.");
-        segs.push(STREAM_FAILED_MARKER);
-        let persisted = final_assistant_text(&segs.joined(), &[], TurnOutcome::ToolUse);
+        segs.push("The first thing I see");
+        let persisted = final_assistant_text(&segs.joined(), &[], cut);
         assert_eq!(
             persisted,
-            "Reading the dump now.\n\n(turn ended by a provider error; see the error above)"
+            "Reading the dump now.\n\nThe first thing I see\n\n(response interrupted by a failed model call)"
         );
+    }
+
+    #[test]
+    fn a_call_that_failed_before_any_text_persists_its_marker_alone() {
+        // Before the tool placeholder, like a stop: the turn did not end
+        // of the model's own accord, and the fold looks for this string.
+        let cut = TurnOutcome::EarlyStop(EarlyStopReason::CallFailed);
+        assert_eq!(
+            final_assistant_text("", &["file_read".to_string()], cut),
+            "(turn interrupted by a failed model call)"
+        );
+        assert_eq!(final_assistant_text("  ", &[], cut), crate::sessions::model_view::CALL_FAILED_MARKER);
     }
 
     #[test]
@@ -169,10 +182,7 @@ mod transcript_segments_tests {
         let mut last_response_text = String::new();
         for events in iterations {
             let (tx, mut rx) = mpsc::channel(64);
-            let turn = super::collect_response(Box::pin(stream::iter(events)), &tx, "Embra", None)
-                .await
-                .expect("collect_response ok")
-                .expect("got Complete turn");
+            let turn = super::collect_response(Box::pin(stream::iter(events)), &tx, "Embra", None).await;
             drop(tx);
             while rx.recv().await.is_some() {}
             last_response_text = turn_text(&turn);
@@ -1675,10 +1685,7 @@ mod reasoning_delta_privacy_tests {
         let brain_rx = Box::pin(stream::iter(events));
         let (tx, mut rx) = mpsc::channel(64);
 
-        let turn = collect_response(brain_rx, &tx, "Embra", None)
-            .await
-            .expect("collect_response ok")
-            .expect("got Complete turn");
+        let turn = collect_response(brain_rx, &tx, "Embra", None).await;
 
         drop(tx);
         let mut frames = Vec::new();
@@ -1760,7 +1767,7 @@ mod reasoning_delta_privacy_tests {
         let brain_rx = Box::pin(stream::iter(events));
         let (tx, mut rx) = mpsc::channel(64);
 
-        let _ = collect_response(brain_rx, &tx, "Embra", None).await.unwrap();
+        let _ = collect_response(brain_rx, &tx, "Embra", None).await;
         drop(tx);
 
         let mut frames = Vec::new();
@@ -3238,9 +3245,7 @@ mod operator_stop_tests {
             super::collect_response(events.boxed(), &tx, "Embra", Some(&mut check)),
         )
         .await
-        .expect("the call ends at Complete")
-        .expect("no error")
-        .expect("the turn the provider completed");
+        .expect("the call ends at Complete");
         assert_eq!(turn.outcome, TurnOutcome::ToolUse);
         assert!(turn.has_tool_call(), "the tool call is the loop's to run");
 
@@ -3356,6 +3361,31 @@ mod operator_stop_tests {
         let frames = super::closing_frames(false, true, None, None);
         assert_eq!(frames.len(), 1, "{frames:?}");
         assert_eq!(done_text(&frames[0]), "");
+    }
+
+    /// A call that failed after text had streamed in: the `Done` carries
+    /// that text, so both consoles turn their live line into a row, and
+    /// the notice says what is on record. The console dropped the line on
+    /// an empty `Done`; the phone kept it.
+    #[test]
+    fn a_cut_call_closes_with_its_partial_then_the_notice() {
+        let cut = TurnOutcome::EarlyStop(EarlyStopReason::CallFailed);
+        let partial = crate::provider::AssistantTurn {
+            content: vec![crate::provider::Block::Text("Two plus two is".into())],
+            outcome: cut,
+            stop_details: None,
+        };
+        let notice = super::terminal_outcome_notice(cut, None);
+        let frames = super::closing_frames(false, true, super::undelivered_after(&partial), notice);
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(done_text(&frames[0]), "Two plus two is");
+        match &frames[1] {
+            embra_common::proto::brain::conversation_response::ResponseType::System(m) => {
+                assert_eq!(m.msg_type, SystemMessageType::Warning as i32);
+                assert!(m.content.contains("failed model call") && m.content.contains("saved"), "{}", m.content);
+            }
+            other => panic!("the notice follows the Done: {other:?}"),
+        }
     }
 
     #[test]

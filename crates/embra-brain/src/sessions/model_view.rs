@@ -43,15 +43,30 @@ pub const OPERATOR_STOP_MARKER: &str = "(turn stopped by operator)";
 pub const OPERATOR_STOP_NOTE: &str =
     "[Your reply to the message above was stopped by the operator before you had written anything.]";
 
-/// The assistant text persisted for a turn whose model call failed, after
-/// the text the turn had, or alone when it had none. `grpc_service`'s turn
-/// loop writes it; the server's own words are in the console and the log,
-/// never here.
+/// The assistant text persisted for a turn whose model call failed before
+/// any text had arrived: a request refused or lost, a server that sent
+/// nothing for the whole wait, a stream that broke. `final_assistant_text`
+/// writes it. What the server said is in the console and the log, never
+/// here: a marker with a variable part could not be matched whole.
+pub const CALL_FAILED_MARKER: &str = "(turn interrupted by a failed model call)";
+
+/// What follows the text of a turn whose model call failed later, in the
+/// assistant's own slot, as a stop's suffix does.
+pub const CALL_FAILED_SUFFIX: &str = "(response interrupted by a failed model call)";
+
+/// What the model reads in the operator's next message in place of
+/// [`CALL_FAILED_MARKER`]. The turn's tool calls are on record whether or
+/// not a word was written.
+pub const CALL_FAILED_NOTE: &str =
+    "[Your reply to the message above was cut by a failed model call before you had written anything. Tool calls of that turn may have run; turn_trace shows them.]";
+
+/// The marker a failed continuation left until the turn loop wrote
+/// [`CALL_FAILED_MARKER`]: after the turn's text, or alone when the turn
+/// had none. No code writes it any more; histories hold it.
 pub const STREAM_FAILED_MARKER: &str = "(turn ended by a provider error; see the error above)";
 
-/// What the model reads in the operator's next message in place of that
-/// marker standing alone. The turn's tool calls are on record whether or
-/// not a word was written.
+/// What the model reads in place of [`STREAM_FAILED_MARKER`] standing
+/// alone.
 pub const STREAM_FAILED_NOTE: &str =
     "[Your reply to the message above was cut by a provider error before you had written anything. Tool calls of that turn may have run; turn_trace shows them.]";
 
@@ -59,6 +74,7 @@ pub const STREAM_FAILED_NOTE: &str =
 /// note the model reads in its place.
 const BARE_MARKERS: &[(&str, &str)] = &[
     (OPERATOR_STOP_MARKER, OPERATOR_STOP_NOTE),
+    (CALL_FAILED_MARKER, CALL_FAILED_NOTE),
     (STREAM_FAILED_MARKER, STREAM_FAILED_NOTE),
 ];
 
@@ -245,12 +261,31 @@ mod tests {
         assert!(!blocks.windows(2).any(|w| matches!(w, [Block::Text(_), Block::Text(_)])));
     }
 
-    /// A continuation that failed in a turn with tool calls and no text
-    /// left its marker alone in the assistant's slot, where a model reads
-    /// it as a reply of its own (the header's incident). It is told as a
-    /// note, like a stop; after text it stays the assistant's suffix.
+    /// A turn whose model call failed before any text leaves its marker
+    /// alone in the assistant's slot, where a model reads it as a reply of
+    /// its own (the header's incident). It is told as a note, like a stop;
+    /// after text the suffix stays the assistant's.
     #[test]
-    fn a_turn_cut_by_a_provider_error_before_any_text_is_told_in_the_operators_next_message() {
+    fn a_turn_cut_by_a_failed_call_before_any_text_is_told_in_the_operators_next_message() {
+        let out = fold_stopped_turns(vec![
+            user("Read the three files"),
+            assistant(CALL_FAILED_MARKER),
+            user("What happened?"),
+        ]);
+        assert_eq!(out.len(), 1);
+        let expected = format!("Read the three files\n\n{CALL_FAILED_NOTE}\n\nWhat happened?");
+        assert_eq!(texts(&out[0]), vec![expected.as_str()]);
+
+        let partial = format!("I have read two of them.\n\n{CALL_FAILED_SUFFIX}");
+        let out = fold_stopped_turns(vec![user("A"), assistant(&partial), user("B")]);
+        assert_eq!(out.len(), 3);
+        assert_eq!(texts(&out[1]), vec![partial.as_str()]);
+    }
+
+    /// The marker the turn loop wrote before: histories hold it, alone
+    /// where the turn had no text and after the text where it had.
+    #[test]
+    fn a_marker_of_the_old_wording_folds_like_the_new_one() {
         let out = fold_stopped_turns(vec![
             user("Read the three files"),
             assistant(STREAM_FAILED_MARKER),
@@ -272,11 +307,11 @@ mod tests {
             user("A"),
             marker(),
             user("B"),
-            assistant(STREAM_FAILED_MARKER),
+            assistant(CALL_FAILED_MARKER),
             user("C"),
         ]);
         assert_eq!(out.len(), 1);
-        let expected = format!("A\n\n{OPERATOR_STOP_NOTE}\n\nB\n\n{STREAM_FAILED_NOTE}\n\nC");
+        let expected = format!("A\n\n{OPERATOR_STOP_NOTE}\n\nB\n\n{CALL_FAILED_NOTE}\n\nC");
         assert_eq!(texts(&out[0]), vec![expected.as_str()]);
     }
 
@@ -289,6 +324,7 @@ mod tests {
             for (other, _) in BARE_MARKERS {
                 assert!(!note.contains(other), "{note} carries {other}");
             }
+            assert!(!note.contains(CALL_FAILED_SUFFIX), "{note} carries the suffix");
             assert!(
                 BARE_MARKERS.iter().skip(i + 1).all(|(later, _)| later != marker),
                 "{marker} is listed twice"

@@ -177,6 +177,12 @@ pub enum EarlyStopReason {
     /// produced by a provider wire mapper — the loop driver synthesizes it
     /// when the stop generation advances mid-turn.
     OperatorStop,
+    /// The model call failed: the request was refused or lost before its
+    /// stream, or the stream ended without a result. Never produced by a
+    /// provider wire mapper: the turn loop makes the turn, with the text
+    /// that had arrived, so that a failed call is closed and saved like
+    /// any other end of a turn.
+    CallFailed,
     Other,
 }
 
