@@ -1743,7 +1743,7 @@ async fn handle_turn(
             // confirmation is a plain message, and a command is not it.
             super::update::cancel_pending_restore(pending_backup_restore, tx).await;
             if let Some(turn) = handle_slash_command(
-                &cmd.command, &cmd.args, tx, ctx, config_tz, api_key
+                &cmd.command, &cmd.args, tx, ctx, config_tz, api_key, stop_rx
             ).await {
                 // Slash command requested a synthetic user turn — feed it
                 // through the Brain. `/continue` hands its cut turn over

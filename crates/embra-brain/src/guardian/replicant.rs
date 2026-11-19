@@ -224,6 +224,7 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// A provider that answers `stream_turn` with the events scripted:
     /// the glue between a provider's stream and the verdict (#55).
@@ -313,6 +314,97 @@ mod tests {
 
         let err = judge(Vec::new()).await.expect_err("a stream that ends with no Complete");
         assert_eq!(err, "empty replicant response");
+    }
+
+    /// A provider that takes the check's call and never answers it, and
+    /// says when the call arrived and when its future was dropped.
+    struct SilentProvider {
+        asked: Arc<tokio::sync::Notify>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct SaysWhenDropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for SaysWhenDropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for SilentProvider {
+        fn display_name(&self) -> &str {
+            "silent"
+        }
+
+        fn kind(&self) -> crate::provider::ProviderKind {
+            crate::provider::ProviderKind::LmStudio
+        }
+
+        fn base_url(&self) -> &str {
+            "http://silent.invalid"
+        }
+
+        async fn validate_key(&self, _key: &str) -> crate::provider::ValidationResult {
+            crate::provider::ValidationResult::Valid
+        }
+
+        async fn stream_turn(
+            &self,
+            _messages: &[ApiMessage],
+            _system: &SystemPromptBundle,
+            _tools: &ToolManifest,
+            _options: LlmRequestOptions,
+        ) -> Result<BoxStream<'static, StreamEvent>, crate::provider::ProviderError> {
+            let _request = SaysWhenDropped(self.dropped.clone());
+            self.asked.notify_one();
+            std::future::pending().await
+        }
+
+        fn build_tool_manifest(
+            &self,
+            descriptors: &[&'static crate::tools::registry::ToolDescriptor],
+        ) -> ToolManifest {
+            FakeProvider { events: Vec::new() }.build_tool_manifest(descriptors)
+        }
+    }
+
+    /// `/guardian approve` and `define` wait for the check, which is a
+    /// model call and can take as long as one, and nothing could end the
+    /// wait. A stop ends it: the check's request is dropped, which closes
+    /// its connection, and no verdict comes back to act on.
+    #[tokio::test]
+    async fn a_stop_ends_the_wait_for_the_check_and_brings_back_no_verdict() {
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = SilentProvider { asked: asked.clone(), dropped: dropped.clone() };
+        let soul = serde_json::json!({"name": "Embra"});
+        let module = module();
+        // The operator stops once the model server has the check's request.
+        let stopped = async { asked.notified().await };
+
+        let checked = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            super::super::unless_stopped(evaluate_against_soul(&provider, &soul, &module), stopped),
+        )
+        .await
+        .expect("the stop ends the wait");
+
+        assert!(checked.is_none(), "a stopped check has no verdict: {checked:?}");
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst), "the request to the model was dropped");
+    }
+
+    /// With no stop the check's own answer comes back, and a stop that is
+    /// already there wins over an answer that is ready too.
+    #[tokio::test]
+    async fn a_check_that_answers_is_its_answer_and_a_stop_already_given_comes_first() {
+        let never = std::future::pending::<()>();
+        assert_eq!(super::super::unless_stopped(async { 7 }, never).await, Some(7));
+        assert_eq!(super::super::unless_stopped(async { 7 }, async {}).await, None);
+        let said = super::super::check_stopped_notice("temp_delta", "was not built and still waits for approval");
+        assert_eq!(
+            said,
+            "guardian: stopped before the replicant check answered. 'temp_delta' was not built and still waits for approval, and nothing was changed. Run the command again to have it checked."
+        );
     }
 
     #[test]

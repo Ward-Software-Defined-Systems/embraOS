@@ -316,14 +316,22 @@ pub async fn reconcile_on_boot(db: &WardsonDbClient) -> anyhow::Result<()> {
 /// after the first whitespace (the console sends `define\n<module>`).
 /// Returns a message for the operator (the gRPC arm sends it as a
 /// SystemMessage); never feeds a synthetic model turn.
-pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> String {
+/// `stopped` resolves when the operator stops the command. `define` and
+/// `approve` ask the model for the replicant check, and wait for it no
+/// longer than that: a stop leaves the tool as it was. A caller with no
+/// stop to offer passes `std::future::pending()`.
+pub async fn handle_guardian_slash(
+    args: &str,
+    db: &Arc<WardsonDbClient>,
+    stopped: impl std::future::Future<Output = ()>,
+) -> String {
     let (sub, rest) = match args.split_once(char::is_whitespace) {
         Some((a, b)) => (a.trim(), b.trim_start()),
         None => (args.trim(), ""),
     };
     match sub {
-        "define" => define(db, rest).await,
-        "approve" => approve(db, rest.trim()).await,
+        "define" => define(db, rest, stopped).await,
+        "approve" => approve(db, rest.trim(), stopped).await,
         "reject" => reject(db, rest.trim()).await,
         "list" => list_human(db).await,
         "status" => match load_doc(db, rest.trim()).await {
@@ -807,7 +815,37 @@ async fn egress_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
     }
 }
 
-async fn define(db: &Arc<WardsonDbClient>, source: &str) -> String {
+/// `work`, or `None` when `stopped` resolves first. The replicant check is a
+/// model call and can take as long as one (a local model reads a long
+/// prompt for minutes; the wait for it is two hours by default). Dropping
+/// it closes its connection, which ends the model server's work on it.
+async fn unless_stopped<T>(
+    work: impl std::future::Future<Output = T>,
+    stopped: impl std::future::Future<Output = ()>,
+) -> Option<T> {
+    tokio::pin!(work);
+    tokio::pin!(stopped);
+    tokio::select! {
+        biased;
+        () = &mut stopped => None,
+        out = &mut work => Some(out),
+    }
+}
+
+/// What a command says when the operator stopped it while it waited for the
+/// replicant check. The check decided nothing, so nothing was done: the
+/// gate fails closed on a stop as on any check that did not answer.
+fn check_stopped_notice(name: &str, left: &str) -> String {
+    format!(
+        "guardian: stopped before the replicant check answered. '{name}' {left}, and nothing was changed. Run the command again to have it checked."
+    )
+}
+
+async fn define(
+    db: &Arc<WardsonDbClient>,
+    source: &str,
+    stopped: impl std::future::Future<Output = ()>,
+) -> String {
     if source.trim().is_empty() {
         return "guardian: empty module. Use /guardian-define and paste a Rust \
                 module (marker + GUARDIAN_* + fn run)."
@@ -840,7 +878,10 @@ async fn define(db: &Arc<WardsonDbClient>, source: &str) -> String {
             );
         }
     };
-    let record = match run_replicant_check(db, &cfg, &module).await {
+    let Some(checked) = unless_stopped(run_replicant_check(db, &cfg, &module), stopped).await else {
+        return check_stopped_notice(&module.name, "was not compiled");
+    };
+    let record = match checked {
         Ok(Some((verdict, model))) => {
             if verdict.is_refuse() {
                 let touched = if verdict.touched_lines.is_empty() {
@@ -1118,7 +1159,11 @@ pub async fn propose(
 /// drifted) and run the existing build pipeline (the second half of
 /// `define`). The stored replicant verdict survives via `mark`'s
 /// load-merge on completion.
-async fn approve(db: &Arc<WardsonDbClient>, name: &str) -> String {
+async fn approve(
+    db: &Arc<WardsonDbClient>,
+    name: &str,
+    stopped: impl std::future::Future<Output = ()>,
+) -> String {
     if name.is_empty() {
         return "Usage: /guardian approve <name>".to_string();
     }
@@ -1170,7 +1215,10 @@ async fn approve(db: &Arc<WardsonDbClient>, name: &str) -> String {
         }
     };
     let now = chrono::Utc::now().to_rfc3339();
-    let record = match run_replicant_check(db, &cfg, &module).await {
+    let Some(checked) = unless_stopped(run_replicant_check(db, &cfg, &module), stopped).await else {
+        return check_stopped_notice(name, "was not built and still waits for approval");
+    };
+    let record = match checked {
         Ok(Some((verdict, model))) => {
             if verdict.is_refuse() {
                 let touched = if verdict.touched_lines.is_empty() {

@@ -84,6 +84,29 @@ pub(super) fn continue_refusal(decision: &ContinueDecision) -> Option<String> {
     }
 }
 
+/// What the consoles show while a Guardian command waits for the replicant
+/// check: "<name> is running replicant check (12s)...".
+pub(super) const GUARDIAN_CHECK_LABEL: &str = "replicant check";
+
+/// Whether a `/guardian` command asks the model for the replicant check:
+/// `define` (the module follows on the next line) and `approve`.
+pub(super) fn guardian_runs_the_check(args: &str) -> bool {
+    matches!(args.split_whitespace().next(), Some("define" | "approve"))
+}
+
+/// The frame that tells a console whether something runs, and what.
+async fn send_thinking(tx: &mpsc::Sender<Result<ConversationResponse, Status>>, on: bool, what: &str) {
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Thinking(ThinkingState {
+                is_thinking: on,
+                name: String::new(),
+                current_tool: what.to_string(),
+            })),
+        }))
+        .await;
+}
+
 pub(super) async fn handle_slash_command(
     command: &str,
     args: &str,
@@ -91,6 +114,7 @@ pub(super) async fn handle_slash_command(
     ctx: &ServiceCtx,
     config_tz: &str,
     _api_key: &str,
+    stop_rx: &watch::Receiver<u64>,
 ) -> Option<SlashTurn> {
     let ServiceCtx { db, session_mgr, pending_openai_compat_setup, pending_session_delete, .. } = ctx;
     // Helper to send a system message
@@ -188,7 +212,23 @@ pub(super) async fn handle_slash_command(
             // The body for `define` is `define\n<module>` from the
             // console's /guardian-define capture mode. Reports via
             // SystemMessage; never feeds a synthetic model turn.
-            let msg = crate::guardian::handle_guardian_slash(args, db).await;
+            //
+            // `define` and `approve` ask the model for the replicant check,
+            // a call that can take as long as any other, and nothing could
+            // stop it: the command ran outside a turn. The two run as one
+            // now. The mark makes the operator's stop count, and the
+            // Thinking frame tells the consoles that something runs, which
+            // is when Esc and the phone's stop button send a stop.
+            let msg = if guardian_runs_the_check(args) {
+                let (in_turn_guard, mut stop_check) = begin_turn(&ctx.in_turn, stop_rx, "guardian");
+                send_thinking(tx, true, GUARDIAN_CHECK_LABEL).await;
+                let msg = crate::guardian::handle_guardian_slash(args, db, stop_check.triggered()).await;
+                drop(in_turn_guard);
+                send_thinking(tx, false, "").await;
+                msg
+            } else {
+                crate::guardian::handle_guardian_slash(args, db, std::future::pending()).await
+            };
             send_msg(tx, msg).await;
         }
         "/status" => {

@@ -1440,3 +1440,41 @@ async fn a_prompt_gemini_blocked_is_said_with_its_reason_and_is_not_kept_for_con
     );
     assert_eq!(rig.asked_at("/gemini/").await.len(), 1);
 }
+
+// ── A Guardian command that waits for the model ─────────────────────
+
+/// `/guardian approve` and `/guardian define` ask the model for the
+/// replicant check, and ran outside a turn: no console was told that
+/// something ran, so Esc sent no stop, and a stop would have found no turn.
+/// They run as a turn. The others, which ask the model nothing, do not.
+#[tokio::test]
+async fn a_guardian_command_that_asks_for_the_check_runs_as_a_turn_and_the_others_do_not() {
+    let rig = Rig::new().await;
+    let thinking = |frames: &[ResponseType]| -> Vec<(bool, String)> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                ResponseType::Thinking(t) => Some((t.is_thinking, t.current_tool.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let frames = rig.command("/guardian", "approve no_such_tool").await;
+
+    assert_eq!(thinking(&frames), [(true, GUARDIAN_CHECK_LABEL.to_string()), (false, String::new())]);
+    assert!(
+        matches!(frames.last(), Some(ResponseType::System(m)) if m.content.starts_with("guardian:")),
+        "the answer follows the frame that ends the wait: {frames:?}"
+    );
+    assert!(!rig.ctx.in_turn.load(std::sync::atomic::Ordering::SeqCst), "the mark is gone with the command");
+
+    let frames = rig.command("/guardian", "list").await;
+    assert_eq!(thinking(&frames), []);
+
+    assert!(guardian_runs_the_check("approve temp_delta"));
+    assert!(guardian_runs_the_check("define\n// guardian-tool: temp_delta\nfn run() {}"));
+    for other in ["", "list", "status temp_delta", "reject temp_delta", "approved", "egress add host"] {
+        assert!(!guardian_runs_the_check(other), "{other:?}");
+    }
+}

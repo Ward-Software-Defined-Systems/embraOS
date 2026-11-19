@@ -71,7 +71,7 @@ The verdict shape:
 
 Two rules hold on both paths:
 
-- **Fail closed.** If the verdict call errors or returns an unparseable verdict, **nothing compiles** — the system never defaults to allow.
+- **Fail closed.** If the verdict call errors or returns an unparseable verdict, **nothing compiles** — the system never defaults to allow. The same holds for a check the operator stops: `/guardian-define` and `/guardian approve` wait for the verdict as a turn waits for a reply (the console shows `replicant check`), Esc or `/stop` ends the wait, and nothing is compiled or approved.
 - **Skipped only before the soul is sealed.** During first-boot setup there is no soul document and no stored seal hash, so an operator define and a rebuild proceed; an intelligence proposal, by contrast, fails closed in that state (the intelligence never authors ungated). A soul document that is missing beside a stored seal hash is not that state: it is the one trustd halts a boot on, and every path refuses it.
 - **A database error is an error, not an unsealed soul.** When the soul cannot be read, every path refuses — `guardian_propose`, `/guardian-define` and `/guardian rebuild` alike — instead of reading the failure as "nothing to check against".
 
