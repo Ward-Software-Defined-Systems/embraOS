@@ -5,6 +5,10 @@
 //! `Oom` into `Instantiate`/`Trap` without failing to compile. These tests
 //! are the tripwire.
 //!
+//! The last one is of another kind: a guest must not be able to end the
+//! host's process. The Guardian builds wasmtime without its `gc` feature,
+//! and that build once left a path from guest code to an abort.
+//!
 //! Guests are hand-written `wat` (no toolchain needed) exporting the four
 //! ABI items the host resolves: `memory`, `galloc`, `gfree`,
 //! `guardian_run`.
@@ -78,6 +82,25 @@ const GREEDY_AT_RUNTIME: &str = r#"
   (func (export "guardian_run") (param i32 i32) (result i64)
     (if (i32.ne (memory.grow (i32.const 2000)) (i32.const -1))
       (then (unreachable)))
+    (i64.const 0)))
+"#;
+
+/// `guardian_run` calls a function through a supertype of the function's
+/// own type: `$callee` is of `$narrow`, which is declared a subtype of the
+/// non-final `$wide`, and the `call_indirect` expects `$wide`. The two type
+/// ids differ, so the engine has to decide the subtype relation at run time.
+const CALLS_THROUGH_A_SUPERTYPE: &str = r#"
+(module
+  (type $wide (sub (func)))
+  (type $narrow (sub $wide (func)))
+  (memory (export "memory") 1)
+  (table 1 funcref)
+  (func $callee (type $narrow))
+  (elem (i32.const 0) func $callee)
+  (func (export "galloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "gfree") (param i32 i32))
+  (func (export "guardian_run") (param i32 i32) (result i64)
+    (call_indirect (type $wide) (i32.const 0))
     (i64.const 0)))
 "#;
 
@@ -213,4 +236,22 @@ fn guest_trap_is_classified_as_trap() {
         matches!(err, GuardianError::Trap(_)),
         "expected Trap, got {err:?}"
     );
+}
+
+/// wasmtime 48.0.8 and earlier, built as the Guardian builds it (no default
+/// features, so no `gc`), aborted the process here: function subtyping is
+/// part of the GC proposal, which stays enabled in such a build, and the
+/// run-time check of a subtype was a stub that panicked inside compiled
+/// code, where a panic cannot unwind (GHSA-rc4p-x33f-vpr2,
+/// RUSTSEC-2026-0570; fixed in 48.0.9). An abort is not a failure this test
+/// can report: on an affected wasmtime the test binary ends with SIGABRT
+/// and every test after this one is lost with it.
+#[test]
+fn a_guest_that_calls_through_a_function_subtype_does_not_end_the_hosts_process() {
+    let host = WasmHost::new().unwrap();
+    let m = compile(&host, CALLS_THROUGH_A_SUPERTYPE);
+    let out = host
+        .call(&m, "{}", Capabilities::none(), DEADLINE, DEFAULT_MEMORY_CAP)
+        .expect("the callee is of a subtype of the expected type: the call is made");
+    assert_eq!(out, "", "the guest returned from the call and gave its empty output");
 }
