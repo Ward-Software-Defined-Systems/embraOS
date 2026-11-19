@@ -196,6 +196,9 @@ set another.
   active.
 - **Esc** ends a wait at any time: the request is dropped and its connection
   is closed.
+- While a call waits, the web console says for how long once a minute has
+  passed: `Embra is thinking (12 min)...` in the console, `thinking… 12 min`
+  on the phone's page. The serial console's line carries no time.
 - When the wait runs out the request is dropped, nothing is sent again, and
   the brain says so: `the model server sent nothing for 120 minutes before its
   answer began; the request was dropped`. The turn is cut and saved as far as

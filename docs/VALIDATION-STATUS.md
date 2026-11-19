@@ -127,6 +127,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
+| The replicant check stopped while `/guardian-define` waits for it: nothing compiled, the model server's connection closed | QEMU, with a stand-in model server | `/guardian approve` stopped on a tool the intelligence proposed |
 | A tool of the operator's and one the intelligence proposes: validation, the replicant check and its refusal, the build, the sandbox | QEMU; QEMU on Apple Silicon | a live run of the rebuild gate, of a database error at the check and of a stored hash that no longer matches (unit tests cover the three) |
 | The shipped tools: `web_search`, `http_request`, `websocket` | QEMU; bare metal (`websocket`) | |
 | The browser service through `websocket` | QEMU (every call of a session); bare metal (one exchange, driven by the intelligence) | an intelligence that keeps one connection over several turns |
@@ -141,11 +142,14 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | The model wait: `/model-wait`, a call ended when the wait ran out | QEMU, with a wait of one minute | a local model whose answer begins after more than 15 minutes |
 | A turn that was running at a restart: in its session after the boot, the next turn told | QEMU: `/reboot now`; a power cut one second into a turn's held model call, and two seconds after a turn's end, on the RocksDB engine | a power cut on the fjall engine |
 | Learning Mode through a refused model call: the phase stays open | QEMU, with a stand-in model server | |
+| The wait for the model said in minutes: the console's line and the phone's top bar, after a minute of a held call | QEMU, in Chrome 156 | |
+| A console that attaches while a turn runs: told what runs, shown as running, its stop ends the turn, the reply arrives at the turn's end | QEMU, with two consoles on a stand-in model server | a phone that loses and regains its connection during a turn |
 
 ## First boot and identity
 
 | What | Validated on | TBD |
 |---|---|---|
+| A console that leaves at a question of the first-boot wizard: its conversation ends there, no Learning Mode and no model call follow, and the next console starts the wizard | QEMU | |
 | The configuration wizard, Learning Mode, the identity import | QEMU; QEMU on Apple Silicon | Learning Mode with a real model while two consoles are attached |
 | The re-seal ceremony | a raw disk image on the build host | a machine installed from the ISO; a disk converted for a hypervisor |
 
