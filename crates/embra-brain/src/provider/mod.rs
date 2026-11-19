@@ -154,6 +154,12 @@ pub enum ProviderError {
     /// once more. The text is the whole sentence the operator reads.
     #[error("{0}")]
     Connect(String),
+    /// The server was reached and sent nothing for the whole wait the
+    /// provider allows. The request was dropped; it is never tried again,
+    /// since a server that takes this long would take as long once more.
+    /// The text is the whole sentence the operator reads.
+    #[error("{0}")]
+    Silent(String),
     #[error("network: {0}")]
     Network(String),
     #[error("decode: {0}")]

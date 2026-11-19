@@ -44,6 +44,49 @@ use self::wire::{ModelsResponse, OpenAIChatRequest, OpenAIMessage, OpenAITool};
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// The model wait when the operator has set none: how long embraOS waits
+/// while a local model server sends nothing. A local model reads a long
+/// prompt in silence before its first byte, and a slow one writes a long
+/// tool call in silence inside its answer; neither says anything is wrong.
+/// The 15 minutes this replaces was sized for a measured five to eight
+/// minutes and ended calls a healthy server was still working on.
+pub(crate) const DEFAULT_MODEL_WAIT_MINUTES: u64 = 120;
+
+/// The local presets' own long-lived client, one for each reading of the
+/// roots like the brain's other two (`net::SharedClient`). It bounds the
+/// connect and nothing else: every wait for the server on it runs on the
+/// brain's own clock, under the model wait (`post_once`, `streaming::pump`).
+/// A read bound of reqwest's would be a ceiling on what the operator may
+/// set, and before the response headers it is one timer from the start of
+/// the request that nothing resets. A host that is gone is noticed without
+/// it: reqwest's TCP keepalive and user timeout are on by default.
+fn shared_client() -> reqwest::Client {
+    static SHARED: crate::net::SharedClient = crate::net::SharedClient::new();
+    crate::net::shared_through(&SHARED, |builder| {
+        builder
+            .connect_timeout(crate::net::CONNECT_TIMEOUT)
+            .build()
+            .expect("a reqwest client with a redirect policy and a connect bound builds")
+    })
+}
+
+/// What the operator reads when the model wait ran out: before the answer
+/// began, or in the middle of it.
+pub(super) fn silent_sentence(waited: Duration, in_the_answer: bool) -> String {
+    let secs = waited.as_secs();
+    let length = match (secs.is_multiple_of(60), secs / 60, secs) {
+        (true, 1, _) => "1 minute".to_string(),
+        (true, minutes, _) => format!("{minutes} minutes"),
+        (false, _, 1) => "1 second".to_string(),
+        (false, _, secs) => format!("{secs} seconds"),
+    };
+    if in_the_answer {
+        format!("the model server sent nothing for {length} in the middle of its answer; the connection was closed")
+    } else {
+        format!("the model server sent nothing for {length} before its answer began; the request was dropped")
+    }
+}
+
 /// Preset variant within the OpenAI-compat module. Ollama and LM Studio
 /// share wire format; presets carry preset-specific defaults (port, label).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -84,12 +127,19 @@ pub struct OpenAICompatProvider {
     preset: OpenAiCompatPreset,
     base_url: String,
     bearer_token: Option<String>,
-    // No client is kept: each request takes `crate::net::shared()`, the
-    // client of the roots in force (see `AnthropicProvider`).
+    // No client is kept: each request takes `shared_client()`, the client
+    // of the roots in force (see `AnthropicProvider`).
     model_id: String,
     display_name: String,
     /// `/effort` override for this preset, sent verbatim when set.
     reasoning_effort_override: Option<String>,
+    /// The model wait: how long a call waits while the server sends
+    /// nothing. The clock starts when the request is sent, and starts
+    /// again when the answer begins (its status and headers) and at every
+    /// chunk of its body, a keep-alive comment included. When it runs out
+    /// the request is dropped, the connection closes and nothing is tried
+    /// again.
+    model_wait: Duration,
 }
 
 impl OpenAICompatProvider {
@@ -115,7 +165,15 @@ impl OpenAICompatProvider {
             model_id: model,
             display_name,
             reasoning_effort_override: None,
+            model_wait: Duration::from_secs(DEFAULT_MODEL_WAIT_MINUTES * 60),
         }
+    }
+
+    /// The model wait in place of the default (`/model-wait`).
+    #[cfg_attr(not(test), expect(dead_code, reason = "the stored wait reaches the provider with the command, in the commit after this one"))]
+    pub fn with_model_wait(mut self, wait: Duration) -> Self {
+        self.model_wait = wait;
+        self
     }
 
     /// Operator `reasoning_effort` override (`/effort` while this preset
@@ -195,26 +253,36 @@ impl OpenAICompatProvider {
         url: &str,
         body: &OpenAIChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
-        let mut req = crate::net::shared()
+        let mut req = shared_client()
             .post(url)
             .header("content-type", "application/json")
             .json(body);
         if let Some(token) = self.bearer_token.as_deref().filter(|t| !t.is_empty()) {
             req = req.bearer_auth(token);
         }
-        match req.send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    return Ok(resp);
+        // The whole exchange under the model wait: the request and its
+        // answer's head, and the body of an answer that is an error, which
+        // a server can leave unfinished as well. The client has no read
+        // bound of its own.
+        let exchange = async {
+            match req.send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        return Ok(resp);
+                    }
+                    let status = resp.status().as_u16();
+                    let body_text = resp.text().await.unwrap_or_default();
+                    Err(ProviderError::Http {
+                        status,
+                        body: body_text,
+                    })
                 }
-                let status = resp.status().as_u16();
-                let body_text = resp.text().await.unwrap_or_default();
-                Err(ProviderError::Http {
-                    status,
-                    body: body_text,
-                })
+                Err(e) => Err(request_error(&self.base_url, e)),
             }
-            Err(e) => Err(request_error(&self.base_url, e)),
+        };
+        match tokio::time::timeout(self.model_wait, exchange).await {
+            Ok(answer) => answer,
+            Err(_) => Err(ProviderError::Silent(silent_sentence(self.model_wait, false))),
         }
     }
 }
@@ -457,6 +525,7 @@ impl LlmProvider for OpenAICompatProvider {
         // which is wrapped as a BoxStream<StreamEvent>.
         let (tx, rx) = mpsc::channel::<StreamEvent>(256);
         let model_id = self.model_id.clone();
+        let model_wait = self.model_wait;
         let tx_clone = tx.clone();
         tokio::spawn(async move {
             if let Err(e) = streaming::process_sse_stream(
@@ -464,6 +533,7 @@ impl LlmProvider for OpenAICompatProvider {
                 tx_clone.clone(),
                 model_id,
                 options.include_reasoning,
+                model_wait,
             )
             .await
             {
@@ -1845,6 +1915,124 @@ mod tests {
             "a request that got through and was lost is not sent again, whatever its text says"
         );
         assert!(!should_retry(&Err(ProviderError::Decode("json".to_string()))));
+    }
+
+    /// A server that takes the request and holds it: how many connections
+    /// it took, and a signal when a request's head has been read.
+    struct Holding {
+        base: String,
+        connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        asked: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    /// `answer` is written once the request's head has been read; the
+    /// connection is then held open with nothing more sent.
+    async fn holding(answer: &'static str) -> Holding {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a listener");
+        let base = format!("http://{}", listener.local_addr().expect("its address"));
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let asked = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (count, said) = (connections.clone(), asked.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                count.fetch_add(1, Ordering::SeqCst);
+                let said = said.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket.write_all(answer.as_bytes()).await;
+                    let _ = socket.flush().await;
+                    said.notify_one();
+                    // Held open, silent, until the client goes.
+                    while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+                });
+            }
+        });
+        Holding { base, connections, asked }
+    }
+
+    /// The model server has the request and sends nothing. The call ends
+    /// when the model wait runs out, on the brain's own clock, with a
+    /// sentence that says so; it is not sent again. The clock is paused
+    /// once the request has arrived: from there the wait's end is the next
+    /// timer, and two hours pass at once.
+    #[tokio::test]
+    async fn a_server_that_never_answers_fails_the_call_when_the_wait_runs_out() {
+        use std::sync::atomic::Ordering;
+
+        let server = holding("").await;
+        let provider = OpenAICompatProvider::ollama(server.base.clone(), None, "m".to_string());
+        assert_eq!(provider.model_wait, Duration::from_secs(120 * 60), "the default: two hours");
+
+        let (system, tools) = (system_bundle(), empty_manifest());
+        let messages = [ApiMessage::user_text("hi")];
+        let call = provider.stream_turn(&messages, &system, &tools, LlmRequestOptions::default());
+        let clock = async {
+            server.asked.notified().await;
+            tokio::time::pause();
+            tokio::time::Instant::now()
+        };
+        // A day on the paused clock: a call that waits without a bound is
+        // at this deadline at once, where it would never return.
+        let (answer, paused_at) =
+            tokio::time::timeout(Duration::from_secs(24 * 3600), async { tokio::join!(call, clock) })
+                .await
+                .expect("the call ends when the model wait runs out");
+
+        let Err(err) = answer else { panic!("the call came back with an answer") };
+        let ProviderError::Silent(text) = &err else { panic!("a silent server: {err:?}") };
+        assert_eq!(
+            text,
+            "the model server sent nothing for 120 minutes before its answer began; the request was dropped"
+        );
+        assert!(paused_at.elapsed() >= Duration::from_secs(119 * 60), "not before the wait's end");
+        assert_eq!(server.connections.load(Ordering::SeqCst), 1, "a wait that ran out is not tried again");
+        assert!(!should_retry(&Err(err)));
+    }
+
+    /// A server that answers with an error status and never finishes the
+    /// error's body: reading that body is a wait for the server too, and
+    /// the client has no read bound of its own.
+    #[tokio::test]
+    async fn an_error_answer_whose_body_never_comes_is_bounded_by_the_same_wait() {
+        let server = holding("HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\ncontent-length: 100\r\n\r\nno such").await;
+        let provider = OpenAICompatProvider::lm_studio(server.base.clone(), None, "m".to_string())
+            .with_model_wait(Duration::from_secs(5 * 60));
+
+        let url = format!("{}/v1/chat/completions", server.base);
+        let request = any_request();
+        let call = provider.post_once(&url, &request);
+        let clock = async {
+            server.asked.notified().await;
+            tokio::time::pause();
+        };
+        let (answer, ()) = tokio::time::timeout(Duration::from_secs(24 * 3600), async { tokio::join!(call, clock) })
+            .await
+            .expect("the call ends when the model wait runs out");
+
+        let err = answer.expect_err("the wait ran out");
+        assert!(
+            matches!(&err, ProviderError::Silent(text) if text.starts_with("the model server sent nothing for 5 minutes")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_silence_is_said_in_minutes_and_where_it_fell() {
+        assert_eq!(
+            silent_sentence(Duration::from_secs(60), false),
+            "the model server sent nothing for 1 minute before its answer began; the request was dropped"
+        );
+        assert_eq!(
+            silent_sentence(Duration::from_secs(240 * 60), true),
+            "the model server sent nothing for 240 minutes in the middle of its answer; the connection was closed"
+        );
+        // A wait that is not whole minutes exists in tests alone.
+        assert!(silent_sentence(Duration::from_secs(90), false).contains("for 90 seconds"));
     }
 
     fn any_request() -> OpenAIChatRequest {

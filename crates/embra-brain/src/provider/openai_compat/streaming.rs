@@ -79,19 +79,26 @@ pub async fn process_sse_stream(
     tx: mpsc::Sender<StreamEvent>,
     model_id: String,
     include_reasoning: bool,
+    wait: std::time::Duration,
 ) -> Result<()> {
-    pump(response.bytes_stream(), tx, model_id, include_reasoning).await
+    pump(response.bytes_stream(), tx, model_id, include_reasoning, wait).await
 }
 
 /// The parser, over any stream of byte chunks: the response body in
 /// production, a list of byte vectors in the tests. The tests run this
 /// function; there is no second copy of the loop for them to drift from,
 /// and none is to be written.
+///
+/// `wait` is the model wait: each read of the body runs under it, so it
+/// starts again at every chunk, whatever the chunk carries. A server that
+/// sends nothing for the whole of it fails the call; the client these
+/// presets use has no read bound of its own.
 async fn pump<S, B, E>(
     mut stream: S,
     tx: mpsc::Sender<StreamEvent>,
     model_id: String,
     include_reasoning: bool,
+    wait: std::time::Duration,
 ) -> Result<()>
 where
     S: Stream<Item = std::result::Result<B, E>> + Unpin,
@@ -102,7 +109,10 @@ where
     let mut state = ParserState::new(model_id, include_reasoning);
 
     loop {
-        let chunk = match next_chunk(&mut stream, &tx).await {
+        let Ok(next) = tokio::time::timeout(wait, next_chunk(&mut stream, &tx)).await else {
+            return Err(anyhow::anyhow!(super::silent_sentence(wait, true)));
+        };
+        let chunk = match next {
             Next::Chunk(chunk) => chunk.map_err(Into::into)?,
             Next::Ended => break,
             Next::Unheard => {
@@ -447,6 +457,9 @@ mod tests {
     use futures::StreamExt;
     use serde_json::json;
 
+    /// A model wait no test here reaches, for the tests that are not about it.
+    const LONG: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
     /// The body in one chunk, reasoning off. Reasoning-on tests call
     /// `drive_fake_with_options`.
     async fn drive_fake(sse_text: &str, model_id: &str) -> Vec<StreamEvent> {
@@ -471,7 +484,7 @@ mod tests {
         let stream = futures::stream::iter(
             chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
         );
-        let parser = tokio::spawn(pump(stream, tx, model_id.to_string(), include_reasoning));
+        let parser = tokio::spawn(pump(stream, tx, model_id.to_string(), include_reasoning, LONG));
         let mut events = Vec::new();
         while let Some(e) = rx.recv().await {
             events.push(e);
@@ -1128,7 +1141,7 @@ mod tests {
             let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(
                 body.into_bytes(),
             )]);
-            let err = pump(stream, tx, "test-model".to_string(), false)
+            let err = pump(stream, tx, "test-model".to_string(), false, LONG)
                 .await
                 .expect_err("the refusal fails the call");
             let text = err.to_string();
@@ -1214,11 +1227,131 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
                 drop(listener.lock().unwrap().take());
             });
-            pump(stream, tx, "test-model".to_string(), true)
+            pump(stream, tx, "test-model".to_string(), true, LONG)
                 .await
                 .expect("a dropped receiver is not an error");
             assert_eq!(read.load(Ordering::SeqCst), 1, "read on after {checkpoint}");
         }
+    }
+
+    /// The model wait of the tests about it: the default's two hours.
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(120 * 60);
+
+    /// A body whose chunks arrive `gap` apart, the first one after `gap`.
+    fn spaced(
+        chunks: Vec<Vec<u8>>,
+        gap: std::time::Duration,
+    ) -> impl Stream<Item = std::result::Result<Vec<u8>, std::convert::Infallible>> + Unpin {
+        Box::pin(futures::stream::unfold(chunks.into_iter(), move |mut rest| async move {
+            let chunk = rest.next()?;
+            tokio::time::sleep(gap).await;
+            Some((Ok(chunk), rest))
+        }))
+    }
+
+    fn text_chunk(text: &str) -> Vec<u8> {
+        data_frame(assistant_chunk_with_text(text, None)).into_bytes()
+    }
+
+    /// A server that opened its answer and sends nothing for the whole
+    /// model wait. The call fails when the wait runs out and not before,
+    /// with a sentence of the brain's own, and no reply is made of it.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_stays_silent_past_the_wait_fails_the_call_and_emits_no_complete() {
+        let silent = futures::stream::pending::<std::result::Result<Vec<u8>, std::convert::Infallible>>();
+        let (tx, mut rx) = mpsc::channel(8);
+        let began = tokio::time::Instant::now();
+
+        // A day on the paused clock: a parser that waits without a bound
+        // is at this deadline at once, where it would never return.
+        let err = tokio::time::timeout(WAIT * 12, pump(silent, tx, "test-model".to_string(), true, WAIT))
+            .await
+            .expect("the parser ends when the model wait runs out")
+            .expect_err("the wait ran out");
+
+        assert_eq!(began.elapsed(), WAIT, "at the wait's end, on the brain's own clock");
+        assert_eq!(
+            err.to_string(),
+            "the model server sent nothing for 120 minutes in the middle of its answer; the connection was closed"
+        );
+        assert!(rx.recv().await.is_none(), "nothing was emitted, a Complete least of all");
+    }
+
+    /// The wait is for a silence, never for the answer: it starts again at
+    /// every chunk. Four chunks, each a minute short of the wait after the
+    /// one before it, are an answer that took most of a working day.
+    #[tokio::test(start_paused = true)]
+    async fn every_chunk_starts_the_wait_again() {
+        let almost = WAIT - std::time::Duration::from_secs(60);
+        let chunks = vec![
+            text_chunk("one "),
+            text_chunk("two "),
+            text_chunk("three"),
+            data_frame(assistant_chunk_with_text("", Some("stop"))).into_bytes(),
+        ];
+        let (tx, mut rx) = mpsc::channel(8);
+        let began = tokio::time::Instant::now();
+
+        pump(spaced(chunks, almost), tx, "test-model".to_string(), true, WAIT)
+            .await
+            .expect("no silence reached the wait");
+
+        assert_eq!(began.elapsed(), almost * 4);
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+        let complete = events.iter().find_map(|e| match e {
+            StreamEvent::Complete(turn) => Some(turn),
+            _ => None,
+        });
+        let turn = complete.expect("the answer completed");
+        assert!(matches!(&turn.content[..], [Block::Text(t)] if t == "one two three"), "{:?}", turn.content);
+    }
+
+    /// The server speaks, then goes silent for the whole wait: the call
+    /// fails after the text that arrived, and that text is no finished
+    /// reply.
+    #[tokio::test(start_paused = true)]
+    async fn a_silence_inside_the_reply_fails_the_call_after_the_text_that_arrived() {
+        let body = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(text_chunk("Half an ans"))])
+            .chain(futures::stream::pending());
+        let (tx, mut rx) = mpsc::channel(8);
+
+        let err = tokio::time::timeout(WAIT * 12, pump(body, tx, "test-model".to_string(), true, WAIT))
+            .await
+            .expect("the parser ends when the model wait runs out")
+            .expect_err("the wait ran out");
+
+        assert!(err.to_string().contains("in the middle of its answer"), "{err}");
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+        assert!(matches!(&events[..], [StreamEvent::TextDelta(t)] if t == "Half an ans"), "{events:?}");
+    }
+
+    /// A keep-alive comment is the server speaking: it carries nothing the
+    /// parser reads, and it starts the wait again like any chunk.
+    #[tokio::test(start_paused = true)]
+    async fn a_keep_alive_comment_counts_as_the_server_speaking() {
+        let almost = WAIT - std::time::Duration::from_secs(60);
+        let chunks = vec![
+            b": keep-alive\n\n".to_vec(),
+            b": keep-alive\n\n".to_vec(),
+            data_frame(assistant_chunk_with_text("here", Some("stop"))).into_bytes(),
+        ];
+        let (tx, mut rx) = mpsc::channel(8);
+
+        pump(spaced(chunks, almost), tx, "test-model".to_string(), true, WAIT)
+            .await
+            .expect("the comments kept the wait from running out");
+
+        let mut completed = false;
+        while let Some(e) = rx.recv().await {
+            completed |= matches!(e, StreamEvent::Complete(_));
+        }
+        assert!(completed);
     }
 
     /// The parser sends nothing while a tool call's arguments arrive, and
@@ -1253,7 +1386,7 @@ mod tests {
             });
             let (tx, rx) = mpsc::channel(8);
             drop(rx);
-            pump(stream, tx, "test-model".to_string(), include_reasoning)
+            pump(stream, tx, "test-model".to_string(), include_reasoning, LONG)
                 .await
                 .expect("a dropped receiver is not an error");
             assert_eq!(read.load(Ordering::SeqCst), 0, "read on through {what}");
@@ -1267,7 +1400,7 @@ mod tests {
     async fn a_dropped_receiver_ends_the_parser_while_the_stream_is_silent() {
         let silent = futures::stream::pending::<std::result::Result<Vec<u8>, std::convert::Infallible>>();
         let (tx, rx) = mpsc::channel(8);
-        let parser = tokio::spawn(pump(silent, tx, "test-model".to_string(), true));
+        let parser = tokio::spawn(pump(silent, tx, "test-model".to_string(), true, LONG));
         tokio::task::yield_now().await;
         assert!(!parser.is_finished(), "the parser waits on a silent stream while somebody listens");
         drop(rx);
@@ -1433,7 +1566,7 @@ mod tests {
             Err(std::io::Error::other("connection reset")),
         ]);
         let (tx, mut rx) = mpsc::channel(8);
-        let err = pump(stream, tx, "test-model".to_string(), false)
+        let err = pump(stream, tx, "test-model".to_string(), false, LONG)
             .await
             .expect_err("the read error");
         assert!(err.to_string().contains("connection reset"));

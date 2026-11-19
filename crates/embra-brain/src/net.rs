@@ -52,13 +52,16 @@ pub(crate) fn same_origin_redirect_policy() -> Policy {
 
 /// TCP + TLS establishment bound for every client built here.
 pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// Per-read idle bound for every client built here (#26). It resets on
-/// every byte, so a response that keeps flowing never trips it; it only
-/// unsticks a connection that has gone dead. Long on purpose: a local
-/// model's prompt processing on a large context is silent for minutes
-/// before the first token, so this is the database client's figure, set
-/// for a measured 5–8 min worst case. Never a total `.timeout()`: a turn
-/// legitimately runs many minutes.
+/// Per-read idle bound of the brain's shared client (#26): Gemini and its
+/// cache manager, the GitHub and GitLab tools. Inside a response body it
+/// starts again at every frame, so a response that keeps flowing never
+/// trips it. Before the response's headers it is one timer from the start
+/// of the request, which nothing resets (reqwest 0.12): there it bounds
+/// the wait for the answer to begin. Never a total `.timeout()`: a turn
+/// legitimately runs many minutes. The local presets are not on it: a
+/// local model is silent for longer than this while it is healthy, and
+/// they wait under the model wait on a client of their own
+/// (`provider::openai_compat`).
 pub(crate) const READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// The operator's CA drop-in directory on STATE, seeded by `seed-state.sh
@@ -363,9 +366,11 @@ pub(crate) fn shared_through(
 
 /// The brain's long-lived `client()` (#36). The key is a per-request header
 /// on every provider and the bounds are fixed, so one client serves Gemini
-/// and its cache manager, the OpenAI-compatible presets and the GitHub and
-/// GitLab tools. The Anthropic client keeps its own pair of bounds and its
-/// own instance (`provider::anthropic::shared_client`).
+/// and its cache manager and the GitHub and GitLab tools. The Anthropic
+/// client keeps its own pair of bounds and its own instance
+/// (`provider::anthropic::shared_client`); the local presets' has a connect
+/// bound alone, and their waits run under the model wait
+/// (`provider::openai_compat::shared_client`).
 pub(crate) fn shared() -> reqwest::Client {
     static SHARED: SharedClient = SharedClient::new();
     shared_through(&SHARED, |builder| {
@@ -1175,15 +1180,19 @@ mod tests {
     /// the validate and probe clients a total one, the streaming and API
     /// clients the two bounds — so no reqwest client of the brain can hang
     /// on a connection that has gone dead. This reads every use of
-    /// `builder()` outside this file and the two long-lived clients' own
-    /// builders (`shared_through`).
+    /// `builder()` outside this file and the three long-lived clients' own
+    /// builders (`shared_through`). The local presets' client sets the
+    /// connect bound alone: its reads are bounded by the model wait, on the
+    /// brain's own clock, which this scan does not see
+    /// (`a_server_that_never_answers_fails_the_call_when_the_wait_runs_out`
+    /// and the parser's tests hold that).
     #[test]
     fn every_net_builder_sets_a_timeout() {
         let mut files = Vec::new();
         rust_sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
         // Spelled in pieces so this test does not read itself. The second
         // pattern is a call of `shared_through`, whose cell is passed by
-        // reference: the two long-lived clients finish their own builder.
+        // reference: the three long-lived clients finish their own builder.
         let calls = [["crate::net::", "builder()"].concat(), ["shared_", "through(&"].concat()];
         let mut seen = [0usize; 2];
         for file in files {
@@ -1202,6 +1211,9 @@ mod tests {
             }
         }
         assert!(seen[0] >= 5, "the scan found {} builder sites; the pattern or the tree moved", seen[0]);
-        assert_eq!(seen[1], 2, "the two long-lived clients: net::shared and the Anthropic stream's");
+        assert_eq!(
+            seen[1], 3,
+            "the three long-lived clients: net::shared, the Anthropic stream's and the local presets'"
+        );
     }
 }
