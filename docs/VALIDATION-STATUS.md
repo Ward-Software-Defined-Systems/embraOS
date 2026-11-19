@@ -2,7 +2,7 @@
 
 What embraOS has been run on, and what has not been run yet. This is the one page that says so. The rest of the manual describes what the OS does, and the [change log](CHANGE-LOG.md) records what changed and when.
 
-**As of:** 2026-11-18, `v0.26.0-phase2`.
+**As of:** 2026-11-19, after `v0.26.0-phase2`.
 
 x86_64 under QEMU on Linux is the reference platform: what the manual describes has been run there, unless a row below marks it TBD. The tables list what has been run beyond that, and every item that is still TBD. An item marked TBD has not been run; it is not known to fail.
 
@@ -131,6 +131,16 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | The shipped tools: `web_search`, `http_request`, `websocket` | QEMU; bare metal (`websocket`) | |
 | The browser service through `websocket` | QEMU (every call of a session); bare metal (one exchange, driven by the intelligence) | an intelligence that keeps one connection over several turns |
 | A Microsoft 365 shared mailbox through `http_request` | QEMU | |
+
+## Turns and the model wait
+
+| What | Validated on | TBD |
+|---|---|---|
+| A turn cut by a failed model call (a request refused, an error inside the answer, the model wait run out, the network card's link taken away before an answer and inside one): the error named, the turn saved with its marker, `/continue`, the next turn told what was cut | QEMU, with a stand-in model server on the LM Studio preset | |
+| A stop before the answer begins and inside a silent answer: the request's connection closed with the stop | QEMU, with a stand-in model server | Ollama and LM Studio: the server's own log showing that it left the request |
+| The model wait: `/model-wait`, a call ended when the wait ran out | QEMU, with a wait of one minute | a local model whose answer begins after more than 15 minutes |
+| A turn that was running at a restart: in its session after the boot, the next turn told | QEMU: `/reboot now`; a power cut 38 seconds and more into the turn, on the RocksDB engine | a power cut on the fjall engine |
+| Learning Mode through a refused model call: the phase stays open | QEMU, with a stand-in model server | |
 
 ## First boot and identity
 

@@ -24,7 +24,7 @@ Session:
 
 Turn:
   /ml                            Toggle multi-line mode (. on own line to send)
-  /stop                          Stop a stuck in-flight turn (or press Esc while it streams)
+  /stop                          Stop a stuck in-flight turn (or press Esc while it runs)
   /continue                      Send the last call of a turn that a failed model call cut once more, with everything the turn held
   /iter-cap                      Show the per-turn tool iteration cap
   /iter-cap <N>                  Set the cap (1..=1000, default 100)

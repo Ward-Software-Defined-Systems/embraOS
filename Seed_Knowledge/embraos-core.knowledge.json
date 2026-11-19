@@ -96,7 +96,7 @@
       "id": "seed_core_operator_actions",
       "kind": "semantic",
       "category": "fact",
-      "content": "Some actions are the operator's and cannot be performed by a tool from inside a session: updating the OS (/update), taking, restoring or deleting a backup (/backup), rebooting or powering the machine off (/reboot now, /reboot halt), making a new access token for the web console (/web-token rotate), choosing a slot or a maintenance job in the boot menu, installing the OS from the installer medium, rebuilding the OS image, importing a certificate authority (/ca import), seeding STATE drop-ins (CA certificates, seed-knowledge packs, imported intelligence), re-sealing the soul, and approving Guardian proposals. A slash command is typed by the operator in the console; no tool runs one. When work requires one of these, the correct move is a precise report naming the action or the command and why — not retrying in-session.",
+      "content": "Some actions are the operator's and cannot be performed by a tool from inside a session: updating the OS (/update), taking, restoring or deleting a backup (/backup), rebooting or powering the machine off (/reboot now, /reboot halt), making a new access token for the web console (/web-token rotate), choosing a slot or a maintenance job in the boot menu, installing the OS from the installer medium, rebuilding the OS image, importing a certificate authority (/ca import), seeding STATE drop-ins (CA certificates, seed-knowledge packs, imported intelligence), re-sealing the soul, approving Guardian proposals, and continuing a turn that a failed model call cut (/continue). A slash command is typed by the operator in the console; no tool runs one. When work requires one of these, the correct move is a precise report naming the action or the command and why — not retrying in-session.",
       "tags": ["operator", "constraints", "boot"]
     },
     { "_comment": "── providers & runtime ──────────────────────────────────" },
@@ -104,7 +104,7 @@
       "id": "seed_core_providers",
       "kind": "semantic",
       "category": "fact",
-      "content": "The brain drives one of four LLM backends through a single provider abstraction: Anthropic Claude, Google Gemini, Ollama, and LM Studio (the last two for local inference). Every registered tool works identically across all four. The active provider and model are operator-chosen — at the first-boot wizard and at runtime via /provider and /model; credentials are operator-provided at setup and stored OS-side (STATE files and system config), never in a repository.",
+      "content": "The brain drives one of four LLM backends through a single provider abstraction: Anthropic Claude, Google Gemini, Ollama, and LM Studio (the last two for local inference). Every registered tool works identically across all four. The active provider and model are operator-chosen — at the first-boot wizard and at runtime via /provider and /model; credentials are operator-provided at setup and stored OS-side (STATE files and system config), never in a repository. On Ollama and LM Studio a call waits through a server's silence (a long prompt being read, a long tool call being written) for the model wait, which the operator sets with /model-wait; when it runs out the call fails and the turn is cut.",
       "tags": ["providers", "llm", "config"]
     },
     { "_comment": "── observability ────────────────────────────────────────" },
@@ -172,7 +172,7 @@
       "id": "seed_core_sessions",
       "kind": "semantic",
       "category": "fact",
-      "content": "Conversations are named sessions persisted in WardSONDB — they survive reboots, are listed and switched with /sessions, /switch, and /new, and store their transcripts full-fidelity. Cross-session continuity comes from the knowledge graph (promotion, retrieval, enrichment — covered in depth by the embraos-kg seeded knowledge), not from replaying old session transcripts into new context.",
+      "content": "Conversations are named sessions persisted in WardSONDB — they survive reboots, are listed and switched with /sessions, /switch, and /new, and store their transcripts full-fidelity. Cross-session continuity comes from the knowledge graph (promotion, retrieval, enrichment — covered in depth by the embraos-kg seeded knowledge), not from replaying old session transcripts into new context. A turn whose model call fails before the turn has finished is a cut turn: it is saved as far as it got (the operator's message, the reply so far, a marker such as \"(response interrupted by a failed model call)\"), and so is a turn that was running when embraOS restarted (after a power cut, as far as the database had written it to the disk: about its last half minute of writes is lost with the power). The first turn after a cut one carries an <interrupted_turn> block at the head of its message, naming the tool calls of the cut turn that are on record; their results are no longer in context, and turn_trace with turn_index_back=1 shows a preview of each. The operator can type /continue instead, which sends the call that failed once more with everything the turn held.",
       "tags": ["sessions", "memory", "continuity"]
     },
     {

@@ -179,12 +179,43 @@ The list is operator-overridable at wizard time. Switching models post-wizard ru
 
 ---
 
+## How Long embraOS Waits for a Local Model
+
+A local model reads a long prompt in silence before the first byte of its
+answer, and a slow one writes a long tool call in silence inside it. Neither
+is a fault, and embraOS waits through both. The **model wait** is how long a
+call waits while Ollama or LM Studio sends nothing: 120 minutes, unless you
+set another.
+
+- The clock starts when a request is sent, and starts again when the answer
+  begins and at each piece of it. It bounds a silence, never the length of an
+  answer.
+- `/model-wait` shows it, `/model-wait <minutes>` sets it for both local
+  presets, and `/model-wait reset` goes back to 120 minutes. A change applies
+  from your next message. `/provider` names the wait while a local preset is
+  active.
+- **Esc** ends a wait at any time: the request is dropped and its connection
+  is closed.
+- When the wait runs out the request is dropped, nothing is sent again, and
+  the brain says so: `the model server sent nothing for 120 minutes before its
+  answer began; the request was dropped`. The turn is cut and saved as far as
+  it got; `/continue` sends the call once more (see
+  [OPERATION.md](../OPERATIONS/OPERATION.md), "When a turn is cut").
+- The model wait is for a server that can be reached and is silent. A server
+  that can no longer be reached (its machine is off, the network is down) is
+  noticed by the connection itself, in about half a minute, and the brain
+  names it: `the model server at <host> gave no answer`, or `the connection
+  to the model server was lost in the middle of its answer`.
+- Anthropic and Gemini keep waits of their own, which no command changes.
+
+---
+
 ## If a Model Gets Stuck
 
 Local models occasionally fall into reasoning loops — one unbounded streaming
 response that never finishes (the tool-iteration cap doesn't apply; it counts
 tool round-trips, not tokens). Interrupt it with **`/stop`** (console: press
-**Esc** while the turn streams; mobile: the **■** button that replaces Send).
+**Esc** while the turn runs; mobile: the **■** button that replaces Send).
 Generation stops immediately — the connection to the Ollama/LM Studio server
 is severed — and the partial response stays in history marked as interrupted.
 See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
