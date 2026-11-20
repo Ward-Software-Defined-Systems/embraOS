@@ -50,7 +50,7 @@ pub(super) fn reboot_decision(args: &str, pid_one_comm: Option<&str>, scheduled:
             "Stopping embraOS and powering the machine off. Every session is kept; switch the machine on again to come back through the boot menu.{job}"
         )),
         "" => RebootDecision::Explain(format!(
-            "Reboot embraOS? Every session is kept; a turn in flight is stopped, and the console disconnects for about a minute while the machine comes back through the boot menu.{job} Type /reboot now to proceed, or /reboot halt to stop embraOS and power the machine off instead."
+            "Reboot embraOS? Every session is kept; a turn in flight is cut and kept as far as it got, and the console disconnects for about a minute while the machine comes back through the boot menu.{job} Type /reboot now to proceed, or /reboot halt to stop embraOS and power the machine off instead."
         )),
         other => RebootDecision::Explain(format!(
             "Unknown argument '{other}'. /reboot explains, /reboot now reboots, /reboot halt powers the machine off."
