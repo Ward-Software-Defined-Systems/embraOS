@@ -35,7 +35,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `hyper-v/embraos.vhdx` | Hyper-V | the aarch64 VHDX |
 | `parallels/embraos.vmx` with its VMDK | Parallels | Parallels on Apple Silicon |
 | A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early. The laptop: the installed disk boots from its SATA SSD, with its own panel, keyboard and pointer, and a lease on its wired port and over Wi-Fi. The stick: the installed disk boots from its eMMC, with the display on HDMI, a keyboard and a mouse, and a lease over Wi-Fi. The Pi: the installed card boots through its UEFI firmware to the first-boot wizard, with the display on HDMI, a keyboard and a mouse | every other machine; on the Pi, what follows the first-boot wizard (a network card, a session) |
-| A core that is awake runs at the top of its frequency range (the `performance` governor and policy; before, a CPU without hardware P-states stayed at its lowest frequency) | | a machine without hardware P-states; a machine with them |
+| A core that is awake runs at the top of its frequency range (the `performance` governor and policy; before, a CPU without hardware P-states stayed at its lowest frequency) | Bare metal, a CPU with hardware P-states: every core's policy reads `performance`, and its energy preference with it | a machine without hardware P-states |
 | `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it) | a machine that cannot power itself off; aarch64 |
 
 ## The installer (`embraos.iso`)
