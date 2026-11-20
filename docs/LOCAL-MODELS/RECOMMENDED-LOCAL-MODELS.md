@@ -135,7 +135,7 @@ Every turn replays the whole session: the system prompt, the history, the turn's
 | Server | At the limit | What the operator sees |
 |---|---|---|
 | LM Studio with the preset | Refuses: the stream opens and answers inside it with one error frame, then closes. | `Brain error: the model server answered with an error: Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.` The turn ends there. The operator's message and the reply so far are saved, and the saved reply ends with `(response interrupted by a failed model call)`, or is `(turn interrupted by a failed model call)` when nothing had been written. |
-| Ollama, an MLX build | Refuses: HTTP 400 before any stream opens (`input length (N tokens) exceeds the model's maximum context length (M tokens)`; read from Ollama's source, `mlxrunner/pipeline.go`, not yet seen live). | The same error, the same marker. |
+| Ollama, an MLX build | Refuses: HTTP 400 before any stream opens (`input length (N tokens) exceeds the model's maximum context length (M tokens)`; read from Ollama's source, `mlxrunner/pipeline.go`, not yet seen live). | `Brain error: HTTP 400:` with the server's message. The turn ends there, with the same marker. |
 | Ollama, a GGUF build | Trims. First the oldest messages go, keeping the system prompt and the latest message, logged at debug level only (`truncating input messages which exceed context length`, with `OLLAMA_DEBUG=1`). If the system prompt, the tool list and the latest message still do not fit, the prompt itself is cut: the first few tokens and the last ones, about half the window in all, logged at WARN (`truncating input prompt`; `server/prompt.go` and `llm/llama_server.go` in Ollama's source). | Nothing. The model answers from what is left and the turn ends normally. |
 
 **A refused turn stays refused.** The brain logs the refusal at ERROR with the sizes of the tool results that went out with the request. The history only grows, so continue in a new session (`/new <name>`; the knowledge graph and the memories are shared).
@@ -201,14 +201,19 @@ set another.
   on the phone's page. The serial console's line carries no time.
 - When the wait runs out the request is dropped, nothing is sent again, and
   the brain says so: `the model server sent nothing for 120 minutes before its
-  answer began; the request was dropped`. The turn is cut and saved as far as
-  it got; `/continue` sends the call once more (see
+  answer began; the request was dropped`, or, for a silence inside an answer,
+  `… in the middle of its answer; the connection was closed`. The turn is cut
+  and saved as far as it got; `/continue` sends the call once more (see
   [OPERATION.md](../OPERATIONS/OPERATION.md), "When a turn is cut").
 - The model wait is for a server that can be reached and is silent. A server
-  that can no longer be reached (its machine is off, the network is down) is
-  noticed by the connection itself, in about half a minute, and the brain
-  names it: `the model server at <host> gave no answer`, or `the connection
-  to the model server was lost in the middle of its answer`.
+  that cannot be connected to is tried once more after a second, and so is one
+  that answers with a 5xx error; then the brain says `could not connect to the
+  model server at <host>`, with the cause. A request that got through is never
+  sent again, since the server may be working on it: when the server can no
+  longer be reached (its machine is off, the network is down), the connection
+  itself notices in about half a minute, and the brain names it: `the model
+  server at <host> gave no answer`, or `the connection to the model server was
+  lost in the middle of its answer`.
 - Anthropic and Gemini keep waits of their own, which no command changes.
 
 ---

@@ -16,8 +16,11 @@ so what's here is exactly what the gate accepts.
    on serial as on the web.
 3. Submit: Enter. A module typed line by line ends with a lone `.` on its
    own line instead.
-4. It is validated synchronously, then compiled to a `wasm32` sandbox in
-   the background. Poll with `/guardian status <name>`.
+4. It is validated synchronously and, once a soul is sealed, checked against
+   it: the replicant check, a call to the model that the console waits for
+   (Esc or `/stop` ends the wait, and nothing is compiled). Then it is
+   compiled to a `wasm32` sandbox in the background. Poll with
+   `/guardian status <name>`.
 5. Once `ready`, just ask the intelligence to use the tool, in plain
    language, by its name (e.g. "use the sum guardian tool to add 2 and
    40"). It invokes the dynamic tool itself through internal meta-tools

@@ -18,7 +18,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 
 ## Operations — `OPERATIONS/`
 
-- [OPERATIONS/OPERATION.md](OPERATIONS/OPERATION.md) — Day-to-day use: the session model, keyboard shortcuts, current limitations.
+- [OPERATIONS/OPERATION.md](OPERATIONS/OPERATION.md) — Day-to-day use: the session model (a turn that is cut, `/continue`), keyboard shortcuts, themes and accessibility, current limitations.
 - [OPERATIONS/COMMAND-REFERENCE.md](OPERATIONS/COMMAND-REFERENCE.md) — Every slash command.
 - [OPERATIONS/UPDATES-AND-BACKUPS.md](OPERATIONS/UPDATES-AND-BACKUPS.md) — The two OS slots and GRUB's A/B state, the in-OS backups (`/backup`, the boot menu), restoring, and the signed OS update.
 - [OPERATIONS/TOOL-REFERENCE.md](OPERATIONS/TOOL-REFERENCE.md) — All 120 built-in tools by category, plus workspace/GitHub/SSH safety notes.

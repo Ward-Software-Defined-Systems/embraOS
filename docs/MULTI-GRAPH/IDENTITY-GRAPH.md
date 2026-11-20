@@ -125,6 +125,12 @@ time via the deterministic transformer.
 A disconnect mid-dialogue writes nothing and re-offers on the next
 learning loop.
 
+A console that leaves Learning Mode (a tab closed, a phone that locks) seals
+nothing. The phases that had completed are stored, and the next console takes
+up after them; the phase that was in progress starts again, since its
+conversation is kept in memory alone. A model call that fails ends no phase:
+the phase stays open and the operator's next message is one more turn of it.
+
 Two consoles can be in Learning Mode at once: the web console keeps a
 console of its own attached beside a chat client's, and each runs its own
 conversation. The first to complete a phase stores its document; a console

@@ -269,7 +269,7 @@ Half of the linked pairs (687 of 1,347) connect two nodes of one session. Those 
 
 ## Auto-enrichment (read path on every user turn)
 
-This is where the KG actually reaches the model. `build_turn_context` (`crates/embra-brain/src/knowledge/enrichment.rs`) is called from `grpc_service/turn.rs` on every user message turn (except resume-briefing turns, which substitute `build_resumption_context`).
+This is where the KG actually reaches the model. `build_turn_context` (`crates/embra-brain/src/knowledge/enrichment.rs`) is called from `grpc_service/turn.rs` on every turn that carries a message of the operator's. The turns that carry none take no retrieval: a resume briefing (which substitutes `build_resumption_context`), a reminder's or a cron job's turn, `/continue`, the reason asked for when a session is deleted, and a message that is an image or a file alone.
 
 ### Gates
 
