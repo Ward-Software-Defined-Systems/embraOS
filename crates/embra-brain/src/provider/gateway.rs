@@ -79,7 +79,7 @@ pub(crate) fn base_for(
 }
 
 /// `host[:port]` of a base URL, for the probe's endpoint label:
-/// `api.anthropic.com` direct, `axiom-app.ops.wsds:4000` through the
+/// `api.anthropic.com` direct, `gateway.example.com:4000` through the
 /// gateway. A base that does not parse is returned as it is.
 pub(crate) fn host_label(base: &str) -> String {
     match reqwest::Url::parse(base) {
@@ -449,10 +449,10 @@ mod tests {
     #[test]
     fn a_url_is_normalized_saved_and_turned_on() {
         let mut c = cfg();
-        let msg = apply(&mut c, &parse_action(" axiom-app.ops.wsds ").unwrap(), Some("0.1.0")).unwrap();
-        assert_eq!(c.provider_gateway, Some(gw("http://axiom-app.ops.wsds:4000", true)));
+        let msg = apply(&mut c, &parse_action(" gateway.example.com ").unwrap(), Some("0.1.0")).unwrap();
+        assert_eq!(c.provider_gateway, Some(gw("http://gateway.example.com:4000", true)));
         assert!(msg.contains("/anthropic") && msg.contains("/lmstudio"), "{msg}");
-        assert!(msg.contains("http://axiom-app.ops.wsds:4000 (WSDS Local AI Gateway 0.1.0)"), "{msg}");
+        assert!(msg.contains("http://gateway.example.com:4000 (WSDS Local AI Gateway 0.1.0)"), "{msg}");
         assert!(msg.contains("Plain HTTP"), "{msg}");
         let msg = apply(&mut c, &parse_action("https://gw.example").unwrap(), None).unwrap();
         assert_eq!(c.provider_gateway, Some(gw("https://gw.example", true)));
@@ -689,8 +689,8 @@ mod tests {
     #[test]
     fn a_bare_host_gets_http_and_the_unified_port() {
         assert_eq!(
-            normalize_url("axiom-app.ops.wsds").unwrap(),
-            "http://axiom-app.ops.wsds:4000"
+            normalize_url("gateway.example.com").unwrap(),
+            "http://gateway.example.com:4000"
         );
         assert_eq!(normalize_url("http://10.0.2.2").unwrap(), "http://10.0.2.2:4000");
         assert_eq!(normalize_url(" [fd00::5] ").unwrap(), "http://[fd00::5]:4000");
@@ -699,8 +699,8 @@ mod tests {
     #[test]
     fn a_scheme_a_port_and_a_path_are_kept_and_a_trailing_slash_is_dropped() {
         assert_eq!(
-            normalize_url("http://axiom-app.ops.wsds:4000/").unwrap(),
-            "http://axiom-app.ops.wsds:4000"
+            normalize_url("http://gateway.example.com:4000/").unwrap(),
+            "http://gateway.example.com:4000"
         );
         assert_eq!(
             normalize_url("http://gw.example:8080/ai/").unwrap(),
@@ -780,8 +780,8 @@ mod tests {
     fn the_host_label_is_the_authority_of_the_base() {
         assert_eq!(host_label("https://api.anthropic.com"), "api.anthropic.com");
         assert_eq!(
-            host_label("http://axiom-app.ops.wsds:4000/anthropic"),
-            "axiom-app.ops.wsds:4000"
+            host_label("http://gateway.example.com:4000/anthropic"),
+            "gateway.example.com:4000"
         );
         assert_eq!(host_label("http://[fd00::5]:4000/gemini"), "[fd00::5]:4000");
         assert_eq!(host_label("not a url"), "not a url");

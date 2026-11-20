@@ -254,15 +254,15 @@ mod tests {
     #[test]
     fn the_gateway_pill_is_up_while_on_off_while_stored_and_absent_otherwise() {
         let on = http_200(
-            r#"{"ok":true,"data":{"services":{"local-ai-gateway":"on","local-ai-gateway.detail":"every provider request goes through http://axiom-app.ops.wsds:4000"}}}"#,
+            r#"{"ok":true,"data":{"services":{"local-ai-gateway":"on","local-ai-gateway.detail":"every provider request goes through http://gateway.example.com:4000"}}}"#,
         );
         let pill = parse_gateway_pill(&on).expect("pill");
         assert_eq!(pill["name"], "local-ai-gateway");
         assert_eq!(pill["state"], "up");
-        assert!(pill["detail"].as_str().unwrap().contains("axiom-app"));
+        assert!(pill["detail"].as_str().unwrap().contains("gateway.example.com"));
 
         let off = http_200(
-            r#"{"ok":true,"data":{"services":{"local-ai-gateway":"off","local-ai-gateway.detail":"off; http://axiom-app.ops.wsds:4000 kept"}}}"#,
+            r#"{"ok":true,"data":{"services":{"local-ai-gateway":"off","local-ai-gateway.detail":"off; http://gateway.example.com:4000 kept"}}}"#,
         );
         assert_eq!(parse_gateway_pill(&off).unwrap()["state"], "off");
 

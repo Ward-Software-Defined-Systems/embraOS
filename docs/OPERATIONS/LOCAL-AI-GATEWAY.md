@@ -22,7 +22,7 @@ On the gateway host, in `config.toml` (`local-ai-gateway config init` writes one
 - Each backend embraOS uses is `enabled`, and its `upstream` is the server that should answer: `[backends.anthropic]` and `[backends.gemini]` default to the providers' hosts; `[backends.ollama]` and `[backends.lmstudio]` default to `http://127.0.0.1:11434` and `http://127.0.0.1:1234` **on the gateway host**, not to the endpoint stored in embraOS.
 - `[dlp.cloud] request_action` is `block` by default. The Security tab's test box shows what a text would trigger.
 
-From an embraOS instance in QEMU, the host machine is `10.0.2.2`, and a name such as `axiom-app.ops.wsds` resolves through QEMU's forwarder at `10.0.2.3` when the host resolves it.
+From an embraOS instance in QEMU, the host machine is `10.0.2.2`, and a name such as `gateway.example.com` resolves through QEMU's forwarder at `10.0.2.3` when the host resolves it.
 
 ## `/local-ai-gateway`
 
@@ -33,7 +33,7 @@ From an embraOS instance in QEMU, the host machine is `10.0.2.2`, and a name suc
 | `/local-ai-gateway on`, `/local-ai-gateway off` | Turn the stored gateway on, after the same identification, or off; the URL is kept |
 | `/local-ai-gateway reset` | Forget the gateway |
 
-A change is saved to `SystemConfig.provider_gateway` (serde-additive; an instance from before the field reads as not configured) and takes effect on the next message: the provider is rebuilt from the configuration at every turn start. The health probe runs through the new route at once; `/status` and the web console's provider pill show its result, and the probe's `endpoint` names the host reached: `api.anthropic.com` direct, `axiom-app.ops.wsds:4000` through the gateway. `/provider` adds `Gateway: on (<url>)` or `Gateway: off (<url> kept)` to its status line. The web console shows a `local-ai-gateway` pill while a gateway is stored: lit while every provider request goes through it, dimmed and reading `off` while it is off, gone after `reset`; its tooltip carries the URL. `/status` carries a `provider_gateway` block with the URL and the switch. The first-boot wizard asks for the gateway right after the name step, with the same normalization and identification (a refused URL is asked again, and `direct` falls back to reaching the providers directly); that boot's key check and a preset's model list go through it.
+A change is saved to `SystemConfig.provider_gateway` (serde-additive; an instance from before the field reads as not configured) and takes effect on the next message: the provider is rebuilt from the configuration at every turn start. The health probe runs through the new route at once; `/status` and the web console's provider pill show its result, and the probe's `endpoint` names the host reached: `api.anthropic.com` direct, `gateway.example.com:4000` through the gateway. `/provider` adds `Gateway: on (<url>)` or `Gateway: off (<url> kept)` to its status line. The web console shows a `local-ai-gateway` pill while a gateway is stored: lit while every provider request goes through it, dimmed and reading `off` while it is off, gone after `reset`; its tooltip carries the URL. `/status` carries a `provider_gateway` block with the URL and the switch. The first-boot wizard asks for the gateway right after the name step, with the same normalization and identification (a refused URL is asked again, and `direct` falls back to reaching the providers directly); that boot's key check and a preset's model list go through it.
 
 ## What goes through, and what stays direct
 
