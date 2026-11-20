@@ -170,7 +170,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | The x86_64 image | Ubuntu 24.04 and 26.04, the reference build; an Intel Mac, with Buildroot in Docker | on an Intel Mac, a build since the wireless drivers joined the image |
 | The aarch64 image | Apple Silicon, with Buildroot in Docker: both storage engines | |
 | The launchers under the bash 3.2 that macOS ships | An Intel Mac; Apple Silicon | |
-| A build leaves none of its host's directories in the programs or in the web console's bundle, and the records of the build are out of the root filesystem | Ubuntu 24.04: the scripts' Rust step and its read-back, and the result booted under QEMU with the removals and the root filesystem's check run on it | an image build (Buildroot's pass with the removals and the check); a build on a Mac (the host pass under bash 3.2 with the BSD tools) |
+| A build leaves none of its host's directories in the programs, in the web console's bundle or in the root filesystem | Ubuntu 24.04: the scripts' Rust step and its read-back, and the result booted under QEMU with the records of the build removed | an image build (Buildroot's pass: the removals, sqlite, libpsl and WebKit built without Buildroot's directory, the root filesystem's check); a build on a Mac (the host pass under bash 3.2 with the BSD tools) |
 | `seed-state-mac.sh --update-key` | | on a Mac |
 
 Which models have been vetted with each provider is in [LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md](LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md).

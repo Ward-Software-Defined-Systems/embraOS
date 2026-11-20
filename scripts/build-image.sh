@@ -347,6 +347,10 @@ fi
 # host install instead re-linked a cached OpenSSL and raced on a symlink).
 # assert_target_is_clean (image-common.sh) checks the result against the marker
 # touched here.
+# Before the directory goes it is read once more: a package whose file there
+# names a directory of this host was built before the compiler was handed a
+# stand-in, and builds again (clean_packages_that_name_the_builder).
+clean_packages_that_name_the_builder "$BUILDROOT_DIR"
 (cd "$BUILDROOT_DIR" && \
     for pkg in embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb embra-update \
                embra-rust-toolchain embra-embedding-model git openssl libcurl openssh; do

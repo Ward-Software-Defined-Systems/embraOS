@@ -1,0 +1,29 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] the built-in table names no file
+
+psl-make-dafsa writes the path of the list it read into the table it
+generates, and the library keeps it as _psl_filename: psl_builtin_filename()
+returns it, and psl_builtin_outdated() and psl_latest() stat it at run time
+to see whether a newer list lies there. A distribution passes the path of its
+installed list. A cross build has no such path: the list is the one in the
+source tree, so the table carries the full path of the build directory, which
+names the builder and exists on no machine the library runs on.
+
+The name is written empty, which is the value the library has without
+built-in data and the one value that makes it stat nothing: a relative or an
+invented path would be a place where a file could be put for it to load.
+
+Upstream: not submitted (the name is by design there; embraOS carries this).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/src/psl-make-dafsa
++++ b/src/psl-make-dafsa
+@@ -518,7 +518,7 @@
+   text += b'static int _psl_nexceptions = %d;\n' % psl_nexceptions
+   text += b'static int _psl_nwildcards = %d;\n' % psl_nwildcards
+   text += b'static const char _psl_sha1_checksum[] = "%s";\n' % bytes(sha1_file(psl_input_file), **codecs)
+-  text += b'static const char _psl_filename[] = "%s";\n' % bytes(psl_input_file, **codecs)
++  text += b'static const char _psl_filename[] = "";\n'
+   return text
+
+ def words_to_whatever(words, converter, utf_mode, codecs):

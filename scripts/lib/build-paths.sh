@@ -13,8 +13,10 @@
 # Buildroot runs.
 #
 # The root filesystem carries records of the build as well, which nothing
-# reads at run time: post_build.sh removes them (remove_build_records), and
-# the image scripts read the whole target directory back.
+# reads at run time: post_build.sh removes them (remove_build_records). Three
+# packages Buildroot compiles would name its own directory, and are handed a
+# stand-in or patched (BUILD_PATHS_BY_PACKAGE). The image scripts read the
+# whole target directory back.
 #
 # Sourced by scripts/lib/image-common.sh and by
 # buildroot/board/embraos/post_build.sh; it defines variables and functions
@@ -223,24 +225,47 @@ remove_build_records() {
     rm -f "$tgt/usr/lib/xsltConf.sh" "$tgt"/usr/lib/libstdc++.so.*-gdb.py
 }
 
-# What Buildroot itself compiled its own directory into, as shell patterns
-# under the target directory: sqlite's shell and WebKit name their sources
-# (`__FILE__`), libpsl the list its table was made from. Where Buildroot runs
-# under the builder's home directory these three say so; in the container of
-# a Mac build they say /work. The check of the root filesystem
-# (assert_rootfs_names_no_builder_dir, image-common.sh) passes them over and
-# names them in its line; every other file is refused.
-BUILD_PATHS_COMPILED_IN=("usr/bin/sqlite3" "usr/lib/libpsl.so.*" "usr/lib/libWPEWebKit-*.so.*")
+# What Buildroot itself would compile its own directory into, as a shell
+# pattern under the target directory and the package behind it: sqlite's
+# shell and WebKit name their sources (`__FILE__`), libpsl the list its
+# table was made from. buildroot/external.mk hands the compiler a stand-in
+# for the first two and buildroot/patches/libpsl empties the third's name. A
+# package built before that still says where it was built, and Buildroot
+# rebuilds nothing whose options changed: packages_naming_builder_dirs finds
+# such a package in the target directory the last build left, and the image
+# scripts clean it before they repopulate that directory
+# (clean_packages_that_name_the_builder, image-common.sh).
+BUILD_PATHS_BY_PACKAGE=("usr/bin/sqlite3:sqlite" "usr/lib/libpsl.so.*:libpsl" "usr/lib/libWPEWebKit-*.so.*:wpewebkit")
 
-# compiled_in_by_buildroot <path under the target directory>: status 0 for a
-# file of BUILD_PATHS_COMPILED_IN.
-compiled_in_by_buildroot() {
-    local rel="$1" pattern
-    for pattern in "${BUILD_PATHS_COMPILED_IN[@]}"; do
+# package_that_compiled <path under the target directory>: the package of
+# BUILD_PATHS_BY_PACKAGE the file belongs to; status 1 for any other file.
+package_that_compiled() {
+    local rel="$1" entry
+    for entry in "${BUILD_PATHS_BY_PACKAGE[@]}"; do
         # shellcheck disable=SC2254  # a pattern, on purpose
-        case "$rel" in $pattern) return 0 ;; esac
+        case "$rel" in ${entry%%:*}) printf '%s\n' "${entry##*:}"; return 0 ;; esac
     done
     return 1
+}
+
+# packages_naming_builder_dirs <checkout> <target directory>: the packages of
+# BUILD_PATHS_BY_PACKAGE whose file in that directory names one of
+# builder_needles, one a line. Nothing without the directory (a first build)
+# and nothing where there is nothing to look for (a container).
+packages_naming_builder_dirs() {
+    local root="$1" tgt="$2" entry pattern f found
+    [ -d "$tgt" ] || return 0
+    for entry in "${BUILD_PATHS_BY_PACKAGE[@]}"; do
+        pattern="${entry%%:*}"
+        # shellcheck disable=SC2231  # the pattern expands, on purpose
+        for f in "$tgt"/$pattern; do
+            [ -f "$f" ] || continue
+            found="$(files_naming_builder_dirs "$root" "$f")" || return 2
+            [ -n "$found" ] || continue
+            printf '%s\n' "${entry##*:}"
+            break
+        done
+    done
 }
 
 # Run by itself: one function and its arguments.
@@ -248,7 +273,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ $# -ge 1 ]; then
     set -euo pipefail
     fn="$1"; shift
     case "$fn" in
-        builder_dirs|builder_needles|files_naming_builder_dirs|builder_strings|assert_programs_name_no_builder_dir|remove_build_records|compiled_in_by_buildroot)
+        builder_dirs|builder_needles|files_naming_builder_dirs|builder_strings|assert_programs_name_no_builder_dir|remove_build_records|package_that_compiled|packages_naming_builder_dirs)
             "$fn" "$@" ;;
         export_builder_path_remaps)
             "$fn" "$@"; printf '%s\n' "$CARGO_ENCODED_RUSTFLAGS" | tr '\037' '\n' ;;

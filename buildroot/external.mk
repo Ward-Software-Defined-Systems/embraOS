@@ -6,3 +6,17 @@
 EMBRAOS_RUST_TARGET = $(if $(BR2_aarch64),aarch64-unknown-linux-musl,x86_64-unknown-linux-musl)
 
 include $(sort $(wildcard $(BR2_EXTERNAL_EMBRAOS_PATH)/package/*/*.mk))
+
+# The build directory stays out of what three packages compile it into
+# (scripts/lib/build-paths.sh has the rest of this). sqlite's shell and
+# WebKit name their own sources through __FILE__, and on a Linux host
+# Buildroot's directory lies under the builder's home: the compiler is handed
+# a stand-in for it. Buildroot hands a cmake package its flags through the
+# toolchain file, which stands back when the command line names them, so
+# WebKit's two lines carry the target's own flags in front. libpsl's table
+# names the list it was made from: buildroot/patches/libpsl.
+EMBRAOS_BUILD_DIR_MAP = -ffile-prefix-map=$(BASE_DIR)=/buildroot
+SQLITE_CFLAGS += $(EMBRAOS_BUILD_DIR_MAP)
+WPEWEBKIT_CONF_OPTS += \
+	-DCMAKE_C_FLAGS="$(TARGET_CFLAGS) $(EMBRAOS_BUILD_DIR_MAP)" \
+	-DCMAKE_CXX_FLAGS="$(TARGET_CXXFLAGS) $(EMBRAOS_BUILD_DIR_MAP)"

@@ -116,7 +116,10 @@ mod tests {
     /// on a program that names the builder's home and passes one that names
     /// a neighbour's; a root filesystem loses the records of its build and
     /// nothing else. Both image scripts hand the stand-ins over before the
-    /// first cargo runs and read the programs back after the last.
+    /// first cargo runs and read the programs back after the last. The two
+    /// packages Buildroot compiles that name their sources are handed a
+    /// stand-in for its directory, a third is patched, and one built before
+    /// that is found and cleaned.
     #[cfg(unix)]
     #[test]
     fn a_build_hands_rustc_a_stand_in_for_each_of_its_hosts_directories_and_reads_the_result_back() {
@@ -214,6 +217,15 @@ mod tests {
         }
         assert!(!rootfs.join("usr/lib/icu").exists());
         assert_eq!(run(&[], &["remove_build_records", "rootfs"]).0, Some(0), "a second run over a clean tree succeeds");
+
+        // A package Buildroot compiled before the compiler was handed a
+        // stand-in for its directory is found in the target directory the
+        // last build left, once however many names its file has; one that
+        // carries the stand-in is not.
+        std::fs::write(rootfs.join("usr/bin/sqlite3"), "\u{7f}ELF\0/buildroot/build/sqlite-3.51.3/shell.c\0").unwrap();
+        std::fs::write(rootfs.join("usr/lib/libWPEWebKit-2.0.so.1.6.10"), format!("\u{7f}ELF\0{c}/buildroot-src/output/build/wpewebkit-2.50.5/Source/x.cpp\0")).unwrap();
+        std::os::unix::fs::symlink("libWPEWebKit-2.0.so.1.6.10", rootfs.join("usr/lib/libWPEWebKit-2.0.so.1")).unwrap();
+        assert_eq!(run(&[("HOME", &h)], &["packages_naming_builder_dirs", &c, "rootfs"]), (Some(0), "wpewebkit\n".to_string(), String::new()));
         let _ = std::fs::remove_dir_all(&root);
 
         // Both image scripts hand the stand-ins over before the first cargo
@@ -225,7 +237,18 @@ mod tests {
             let (remaps, trunk, cargo, read) = (at("\n    export_builder_path_remaps "), at("trunk build --release --locked)"), at("\n    cargo build --release --locked --target "), at("\n    assert_programs_name_no_builder_dir "));
             assert!(remaps < trunk && trunk < cargo && cargo < read, "{name}: the stand-ins, trunk, the cross-build, the read-back, in that order");
             assert_eq!(text.matches("\n    cargo build ").count(), 1, "{name}: one cross-build, the one that is read back");
+            // The target directory of the last build is read for such a
+            // package before it is removed.
+            assert!(at("\nclean_packages_that_name_the_builder \"$BUILDROOT_DIR\"\n") < at("\n    rm -rf output/target && \\\n"), "{name}: the last build's target directory is read before it goes");
         }
+        // The compiler's stand-in for Buildroot's own directory, for the two
+        // packages that name their sources, and libpsl's table without a name.
+        let external = std::fs::read_to_string(repo.join("buildroot/external.mk")).unwrap();
+        for line in ["\nEMBRAOS_BUILD_DIR_MAP = -ffile-prefix-map=$(BASE_DIR)=/buildroot\n", "\nSQLITE_CFLAGS += $(EMBRAOS_BUILD_DIR_MAP)\n", "-DCMAKE_C_FLAGS=\"$(TARGET_CFLAGS) $(EMBRAOS_BUILD_DIR_MAP)\"", "-DCMAKE_CXX_FLAGS=\"$(TARGET_CXXFLAGS) $(EMBRAOS_BUILD_DIR_MAP)\""] {
+            assert!(external.contains(line), "external.mk: {line}");
+        }
+        let patch = std::fs::read_to_string(repo.join("buildroot/patches/libpsl/0001-the-built-in-table-names-no-file.patch")).unwrap();
+        assert!(patch.contains("\n+  text += b'static const char _psl_filename[] = \"\";\\n'\n"), "libpsl's table names no file");
         let post_build = std::fs::read_to_string(repo.join("buildroot/board/embraos/post_build.sh")).unwrap();
         assert!(post_build.contains("\nremove_build_records \"${TARGET_DIR}\"\n"));
     }

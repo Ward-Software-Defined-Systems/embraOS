@@ -690,16 +690,37 @@ assert_rootfs_invariants() {
     echo "rootfs.squashfs: $sq_size bytes of a $slot_bytes-byte slot, xz"
 }
 
+# clean_packages_that_name_the_builder <buildroot dir>: a package whose file
+# in the target directory of the last build names a directory of this host
+# (packages_naming_builder_dirs, scripts/lib/build-paths.sh) was built before
+# the compiler was handed a stand-in for Buildroot's directory, and Buildroot
+# rebuilds nothing whose options changed: it is cleaned and builds again.
+# Called by both image scripts before they remove the target directory, which
+# is what it reads. WebKit is one of the three, and its build is the longest
+# of the image: this happens once on a tree, and never in a container, whose
+# directories name nobody.
+clean_packages_that_name_the_builder() {
+    local br="$1" root pkgs pkg
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    pkgs="$(packages_naming_builder_dirs "$root" "$br/output/target")" || {
+        echo "ERROR: the target directory of the last build could not be read through ($br/output/target)" >&2
+        exit 1
+    }
+    for pkg in $pkgs; do
+        echo "build paths: $pkg was built with this host's directory in it; the package builds again from its tarball"
+        clean_buildroot_package "$br" "$pkg"
+    done
+}
+
 # assert_rootfs_names_no_builder_dir: no file of the root filesystem names a
-# directory of this build host (builder_needles, scripts/lib/build-paths.sh),
-# but for the files Buildroot compiled its own directory into
-# (BUILD_PATHS_COMPILED_IN), which the line names when they do. Refused, each
-# with the file and a text of it: a program of this tree built before rustc
-# was handed the stand-ins (a --buildroot-only run over an older build), a
-# record of the build that post_build.sh did not remove, and a package that
-# newly keeps its build directory.
+# directory of this build host (builder_needles, scripts/lib/build-paths.sh).
+# Refused, each with the file and a text of it: a program of this tree built
+# before rustc was handed the stand-ins (a --buildroot-only run over an older
+# build), a record of the build that post_build.sh did not remove, a package
+# Buildroot compiled before it was handed its own stand-in, and a package
+# that newly keeps its build directory.
 assert_rootfs_names_no_builder_dir() {
-    local root tgt="$BUILDROOT_DIR/output/target" found f rel left="" refused=""
+    local root tgt="$BUILDROOT_DIR/output/target" found f rel pkg
     root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     if [ -z "$(builder_needles "$root")" ]; then
         echo "build paths: nothing to look for in the root filesystem (every directory of this build is directly under /)"
@@ -707,36 +728,23 @@ assert_rootfs_names_no_builder_dir() {
     fi
     found="$(files_naming_builder_dirs "$root" "$tgt")" \
         || reject_image "the root filesystem could not be read through for the directories of this build host"
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        rel="${f#"$tgt"/}"
-        if compiled_in_by_buildroot "$rel"; then
-            left="$left /$rel"
-        else
-            refused="${refused}${rel}
-"
-        fi
-    done <<LIST
-$found
-LIST
-    if [ -n "$refused" ]; then
+    if [ -n "$found" ]; then
         echo "ERROR: a directory of this build host is named in the root filesystem:" >&2
-        while IFS= read -r rel; do
-            [ -n "$rel" ] || continue
-            printf '       /%s\n         %s\n' "$rel" "$(builder_strings "$root" "$tgt/$rel" | head -n 1)" >&2
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            rel="${f#"$tgt"/}"
+            printf '       /%s\n         %s\n' "$rel" "$(builder_strings "$root" "$f" | head -n 1)" >&2
+            pkg="$(package_that_compiled "$rel" || true)"
+            [ -z "$pkg" ] || echo "         ($pkg was built before the compiler was handed a stand-in: build again, and it is cleaned first)" >&2
         done <<LIST
-$refused
+$found
 LIST
         echo "       A program of this tree: it was built before rustc was handed the stand-ins; run a full" >&2
         echo "       build (--storage-engine), not --buildroot-only. A record of the build that nothing reads" >&2
         echo "       at run time: remove_build_records (scripts/lib/build-paths.sh) removes it." >&2
         reject_image
     fi
-    if [ -n "$left" ]; then
-        echo "build paths: none of this host's directories in the root filesystem but in what Buildroot compiled its own directory into:$left"
-    else
-        echo "build paths: none of this host's directories in the root filesystem"
-    fi
+    echo "build paths: none of this host's directories in the root filesystem"
 }
 
 # assert_imported_cas: the root filesystem trusts the certificate authorities
