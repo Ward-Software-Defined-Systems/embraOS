@@ -20,6 +20,22 @@ CONFIG_FAT_FS=y
 CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
+# The frequency governor a policy starts under: `performance`, the highest
+# setting every driver has. The x86_64 base configuration says `userspace`,
+# which holds a core at the frequency it was found at until something writes
+# another, and nothing in this image does: on a CPU without hardware
+# P-states (intel_pstate then runs passive and starts a policy at its
+# minimum) every core stayed at its lowest frequency. Under `performance` a
+# core that is awake runs at the top of its range: the governor of that name
+# for a driver that is handed a frequency (intel_pstate passive,
+# acpi-cpufreq, the arm64 drivers), and the policy of that name for one that
+# governs itself (intel_pstate with hardware P-states, amd-pstate), whose own
+# first choice is `powersave`. An idle core still sleeps, and the kernel's
+# thermal limits still lower the ceiling the governor runs at. arm64's base
+# configuration names no default, which the kernel reads as schedutil.
+CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
+# CONFIG_CPU_FREQ_DEFAULT_GOV_USERSPACE is not set
+# CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set
 # Phase 2: the storage and network devices other hypervisors present (NVMe,
 # virtio-scsi, VMware's vmxnet3 and its two LSI Logic controllers, Hyper-V's
 # synthetic storage, network, video and keyboard; VMware's pvscsi is x86-only
