@@ -127,7 +127,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| The replicant check stopped while `/guardian-define` waits for it: nothing compiled, the model server's connection closed | QEMU, with a stand-in model server | `/guardian approve` stopped on a tool the intelligence proposed |
+| The replicant check stopped while `/guardian-define` waits for it: nothing compiled, the model server's connection closed | QEMU, with a stand-in model server | `/guardian approve` stopped on a tool the intelligence proposed; `/guardian rebuild <name>` stopped while it waits |
 | A tool of the operator's and one the intelligence proposes: validation, the replicant check and its refusal, the build, the sandbox | QEMU; QEMU on Apple Silicon | a live run of the rebuild gate, of a database error at the check and of a stored hash that no longer matches (unit tests cover the three) |
 | The shipped tools: `web_search`, `http_request`, `websocket` | QEMU; bare metal (`websocket`) | |
 | The browser service through `websocket` | QEMU (every call of a session); bare metal (one exchange, driven by the intelligence) | an intelligence that keeps one connection over several turns |
@@ -138,6 +138,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | What | Validated on | TBD |
 |---|---|---|
 | The eight themes on the desktop page and the phone's page: the contrast of every text against what is painted behind it, measured on the page in each theme (the main view, the Tools tab and the picker; the chat, the command list and the picker), and the edge of every field | QEMU, in Chrome 156 | Safari on an iPhone; Firefox |
+| What no rule of the stylesheet sets: the words the activity strip draws while its feed is away, a line the web console writes into the terminal itself, and the ring of every card of the picker on a page of another theme, each measured on the page in every theme | QEMU, in Chrome 156 | |
 | The themes on the display console: each one drawn, a change followed within a few seconds, the stored theme at the first paint after a boot | QEMU; bare metal (HDMI) | |
 | The picker (a press, a status poll while it is open, Escape, the keyboard's ring, Apply from a browser that observes) and `/theme` (the list, a name, `reset`, a word that is no theme, and a name at the first-boot wizard's first question) | QEMU, in Chrome 156; bare metal (the picker on the display console, with its mouse) | the picker on a phone |
 
@@ -148,7 +149,8 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | A turn cut by a failed model call (a request refused, an error inside the answer, the model wait run out, the network card's link taken away before an answer and inside one): the error named, the turn saved with its marker, `/continue`, the next turn told what was cut | QEMU, with a stand-in model server on the LM Studio preset | a cut turn and `/continue` with a real key on Anthropic and on Gemini (the tests run both against a stand-in server) |
 | A stop before the answer begins and inside a silent answer: the request's connection closed with the stop | QEMU, with a stand-in model server | Ollama and LM Studio: the server's own log showing that it left the request |
 | The model wait: `/model-wait`, a call ended when the wait ran out | QEMU, with a wait of one minute | a local model whose answer begins after more than 15 minutes |
-| A turn that was running at a restart: in its session after the boot, the next turn told | QEMU: `/reboot now`; a power cut one second into a turn's held model call, and two seconds after a turn's end, on the RocksDB engine | a power cut on the fjall engine |
+| A turn that was running at a restart: in its session after the boot, the next turn told | QEMU: `/reboot now`; a power cut one second into a turn's held model call, and two seconds after a turn's end, on the RocksDB engine and on the fjall engine | |
+| The seal and a power cut: the soul is on the disk before its hash is stored, and the next boot verifies it | QEMU: a power cut a quarter of a second after the seal, on the RocksDB engine and on the fjall engine | |
 | Learning Mode through a refused model call: the phase stays open | QEMU, with a stand-in model server | |
 | The wait for the model said in minutes: the console's line and the phone's top bar, after a minute of a held call | QEMU, in Chrome 156 | |
 | A console that attaches while a turn runs: told what runs, shown as running, its stop ends the turn, the reply arrives at the turn's end | QEMU, with two consoles on a stand-in model server | a phone that loses and regains its connection during a turn |

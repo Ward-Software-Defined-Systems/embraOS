@@ -71,7 +71,7 @@ The verdict shape:
 
 Two rules hold on both paths:
 
-- **Fail closed.** If the verdict call errors or returns an unparseable verdict, **nothing compiles** — the system never defaults to allow. The same holds for a check the operator stops: `/guardian-define` and `/guardian approve` wait for the verdict as a turn waits for a reply (the console shows `replicant check`), Esc or `/stop` ends the wait, and nothing is compiled or approved.
+- **Fail closed.** If the verdict call errors or returns an unparseable verdict, **nothing compiles** — the system never defaults to allow. The same holds for a check the operator stops: `/guardian-define`, `/guardian approve` and `/guardian rebuild <name>` wait for the verdict as a turn waits for a reply (the console shows `replicant check`), Esc or `/stop` ends the wait, and nothing is compiled, approved or rebuilt.
 - **Skipped only before the soul is sealed.** During first-boot setup there is no soul document and no stored seal hash, so an operator define and a rebuild proceed; an intelligence proposal, by contrast, fails closed in that state (the intelligence never authors ungated). A soul document that is missing beside a stored seal hash is not that state: it is the one trustd halts a boot on, and every path refuses it.
 - **A database error is an error, not an unsealed soul.** When the soul cannot be read, every path refuses — `guardian_propose`, `/guardian-define` and `/guardian rebuild` alike — instead of reading the failure as "nothing to check against".
 
@@ -89,7 +89,7 @@ The verdict is persisted with the tool (`ReplicantRecord`: `verdict`, `touched_l
 | **escalate** | compiles, flagged for review; the new verdict replaces the stored one |
 | **refuse** | blocked; the tool stays unbuilt and unloaded, with the reason in `/guardian status <name>` |
 
-Both rules above hold: a check that cannot run fails closed, and before a soul is sealed there is nothing to check against. A gate that stops a rebuild writes its reason to the record and leaves the recorded status alone. Rebuild never builds a `proposed` tool — that is what `/guardian approve` is for, and `--all` must not grant approval in passing.
+Both rules above hold: a check that cannot run fails closed, and before a soul is sealed there is nothing to check against. A stop ends the wait of a one-tool rebuild and leaves the record as it was; `--all` checks its tools in the background, where no console waits. A gate that stops a rebuild writes its reason to the record and leaves the recorded status alone. Rebuild never builds a `proposed` tool — that is what `/guardian approve` is for, and `--all` must not grant approval in passing.
 
 ---
 
