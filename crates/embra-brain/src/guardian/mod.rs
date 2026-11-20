@@ -390,7 +390,7 @@ pub async fn handle_guardian_slash(
             None => format!("guardian: no such tool '{}'", rest.trim()),
         },
         "delete" => delete(db, rest.trim()).await,
-        "rebuild" => rebuild(db, rest).await,
+        "rebuild" => rebuild(db, rest, stopped).await,
         "key" => key_cmd(rest),
         "secret" => secret_cmd(db, rest).await,
         "egress" => egress_cmd(db, rest).await,
@@ -1334,6 +1334,13 @@ fn parse_rebuild_target(arg: &str) -> RebuildTarget<'_> {
     }
 }
 
+/// Whether `/guardian rebuild <arg>` waits for a replicant check: one named
+/// tool's does. `--all` queues the tools and checks each in the background,
+/// where no console waits.
+pub(crate) fn rebuild_waits_for_its_check(arg: &str) -> bool {
+    matches!(parse_rebuild_target(arg), RebuildTarget::One(_))
+}
+
 fn is_loaded(name: &str) -> bool {
     embra_guardian::runtime().is_some_and(|rt| rt.get(name).is_some())
 }
@@ -1343,14 +1350,14 @@ fn is_loaded(name: &str) -> bool {
 /// moved) and for failed builds. The source is never taken from the
 /// command line, and the stored module passes the same two gates as a
 /// paste before it compiles.
-async fn rebuild(db: &Arc<WardsonDbClient>, arg: &str) -> String {
+async fn rebuild(db: &Arc<WardsonDbClient>, arg: &str, stopped: impl std::future::Future<Output = ()>) -> String {
     match parse_rebuild_target(arg) {
         RebuildTarget::Usage => "Usage: /guardian rebuild <name>  (one tool) | \
                                  /guardian rebuild --all  (every built tool that is not \
                                  loaded, and every failed build)"
             .to_string(),
         RebuildTarget::All => rebuild_all(db).await,
-        RebuildTarget::One(name) => rebuild_named(db, name).await,
+        RebuildTarget::One(name) => rebuild_named(db, name, stopped).await,
     }
 }
 
@@ -1436,7 +1443,11 @@ fn gates_passed_text(record: &Option<ReplicantRecord>) -> &'static str {
     }
 }
 
-async fn rebuild_named(db: &Arc<WardsonDbClient>, name: &str) -> String {
+async fn rebuild_named(
+    db: &Arc<WardsonDbClient>,
+    name: &str,
+    stopped: impl std::future::Future<Output = ()>,
+) -> String {
     if REBUILD_BATCH.load(Ordering::SeqCst) {
         return "guardian: a rebuild of all tools is running — /guardian list shows progress. \
                 Try again when it is done."
@@ -1458,12 +1469,16 @@ async fn rebuild_named(db: &Arc<WardsonDbClient>, name: &str) -> String {
         RebuildDecision::AlreadyBuilding => format!(
             "guardian: '{name}' is already building — poll with /guardian status {name}."
         ),
-        RebuildDecision::Rebuild => match rebuild_gates(db, &doc).await {
-            Err(why) => {
+        // The gates ask the model for the replicant check, and the console
+        // waits for it as it does for a paste's: a stop ends the wait. The
+        // check decided nothing then, so the record is left as it was.
+        RebuildDecision::Rebuild => match unless_stopped(rebuild_gates(db, &doc), stopped).await {
+            None => check_stopped_notice(name, "was not rebuilt"),
+            Some(Err(why)) => {
                 record_rebuild_stopped(db, &doc, &why).await;
                 format!("guardian: '{name}' not rebuilt — {why}.")
             }
-            Ok((module, record)) => {
+            Some(Ok((module, record))) => {
                 let passed = gates_passed_text(&record);
                 if let Err(e) = begin_rebuild(db, &doc, record).await {
                     return format!("guardian: could not start the rebuild of '{name}' — {e}");
@@ -2728,6 +2743,80 @@ mod replicant_gate_tests {
 
     async fn mount(server: &MockServer, verb: &str, route: &str, response: ResponseTemplate) {
         Mock::given(method(verb)).and(path(route)).respond_with(response).mount(server).await;
+    }
+
+    /// Says that it was asked, and then never answers.
+    struct AskedAndSilent(Arc<tokio::sync::Notify>);
+    impl wiremock::Respond for AskedAndSilent {
+        fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            self.0.notify_one();
+            ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(86_400))
+        }
+    }
+
+    /// `/guardian rebuild <name>` waits for the replicant check as a paste
+    /// and an approval do, and ran it with no way out: the console was held
+    /// until the model answered. A stop ends the wait while the gates run:
+    /// the tool is not rebuilt, and its record is written by nobody. The
+    /// gates are held here at their first read after the stored module
+    /// validated, which is the configuration the check needs.
+    #[tokio::test]
+    async fn a_rebuild_stopped_while_its_gates_run_changes_nothing() {
+        let tool = embra_guardian::shipped::WEBSOCKET;
+        let mut record = ToolDoc::building(
+            tool.name,
+            "A WebSocket client.",
+            serde_json::json!({"type": "object"}),
+            tool.stored_source(),
+            vec!["websocket".to_string()],
+            "1.94.1",
+            "2026-11-19T00:00:00Z",
+        );
+        record.status = ToolStatus::Failed;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/guardian.tools/docs/{}", tool.name)))
+            .respond_with(envelope(record.to_value()))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let asked = Arc::new(tokio::sync::Notify::new());
+        Mock::given(wiremock::matchers::any())
+            .respond_with(AskedAndSilent(asked.clone()))
+            .with_priority(9)
+            .mount(&server)
+            .await;
+        let db = Arc::new(WardsonDbClient::from_url(&server.uri()));
+
+        // The operator stops once the gates have asked for what they wait on.
+        // The deadline is one no loaded machine reaches when the stop works:
+        // without it a rebuild that ignores the stop would wait out the day.
+        let said = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            rebuild_named(&db, tool.name, async { asked.notified().await }),
+        )
+        .await
+        .expect("the stop ends the wait");
+
+        assert_eq!(
+            said,
+            "guardian: stopped before the replicant check answered. 'websocket' was not rebuilt, and nothing was changed. Run the command again to have it checked."
+        );
+        let requests = server.received_requests().await.expect("the server records its requests");
+        assert!(
+            requests.iter().all(|r| r.method.as_str() == "GET"),
+            "nothing was written: {:?}",
+            requests.iter().map(|r| format!("{} {}", r.method, r.url.path())).collect::<Vec<_>>()
+        );
+        assert!(requests.len() >= 2, "the record was read and the gates had begun");
+    }
+
+    #[test]
+    fn one_tools_rebuild_waits_for_its_check_and_a_batch_does_not() {
+        assert!(rebuild_waits_for_its_check("websocket"));
+        assert!(!rebuild_waits_for_its_check("--all"));
+        assert!(!rebuild_waits_for_its_check(""));
+        assert!(!rebuild_waits_for_its_check("websocket and another"));
     }
 
     #[tokio::test]

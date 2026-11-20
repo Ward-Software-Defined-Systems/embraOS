@@ -88,10 +88,19 @@ pub(super) fn continue_refusal(decision: &ContinueDecision) -> Option<String> {
 /// check: "<name> is running replicant check (12s)...".
 pub(super) const GUARDIAN_CHECK_LABEL: &str = "replicant check";
 
-/// Whether a `/guardian` command asks the model for the replicant check:
-/// `define` (the module follows on the next line) and `approve`.
+/// Whether a `/guardian` command waits for the model's replicant check:
+/// `define` (the module follows on the next line), `approve`, and the
+/// rebuild of one named tool.
 pub(super) fn guardian_runs_the_check(args: &str) -> bool {
-    matches!(args.split_whitespace().next(), Some("define" | "approve"))
+    let (sub, rest) = match args.split_once(char::is_whitespace) {
+        Some((sub, rest)) => (sub, rest),
+        None => (args, ""),
+    };
+    match sub.trim() {
+        "define" | "approve" => true,
+        "rebuild" => crate::guardian::rebuild_waits_for_its_check(rest),
+        _ => false,
+    }
 }
 
 /// The frame that tells a console whether something runs, and what.
@@ -213,10 +222,10 @@ pub(super) async fn handle_slash_command(
             // console's /guardian-define capture mode. Reports via
             // SystemMessage; never feeds a synthetic model turn.
             //
-            // `define` and `approve` ask the model for the replicant check,
-            // a call that can take as long as any other, and nothing could
-            // stop it: the command ran outside a turn. The two run as one
-            // now. The mark makes the operator's stop count, and the
+            // `define`, `approve` and the rebuild of one tool ask the model
+            // for the replicant check, a call that can take as long as any
+            // other, and nothing could stop it: the command ran outside a
+            // turn. They run as one now. The mark makes the operator's stop count, and the
             // Thinking frame tells the consoles that something runs, which
             // is when Esc and the phone's stop button send a stop.
             let msg = if guardian_runs_the_check(args) {

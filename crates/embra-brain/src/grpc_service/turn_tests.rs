@@ -1472,9 +1472,19 @@ async fn a_guardian_command_that_asks_for_the_check_runs_as_a_turn_and_the_other
     let frames = rig.command("/guardian", "list").await;
     assert_eq!(thinking(&frames), []);
 
+    // One tool's rebuild waits for its check too; the batch checks in the
+    // background, where no console waits.
+    let frames = rig.command("/guardian", "rebuild no_such_tool").await;
+    assert_eq!(thinking(&frames), [(true, GUARDIAN_CHECK_LABEL.to_string()), (false, String::new())]);
+    assert!(
+        matches!(frames.last(), Some(ResponseType::System(m)) if m.content == "guardian: no such tool 'no_such_tool'."),
+        "{frames:?}"
+    );
+
     assert!(guardian_runs_the_check("approve temp_delta"));
     assert!(guardian_runs_the_check("define\n// guardian-tool: temp_delta\nfn run() {}"));
-    for other in ["", "list", "status temp_delta", "reject temp_delta", "approved", "egress add host"] {
+    assert!(guardian_runs_the_check("rebuild temp_delta"));
+    for other in ["", "list", "status temp_delta", "reject temp_delta", "approved", "egress add host", "rebuild", "rebuild --all"] {
         assert!(!guardian_runs_the_check(other), "{other:?}");
     }
 }
