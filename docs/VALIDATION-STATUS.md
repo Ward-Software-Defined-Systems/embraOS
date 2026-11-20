@@ -138,8 +138,8 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | What | Validated on | TBD |
 |---|---|---|
 | The eight themes on the desktop page and the phone's page: the contrast of every text against what is painted behind it, measured on the page in each theme (the main view, the Tools tab and the picker; the chat, the command list and the picker), and the edge of every field | QEMU, in Chrome 156 | Safari on an iPhone; Firefox |
-| The themes on the display console: each one drawn, a change followed within a few seconds, the stored theme at the first paint after a boot | QEMU | a machine's own panel |
-| The picker (a press, a status poll while it is open, Escape, the keyboard's ring, Apply from a browser that observes) and `/theme` (the list, a name, `reset`, a word that is no theme, and a name at the first-boot wizard's first question) | QEMU, in Chrome 156 | the picker on a phone, and on the display console with its mouse |
+| The themes on the display console: each one drawn, a change followed within a few seconds, the stored theme at the first paint after a boot | QEMU; bare metal (HDMI) | |
+| The picker (a press, a status poll while it is open, Escape, the keyboard's ring, Apply from a browser that observes) and `/theme` (the list, a name, `reset`, a word that is no theme, and a name at the first-boot wizard's first question) | QEMU, in Chrome 156; bare metal (the picker on the display console, with its mouse) | the picker on a phone |
 
 ## Turns and the model wait
 
