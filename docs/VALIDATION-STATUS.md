@@ -20,6 +20,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | Fusion | VMware Fusion on Apple Silicon |
 | Bare metal | a YouYeeToo X1 single-board computer (Intel Celeron N5105, 16 GB of memory, eMMC, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
 | The laptop | a second machine that is not a VM: a Lenovo ThinkPad E550 (Intel Core i7-5500U, 8 GB of memory, a SATA SSD, an Intel Ethernet port, an Intel Wireless-AC 7265 card, Intel graphics on its own panel) |
+| The stick | a third machine that is not a VM: an AWOW NY41S stick PC (Intel Celeron J4105, 8 GB of memory, eMMC, an Intel Dual Band Wireless-AC 3165 card, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
 
 ## Images and boot
 
@@ -32,7 +33,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `vmware/embraos.vmdk` | | Fusion and VirtualBox; the aarch64 VMDK |
 | `hyper-v/embraos.vhdx` | Hyper-V | the aarch64 VHDX |
 | `parallels/embraos.vmx` with its VMDK | Parallels | Parallels on Apple Silicon |
-| A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early. The laptop: the installed disk boots from its SATA SSD, with its own panel, keyboard and pointer, and a lease on its wired port and over Wi-Fi | every other machine; an aarch64 machine |
+| A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early. The laptop: the installed disk boots from its SATA SSD, with its own panel, keyboard and pointer, and a lease on its wired port and over Wi-Fi. The stick: the installed disk boots from its eMMC, with the display on HDMI, a keyboard and a mouse, and a lease over Wi-Fi | every other machine; an aarch64 machine |
 | A core that is awake runs at the top of its frequency range (the `performance` governor and policy; before, a CPU without hardware P-states stayed at its lowest frequency) | | a machine without hardware P-states; a machine with them |
 | `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it) | a machine that cannot power itself off; aarch64 |
 
@@ -52,7 +53,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; Parallels; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click) | |
+| The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; Parallels; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the stick (HDMI: the page, a keyboard, a mouse and the 1920x1080 mode); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click) | |
 | A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA); bare metal (a held modifier) | |
 | A firmware framebuffer (`ramfb`): 800x600, and 1024x768 on request | QEMU; QEMU on Apple Silicon | |
 | `embra.kioskmode=` | QEMU (standard VGA, virtio-gpu, a firmware framebuffer), GRUB's Diagnostics entry among the ways in | |
@@ -75,8 +76,8 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot) | |
-| A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan; the laptop: its built-in Intel Wireless-AC 7265 (`iwlwifi`) | on a machine, a USB adapter that arrives as a driver disk, which embrad itself switches; every other card family; a card on an Arm machine; `EMBRA_USB_HOST` on a Mac |
+| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot); the stick (a join with its lease) | |
+| A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan; the laptop: its built-in Intel Wireless-AC 7265 (`iwlwifi`); the stick: its built-in Intel Dual Band Wireless-AC 3165 (`iwlwifi`) | on a machine, a USB adapter that arrives as a driver disk, which embrad itself switches; every other card family; a card on an Arm machine; `EMBRA_USB_HOST` on a Mac |
 
 ## The clock
 
@@ -101,7 +102,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| Snapshots and restores: `/backup`, and the boot menu's Backup and restore | QEMU | |
+| Snapshots and restores: `/backup`, and the boot menu's Backup and restore | QEMU; the stick | |
 | A backup uploaded through the web console and restored | QEMU; bare metal | |
 | `/backup` and `/reboot` before a session | QEMU (at the wizard and in Learning Mode); bare metal (at the wizard) | Learning Mode on bare metal |
 | `embraos-backup.sh` across image rebuilds, and its Mac wrapper | QEMU; QEMU on Apple Silicon | |
@@ -171,7 +172,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | The x86_64 image | Ubuntu 24.04 and 26.04, the reference build; an Intel Mac, with Buildroot in Docker | on an Intel Mac, a build since the wireless drivers joined the image |
 | The aarch64 image | Apple Silicon, with Buildroot in Docker: both storage engines | |
 | The launchers under the bash 3.2 that macOS ships | An Intel Mac; Apple Silicon | |
-| A build leaves none of its host's directories in the programs, in the web console's bundle or in the root filesystem | Ubuntu 24.04: the scripts' Rust step and its read-back, and the result booted under QEMU with the records of the build removed | an image build (Buildroot's pass: the removals, sqlite, libpsl and WebKit built without Buildroot's directory, the root filesystem's check); a build on a Mac (the host pass under bash 3.2 with the BSD tools) |
+| A build leaves none of its host's directories in the programs, in the web console's bundle or in the root filesystem, and the kernel's banner names the image | Ubuntu 24.04: an image build with both read-backs, its slot image unpacked and searched, and the image booted under QEMU | a build on a Mac (the host pass under bash 3.2 with the BSD tools) |
 | `seed-state-mac.sh --update-key` | | on a Mac |
 
 Which models have been vetted with each provider is in [LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md](LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md).
