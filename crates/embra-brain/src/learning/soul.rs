@@ -11,6 +11,11 @@ use crate::db::WardsonDbClient;
 pub(crate) const SOUL_HASH_PATH: &str = "/embra/state/soul.sha256";
 
 pub async fn seal_soul(db: &WardsonDbClient, soul: &serde_json::Value) -> Result<()> {
+    seal_soul_at(db, soul, Path::new(SOUL_HASH_PATH)).await
+}
+
+/// `seal_soul` with the hash file named (a test's directory).
+async fn seal_soul_at(db: &WardsonDbClient, soul: &serde_json::Value, hash_path: &Path) -> Result<()> {
     if !db.collection_exists("soul.invariant").await? {
         db.create_collection("soul.invariant").await?;
     }
@@ -31,9 +36,19 @@ pub async fn seal_soul(db: &WardsonDbClient, soul: &serde_json::Value) -> Result
 
     db.write("soul.invariant", &sealed_doc).await?;
 
+    // The soul is on the disk before its hash is. The database answers a
+    // write it has handed to the kernel, which writes it out within about
+    // half a minute, while the hash below is written with an fsync at once.
+    // A power cut in between used to leave a hash on STATE with no soul on
+    // DATA, which `embra-trustd` reads as tamper or data loss: the boot
+    // halts, and the way out is to wipe DATA. With DATA written out first, a
+    // cut leaves either no seal at all or a seal that is whole, but for the
+    // instant between this line and the next.
+    crate::durable::sync_data().await;
+
     // Write hash to STATE partition for boot-time verification by embra-trustd
-    write_soul_hash(Path::new(SOUL_HASH_PATH), &hash).await?;
-    tracing::info!("Soul hash written to {}", SOUL_HASH_PATH);
+    write_soul_hash(hash_path, &hash).await?;
+    tracing::info!("Soul hash written to {}", hash_path.display());
 
     Ok(())
 }
@@ -370,6 +385,71 @@ mod seal_memory_tests {
         let server = MockServer::start().await;
         Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(status)).mount(&server).await;
         server
+    }
+
+    /// A database that has the soul's collection and takes the document.
+    async fn sealing_server() -> MockServer {
+        let server = server(200).await;
+        Mock::given(method("POST"))
+            .and(path("/soul.invariant/docs"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(serde_json::json!({"ok": true, "data": {"_id": "soul"}, "meta": {}})),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("embra-seal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    /// The database answers the soul's write before the kernel has written
+    /// it out, and the hash is written with an fsync: a power cut between
+    /// the two left a hash without a soul, and a boot that halts. The seal
+    /// has DATA written out after the soul is handed over and before the
+    /// hash exists. The second half shows the order: a hash that cannot be
+    /// written ends the seal, and DATA had been written out by then.
+    #[tokio::test]
+    async fn the_soul_is_written_out_before_its_hash_is_stored() {
+        let server = sealing_server().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let soul = serde_json::json!({"format": "graph.v1", "name": "Embra", "nodes": [], "edges": []});
+
+        let dir = scratch("order");
+        let hash_path = dir.join("soul.sha256");
+        let before = crate::durable::asked();
+        seal_soul_at(&db, &soul, &hash_path).await.expect("the seal is made");
+        assert_eq!(crate::durable::asked() - before, 1, "DATA is written out once at the seal");
+        assert_eq!(std::fs::read_to_string(&hash_path).unwrap(), compute_soul_hash(&soul).unwrap());
+
+        // The hash's parent is a file: the hash cannot be written.
+        std::fs::write(dir.join("state"), "a file where the directory should be").unwrap();
+        let before = crate::durable::asked();
+        let err = seal_soul_at(&db, &soul, &dir.join("state").join("soul.sha256")).await.unwrap_err();
+        assert!(err.to_string().starts_with("Failed to write soul hash to STATE"), "{err}");
+        assert_eq!(crate::durable::asked() - before, 1, "DATA was written out before the hash was tried");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A soul the database refuses is not written out and gets no hash.
+    #[tokio::test]
+    async fn a_soul_the_database_refuses_gets_no_hash() {
+        let server = server(200).await;
+        Mock::given(method("POST")).and(path("/soul.invariant/docs")).respond_with(ResponseTemplate::new(507)).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = scratch("refused");
+        let hash_path = dir.join("soul.sha256");
+        let before = crate::durable::asked();
+        let soul = serde_json::json!({"format": "graph.v1", "name": "Embra", "nodes": [], "edges": []});
+        assert!(seal_soul_at(&db, &soul, &hash_path).await.is_err());
+        assert_eq!(crate::durable::asked(), before, "nothing was handed over, so nothing is written out");
+        assert!(!hash_path.exists(), "no hash without its soul");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A seal read that fails answers the last known state, sealed or
