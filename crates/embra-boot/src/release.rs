@@ -119,7 +119,7 @@ mod tests {
     /// first cargo runs and read the programs back after the last. The two
     /// packages Buildroot compiles that name their sources are handed a
     /// stand-in for its directory, a third is patched, and one built before
-    /// that is found and cleaned.
+    /// that is found and cleaned. The kernel's banner names the image.
     #[cfg(unix)]
     #[test]
     fn a_build_hands_rustc_a_stand_in_for_each_of_its_hosts_directories_and_reads_the_result_back() {
@@ -226,6 +226,13 @@ mod tests {
         std::fs::write(rootfs.join("usr/lib/libWPEWebKit-2.0.so.1.6.10"), format!("\u{7f}ELF\0{c}/buildroot-src/output/build/wpewebkit-2.50.5/Source/x.cpp\0")).unwrap();
         std::os::unix::fs::symlink("libWPEWebKit-2.0.so.1.6.10", rootfs.join("usr/lib/libWPEWebKit-2.0.so.1")).unwrap();
         assert_eq!(run(&[("HOME", &h)], &["packages_naming_builder_dirs", &c, "rootfs"]), (Some(0), "wpewebkit\n".to_string(), String::new()));
+
+        // Who a built kernel's banner names, from the header its build wrote.
+        let header = root.join("linux/include/generated/compile.h");
+        std::fs::create_dir_all(header.parent().unwrap()).unwrap();
+        std::fs::write(&header, "#define UTS_MACHINE\t\t\"x86_64\"\n#define LINUX_COMPILE_BY\t\"ann\"\n#define LINUX_COMPILE_HOST\t\"buildhost\"\n").unwrap();
+        assert_eq!(run(&[], &["kernel_banner_builder", "linux"]), (Some(0), "ann@buildhost\n".to_string(), String::new()));
+        assert_eq!(run(&[], &["kernel_banner_builder", "no-kernel"]), (Some(0), String::new(), String::new()), "a kernel not built yet names nobody");
         let _ = std::fs::remove_dir_all(&root);
 
         // Both image scripts hand the stand-ins over before the first cargo
@@ -240,6 +247,8 @@ mod tests {
             // The target directory of the last build is read for such a
             // package before it is removed.
             assert!(at("\nclean_packages_that_name_the_builder \"$BUILDROOT_DIR\"\n") < at("\n    rm -rf output/target && \\\n"), "{name}: the last build's target directory is read before it goes");
+            // A kernel that names its builder is made to link again before make runs.
+            assert!(at("\nrelink_kernel_that_names_its_builder \"$BUILDROOT_DIR\"\n") < at("\n    make BR2_EXTERNAL="), "{name}: the kernel's banner is looked at before make");
         }
         // The compiler's stand-in for Buildroot's own directory, for the two
         // packages that name their sources, and libpsl's table without a name.
@@ -247,6 +256,10 @@ mod tests {
         for line in ["\nEMBRAOS_BUILD_DIR_MAP = -ffile-prefix-map=$(BASE_DIR)=/buildroot\n", "\nSQLITE_CFLAGS += $(EMBRAOS_BUILD_DIR_MAP)\n", "-DCMAKE_C_FLAGS=\"$(TARGET_CFLAGS) $(EMBRAOS_BUILD_DIR_MAP)\"", "-DCMAKE_CXX_FLAGS=\"$(TARGET_CXXFLAGS) $(EMBRAOS_BUILD_DIR_MAP)\""] {
             assert!(external.contains(line), "external.mk: {line}");
         }
+        // The kernel's build is handed the one name the read-back looks for.
+        let library = std::fs::read_to_string(&script).unwrap();
+        let built_by = library.lines().find_map(|l| l.strip_prefix("KERNEL_BUILT_BY=\"")).and_then(|v| v.strip_suffix('"')).expect("KERNEL_BUILT_BY in the library");
+        assert!(external.contains(&format!("\nLINUX_MAKE_ENV += KBUILD_BUILD_USER={built_by} KBUILD_BUILD_HOST={built_by}\n")), "external.mk hands the kernel's build {built_by} for both names");
         let patch = std::fs::read_to_string(repo.join("buildroot/patches/libpsl/0001-the-built-in-table-names-no-file.patch")).unwrap();
         assert!(patch.contains("\n+  text += b'static const char _psl_filename[] = \"\";\\n'\n"), "libpsl's table names no file");
         let post_build = std::fs::read_to_string(repo.join("buildroot/board/embraos/post_build.sh")).unwrap();

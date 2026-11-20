@@ -375,6 +375,11 @@ remove_stale_package_dirs "$BUILDROOT_DIR" embrad embra-apid embra-trustd embra-
 # (clean_packages_with_changed_patches, scripts/lib/image-common.sh).
 clean_packages_with_changed_patches "$BUILDROOT_DIR" "$(cd "$(dirname "$0")/.." && pwd)/buildroot/patches"
 
+# A kernel built before its build was told what to name in its banner names
+# who built it: its build step runs again, a link
+# (relink_kernel_that_names_its_builder, scripts/lib/image-common.sh).
+relink_kernel_that_names_its_builder "$BUILDROOT_DIR"
+
 # The kernel tarball, verified against its pin before Buildroot runs: Buildroot
 # checks no hash for a custom kernel version (scripts/lib/image-common.sh).
 echo "=== Step 4a: Stage the Linux kernel $LINUX_KERNEL_VERSION (pinned) ==="

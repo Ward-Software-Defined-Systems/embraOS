@@ -600,6 +600,10 @@ assert_rootfs_invariants() {
         echo "ERROR: /boot/$kernel in the rootfs is not the kernel Buildroot built (BR2_LINUX_KERNEL_INSTALL_TARGET)" >&2
         reject_image
     }
+    # The kernel's banner names the image, never who built it: read from the
+    # header the kernel's build wrote for it.
+    [ "$(kernel_banner_builder "$BUILDROOT_DIR/output/build/linux-$LINUX_KERNEL_VERSION")" = "$KERNEL_BUILT_BY@$KERNEL_BUILT_BY" ] \
+        || reject_image "the kernel's banner does not name $KERNEL_BUILT_BY@$KERNEL_BUILT_BY: its build was not handed KBUILD_BUILD_USER and KBUILD_BUILD_HOST (buildroot/external.mk)"
     cmp -s "$tgt/boot/initramfs.cpio.gz" initramfs.cpio.gz || {
         echo "ERROR: /boot/initramfs.cpio.gz in the rootfs is not the repository's initramfs.cpio.gz" >&2
         reject_image
@@ -710,6 +714,26 @@ clean_packages_that_name_the_builder() {
         echo "build paths: $pkg was built with this host's directory in it; the package builds again from its tarball"
         clean_buildroot_package "$br" "$pkg"
     done
+}
+
+# relink_kernel_that_names_its_builder <buildroot dir>: a kernel built before
+# its build was handed a name for the banner (buildroot/external.mk) carries
+# the login and the host name of whoever built it, and Buildroot builds a
+# built kernel no second time. Its build step is made to run again: the
+# kernel's own build rewrites the banner's header and links, and compiles
+# nothing twice. Called by both image scripts before make.
+relink_kernel_that_names_its_builder() {
+    local br="$1" tree who
+    tree="$br/output/build/linux-$LINUX_KERNEL_VERSION"
+    who="$(kernel_banner_builder "$tree")"
+    [ -n "$who" ] || return 0
+    [ "$who" != "$KERNEL_BUILT_BY@$KERNEL_BUILT_BY" ] || return 0
+    echo "kernel: its banner names who built it; its build step runs again (the banner and a link, nothing is compiled twice)"
+    ( cd "$br" && make linux-clean-for-rebuild ) >/dev/null 2>&1 || true
+    if [ -e "$tree/.stamp_built" ]; then
+        echo "ERROR: the kernel's build stamp is still there ($tree/.stamp_built): run 'make linux-clean-for-rebuild' in $br, then build again" >&2
+        exit 1
+    fi
 }
 
 # assert_rootfs_names_no_builder_dir: no file of the root filesystem names a

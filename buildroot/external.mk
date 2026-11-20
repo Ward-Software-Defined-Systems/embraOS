@@ -20,3 +20,10 @@ SQLITE_CFLAGS += $(EMBRAOS_BUILD_DIR_MAP)
 WPEWEBKIT_CONF_OPTS += \
 	-DCMAKE_C_FLAGS="$(TARGET_CFLAGS) $(EMBRAOS_BUILD_DIR_MAP)" \
 	-DCMAKE_CXX_FLAGS="$(TARGET_CXXFLAGS) $(EMBRAOS_BUILD_DIR_MAP)"
+
+# The kernel's banner (the first line of its log, /proc/version) names who
+# built it: the login that ran the build and the host's name, unless its
+# build is told another (scripts/mkcompile_h in the kernel's tree). An image
+# names neither. The name is KERNEL_BUILT_BY in scripts/lib/build-paths.sh,
+# which reads the built kernel back.
+LINUX_MAKE_ENV += KBUILD_BUILD_USER=embraos KBUILD_BUILD_HOST=embraos

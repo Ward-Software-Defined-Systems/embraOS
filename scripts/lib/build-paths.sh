@@ -16,7 +16,8 @@
 # reads at run time: post_build.sh removes them (remove_build_records). Three
 # packages Buildroot compiles would name its own directory, and are handed a
 # stand-in or patched (BUILD_PATHS_BY_PACKAGE). The image scripts read the
-# whole target directory back.
+# whole target directory back. The kernel's banner names who built it, and is
+# told a name of the image's own (KERNEL_BUILT_BY).
 #
 # Sourced by scripts/lib/image-common.sh and by
 # buildroot/board/embraos/post_build.sh; it defines variables and functions
@@ -268,12 +269,28 @@ packages_naming_builder_dirs() {
     done
 }
 
+# The name the kernel's banner carries in place of the builder's login and of
+# the build host's name: buildroot/external.mk hands the kernel's build both
+# (KBUILD_BUILD_USER, KBUILD_BUILD_HOST).
+KERNEL_BUILT_BY="embraos"
+
+# kernel_banner_builder <built kernel tree>: `<login>@<host>` as the kernel's
+# own header records them for its banner (include/generated/compile.h);
+# nothing for a tree without the header (a kernel not built yet).
+kernel_banner_builder() {
+    local header="$1/include/generated/compile.h" by host
+    [ -f "$header" ] || return 0
+    by="$(sed -n 's/^#define LINUX_COMPILE_BY[[:space:]]*"\(.*\)"$/\1/p' "$header" | head -n 1)"
+    host="$(sed -n 's/^#define LINUX_COMPILE_HOST[[:space:]]*"\(.*\)"$/\1/p' "$header" | head -n 1)"
+    printf '%s@%s\n' "$by" "$host"
+}
+
 # Run by itself: one function and its arguments.
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ $# -ge 1 ]; then
     set -euo pipefail
     fn="$1"; shift
     case "$fn" in
-        builder_dirs|builder_needles|files_naming_builder_dirs|builder_strings|assert_programs_name_no_builder_dir|remove_build_records|package_that_compiled|packages_naming_builder_dirs)
+        builder_dirs|builder_needles|files_naming_builder_dirs|builder_strings|assert_programs_name_no_builder_dir|remove_build_records|package_that_compiled|packages_naming_builder_dirs|kernel_banner_builder)
             "$fn" "$@" ;;
         export_builder_path_remaps)
             "$fn" "$@"; printf '%s\n' "$CARGO_ENCODED_RUSTFLAGS" | tr '\037' '\n' ;;
