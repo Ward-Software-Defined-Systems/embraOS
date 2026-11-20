@@ -41,8 +41,9 @@ pub(crate) const USAGE: &str = "Usage: /network wifi | /network wifi join <name>
 const SEND_WAIT: Duration = Duration::from_secs(1);
 /// How long `system_status` waits for a card's supplicant to say what the
 /// card is on. The tool is called often, by the model: a supplicant that
-/// does not answer costs it this much and no more.
-const STATUS_WAIT: Duration = Duration::from_secs(1);
+/// does not answer costs it this much and no more. A machine's
+/// `NetEnv::status_wait`.
+pub(crate) const STATUS_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -342,11 +343,11 @@ impl Drop for Ctrl {
 /// card's supplicant says it now: what `system_status` shows the
 /// intelligence. `None` for a card that is on no network, for one that is
 /// still joining, and for a supplicant that is not there or does not answer
-/// within [`STATUS_WAIT`]. One question, `STATUS`: no scan is started, and
+/// within the status wait ([`STATUS_WAIT`]). One question, `STATUS`: no scan is started, and
 /// the answer carries no passphrase and no network that is merely stored
 /// or in range.
 pub(crate) fn joined_network(env: &NetEnv, card: &str) -> Option<String> {
-    let mut ctrl = Ctrl::open(&env.wifi_ctrl, card, STATUS_WAIT).ok()?;
+    let mut ctrl = Ctrl::open(&env.wifi_ctrl, card, env.status_wait).ok()?;
     let link = wifi::parse_status(&ctrl.request("STATUS").ok()?);
     match (link.joined(), link.ssid) {
         (true, Some(ssid)) => Some(wifi::ssid_shown(&ssid)),
@@ -753,14 +754,19 @@ mod tests {
     }
 
     /// A stand-in supplicant that is inside a long call into the kernel:
-    /// it reads nothing for `busy`, then answers every question that has
-    /// queued up, in the order they came.
-    fn busy_supplicant(env: &NetEnv, answers: &'static [(&'static str, &'static str)], busy: Duration) -> std::sync::mpsc::Receiver<String> {
+    /// it reads nothing until its test lets it go (a word on `release`),
+    /// then answers every question that has queued up, in the order they
+    /// came. Held by the test and not by a clock: how long a runner takes
+    /// over the test's own steps then decides nothing.
+    fn busy_supplicant(env: &NetEnv, answers: &'static [(&'static str, &'static str)], release: std::sync::mpsc::Receiver<()>) -> std::sync::mpsc::Receiver<String> {
         let socket = UnixDatagram::bind(env.wifi_ctrl.join("wlan0")).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            std::thread::sleep(busy);
+            // A test that ended first has dropped its end: the stand-in goes with it.
+            if release.recv().is_err() {
+                return;
+            }
             let mut buf = [0u8; 256];
             while let Some((n, from)) = next_question(&socket, &mut buf) {
                 let command = String::from_utf8_lossy(&buf[..n]).into_owned();
@@ -811,9 +817,9 @@ mod tests {
         // and none is asked for one.
         let wired = UnixDatagram::bind(env.wifi_ctrl.join("eth0")).unwrap();
         wired.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
-        let started = Instant::now();
         let report = crate::network::report(&env).unwrap();
-        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        // A question would be in the socket's queue by now, and a wait
+        // follows a question alone.
         assert!(wired.recv(&mut [0u8; 32]).is_err(), "nothing is asked on a wired card's name");
         assert_eq!(networks_of(&report), [("eth0", None), ("wlan0", Some("Home Net"))]);
         let json = serde_json::to_string(&report).unwrap();
@@ -857,26 +863,34 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
 
         // No supplicant on the card (embrad has not started one, or
-        // embra.wifi=0): no name, and no wait.
-        let (root, env) = machine("status-none", true);
+        // embra.wifi=0): no name, and no wait. The wait a supplicant would
+        // be given is a minute on this machine, so that the time says it
+        // was not spent however loaded the runner is.
+        let (root, mut env) = machine("status-none", true);
+        env.status_wait = Duration::from_secs(60);
         two_cards(&env);
         let started = Instant::now();
         assert_eq!(networks_of(&crate::network::report(&env).unwrap()), [("eth0", None), ("wlan0", None)]);
-        assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn a_supplicant_that_does_not_answer_holds_the_status_a_second_and_no_longer() {
-        let (root, env) = machine("status-silent", true);
+        let (root, mut env) = machine("status-silent", true);
         two_cards(&env);
+        // The status tool's wait is a machine's own, one second. The
+        // command's is made two minutes here, so that the time says which
+        // of the two the status took however loaded the runner is.
+        assert_eq!(env.status_wait, Duration::from_secs(1));
+        env.answer_wait = Duration::from_secs(120);
         // A socket on the card's name that takes the question and says nothing.
         let silent = UnixDatagram::bind(env.wifi_ctrl.join("wlan0")).unwrap();
         let started = Instant::now();
         let report = crate::network::report(&env).unwrap();
         let took = started.elapsed();
         assert_eq!(networks_of(&report), [("eth0", None), ("wlan0", None)]);
-        assert!(took >= Duration::from_millis(900) && took < Duration::from_millis(2500), "the status tool's wait, not the command's three seconds: {took:?}");
+        assert!(took >= Duration::from_millis(900) && took < Duration::from_secs(60), "the status tool's second, not the command's wait: {took:?}");
         let mut buf = [0u8; 32];
         silent.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
         assert_eq!(silent.recv(&mut buf).map(|n| buf[..n].to_vec()).unwrap(), b"STATUS".to_vec(), "the question did arrive");
@@ -889,9 +903,11 @@ mod tests {
     #[test]
     fn the_card_the_network_it_is_on_and_the_networks_in_range_are_shown() {
         let (root, env) = machine("show", true);
-        // A scan that ends after a fifth of a second, and a patience of ten.
+        // A scan that ends after a fifth of a second, and a patience of
+        // two minutes: the time then tells the scan's end from the
+        // patience's however loaded the runner is.
         let mut env = env;
-        env.scan_wait = Duration::from_secs(10);
+        env.scan_wait = Duration::from_secs(120);
         let started = Instant::now();
         let asked = supplicant(&env, &[
             ("SCAN", "OK\n"),
@@ -902,7 +918,7 @@ mod tests {
         assert!(!answer("join Home Net --key correct horse battery", &env).refused);
         let shown = answer("", &env).text;
         let took = started.elapsed();
-        assert!(took >= Duration::from_millis(200) && took < Duration::from_secs(4), "the scan's end is waited for, and no longer: {took:?}");
+        assert!(took >= Duration::from_millis(200) && took < Duration::from_secs(60), "the scan's end is waited for, and no longer: {took:?}");
         assert_eq!(
             shown,
             "Wi-Fi\n  wlan0 (02:00:00:00:00:00): on Home Net (WPA2-PSK), signal strong, -47 dBm\n  Stored: Home Net\n  Country: not set (the card keeps to the channels every country allows; /network wifi country <CC>)\n  In range:\n    Home Net  strong, -47 dBm  WPA2  (stored)\n    café      fair, -70 dBm  WPA3\n    corp      weak, -82 dBm  802.1X (a company network: not supported)\n  /network wifi join <name> --key <passphrase> · /network wifi join <name> --open · /network wifi forget <name> · /network wifi country <CC>"
@@ -944,8 +960,9 @@ mod tests {
         env.answer_wait = Duration::from_millis(100);
         // The card is on a network, and its supplicant is inside a long
         // call into the kernel (a radio that was idle is started again for
-        // a scan): nothing is read for a while, then every question that
-        // queued up is answered, in order.
+        // a scan): nothing is read until the test lets it go, then every
+        // question that queued up is answered, in order.
+        let (release, held) = std::sync::mpsc::channel();
         let asked = busy_supplicant(
             &env,
             &[
@@ -954,7 +971,7 @@ mod tests {
                 ("SCAN", "OK\n"),
                 ("SCAN_RESULTS", "bssid / frequency / signal level / flags / ssid\n02:00:00:00:01:00\t2412\t-50\t[WPA2-PSK-CCMP][ESS]\tHome Net\n"),
             ],
-            Duration::from_millis(500),
+            held,
         );
         let started = Instant::now();
         let shown = answer("", &env).text;
@@ -964,12 +981,27 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("  In range: no scan could be asked for: the card is not ready yet\n"), "{shown}");
-        assert!(took >= Duration::from_millis(100) && took < Duration::from_millis(400), "one question's wait, and no other question after it: {took:?}");
-        // The answers come, late: none of them was read as the answer to a
-        // later question, because no later question was asked.
-        std::thread::sleep(Duration::from_millis(700));
-        assert_eq!(asked.try_iter().collect::<Vec<String>>(), ["STATUS"]);
-        // The supplicant answers again: the card's line and its list are its own.
+        assert!(took >= Duration::from_millis(100), "the one question's wait was waited out: {took:?}");
+        // The supplicant comes back and answers what queued up, late. A
+        // question of the test's own goes in behind them: once the stand-in
+        // has that on its record, the record holds everything the brain
+        // asked. One question: none followed the one that went unanswered,
+        // so no late answer was read as the answer to a later question.
+        release.send(()).unwrap();
+        UnixDatagram::unbound().unwrap().send_to(b"MARK", env.wifi_ctrl.join("wlan0")).unwrap();
+        let mut before_the_mark = Vec::new();
+        loop {
+            let question = asked.recv_timeout(Duration::from_secs(60)).expect("the stand-in records every question it reads");
+            if question == "MARK" {
+                break;
+            }
+            before_the_mark.push(question);
+        }
+        assert_eq!(before_the_mark, ["STATUS"]);
+        // The supplicant answers again: the card's line and its list are
+        // its own. It is given a minute for each answer, which it does not
+        // need: a loaded runner must not read as a busy radio.
+        env.answer_wait = Duration::from_secs(60);
         let shown = answer("", &env).text;
         assert!(shown.contains("  wlan0 (02:00:00:00:00:00): on Home Net (WPA2-PSK), signal strong, -50 dBm\n"), "{shown}");
         std::fs::remove_dir_all(&root).unwrap();
@@ -1080,7 +1112,7 @@ mod tests {
         std::thread::spawn(move || {
             let _ = tx.send(joined_network(&env, "wlan0"));
         });
-        let answer = rx.recv_timeout(Duration::from_secs(5));
+        let answer = rx.recv_timeout(Duration::from_secs(60));
         assert_eq!(answer, Ok(None), "after {:?} with {queued} questions queued", started.elapsed());
         assert!(started.elapsed() >= Duration::from_millis(900));
         drop((silent, fillers));

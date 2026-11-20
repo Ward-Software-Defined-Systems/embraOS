@@ -82,6 +82,9 @@ pub(crate) struct NetEnv {
     pub(crate) scan_wait: std::time::Duration,
     /// How long a supplicant is given to answer one question.
     pub(crate) answer_wait: std::time::Duration,
+    /// How long `system_status` waits for a card's supplicant to say what
+    /// the card is on.
+    pub(crate) status_wait: std::time::Duration,
 }
 
 impl NetEnv {
@@ -100,6 +103,7 @@ impl NetEnv {
             wifi_logs: PathBuf::from(embra_boot::wifi::LOG_DIR),
             scan_wait: std::time::Duration::from_secs(12),
             answer_wait: std::time::Duration::from_secs(3),
+            status_wait: crate::network_wifi::STATUS_WAIT,
         }
     }
 
@@ -552,6 +556,7 @@ mod tests {
             wifi_logs: root.join("net").join("wpa-log"),
             scan_wait: std::time::Duration::from_millis(20),
             answer_wait: std::time::Duration::from_secs(3),
+            status_wait: crate::network_wifi::STATUS_WAIT,
         };
         (root, env)
     }
