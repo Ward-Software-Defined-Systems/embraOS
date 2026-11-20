@@ -103,7 +103,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | What | Validated on | TBD |
 |---|---|---|
 | Snapshots and restores: `/backup`, and the boot menu's Backup and restore | QEMU; the stick | |
-| A backup uploaded through the web console and restored | QEMU; bare metal | |
+| A backup uploaded through the web console and restored | QEMU; bare metal; the stick (a backup taken on bare metal) | |
 | `/backup` and `/reboot` before a session | QEMU (at the wizard and in Learning Mode); bare metal (at the wizard) | Learning Mode on bare metal |
 | `embraos-backup.sh` across image rebuilds, and its Mac wrapper | QEMU; QEMU on Apple Silicon | |
 | `embraos-backup.sh`: the web console's access token and the saved clock left out of a backup, and the image's own kept at a restore | the script's `self-test`, on scratch directories | a backup and a restore of an image |
