@@ -138,7 +138,7 @@ mod exit_line_tests {
 /// What an attached browser is shown between two consoles.
 fn restart_banner(how: &str, delay: Duration) -> String {
     format!(
-        "\r\n\x1b[2m[embra-web] embra-console exited ({how}) \u{2014} restarting in {} s\u{2026}\x1b[0m\r\n",
+        "\r\n\x1b[90m[embra-web] embra-console exited ({how}) \u{2014} restarting in {} s\u{2026}\x1b[0m\r\n",
         delay.as_secs()
     )
 }

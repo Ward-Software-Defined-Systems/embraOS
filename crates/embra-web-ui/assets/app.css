@@ -1221,12 +1221,17 @@ body.kiosk .emoji { display: none; }
 /* One card a theme. A card carries its theme's `data-theme`, so the tokens
    inside it are that theme's own: it is drawn in the colours it offers. */
 .modal.themes { width: min(760px, 94vw); }
-.theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+.theme-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px;
+  --page-focus: var(--focus); }
 .sheet .theme-grid { padding: 10px 14px 4px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .theme-card { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px;
   font: inherit; text-align: left; cursor: pointer; border-radius: 10px;
   background: var(--bg); color: var(--txt); border: 2px solid var(--control-line); }
 .theme-card[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+/* The ring of a card is drawn around it, on the page: it takes the page's
+   colour (kept by the grid above), where the card's own could be the
+   page's ground. */
+.theme-card:focus-visible { outline-color: var(--page-focus); }
 .theme-card .tc-chips { display: flex; gap: 4px; }
 .theme-card .tc-chips i { width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--control-line); }
 .theme-card .tc-chips .c-panel { background: var(--panel-2); }

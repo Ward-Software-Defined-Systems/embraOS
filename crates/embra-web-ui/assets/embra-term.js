@@ -79,7 +79,7 @@
       if (openedAt && Date.now() - openedAt >= RECONNECT_STABLE_MS) reconnectDelay = RECONNECT_BASE_MS;
       openedAt = 0;
       const secs = Math.round(reconnectDelay / 1000);
-      term.write(`\r\n\x1b[2m[embra-web] connection lost — reconnecting in ${secs} s…\x1b[0m\r\n`);
+      term.write(`\r\n\x1b[90m[embra-web] connection lost — reconnecting in ${secs} s…\x1b[0m\r\n`);
       if (!reconnectTimer) reconnectTimer = setTimeout(() => {
         reconnectTimer = null; connect();
       }, reconnectDelay);
@@ -588,7 +588,7 @@
     const embraDownload = (url, asked) => {
       if (kiosk) {
         if (asked) embraKioskNeedsBrowser("download", url);
-        else term.write("\r\n\x1b[2m[embra-web] a file is downloaded from a browser on another machine (the right mouse button shows this console's URL): " + url + "\x1b[0m\r\n");
+        else term.write("\r\n\x1b[90m[embra-web] a file is downloaded from a browser on another machine (the right mouse button shows this console's URL): " + url + "\x1b[0m\r\n");
         return;
       }
       const a = document.createElement("a");
@@ -716,7 +716,7 @@
   window.embraUploadFiles = async function (files) {
     for (const f of Array.from(files)) {
       if (!embraAcceptsFile(f)) {
-        if (term) term.write("\r\n\x1b[2m[embra-web] attach skipped: " + f.name + " is not an image or a text file\x1b[0m\r\n");
+        if (term) term.write("\r\n\x1b[90m[embra-web] attach skipped: " + f.name + " is not an image or a text file\x1b[0m\r\n");
         continue;
       }
       try {
@@ -736,19 +736,19 @@
           if (embraCertificateCommand(f.name, "x") && /not UTF-8 text/.test(msg)) {
             msg += ": a certificate in DER is not text. Convert it (openssl x509 -inform der -in <file> -out <file>.pem), or give /ca import a URL";
           }
-          if (term) term.write("\r\n\x1b[2m[embra-web] attach failed: " + msg + "\x1b[0m\r\n");
+          if (term) term.write("\r\n\x1b[90m[embra-web] attach failed: " + msg + "\x1b[0m\r\n");
           continue;
         }
         const certificate = embraCertificateCommand(f.name, body.path);
         if (certificate) {
           if (writable) window.embraTermInject(certificate);
-          else if (term) term.write("\r\n\x1b[2m[embra-web] uploaded " + handle + " — take control and run " + certificate + "\x1b[0m\r\n");
+          else if (term) term.write("\r\n\x1b[90m[embra-web] uploaded " + handle + " — take control and run " + certificate + "\x1b[0m\r\n");
           continue;
         }
         if (writable) window.embraTermInject("/attach " + handle + "\r");
-        else if (term) term.write("\r\n\x1b[2m[embra-web] uploaded " + handle + " — take control to attach it\x1b[0m\r\n");
+        else if (term) term.write("\r\n\x1b[90m[embra-web] uploaded " + handle + " — take control to attach it\x1b[0m\r\n");
       } catch (err) {
-        if (term) term.write("\r\n\x1b[2m[embra-web] attach failed: " + err + "\x1b[0m\r\n");
+        if (term) term.write("\r\n\x1b[90m[embra-web] attach failed: " + err + "\x1b[0m\r\n");
       }
     }
   };

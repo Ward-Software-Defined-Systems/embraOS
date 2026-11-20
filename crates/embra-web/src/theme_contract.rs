@@ -10,12 +10,23 @@
 //! dimmed by opacity or set under twelve pixels, the keyboard's place shown,
 //! and less motion for a reader who asked for it.
 //!
+//! Three things a stylesheet does not show are held here too, each read
+//! from the source that draws it: the words the activity strip draws on its
+//! canvas, the ring of a card in the theme picker, and the lines the web
+//! console writes into the terminal itself.
+//!
 //! They live in this crate because CI runs its tests and not the page's.
 
 use embra_tools_core::theme::{self, THEMES};
 use std::collections::BTreeMap;
 
 const CSS: &str = include_str!("../../embra-web-ui/assets/app.css");
+/// The activity strip: it draws on a canvas, so no rule of the stylesheet
+/// sets its text.
+const STRIP: &str = include_str!("../../embra-web-ui/src/activity.rs");
+/// The two places the web console writes lines of its own into the terminal.
+const TERMINAL_PAGE: &str = include_str!("../../embra-web-ui/assets/embra-term.js");
+const PTY_BRIDGE: &str = include_str!("pty_bridge.rs");
 
 /// The grounds a text is read on, and the tokens that are read as text.
 const GROUNDS: [&str; 5] = ["bg", "bg-2", "panel", "panel-2", "bg-glow"];
@@ -293,4 +304,75 @@ fn the_page_answers_a_request_for_less_motion() {
     let (_, selector, declarations) = rule.expect("a rule for prefers-reduced-motion");
     assert!(selector.starts_with('*'), "{selector}");
     assert!(declarations.contains("animation-duration") && declarations.contains("transition-duration"), "{declarations}");
+}
+
+
+/// The strip's words are drawn on a canvas, where no rule above reaches
+/// them. While its feed was away they were drawn at 40% opacity, which put
+/// "activity feed offline" at about 2:1 in every theme, and a tool call's
+/// chip was named at eleven pixels. A word is drawn at twelve pixels or
+/// more, and the fill it is drawn with never carries the strip's dimming:
+/// away, the readouts take the theme's dim text colour whole.
+#[test]
+fn the_strips_words_keep_their_size_and_their_contrast() {
+    let lines: Vec<&str> = STRIP.lines().collect();
+    let mut fonts = 0;
+    for line in &lines {
+        if let Some(at) = line.find("set_font(\"") {
+            let size = &line[at + 10..];
+            let size: f64 = size[..size.find("px").expect("a size in pixels")].parse().expect("a number of pixels");
+            assert!(size >= 12.0, "the strip sets text at {size}px: {}", line.trim());
+            fonts += 1;
+        }
+    }
+    assert!(fonts >= 2, "the strip's fonts were read: {fonts}");
+
+    let mut words = 0;
+    for (at, line) in lines.iter().enumerate() {
+        if !line.contains(".fill_text(") {
+            continue;
+        }
+        let fill = lines[..at].iter().rev().find(|l| l.contains("set_fill_style_str(")).expect("a fill before the text");
+        let dimmed = fill.split(|c: char| !c.is_alphanumeric() && c != '_').any(|word| word == "dim");
+        assert!(!dimmed, "a word of the strip is drawn dimmed by opacity: {}", fill.trim());
+        words += 1;
+    }
+    assert!(words >= 4, "the strip's words were read: {words}");
+    assert!(
+        STRIP.contains("let text = rgba(readout_ink(&pal, v.dimmed()), 1.0);"),
+        "the readouts are drawn whole, in the colour `readout_ink` gives"
+    );
+}
+
+/// A card of the picker carries its own theme's tokens, and the ring of
+/// the keyboard is drawn around it, on the page. With the card's own colour
+/// the ring of a dark theme's card was white on a light page's white. The
+/// grid keeps the page's colour and the card's ring takes it: the page's
+/// ring on the page's grounds is what `every_pair_that_is_read` holds.
+#[test]
+fn a_picker_cards_ring_is_the_pages() {
+    let rules = rules();
+    let of = |selector: &str| {
+        rules.iter().find(|(_, s, _)| s == selector).unwrap_or_else(|| panic!("a rule for `{selector}`")).2.clone()
+    };
+    let grid: String = of(".theme-grid").split_whitespace().collect();
+    assert!(grid.contains("--page-focus:var(--focus)"), "{grid}");
+    let ring: String = of(".theme-card:focus-visible").split_whitespace().collect();
+    assert!(ring.contains("outline-color:var(--page-focus)"), "{ring}");
+    for (name, tokens) in blocks() {
+        assert!(!tokens.contains_key("page-focus"), "`{name}` sets the page's ring for the cards inside it");
+    }
+}
+
+/// The terminal holds faint text to half the theme's figure and draws it
+/// at half opacity. The console program marks nothing faint; the web
+/// console's own lines ("connection lost", an upload's) were, and stood at
+/// about 3:1 in the light themes. They are written in the terminal's dim
+/// colour, which the terminal holds to the whole figure.
+#[test]
+fn the_web_console_writes_none_of_its_own_lines_faint() {
+    for (name, source) in [("embra-term.js", TERMINAL_PAGE), ("pty_bridge.rs", PTY_BRIDGE)] {
+        assert!(!source.contains("\\x1b[2m"), "{name} writes a faint line");
+        assert!(source.contains("\\x1b[90m[embra-web]"), "{name} writes its lines in the dim colour");
+    }
 }

@@ -507,6 +507,14 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// The colour of the readouts' words. A feed that is away dims what the
+/// strip draws by opacity. Its words are dimmed by their colour alone, the
+/// theme's dim text, which holds the contrast a theme promises of text:
+/// drawn at 40% they stood at about 2:1, "activity feed offline" among them.
+fn readout_ink(pal: &Palette, dimmed: bool) -> (u8, u8, u8) {
+    if dimmed { pal.txt_dim } else { pal.txt }
+}
+
 fn rgba((r, g, b): (u8, u8, u8), a: f64) -> String {
     format!("rgba({r},{g},{b},{:.3})", a.clamp(0.0, 1.0))
 }
@@ -712,8 +720,9 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
         ctx.fill();
     }
 
-    // Chips rise from the brain and fade.
-    ctx.set_font("11px Inter, system-ui, sans-serif");
+    // Chips rise from the brain and fade. No text of the page is under
+    // twelve pixels, and a chip's name is text.
+    ctx.set_font("12px Inter, system-ui, sans-serif");
     ctx.set_text_align("center");
     ctx.set_text_baseline("middle");
     for (i, chip) in v.chips.iter().enumerate() {
@@ -723,12 +732,13 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
         let x = l.brain_x + 56.0 * (i as f64 - (v.chips.len() as f64 - 1.0) / 2.0);
         let y = l.link_y - rise;
         let label = if chip.error { format!("! {}", chip.label) } else { chip.label.clone() };
-        let width = 7.0 * label.chars().count() as f64 + 10.0;
+        let width = 7.6 * label.chars().count() as f64 + 10.0;
         ctx.set_fill_style_str(&rgba(pal.panel_2, 0.9 * alpha * dim));
         ctx.fill_rect(x - width / 2.0, y - 8.0, width, 16.0);
         ctx.set_stroke_style_str(&rgba(if chip.error { pal.bad } else { pal.line }, alpha * dim));
         ctx.stroke_rect(x - width / 2.0, y - 8.0, width, 16.0);
-        ctx.set_fill_style_str(&rgba(if chip.error { pal.bad } else { pal.txt }, alpha * dim));
+        // The name fades with the chip's age and with nothing else.
+        ctx.set_fill_style_str(&rgba(if chip.error { pal.bad } else { pal.txt }, alpha));
         let _ = ctx.fill_text(&label, x, y);
     }
 
@@ -739,8 +749,7 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
     ctx.set_font("13px Inter, system-ui, sans-serif");
     ctx.set_text_baseline("alphabetic");
     let snap = v.snapshot.as_ref();
-    let dim_text = rgba(pal.txt_dim, dim);
-    let text = rgba(pal.txt, dim);
+    let text = rgba(readout_ink(&pal, v.dimmed()), 1.0);
 
     ctx.set_text_align("left");
     let model = snap.map(|s| s.model.as_str()).unwrap_or("");
@@ -767,7 +776,7 @@ fn draw(ctx: &CanvasRenderingContext2d, w: f64, h: f64, v: &Viz, now: f64) {
     } else {
         "embra-brain · idle".to_string()
     };
-    ctx.set_fill_style_str(if v.dimmed() { &dim_text } else { &text });
+    ctx.set_fill_style_str(&text);
     let _ = ctx.fill_text(&brain_line, l.brain_x, l.readout_y);
 
     ctx.set_text_align("right");
@@ -1070,5 +1079,14 @@ mod palette_tests {
             [p.txt, p.txt_dim, p.accent, p.accent_2, p.accent_red, p.bad, p.panel_2, p.line],
             ["txt", "txt-dim", "accent", "accent-2", "accent-red", "bad", "panel-2", "line"].map(token)
         );
+    }
+
+    /// A feed that is away dims the drawings and never the words: they take
+    /// the theme's dim text colour, whole.
+    #[test]
+    fn the_readouts_words_are_dimmed_by_their_colour() {
+        let p = Palette::default();
+        assert_eq!(readout_ink(&p, false), p.txt);
+        assert_eq!(readout_ink(&p, true), p.txt_dim);
     }
 }
