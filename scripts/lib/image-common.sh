@@ -19,6 +19,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/disk-layout.sh"
 # bakes the folder, and with release-update.sh, which signs no release from it.
 # shellcheck source=scripts/lib/imported-cas.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/imported-cas.sh"
+# The build host's directories stay out of the programs and the root
+# filesystem: the stand-ins rustc is handed, the records post_build.sh
+# removes, and the functions the checks below read the result back with.
+# shellcheck source=scripts/lib/build-paths.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build-paths.sh"
 
 # embra-guardian-v1 in-OS Rust toolchain pin (musl host + wasm32 std).
 # Staged into vendor/rust-toolchain by Step 3.5 and installed at /opt/rust.
@@ -336,8 +341,8 @@ assert_target_is_clean() {
 # nothing else, the embedding model, the in-OS toolchain at the pinned
 # version and that version only, no SSH server, and the slot's contents (the
 # kernel, the initramfs, the release stamp, GRUB's slot line, exactly those
-# under /boot, a squashfs that fits its slot and is xz). Takes the Rust triple
-# of the build.
+# under /boot, a squashfs that fits its slot and is xz), and no directory of
+# the build host in any file. Takes the Rust triple of the build.
 # assert_kernel_fragments_applied <triple>: every `CONFIG_X=y` and
 # `CONFIG_X=m` line of the kernel fragments this architecture merges
 # (board/embraos/linux.fragment for both, linux-<arch>.fragment beside it
@@ -665,6 +670,7 @@ assert_rootfs_invariants() {
         echo "release signing keys: none yet (scripts/update-signing.pub holds no key; the updater refuses every manifest until one is added)"
     fi
     assert_imported_cas
+    assert_rootfs_names_no_builder_dir
 
     # The squashfs fits its slot with the margin free (layout.sh), and it is
     # xz: GRUB 2.12's squash4 reads gzip, lzo and xz, never zstd.
@@ -682,6 +688,55 @@ assert_rootfs_invariants() {
         reject_image
     }
     echo "rootfs.squashfs: $sq_size bytes of a $slot_bytes-byte slot, xz"
+}
+
+# assert_rootfs_names_no_builder_dir: no file of the root filesystem names a
+# directory of this build host (builder_needles, scripts/lib/build-paths.sh),
+# but for the files Buildroot compiled its own directory into
+# (BUILD_PATHS_COMPILED_IN), which the line names when they do. Refused, each
+# with the file and a text of it: a program of this tree built before rustc
+# was handed the stand-ins (a --buildroot-only run over an older build), a
+# record of the build that post_build.sh did not remove, and a package that
+# newly keeps its build directory.
+assert_rootfs_names_no_builder_dir() {
+    local root tgt="$BUILDROOT_DIR/output/target" found f rel left="" refused=""
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    if [ -z "$(builder_needles "$root")" ]; then
+        echo "build paths: nothing to look for in the root filesystem (every directory of this build is directly under /)"
+        return 0
+    fi
+    found="$(files_naming_builder_dirs "$root" "$tgt")" \
+        || reject_image "the root filesystem could not be read through for the directories of this build host"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        rel="${f#"$tgt"/}"
+        if compiled_in_by_buildroot "$rel"; then
+            left="$left /$rel"
+        else
+            refused="${refused}${rel}
+"
+        fi
+    done <<LIST
+$found
+LIST
+    if [ -n "$refused" ]; then
+        echo "ERROR: a directory of this build host is named in the root filesystem:" >&2
+        while IFS= read -r rel; do
+            [ -n "$rel" ] || continue
+            printf '       /%s\n         %s\n' "$rel" "$(builder_strings "$root" "$tgt/$rel" | head -n 1)" >&2
+        done <<LIST
+$refused
+LIST
+        echo "       A program of this tree: it was built before rustc was handed the stand-ins; run a full" >&2
+        echo "       build (--storage-engine), not --buildroot-only. A record of the build that nothing reads" >&2
+        echo "       at run time: remove_build_records (scripts/lib/build-paths.sh) removes it." >&2
+        reject_image
+    fi
+    if [ -n "$left" ]; then
+        echo "build paths: none of this host's directories in the root filesystem but in what Buildroot compiled its own directory into:$left"
+    else
+        echo "build paths: none of this host's directories in the root filesystem"
+    fi
 }
 
 # assert_imported_cas: the root filesystem trusts the certificate authorities

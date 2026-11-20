@@ -137,6 +137,10 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     export CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
     export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
     export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+    # The build host's directories stay out of the programs and the web
+    # bundle: rustc is handed a stand-in for each, by trunk's cargo and by
+    # the cross-build alike (scripts/lib/build-paths.sh).
+    export_builder_path_remaps "$(cd "$(dirname "$0")/.." && pwd)"
 
     # Build the Leptos/WASM frontend BEFORE the cargo cross-build so
     # embra-web can embed crates/embra-web-ui/dist via rust-embed. This
@@ -162,6 +166,10 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     # that no longer matches a manifest stops the build instead of being
     # re-resolved here (the storage pins ride on it).
     cargo build --release --locked --target x86_64-unknown-linux-musl
+    # The stand-ins read back: no program and no file of the bundle names a
+    # directory of this host, or the build stops here.
+    assert_programs_name_no_builder_dir "$(cd "$(dirname "$0")/.." && pwd)" \
+        target/x86_64-unknown-linux-musl/release crates/embra-web-ui/dist
     # The release stamp beside the binaries: /etc/embraos-release in the image
     # and GRUB's slot line come from it (scripts/lib/image-common.sh).
     write_release_file x86_64-unknown-linux-musl "$STORAGE_ENGINE"

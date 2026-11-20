@@ -282,6 +282,14 @@ rm -f "${TARGET_DIR}/usr/sbin/sshd" \
       "${TARGET_DIR}/usr/libexec/sftp-server" \
       "${TARGET_DIR}/etc/ssh/sshd_config"
 
+# The records of the build that the root filesystem would carry and nothing
+# reads at run time: the in-OS toolchain's install log and manifests, ICU's
+# build tools and makefile fragments, libxslt's and libstdc++'s helpers. Each
+# names the directories the build ran in (scripts/lib/build-paths.sh).
+# shellcheck source=scripts/lib/build-paths.sh
+source "${REPO_ROOT}/scripts/lib/build-paths.sh"
+remove_build_records "${TARGET_DIR}"
+
 # udev's files, for a build that carries it (eudev comes with the display
 # console's input): its network-naming rule would rename a card after embrad
 # has started a DHCP client on it under the kernel's name (crates/embrad/src/

@@ -205,6 +205,11 @@ if [ "$BUILDROOT_ONLY" = false ]; then
         echo "WARNING: could not locate musl sysroot — bindgen-based crates may fail" >&2
     fi
 
+    # The build host's directories stay out of the programs and the web
+    # bundle: rustc is handed a stand-in for each, by trunk's cargo and by
+    # the cross-build alike (scripts/lib/build-paths.sh).
+    export_builder_path_remaps "$(cd "$(dirname "$0")/.." && pwd)"
+
     # Build the Leptos/WASM frontend BEFORE the cargo cross-build so
     # embra-web can embed crates/embra-web-ui/dist via rust-embed. This
     # is host/CI-only (no Node in the image; assets ride inside the
@@ -230,6 +235,12 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     # that no longer matches a manifest stops the build instead of being
     # re-resolved here (the storage pins ride on it).
     cargo build --release --locked --target "$RUST_TARGET"
+    # The stand-ins read back: no program and no file of the bundle names a
+    # directory of this host, or the build stops here. On a Mac this is the
+    # one place that knows the Mac's directories: the Buildroot pass runs in
+    # a container.
+    assert_programs_name_no_builder_dir "$(cd "$(dirname "$0")/.." && pwd)" \
+        "target/$RUST_TARGET/release" crates/embra-web-ui/dist
     # The release stamp beside the binaries: /etc/embraos-release in the image
     # and GRUB's slot line come from it (scripts/lib/image-common.sh).
     write_release_file "$RUST_TARGET" "$STORAGE_ENGINE"
