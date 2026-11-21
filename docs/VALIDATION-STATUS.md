@@ -47,7 +47,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | An unattended install | QEMU; QEMU on Apple Silicon | |
 | A second install over an installed disk | QEMU | |
 | A stick that attaches as UAS | QEMU, from the medium's kernel on (OVMF reads no such stick) | a UAS stick booted by a machine's firmware |
-| The upgrade in place | QEMU (at the prompt and unattended, into either slot; the trial boot, its snapshot and the confirmation; the slot before it booted again after three failed tries); bare metal | |
+| The upgrade in place | QEMU (at the prompt and unattended, into either slot; the trial boot, its snapshot and the confirmation; the slot before it booted again after three failed tries); bare metal; the stick (from a USB stick, a medium built on an Intel Mac) | |
 | A medium of the other storage engine is refused | Bare metal | |
 
 ## The display console
@@ -77,7 +77,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot); the stick (a join with its lease); the Pi (a join with its lease) | |
+| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot); the stick (a join with its lease, the join at the next boot); the Pi (a join with its lease) | |
 | A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan; the laptop: its built-in Intel Wireless-AC 7265 (`iwlwifi`); the stick: its built-in Intel Dual Band Wireless-AC 3165 (`iwlwifi`); the Pi: its USB adapter (`rt2800usb`) | on a machine, a USB adapter that arrives as a driver disk, which embrad itself switches; every other card family; `EMBRA_USB_HOST` on a Mac |
 
 ## The clock
@@ -170,7 +170,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| The x86_64 image | Ubuntu 24.04 and 26.04, the reference build; an Intel Mac, with Buildroot in Docker | on an Intel Mac, a build since the wireless drivers joined the image |
+| The x86_64 image | Ubuntu 24.04 and 26.04, the reference build; an Intel Mac, with Buildroot in Docker (with the wireless drivers in the image: its installer medium upgraded the stick, which joined its Wi-Fi network) | |
 | The aarch64 image | Apple Silicon, with Buildroot in Docker: both storage engines | |
 | The launchers under the bash 3.2 that macOS ships | An Intel Mac; Apple Silicon | |
 | A build leaves none of its host's directories in the programs, in the web console's bundle or in the root filesystem, and the kernel's banner names the image | Ubuntu 24.04: an image build with both read-backs, its slot image unpacked and searched, and the image booted under QEMU | a build on a Mac (the host pass under bash 3.2 with the BSD tools) |
