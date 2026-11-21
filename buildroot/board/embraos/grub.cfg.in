@@ -223,6 +223,8 @@ submenu "Diagnostics" --id diagnostics {
         echo "  embra.ntp=<host>|off        the time server of this boot (else those set with /network time, else the DHCP lease's, then time.cloudflare.com); off asks none"
         echo "  embra.wifi=0                no Wi-Fi driver is loaded in this boot"
         echo "  embra.mode=update|backup|restore   a maintenance boot instead of the services"
+        echo "The kernel reads:"
+        echo "  nomodeset                   the firmware's framebuffer in place of the graphics driver (a display that stays dark after this menu)"
         echo "Press any key to return"
         sleep --interruptible 60
     }

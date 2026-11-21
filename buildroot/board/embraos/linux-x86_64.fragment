@@ -56,3 +56,15 @@ CONFIG_X86_PKG_TEMP_THERMAL=y
 # through this driver; an AMD CPU and a virtual machine (no MWAIT) are
 # refused by it and keep what they had.
 CONFIG_INTEL_IDLE=y
+# AMD's graphics: the amdgpu driver with its display engine, for the Radeon
+# of an AMD CPU and for a Radeon card (the base config has Intel's i915
+# alone). Like i915 it drives the outputs and sets the video mode, where a
+# machine without a graphics driver keeps the one mode its firmware left;
+# the display console draws in software either way. The driver asks for
+# its firmware at probe, before the rootfs is mounted, and takes the
+# display over from the firmware's framebuffer first: post_build.sh puts
+# its blobs into /boot/firmware.cpio.gz beside i915's (PROBE_DRIVERS), and
+# the image build refuses an archive without them. `nomodeset` on the
+# kernel line keeps the firmware's framebuffer in place of either driver.
+CONFIG_DRM_AMDGPU=y
+CONFIG_DRM_AMD_DC=y

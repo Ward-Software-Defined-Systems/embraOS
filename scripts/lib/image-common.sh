@@ -449,7 +449,7 @@ assert_firmware_present() {
         have=$((have + drv_have)); lack=$((lack + drv_lack))
         printf '  firmware %-16s %3d of %3d names present%s\n' "$drv" "$drv_have" $((drv_have + drv_lack)) "${absent:+ (absent:$absent)}"
         case "$drv" in
-            bnx2|bnx2x|qed|i915|ice|cxgb4|r8169|r8152|tg3|e100)
+            bnx2|bnx2x|qed|i915|amdgpu|ice|cxgb4|r8169|r8152|tg3|e100)
                 [ "$drv_have" -gt 0 ] || fatal="$fatal $drv"
                 ;;
         esac
@@ -524,7 +524,47 @@ assert_boot_initrds() {
     [ "$members" -gt 0 ] || reject_image "/boot/firmware.cpio.gz carries no lib/firmware file (post_build.sh builds it from the probe-time drivers' names)"
     assert_cpio_parents_precede "$listing" "/boot/firmware.cpio.gz"
     rm -f "$listing"
+    assert_probe_firmware_archived "$tgt"
     echo "probe-time firmware: /boot/firmware.cpio.gz carries $members files with their directories ($(stat -c %s "$tgt/boot/firmware.cpio.gz") bytes)"
+}
+
+# assert_probe_firmware_archived <target dir>: every blob a probe-time driver
+# names and the rootfs holds is a member of /boot/firmware.cpio.gz. The
+# drivers are post_build.sh's PROBE_DRIVERS, read from its line so the two
+# cannot drift; their names are the kernel's own list
+# (modules.builtin.modinfo, `<driver>.firmware=<file>`). A graphics driver
+# takes the display over from the firmware's framebuffer before it asks for
+# its blobs, so one that is missing from the archive is a screen that stays
+# dark on that hardware, from a build that looked whole.
+assert_probe_firmware_archived() {
+    local tgt="$1" post="buildroot/board/embraos/post_build.sh" drivers modinfo members drv name cand want=0 lack=0 missing=""
+    drivers="$(sed -n 's/^PROBE_DRIVERS="\(.*\)"$/\1/p' "$post")"
+    [ -n "$drivers" ] && [ "$(grep -c '^PROBE_DRIVERS=' "$post")" = 1 ] \
+        || reject_image "no single PROBE_DRIVERS=\"...\" line in $post: the build cannot tell which drivers' firmware the boot archive is to carry"
+    modinfo="$(ls "$tgt"/lib/modules/*/modules.builtin.modinfo 2>/dev/null | head -n1)"
+    [ -n "$modinfo" ] || reject_image "lib/modules/<version>/modules.builtin.modinfo is missing from the rootfs"
+    members="$(mktemp)"
+    gzip -dc "$tgt/boot/firmware.cpio.gz" | cpio -t --quiet 2>/dev/null > "$members"
+    for drv in $drivers; do
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            for cand in "$name" "$name.xz" "$name.zst"; do
+                if [ -f "$tgt/lib/firmware/$cand" ]; then
+                    want=$((want + 1))
+                    if ! grep -q -x -F "lib/firmware/$cand" "$members"; then
+                        lack=$((lack + 1))
+                        [ "$lack" -gt 5 ] || missing="$missing $cand"
+                    fi
+                    break
+                fi
+            done
+        done <<EOF
+$(tr '\0' '\n' < "$modinfo" | sed -n "s/^${drv}\.firmware=//p" | sort -u)
+EOF
+    done
+    rm -f "$members"
+    [ "$lack" = 0 ] || reject_image "/boot/firmware.cpio.gz lacks $lack of the firmware files that the probe-time drivers ($drivers) name and the rootfs holds (the first:$missing): a driver that probes before the rootfs is mounted would not find them (post_build.sh builds the archive)"
+    echo "probe-time firmware: the $want files that ${drivers// /, } name and the rootfs holds are all in /boot/firmware.cpio.gz"
 }
 
 assert_rootfs_invariants() {
