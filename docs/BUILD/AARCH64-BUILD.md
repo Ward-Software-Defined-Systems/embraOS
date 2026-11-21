@@ -507,7 +507,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Architecture | `BR2_x86_64=y` | `BR2_aarch64=y` |
 | Kernel config method | `BR2_LINUX_KERNEL_USE_DEFCONFIG=y` | `BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y` |
 | Kernel defconfig name | `BR2_LINUX_KERNEL_DEFCONFIG="x86_64"` | *(not needed — arch default is implicit)* |
-| Kernel fragments (`BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES`) | `linux.fragment` and `linux-x86_64.fragment` | `linux.fragment` |
+| Kernel fragments (`BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES`) | `linux.fragment` and `linux-x86_64.fragment` | `linux.fragment` and `linux-aarch64.fragment` |
 | GRUB target | `BR2_TARGET_GRUB2_X86_64_EFI=y` | `BR2_TARGET_GRUB2_ARM64_EFI=y` |
 | Microcode | `BR2_PACKAGE_EMBRA_INTEL_MICROCODE=y`: Intel's bundle at the version `buildroot/package/embra-intel-microcode` pins, its files kept off the rootfs for `/boot/ucode.cpio` | *(none)* |
 
@@ -533,7 +533,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
 | Display console | the web console on the display through WPE WebKit and cog | the same stack, on a virtio-gpu display with a USB keyboard and tablet (1920x1080; the command under [Boot](#3-boot)) or on `ramfb`, the firmware's framebuffer (800x600); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above) |
-| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` alone, read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (1480 modules with them, 82 MB uncompressed under `/lib/modules`). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others |
+| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` + `linux-aarch64.fragment` (the two frequency drivers the base configuration leaves as modules, built in), read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (1478 modules with them, 82 MB uncompressed under `/lib/modules`). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)) |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
 | A Buildroot tree from before `v0.24.0-phase2` | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
