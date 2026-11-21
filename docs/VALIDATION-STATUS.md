@@ -21,7 +21,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | Bare metal | a YouYeeToo X1 single-board computer (Intel Celeron N5105, 16 GB of memory, eMMC, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
 | The laptop | a second machine that is not a VM: a Lenovo ThinkPad E550 (Intel Core i7-5500U, 8 GB of memory, a SATA SSD, an Intel Ethernet port, an Intel Wireless-AC 7265 card, Intel graphics on its own panel) |
 | The stick | a third machine that is not a VM: an AWOW NY41S stick PC (Intel Celeron J4105, 8 GB of memory, eMMC, an Intel Dual Band Wireless-AC 3165 card, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
-| The Pi | an aarch64 machine that is not a VM: a Raspberry Pi 5 (8 GB of memory, board revision 1.1, an SD card), started by a UEFI firmware whose files are on the installed card's EFI partition |
+| The Pi | an aarch64 machine that is not a VM: a Raspberry Pi 5 (8 GB of memory, board revision 1.1, an SD card, a Linksys AE1000 USB Wi-Fi adapter on a Ralink RT3572), started by a UEFI firmware whose files are on the installed card's EFI partition |
 
 ## Images and boot
 
@@ -34,7 +34,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `vmware/embraos.vmdk` | | Fusion and VirtualBox; the aarch64 VMDK |
 | `hyper-v/embraos.vhdx` | Hyper-V | the aarch64 VHDX |
 | `parallels/embraos.vmx` with its VMDK | Parallels | Parallels on Apple Silicon |
-| A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early. The laptop: the installed disk boots from its SATA SSD, with its own panel, keyboard and pointer, and a lease on its wired port and over Wi-Fi. The stick: the installed disk boots from its eMMC, with the display on HDMI, a keyboard and a mouse, and a lease over Wi-Fi. The Pi: the installed card boots through its UEFI firmware to the first-boot wizard, with the display on HDMI, a keyboard and a mouse | every other machine; on the Pi, what follows the first-boot wizard (a network card, a session) |
+| A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early. The laptop: the installed disk boots from its SATA SSD, with its own panel, keyboard and pointer, and a lease on its wired port and over Wi-Fi. The stick: the installed disk boots from its eMMC, with the display on HDMI, a keyboard and a mouse, and a lease over Wi-Fi. The Pi: the installed card boots through its UEFI firmware, with the display on HDMI, a keyboard and a mouse, a lease over Wi-Fi on its USB adapter, and a session; under that firmware the board's own Ethernet port and Wi-Fi card do not come up | every other machine |
 | A core that is awake runs at the top of its frequency range (the `performance` governor and policy; before, a CPU without hardware P-states stayed at its lowest frequency) | Bare metal, a CPU with hardware P-states: every core's policy reads `performance`, and its energy preference with it | a machine without hardware P-states |
 | `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it) | a machine that cannot power itself off; aarch64 |
 
@@ -77,8 +77,8 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot); the stick (a join with its lease) | |
-| A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan; the laptop: its built-in Intel Wireless-AC 7265 (`iwlwifi`); the stick: its built-in Intel Dual Band Wireless-AC 3165 (`iwlwifi`) | on a machine, a USB adapter that arrives as a driver disk, which embrad itself switches; every other card family; a card on an Arm machine; `EMBRA_USB_HOST` on a Mac |
+| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot); the stick (a join with its lease); the Pi (a join with its lease) | |
+| A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan; the laptop: its built-in Intel Wireless-AC 7265 (`iwlwifi`); the stick: its built-in Intel Dual Band Wireless-AC 3165 (`iwlwifi`); the Pi: its USB adapter (`rt2800usb`) | on a machine, a USB adapter that arrives as a driver disk, which embrad itself switches; every other card family; `EMBRA_USB_HOST` on a Mac |
 
 ## The clock
 
