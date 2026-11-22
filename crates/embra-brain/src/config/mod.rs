@@ -922,6 +922,20 @@ pub async fn run_config_wizard_grpc(
     response_rx: &mut mpsc::Receiver<String>,
     db: &WardsonDbClient,
 ) -> Result<SystemConfig> {
+    use crate::native_model::{Env, jobs::Jobs};
+    run_config_wizard_with(tx, response_rx, db, &Env::in_force(), Jobs::shared()).await
+}
+
+/// The wizard, with where a native model's records and updater are and the
+/// brain's jobs: the machine's own in `run_config_wizard_grpc`, a test's in
+/// a test.
+pub(crate) async fn run_config_wizard_with(
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    response_rx: &mut mpsc::Receiver<String>,
+    db: &WardsonDbClient,
+    native_env: &crate::native_model::Env,
+    native_jobs: &crate::native_model::jobs::Jobs,
+) -> Result<SystemConfig> {
     // Welcome
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -953,33 +967,68 @@ pub async fn run_config_wizard_grpc(
     };
     info!("Config wizard: name = {}", name);
 
-    // Step 1b: the provider gateway, before the provider: the key check
-    // and a preset's model list of this boot go through it when chosen.
-    let gateway = crate::setup::wizard::run_gateway_subflow(tx, response_rx).await?;
+    // Step 1b: the routing question, before the provider: the key check
+    // and a preset's model list of this boot go through the gateway when
+    // one is chosen, and the native answer (experimental) has no provider
+    // and no key to ask for: it asks which model, and installs its file.
+    // Its "back" asks the routing question again.
+    use crate::setup::wizard::Routing;
+    let (gateway, native_model) = loop {
+        match crate::setup::wizard::run_gateway_subflow(tx, response_rx).await? {
+            Routing::Direct => break (None, None),
+            Routing::Gateway(g, version) => break (Some((g, version)), None),
+            Routing::Native => {
+                if let Some(model) = crate::setup::wizard::run_native_subflow(tx, response_rx, native_env, native_jobs).await? {
+                    break (None, Some(model));
+                }
+            }
+        }
+    };
     if let Some((g, version)) = &gateway {
         info!("Config wizard: gateway = {} ({})", g.url, version);
+    }
+    // Another answer than the native one asks for no model: a record left
+    // by a native pick earlier in this setup (the wizard restarted at its
+    // confirmation) is put back, and embrad ends the model server.
+    if native_model.is_none() && crate::native_model::ask_for_none(native_env) {
+        info!("Config wizard: the native model's record asks for none");
     }
 
     // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way, then the
     // Anthropic line-up, five models since 2026-09-27) —
     // Selector UI. The default is the first label (see
     // PROVIDER_WIZARD_LABELS) and tracks the provider's DEFAULT_MODEL.
-    let _ = tx.send(Ok(ConversationResponse {
-        response_type: Some(conversation_response::ResponseType::Setup(
-            SetupPrompt {
-                field_type: SetupFieldType::Selector as i32,
-                prompt: "Which AI provider would you like to use?".to_string(),
-                options: PROVIDER_WIZARD_LABELS.iter().map(|l| l.to_string()).collect(),
-                default_value: PROVIDER_WIZARD_LABELS[0].to_string(),
+    // Not asked on the native answer, which named its model already.
+    let provider_choice = match native_model {
+        Some(model) => format!("{}: {}", ProviderKind::Native.label(), model.id),
+        None => {
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::Setup(
+                    SetupPrompt {
+                        field_type: SetupFieldType::Selector as i32,
+                        prompt: "Which AI provider would you like to use?".to_string(),
+                        options: PROVIDER_WIZARD_LABELS.iter().map(|l| l.to_string()).collect(),
+                        default_value: PROVIDER_WIZARD_LABELS[0].to_string(),
+                    }
+                )),
+            })).await;
+            match response_rx.recv().await {
+                Some(input) if !input.is_empty() => input,
+                Some(_) => PROVIDER_WIZARD_LABELS[0].to_string(),
+                None => anyhow::bail!("setup channel closed during the provider step"),
             }
-        )),
-    })).await;
-    let provider_choice = match response_rx.recv().await {
-        Some(input) if !input.is_empty() => input,
-        Some(_) => PROVIDER_WIZARD_LABELS[0].to_string(),
-        None => anyhow::bail!("setup channel closed during the provider step"),
+        }
     };
-    let provider_kind = provider_from_label(&provider_choice);
+    let provider_kind = match native_model {
+        Some(_) => ProviderKind::Native,
+        None => provider_from_label(&provider_choice),
+    };
+    // Whether the provider is reached with an API key: Anthropic and Gemini.
+    // A server preset has its bearer from its sub-flow, a native model none.
+    let keyed = match provider_kind.wire() {
+        Wire::Anthropic | Wire::Gemini => true,
+        Wire::OpenAiCompat(_) => false,
+    };
     // Capture the chosen Anthropic model for the Anthropic path; persisted
     // below as `SystemConfig.anthropic_model`.
     let anthropic_model = anthropic_model_from_label(&provider_choice);
@@ -999,6 +1048,8 @@ pub async fn run_config_wizard_grpc(
     // (Endpoint → Bearer → Probe-and-Select). Existing 2-way path
     // covers Anthropic/Gemini unchanged.
     let openai_compat_setup = match provider_kind.wire() {
+        // A native model has no endpoint, no bearer and no server's list.
+        Wire::OpenAiCompat(crate::provider::openai_compat::OpenAiCompatPreset::Native) => None,
         Wire::OpenAiCompat(preset) => Some(
             crate::setup::wizard::run_openai_compat_subflow(
                 preset,
@@ -1033,8 +1084,7 @@ pub async fn run_config_wizard_grpc(
     };
     // Skip env-var "other" warning for OpenAI-compat — bearer flow
     // already gathered the relevant credential via prompts.
-    if openai_compat_setup.is_none()
-        && std::env::var(other_env_name).map(|v| !v.is_empty()).unwrap_or(false)
+    if keyed && std::env::var(other_env_name).map(|v| !v.is_empty()).unwrap_or(false)
     {
         let _ = tx.send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::System(
@@ -1054,7 +1104,7 @@ pub async fn run_config_wizard_grpc(
     // Skipped entirely for OpenAI-compat presets (Sprint 5): bearer was
     // already collected in the sub-flow and is held in `openai_compat_setup`.
     // The legacy `api_key` field stays empty for OpenAI-compat configs.
-    let api_key = if openai_compat_setup.is_some() {
+    let api_key = if !keyed {
         String::new()
     } else {
         loop {
@@ -1181,7 +1231,7 @@ pub async fn run_config_wizard_grpc(
         name,
         gateway.as_ref().map(|(g, _)| g.url.as_str()).unwrap_or("none"),
         provider_choice,
-        key_summary(&api_key),
+        if native_model.is_some() { "none (a native model has no key)".to_string() } else { key_summary(&api_key) },
         timezone,
     );
     let _ = tx.send(Ok(ConversationResponse {
@@ -1202,7 +1252,7 @@ pub async fn run_config_wizard_grpc(
         .to_lowercase();
     if confirm.contains("no") || confirm == "2" {
         // Restart — recursive call (simple approach for now)
-        return Box::pin(run_config_wizard_grpc(tx, response_rx, db)).await;
+        return Box::pin(run_config_wizard_with(tx, response_rx, db, native_env, native_jobs)).await;
     }
 
     // Save config — populate the legacy api_key (active provider's
@@ -1220,6 +1270,10 @@ pub async fn run_config_wizard_grpc(
     if let Some(setup) = &openai_compat_setup {
         openai_compat.set_endpoint(setup.preset, &setup.endpoint);
         openai_compat.set_model(setup.preset, &setup.model_id);
+    }
+    // The native answer: the model kept loaded is the one it installed.
+    if let Some(model) = native_model {
+        openai_compat.set_model(crate::provider::openai_compat::OpenAiCompatPreset::Native, model.id);
     }
     let config = SystemConfig {
         name,
@@ -1256,6 +1310,12 @@ pub async fn run_config_wizard_grpc(
     };
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");
+    // The record embrad follows says what the saved configuration asks: the
+    // native answer wrote it already, and a write that failed then is made
+    // again here.
+    if let Err(why) = crate::native_model::follow(native_env, &config.openai_compat) {
+        tracing::warn!("Config wizard: {why}");
+    }
 
     // Write timezone to STATE partition so embrad can set TZ on subsequent boots
     let tz_path = "/embra/state/timezone";
@@ -1270,7 +1330,7 @@ pub async fn run_config_wizard_grpc(
     // bearer is written separately below at /embra/state/bearer_<preset>).
     // Mode 0600 per Locked Decision #8 (Sprint 5 retroactive fix to
     // existing api_key writes that previously used default umask).
-    if openai_compat_setup.is_none() {
+    if keyed {
         let key_path = "/embra/state/api_key";
         if let Err(e) = write_credential_state(key_path, &config.api_key) {
             tracing::warn!("Could not write API key to STATE: {}", e);
@@ -1316,7 +1376,7 @@ pub async fn run_config_wizard_grpc(
     // provider; the alternate is added later via /provider --setup.
     // Skipped for OpenAI-compat — bearer landed at
     // /embra/state/bearer_<preset> above (Sprint 5).
-    if openai_compat_setup.is_none() {
+    if keyed {
         let per_provider_state_path = match provider_kind {
             ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
             ProviderKind::Gemini => "/embra/state/api_key_gemini",
@@ -2393,6 +2453,80 @@ mod wizard_channel_tests {
         let key_prompt = last.expect("the wizard asked for the key");
         assert!(key_prompt.prompt.contains("API key"), "{}", key_prompt.prompt);
         assert_eq!(key_prompt.field_type, SetupFieldType::Secret as i32);
+    }
+
+    /// The native answer (experimental) asks neither a provider nor a key:
+    /// after the routing question come the model, the timezone and the
+    /// confirmation, whose summary names the model. The record embrad
+    /// follows asks for the model by then. Another answer after a restart
+    /// asks for none again, and the way back at the model question asks the
+    /// routing question again.
+    #[tokio::test]
+    async fn the_native_answer_asks_no_provider_and_no_key_and_another_answer_takes_the_model_back() {
+        use crate::native_model::test_support::{install, machine};
+        use crate::setup::wizard::{GATEWAY_DIRECT, NATIVE_BACK, ROUTING_NATIVE};
+        use embra_boot::native_model::{self as native, Wanted};
+        let (_root, env) = machine("config-wizard-native");
+        let four = native::by_id("qwen3.5-4b").unwrap();
+        install(four, &env);
+        let jobs = crate::native_model::jobs::Jobs::default();
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let run = |answers: Vec<&'static str>| {
+            let (env, jobs, db) = (env.clone(), jobs.clone(), &db);
+            async move {
+                let (tx, mut prompts) = mpsc::channel(64);
+                let (answer_tx, mut response_rx) = mpsc::channel::<String>(64);
+                for answer in answers {
+                    answer_tx.send(answer.to_string()).await.unwrap();
+                }
+                drop(answer_tx);
+                let err = super::run_config_wizard_with(&tx, &mut response_rx, db, &env, &jobs).await.unwrap_err().to_string();
+                drop(tx);
+                let mut frames = Vec::new();
+                while let Some(Ok(f)) = prompts.recv().await {
+                    frames.push(f);
+                }
+                (err, frames)
+            }
+        };
+
+        // The console leaves at the confirmation, which keeps the save and
+        // the STATE writes out of the test.
+        let (err, frames) = run(vec!["Embra", ROUTING_NATIVE, "qwen3.5-4b", "UTC"]).await;
+        assert!(err.contains("setup channel closed during the confirmation step"), "{err}");
+        let asked: Vec<&str> = setup_prompts(&frames).iter().map(|p| p.prompt.split(['.', '?', '(']).next().unwrap_or_default().trim()).collect();
+        assert_eq!(
+            asked,
+            ["What would you like to name your intelligence", "Reach the AI providers directly, through WSDS Local AI Gateway, or run a model natively on this machine", "Select a native model", "What timezone are you in", "Configuration summary:\n  Name: Embra\n  Gateway: none\n  Provider: Native"],
+            "no provider question and no key question"
+        );
+        let confirm = setup_prompts(&frames).into_iter().last().expect("the confirmation");
+        assert_eq!(confirm.field_type, SetupFieldType::Confirm as i32);
+        assert!(
+            confirm.prompt.contains("\n  Gateway: none\n  Provider: Native (experimental): qwen3.5-4b\n  API Key: none (a native model has no key)\n  Timezone: Etc/UTC\n"),
+            "{}",
+            confirm.prompt
+        );
+        assert!(system_texts(&frames).iter().any(|t| t == &crate::setup::wizard::native_notice()), "the notice was said");
+        assert_eq!(native::read_settings(&env.settings), Ok(Some(Wanted::new(four))), "embrad loads the model while the setup goes on");
+
+        // Restarted at the confirmation, and answered directly this time:
+        // the record asks for none, and the provider is asked as ever.
+        let (err, frames) = run(vec!["Embra", ROUTING_NATIVE, "qwen3.5-4b", "UTC", "No, restart setup", "Embra", GATEWAY_DIRECT]).await;
+        assert!(err.contains("setup channel closed during the provider step"), "{err}");
+        assert_eq!(setup_prompts(&frames).last().unwrap().prompt, "Which AI provider would you like to use?");
+        assert_eq!(native::read_settings(&env.settings), Ok(None), "another answer takes the model back");
+
+        // The way back at the model question: the routing question again.
+        let (err, frames) = run(vec!["Embra", ROUTING_NATIVE, NATIVE_BACK, GATEWAY_DIRECT]).await;
+        assert!(err.contains("setup channel closed during the provider step"), "{err}");
+        let routing = setup_prompts(&frames).iter().filter(|p| p.prompt.starts_with("Reach the AI providers directly")).count();
+        assert_eq!(routing, 2, "asked again after the way back");
+        assert_eq!(native::read_settings(&env.settings), Ok(None));
+
+        // A console that leaves at the native model question ends the wizard by that step's name.
+        let (err, _) = run(vec!["Embra", ROUTING_NATIVE]).await;
+        assert!(err.contains("setup channel closed during the native model step"), "{err}");
     }
 
     /// The gateway step and its endpoint step name themselves the same way.

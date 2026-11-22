@@ -1,15 +1,18 @@
-//! Two sub-flows of the first-run wizard: the provider gateway question
-//! (direct, or through WSDS Local AI Gateway, whose listener identifies
-//! itself), and the Endpoint → Bearer → Probe-and-Select flow of the
-//! OpenAI-compat presets, which lists the models through the gateway when
-//! one was chosen.
+//! Three sub-flows of the first-run wizard: the routing question (the
+//! providers directly, through WSDS Local AI Gateway, whose listener
+//! identifies itself, or a model natively on this machine, experimental);
+//! the Endpoint → Bearer → Probe-and-Select flow of the OpenAI-compat
+//! presets, which lists the models through the gateway when one was chosen;
+//! and the native answer's own steps, which model and its install.
 
 use anyhow::{anyhow, Result};
-use tokio::sync::mpsc;
+use embra_boot::native_model::{self as native, NativeModel};
+use tokio::sync::{broadcast, mpsc};
 use tonic::Status;
 use tracing::info;
 
 use crate::config::ProviderGateway;
+use crate::native_model::jobs::{JobEnd, JobEvent, JobKind, Jobs};
 use crate::provider::gateway as gateway_rules;
 use crate::provider::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset};
 use embra_common::proto::brain::{
@@ -290,24 +293,25 @@ pub enum SubflowError {
     SelectionChannelClosed,
 }
 
-/// The provider gateway question of the first-run wizard, asked after the
-/// name and before the provider: reach the providers directly, or through
-/// WSDS Local AI Gateway. With the gateway chosen, its unified listener's
-/// endpoint is normalized ([`gateway_rules::normalize_url`]) and must
-/// identify itself ([`gateway_rules::identify`]); a refusal shows the
-/// reason and asks again, and `direct` at the re-ask (its default, so Enter
-/// is enough on both clients) falls back to direct. Returns the gateway,
-/// on, with the version it answered, or `None` for direct.
+/// The routing question of the first-run wizard, asked after the name and
+/// before the provider: reach the providers directly, through WSDS Local AI
+/// Gateway, or run a model natively on this machine (experimental). With
+/// the gateway chosen, its unified listener's endpoint is normalized
+/// ([`gateway_rules::normalize_url`]) and must identify itself
+/// ([`gateway_rules::identify`]); a refusal shows the reason and asks again,
+/// and `direct` at the re-ask (its default, so Enter is enough on both
+/// clients) falls back to direct. The native answer asks nothing more here:
+/// [`run_native_subflow`] has its steps.
 pub async fn run_gateway_subflow(
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     response_rx: &mut mpsc::Receiver<String>,
-) -> Result<Option<(ProviderGateway, String)>> {
+) -> Result<Routing> {
     let _ = tx
         .send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
                 field_type: SetupFieldType::Selector as i32,
                 prompt: GATEWAY_QUESTION.to_string(),
-                options: vec![GATEWAY_DIRECT.to_string(), GATEWAY_THROUGH.to_string()],
+                options: vec![GATEWAY_DIRECT.to_string(), GATEWAY_THROUGH.to_string(), ROUTING_NATIVE.to_string()],
                 default_value: String::new(),
             })),
         }))
@@ -315,9 +319,13 @@ pub async fn run_gateway_subflow(
     let choice = response_rx
         .recv()
         .await
-        .ok_or_else(|| anyhow!("setup channel closed during the gateway step"))?;
-    if !choice.to_ascii_lowercase().contains("gateway") {
-        return Ok(None);
+        .ok_or_else(|| anyhow!("setup channel closed during the gateway step"))?
+        .to_ascii_lowercase();
+    if choice.contains("native") {
+        return Ok(Routing::Native);
+    }
+    if !choice.contains("gateway") {
+        return Ok(Routing::Direct);
     }
 
     let mut prompt_text = GATEWAY_ENDPOINT_PROMPT.to_string();
@@ -341,7 +349,7 @@ pub async fn run_gateway_subflow(
         let re_asking = !default.is_empty();
         if re_asking && (answer.is_empty() || answer.eq_ignore_ascii_case("direct")) {
             send_system(tx, GATEWAY_DIRECT_NOTE.to_string(), SystemMessageType::Info).await;
-            return Ok(None);
+            return Ok(Routing::Direct);
         }
         let outcome = match gateway_rules::normalize_url(answer) {
             Err(reason) => Err(format!("Not a gateway URL: {reason}.")),
@@ -356,7 +364,7 @@ pub async fn run_gateway_subflow(
                 send_system(tx, gateway_rules::identified_line(&url, &version), SystemMessageType::Info)
                     .await;
                 info!(target: "setup::gateway", url = %url, version = %version, "gateway identified");
-                return Ok(Some((ProviderGateway { url, enabled: true }, version)));
+                return Ok(Routing::Gateway(ProviderGateway { url, enabled: true }, version));
             }
             Err(reason) => {
                 send_system(tx, reason, SystemMessageType::Error).await;
@@ -367,10 +375,11 @@ pub async fn run_gateway_subflow(
     }
 }
 
-/// The gateway question and its two options; the direct one first, since
-/// the console's selector starts on the first option.
+/// The routing question and its options; the direct one first, since the
+/// console's selector starts on the first option. "provider" in it gives
+/// the console its Provider header.
 pub const GATEWAY_QUESTION: &str =
-    "Reach the AI providers directly, or through WSDS Local AI Gateway?";
+    "Reach the AI providers directly, through WSDS Local AI Gateway, or run a model natively on this machine (experimental)?";
 pub const GATEWAY_DIRECT: &str = "Directly";
 pub const GATEWAY_THROUGH: &str = "Through WSDS Local AI Gateway";
 /// "endpoint" gives the console its Endpoint header; no "provider" in it.
@@ -380,6 +389,225 @@ const GATEWAY_REASK_PROMPT: &str =
     "Re-enter the gateway endpoint, or answer direct to reach the providers directly:";
 const GATEWAY_DIRECT_NOTE: &str =
     "Reaching the providers directly. /local-ai-gateway <url> stores a gateway after setup.";
+
+/// How the wizard's routing question was answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Routing {
+    /// The providers are reached directly.
+    Direct,
+    /// Through the gateway, on, with the version it answered.
+    Gateway(ProviderGateway, String),
+    /// A model on this machine (experimental): no provider, no key.
+    Native,
+}
+
+/// The third answer to the routing question.
+pub const ROUTING_NATIVE: &str = "Natively on this machine (experimental)";
+/// The option of the native model question that goes back to the routing
+/// question.
+pub const NATIVE_BACK: &str = "Back: reach a provider instead";
+/// The word that stops a model's download at the wizard.
+const NATIVE_CANCEL: &str = "cancel";
+/// What Enter sends while a model is being installed: the console sends
+/// nothing for an empty line at a question without a default.
+const NATIVE_PROGRESS: &str = "progress";
+
+/// What the wizard says when the native answer is chosen, before it asks
+/// which model: what the model is, that it leads Learning Mode, that the
+/// seal is permanent, and the way to an identity this model does not write.
+pub fn native_notice() -> String {
+    let models: Vec<&str> = native::CATALOGUE.iter().map(|m| m.label).collect();
+    format!(
+        "A native model (experimental) runs on this machine's own processor: {}. They are small models: they answer slower than a hosted one and with less judgement. \
+         The model you pick leads Learning Mode, where this intelligence's identity is written with you and sealed, and the seal is permanent. \
+         An identity written beforehand can be imported instead: Learning Mode offers the graphs in Imported_Intelligence before it begins. \
+         A provider can be added later with /provider --setup.",
+        models.join(" or ")
+    )
+}
+
+/// The native answer's own steps (experimental): which model, and its
+/// install when its file is not on the machine. Returns the model, with the
+/// record written that has embrad load it while the setup goes on; or
+/// `None` when the operator went back to the routing question.
+///
+/// A download is a job of the brain: it goes on when the console leaves
+/// (the error then names the step), and a console that comes back to this
+/// question follows it from where it is. While it runs the question takes
+/// text, so the operator can ask how far it is, stop it, or type a command
+/// (`/native`, `/network`).
+pub async fn run_native_subflow(
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    response_rx: &mut mpsc::Receiver<String>,
+    env: &crate::native_model::Env,
+    jobs: &Jobs,
+) -> Result<Option<&'static NativeModel>> {
+    send_system(tx, native_notice(), SystemMessageType::Info).await;
+    let model = loop {
+        let (prompt, mut options) = crate::native_model::catalogue_question(None, env);
+        let default_value = options.first().cloned().unwrap_or_default();
+        options.push(NATIVE_BACK.to_string());
+        let _ = tx
+            .send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                    field_type: SetupFieldType::Selector as i32,
+                    prompt,
+                    options,
+                    default_value,
+                })),
+            }))
+            .await;
+        let answer = response_rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("setup channel closed during the native model step"))?;
+        let answer = answer.trim();
+        if answer.to_ascii_lowercase().starts_with("back") {
+            return Ok(None);
+        }
+        // An empty answer is the first model, as Enter on the selector is.
+        let picked = match answer {
+            "" => native::CATALOGUE.first(),
+            name => native::CATALOGUE.iter().find(|m| m.id.eq_ignore_ascii_case(name)),
+        };
+        let Some(model) = picked else {
+            send_system(tx, format!("'{answer}' is not a native model."), SystemMessageType::Error).await;
+            continue;
+        };
+        if native::installed(model, &env.models) == native::Installed::Verified {
+            break model;
+        }
+        if install_at_the_wizard(model, tx, response_rx, env, jobs).await? {
+            break model;
+        }
+    };
+    // The record: embrad loads the model while the remaining questions are
+    // answered. The configuration the wizard saves names the same model,
+    // and the brain writes the record from it again at every start.
+    match native::write_settings(&env.settings, Some(&native::Wanted::new(model))) {
+        Ok(()) => {
+            send_system(tx, format!("{} is installed. embrad loads it now, while the setup goes on.", model.id), SystemMessageType::Info).await
+        }
+        Err(e) => {
+            send_system(
+                tx,
+                format!("{} is installed. Its record could not be written yet ({e}); the brain writes it when the setup is saved.", model.id),
+                SystemMessageType::Info,
+            )
+            .await
+        }
+    }
+    info!(target: "setup::native", model = model.id, "native model chosen");
+    Ok(Some(model))
+}
+
+/// Install `model` and follow the job at the wizard. `true` when its file is
+/// there and checked; `false` when the job did not finish or was stopped,
+/// and the model question is asked again.
+async fn install_at_the_wizard(
+    model: &'static NativeModel,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    response_rx: &mut mpsc::Receiver<String>,
+    env: &crate::native_model::Env,
+    jobs: &Jobs,
+) -> Result<bool> {
+    let mut events = match jobs.start(env, JobKind::Install, model) {
+        Ok(events) => {
+            send_system(
+                tx,
+                format!(
+                    "Installing {}: its file ({} MB) is downloaded and checked, and the lines below follow the updater.",
+                    model.id,
+                    crate::native_model::mb(model.bytes)
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+            events
+        }
+        // A console that left and came back: the install it started runs
+        // still, and is followed from where it is.
+        Err(running) if running.kind == JobKind::Install && running.model.id == model.id => match jobs.follow() {
+            Some(events) => {
+                let how_far = running.last_line.map(|line| format!(": {line}")).unwrap_or_default();
+                send_system(tx, format!("The install of {} runs already{how_far}.", model.id), SystemMessageType::Info).await;
+                events
+            }
+            // It ended this moment: the question is asked again and says how the file stands.
+            None => return Ok(false),
+        },
+        Err(running) => {
+            send_system(
+                tx,
+                format!(
+                    "The {} of {} runs, and one job runs at a time. /native cancel stops it, or wait for it and pick again.",
+                    running.kind.noun(),
+                    running.model.id
+                ),
+                SystemMessageType::Error,
+            )
+            .await;
+            return Ok(false);
+        }
+    };
+    let mut ask = true;
+    let end = loop {
+        if ask {
+            ask = false;
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                        field_type: SetupFieldType::Text as i32,
+                        prompt: format!(
+                            "{} is being installed. Press Enter for how far it is, or answer {NATIVE_CANCEL} to stop it and choose again:",
+                            model.id
+                        ),
+                        options: vec![],
+                        default_value: NATIVE_PROGRESS.to_string(),
+                    })),
+                }))
+                .await;
+        }
+        tokio::select! {
+            event = events.recv() => match event {
+                Ok(JobEvent::Line(line)) => send_system(tx, line, SystemMessageType::Info).await,
+                Ok(JobEvent::Ended(end)) => break end,
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => {
+                    break jobs.last().map(|last| last.end).unwrap_or_else(|| JobEnd::Failed("its end was not heard".to_string()));
+                }
+            },
+            answer = response_rx.recv() => {
+                // The console left. The job is the brain's and goes on.
+                let answer = answer.ok_or_else(|| anyhow!("setup channel closed during the native model's install; the install goes on"))?;
+                if answer.trim().eq_ignore_ascii_case(NATIVE_CANCEL) {
+                    jobs.stop();
+                    send_system(tx, format!("Stopping the install of {}.", model.id), SystemMessageType::Info).await;
+                } else {
+                    let how_far = jobs.running().and_then(|running| running.last_line).unwrap_or_else(|| "The updater has not said how far it is yet.".to_string());
+                    send_system(tx, how_far, SystemMessageType::Info).await;
+                    ask = true;
+                }
+            }
+        }
+    };
+    match end {
+        JobEnd::Done | JobEnd::Nothing(_) => Ok(true),
+        JobEnd::Refused(why) | JobEnd::Failed(why) => {
+            send_system(tx, format!("{} was not installed: {why}. Pick again, or go back to a provider.", model.id), SystemMessageType::Error).await;
+            Ok(false)
+        }
+        JobEnd::Stopped => {
+            send_system(
+                tx,
+                format!("The install of {} was stopped. What arrived is kept, and the next install goes on from it.", model.id),
+                SystemMessageType::Info,
+            )
+            .await;
+            Ok(false)
+        }
+    }
+}
 
 async fn send_system(
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -947,23 +1175,232 @@ mod tests {
         assert!(failed.contains("[backends.ollama] upstream must answer. Re-entering endpoint step…"), "{failed}");
     }
 
-    /// The gateway question: the direct option, an empty answer or anything
-    /// that is not the gateway option stores no gateway and asks nothing more.
+    /// The routing question has three answers, in this order: directly,
+    /// through the gateway, natively. The direct option, an empty answer or
+    /// anything that is neither of the other two stores no gateway and asks
+    /// nothing more; the native one asks nothing more here either.
     #[tokio::test]
     async fn the_direct_option_or_an_empty_answer_stores_no_gateway() {
-        for answer in [GATEWAY_DIRECT, "", "whatever"] {
+        for (answer, expected) in [
+            (GATEWAY_DIRECT, Routing::Direct),
+            ("", Routing::Direct),
+            ("whatever", Routing::Direct),
+            (ROUTING_NATIVE, Routing::Native),
+            ("natively", Routing::Native),
+        ] {
             let (resp_tx, mut resp_rx) = mpsc::channel(32);
             let (user_tx, mut user_rx) = mpsc::channel(32);
             user_tx.send(answer.to_string()).await.unwrap();
             drop(user_tx);
             let out = run_gateway_subflow(&resp_tx, &mut user_rx).await.unwrap();
-            assert!(out.is_none(), "{answer:?}");
+            assert_eq!(out, expected, "{answer:?}");
             let frames = drain(&mut resp_rx).await;
             let ps = prompts(&frames);
             assert_eq!(ps.len(), 1);
             assert_eq!(ps[0].prompt, GATEWAY_QUESTION);
-            assert_eq!(ps[0].options, vec![GATEWAY_DIRECT.to_string(), GATEWAY_THROUGH.to_string()]);
+            assert_eq!(
+                ps[0].prompt,
+                "Reach the AI providers directly, through WSDS Local AI Gateway, or run a model natively on this machine (experimental)?"
+            );
+            assert_eq!(
+                ps[0].options,
+                ["Directly", "Through WSDS Local AI Gateway", "Natively on this machine (experimental)"],
+                "the three answers, the direct one first"
+            );
             assert_eq!(ps[0].default_value, "", "no default: nothing to leak into the next text prompt");
+        }
+    }
+
+    use crate::native_model::test_support::{install, machine, stand_in};
+
+    /// What the wizard sent next, in two minutes at most: a deadline no
+    /// loaded machine reaches when the step works.
+    enum Sent {
+        Said(String),
+        Asked(SetupPrompt),
+    }
+
+    async fn next(resp_rx: &mut mpsc::Receiver<Result<ConversationResponse, Status>>) -> Sent {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(120), resp_rx.recv())
+            .await
+            .expect("the wizard says something")
+            .expect("the wizard is there")
+            .expect("a frame");
+        match frame.response_type {
+            Some(conversation_response::ResponseType::System(m)) => Sent::Said(m.content),
+            Some(conversation_response::ResponseType::Setup(p)) => Sent::Asked(p),
+            other => panic!("neither a message nor a question: {other:?}"),
+        }
+    }
+
+    async fn said(resp_rx: &mut mpsc::Receiver<Result<ConversationResponse, Status>>) -> String {
+        match next(resp_rx).await {
+            Sent::Said(text) => text,
+            Sent::Asked(p) => panic!("a question where a message was expected: {}", p.prompt),
+        }
+    }
+
+    async fn question(resp_rx: &mut mpsc::Receiver<Result<ConversationResponse, Status>>) -> SetupPrompt {
+        match next(resp_rx).await {
+            Sent::Asked(p) => p,
+            Sent::Said(text) => panic!("a message where a question was expected: {text}"),
+        }
+    }
+
+    /// An install that says where it is, then waits for `gate`.
+    fn gated_updater(root: &std::path::Path, gate: &std::path::Path) -> Vec<std::ffi::OsString> {
+        stand_in(
+            root,
+            &format!("echo \"$2: received 270 of 5417 MB (5%)\"\nuntil [ -e '{}' ]; do sleep 0.02; done\necho \"$2: installed and verified\"", gate.display()),
+        )
+    }
+
+    /// The native answer: the notice first, then the model question over the
+    /// catalogue with a way back. A model that is not on the machine is
+    /// installed by a job the question follows; while it runs the operator
+    /// asks how far it is and stops it, and the question is asked again. An
+    /// install that ends writes the record embrad follows.
+    #[tokio::test]
+    async fn the_native_answer_says_what_it_is_asks_the_model_and_installs_it() {
+        let (root, mut env) = machine("wizard-native");
+        let gate = root.join("go-on");
+        env.updater = gated_updater(&root, &gate);
+        let jobs = Jobs::default();
+        let nine = native::by_id("qwen3.5-9b").unwrap();
+        let (resp_tx, mut resp_rx) = mpsc::channel(64);
+        let (user_tx, mut user_rx) = mpsc::channel(8);
+        let operator = async {
+            assert_eq!(said(&mut resp_rx).await, native_notice());
+            let asked = question(&mut resp_rx).await;
+            assert_eq!(asked.field_type, SetupFieldType::Selector as i32);
+            assert_eq!(asked.options, ["qwen3.5-4b", "qwen3.5-9b", NATIVE_BACK], "the catalogue, then the way back");
+            assert_eq!(asked.default_value, "qwen3.5-4b");
+            assert!(asked.prompt.starts_with("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): not installed, downloaded first; "), "{}", asked.prompt);
+
+            // A word that is no model: said, and asked again.
+            user_tx.send("qwen3.5-27b".to_string()).await.unwrap();
+            assert_eq!(said(&mut resp_rx).await, "'qwen3.5-27b' is not a native model.");
+            question(&mut resp_rx).await;
+
+            // The larger model: its install starts, and the question that stands takes text.
+            user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
+            assert_eq!(said(&mut resp_rx).await, "Installing qwen3.5-9b: its file (5417 MB) is downloaded and checked, and the lines below follow the updater.");
+            let waiting = question(&mut resp_rx).await;
+            assert_eq!(waiting.field_type, SetupFieldType::Text as i32);
+            assert_eq!(waiting.prompt, "qwen3.5-9b is being installed. Press Enter for how far it is, or answer cancel to stop it and choose again:");
+            assert_eq!(waiting.default_value, "progress", "Enter sends it: a console sends nothing for an empty line without a default");
+            assert_eq!(said(&mut resp_rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+
+            // Enter: how far it is, and the question again.
+            user_tx.send("progress".to_string()).await.unwrap();
+            assert_eq!(said(&mut resp_rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+            assert_eq!(question(&mut resp_rx).await.prompt, waiting.prompt);
+
+            // Stopped: the model question again, and nothing was asked of embrad.
+            user_tx.send("cancel".to_string()).await.unwrap();
+            assert_eq!(said(&mut resp_rx).await, "Stopping the install of qwen3.5-9b.");
+            assert_eq!(said(&mut resp_rx).await, "The install of qwen3.5-9b was stopped. What arrived is kept, and the next install goes on from it.");
+            assert_eq!(question(&mut resp_rx).await.options.len(), 3);
+            assert_eq!(native::read_settings(&env.settings), Ok(None));
+
+            // Picked again, and this time the file comes.
+            std::fs::write(&gate, "").unwrap();
+            user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
+            assert!(said(&mut resp_rx).await.starts_with("Installing qwen3.5-9b: "));
+            let mut heard = Vec::new();
+            loop {
+                match next(&mut resp_rx).await {
+                    Sent::Said(text) if text.starts_with("qwen3.5-9b is installed.") => break heard.push(text),
+                    Sent::Said(text) => heard.push(text),
+                    Sent::Asked(p) => assert_eq!(p.prompt, waiting.prompt),
+                }
+            }
+            assert!(heard.iter().any(|line| line == "qwen3.5-9b: installed and verified"), "{heard:?}");
+            assert_eq!(heard.last().map(String::as_str), Some("qwen3.5-9b is installed. embrad loads it now, while the setup goes on."));
+        };
+        let (picked, ()) = tokio::join!(run_native_subflow(&resp_tx, &mut user_rx, &env, &jobs), operator);
+        assert_eq!(picked.unwrap().map(|m| m.id), Some("qwen3.5-9b"));
+        assert_eq!(native::read_settings(&env.settings), Ok(Some(native::Wanted::new(nine))), "embrad loads it while the setup goes on");
+    }
+
+    /// The way back writes nothing. A console that leaves ends the step by
+    /// its name, and an install it started goes on: a console that comes
+    /// back to the question follows it from where it is. A model that is
+    /// installed is asked for at once.
+    #[tokio::test]
+    async fn the_native_answers_back_writes_nothing_and_a_console_that_left_finds_its_install_running() {
+        let (root, mut env) = machine("wizard-native-left");
+        let gate = root.join("go-on");
+        env.updater = gated_updater(&root, &gate);
+        let jobs = Jobs::default();
+        let run = |answers: Vec<&'static str>| {
+            let (env, jobs) = (env.clone(), jobs.clone());
+            async move {
+                let (resp_tx, mut resp_rx) = mpsc::channel(64);
+                let (user_tx, mut user_rx) = mpsc::channel(8);
+                for answer in answers {
+                    user_tx.send(answer.to_string()).await.unwrap();
+                }
+                drop(user_tx);
+                let out = run_native_subflow(&resp_tx, &mut user_rx, &env, &jobs).await;
+                (out.map(|m| m.map(|m| m.id)).map_err(|e| e.to_string()), system_texts(&drain(&mut resp_rx).await))
+            }
+        };
+
+        // Back, at once and in any case of letters.
+        for back in [NATIVE_BACK, "back"] {
+            let (out, texts) = run(vec![back]).await;
+            assert_eq!(out, Ok(None), "{back}");
+            assert_eq!(texts, [native_notice()]);
+        }
+        assert!(!env.settings.exists(), "nothing was asked of embrad");
+
+        // The console leaves at the model question.
+        let (out, _) = run(vec![]).await;
+        assert_eq!(out.unwrap_err(), "setup channel closed during the native model step");
+
+        // It leaves while the model is installed: the step ends by its name, and the job goes on.
+        let (out, texts) = run(vec!["qwen3.5-9b"]).await;
+        assert_eq!(out.unwrap_err(), "setup channel closed during the native model's install; the install goes on");
+        assert!(texts.iter().any(|t| t.starts_with("Installing qwen3.5-9b: ")), "{texts:?}");
+        assert_eq!(jobs.running().map(|running| running.model.id), Some("qwen3.5-9b"), "the install is the brain's, not the console's");
+
+        // A console comes back and picks the same model: it follows the install that runs.
+        let (resp_tx, mut resp_rx) = mpsc::channel(64);
+        let (user_tx, mut user_rx) = mpsc::channel(8);
+        let operator = async {
+            assert_eq!(said(&mut resp_rx).await, native_notice());
+            question(&mut resp_rx).await;
+            user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
+            let found = said(&mut resp_rx).await;
+            assert!(found.starts_with("The install of qwen3.5-9b runs already"), "{found}");
+            std::fs::write(&gate, "").unwrap();
+            loop {
+                if let Sent::Said(text) = next(&mut resp_rx).await
+                    && text.starts_with("qwen3.5-9b is installed.")
+                {
+                    break;
+                }
+            }
+        };
+        let (picked, ()) = tokio::join!(run_native_subflow(&resp_tx, &mut user_rx, &env, &jobs), operator);
+        assert_eq!(picked.unwrap().map(|m| m.id), Some("qwen3.5-9b"));
+
+        // A model whose file is on the machine: no job, the record at once; Enter is the first model.
+        let four = native::by_id("qwen3.5-4b").unwrap();
+        install(four, &env);
+        let (out, texts) = run(vec![""]).await;
+        assert_eq!(out, Ok(Some("qwen3.5-4b")));
+        assert_eq!(texts, [native_notice(), "qwen3.5-4b is installed. embrad loads it now, while the setup goes on.".to_string()]);
+        assert_eq!(native::read_settings(&env.settings), Ok(Some(native::Wanted::new(four))));
+    }
+
+    #[test]
+    fn the_native_notice_says_what_the_model_leads_and_names_the_identity_import() {
+        let notice = native_notice();
+        assert!(notice.starts_with("A native model (experimental) runs on this machine's own processor: Qwen3.5 4B or Qwen3.5 9B."), "{notice}");
+        for must in ["leads Learning Mode", "the seal is permanent", "can be imported instead", "Imported_Intelligence", "/provider --setup"] {
+            assert!(notice.contains(must), "{must}: {notice}");
         }
     }
 
@@ -985,7 +1422,7 @@ mod tests {
         user_tx.send(uri.clone()).await.unwrap();
         drop(user_tx);
         let out = run_gateway_subflow(&resp_tx, &mut user_rx).await.unwrap();
-        assert_eq!(out, Some((gateway(&uri), "0.1.0".to_string())));
+        assert_eq!(out, Routing::Gateway(gateway(&uri), "0.1.0".to_string()));
         let frames = drain(&mut resp_rx).await;
         let ps = prompts(&frames);
         assert_eq!(ps[1].prompt, "Enter the gateway's unified listener endpoint (http://host:4000):");
@@ -1014,7 +1451,7 @@ mod tests {
             user_tx.send(bail.to_string()).await.unwrap();
             drop(user_tx);
             let out = run_gateway_subflow(&resp_tx, &mut user_rx).await.unwrap();
-            assert!(out.is_none(), "{bad}");
+            assert_eq!(out, Routing::Direct, "{bad}");
             let frames = drain(&mut resp_rx).await;
             let texts = system_texts(&frames);
             if bad == "localhost" {

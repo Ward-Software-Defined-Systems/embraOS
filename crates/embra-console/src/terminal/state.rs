@@ -32,8 +32,11 @@ pub enum SetupStep {
     /// Sprint 5: OpenAI-compat sub-flow — bearer token prompt.
     BearerToken,
     /// Sprint 5: OpenAI-compat sub-flow — model selector populated
-    /// from the probe.
+    /// from the probe. Also the native answer's model question.
     ModelSelect,
+    /// A native model's file is being installed (experimental): a question
+    /// that takes text, so that a command can be typed while it runs.
+    ModelInstall,
     Timezone,
     Confirm,
 }
@@ -526,7 +529,9 @@ impl AppState {
             SetupStep::Endpoint
         } else if lower.contains("bearer") || lower.contains("auth") {
             SetupStep::BearerToken
-        } else if lower.contains("select a model") || lower.contains("which model") {
+        } else if lower.contains("is being installed") {
+            SetupStep::ModelInstall
+        } else if lower.contains("select a model") || lower.contains("which model") || lower.contains("select a native model") {
             SetupStep::ModelSelect
         } else if lower.contains("name") && !lower.contains("api") {
             SetupStep::Name
@@ -567,6 +572,7 @@ impl AppState {
                 SetupStep::Endpoint => "Enter the endpoint URL (or press Enter for default)...",
                 SetupStep::BearerToken => "Enter bearer token (or press Enter for no auth)...",
                 SetupStep::ModelSelect => "↑/↓ to choose model, Enter to confirm",
+                SetupStep::ModelInstall => "Enter for progress, or cancel to stop it...",
                 SetupStep::Timezone => "Enter timezone (or press Enter for default)...",
                 SetupStep::Confirm => "Enter 1 to confirm or 2 to restart...",
             },
@@ -704,6 +710,25 @@ mod native_render_tests {
         assert_eq!(
             AppState::infer_setup_step("Configuration summary: …. Confirm?"),
             SetupStep::Confirm
+        );
+    }
+
+    /// The wizard's three native prompts: the routing question keeps the
+    /// Provider header, the model question is a model selector, and the
+    /// question that stands while a model is installed is its own step.
+    #[test]
+    fn infer_setup_step_recognizes_the_native_answers_prompts() {
+        assert_eq!(
+            AppState::infer_setup_step("Reach the AI providers directly, through WSDS Local AI Gateway, or run a model natively on this machine (experimental)?"),
+            SetupStep::Provider
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): not installed, downloaded first."),
+            SetupStep::ModelSelect
+        );
+        assert_eq!(
+            AppState::infer_setup_step("qwen3.5-9b is being installed. Press Enter for how far it is, or answer cancel to stop it and choose again:"),
+            SetupStep::ModelInstall
         );
     }
 

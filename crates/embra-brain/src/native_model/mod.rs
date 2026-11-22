@@ -75,6 +75,48 @@ impl Env {
     }
 }
 
+/// A size as the updater's lines say it.
+pub(crate) fn mb(bytes: u64) -> u64 {
+    bytes / (1024 * 1024)
+}
+
+/// How a model's file stands on this machine, for a question that offers
+/// the model.
+pub(crate) fn file_words(model: &contract::NativeModel, env: &Env) -> String {
+    match contract::installed(model, &env.models) {
+        contract::Installed::Verified => "installed".to_string(),
+        contract::Installed::No => "not installed, downloaded first".to_string(),
+        contract::Installed::Partial(bytes) => format!("{} of {} MB downloaded, the rest is downloaded first", mb(bytes), mb(model.bytes)),
+        contract::Installed::Unverified(why) => format!("its file is checked first ({why})"),
+    }
+}
+
+/// The question that offers the catalogue's models, and its options: the
+/// ids, with `current` (the model kept loaded) first, since a console's
+/// selector starts on the first option whatever the default. `/model`,
+/// `/provider --setup native` and the wizard ask it.
+pub(crate) fn catalogue_question(current: Option<&str>, env: &Env) -> (String, Vec<String>) {
+    let mut ids: Vec<String> = contract::CATALOGUE.iter().map(|m| m.id.to_string()).collect();
+    if let Some(at) = current.and_then(|current| ids.iter().position(|id| id == current)) {
+        let kept = ids.remove(at);
+        ids.insert(0, kept);
+    }
+    let stands: Vec<String> = contract::CATALOGUE
+        .iter()
+        .map(|m| format!("{} is {} ({}, {} MB): {}", m.id, m.label, m.quantisation, mb(m.bytes), file_words(m, env)))
+        .collect();
+    (format!("Select a native model (experimental). {}.", stands.join("; ")), ids)
+}
+
+/// Ask for no model, when the record asks for one: the wizard's way back
+/// from the native answer. `true` when the record was written.
+pub(crate) fn ask_for_none(env: &Env) -> bool {
+    match contract::read_settings(&env.settings) {
+        Ok(None) => false,
+        Ok(Some(_)) | Err(_) => contract::write_settings(&env.settings, None).is_ok(),
+    }
+}
+
 /// What the stored configuration asks embrad for: the model kept loaded
 /// with its window, or none. A stored window the model cannot be given (a
 /// catalogue that changed under it) is the model's default.
@@ -300,6 +342,25 @@ pub(crate) mod test_support {
             updater: vec![OsString::from("/nonexistent/embra-update")],
         };
         (root, env)
+    }
+
+    /// A model's file as the updater leaves it: of the catalogue's size
+    /// (sparse: no byte is written) with the record that vouches for it.
+    pub(crate) fn install(model: &'static contract::NativeModel, env: &Env) {
+        std::fs::create_dir_all(model.dir(&env.models)).unwrap();
+        let file = std::fs::File::create(model.file_path(&env.models)).unwrap();
+        file.set_len(model.bytes).unwrap();
+        let meta = std::fs::metadata(model.file_path(&env.models)).unwrap();
+        contract::write_verified(&model.verified_path(&env.models), &contract::Verified::of(model, &meta)).unwrap();
+        assert_eq!(contract::installed(model, &env.models), contract::Installed::Verified);
+    }
+
+    /// A stand-in for the updater: a shell script, run as `/bin/sh <script>`
+    /// so that no test executes a file it has just written.
+    pub(crate) fn stand_in(root: &std::path::Path, body: &str) -> Vec<OsString> {
+        let script = root.join("updater.sh");
+        std::fs::write(&script, format!("{body}\n")).unwrap();
+        vec![OsString::from("/bin/sh"), script.into_os_string()]
     }
 
     /// embrad's status for what is asked: `state` about `wanted`.

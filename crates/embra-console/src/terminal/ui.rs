@@ -230,7 +230,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
                 SetupStep::ApiKey => "API Key",
                 SetupStep::Endpoint => "Endpoint",
                 SetupStep::BearerToken => "Bearer",
-                SetupStep::ModelSelect => "Model",
+                SetupStep::ModelSelect | SetupStep::ModelInstall => "Model",
                 SetupStep::Timezone => "Timezone",
                 SetupStep::Confirm => "Confirm",
             };

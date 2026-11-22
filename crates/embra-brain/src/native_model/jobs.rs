@@ -100,7 +100,6 @@ pub(crate) enum JobEvent {
 struct Slot {
     running: Running,
     stop: Arc<Notify>,
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by `follow`, which the wizard calls (its own commit)"))]
     feed: broadcast::Sender<JobEvent>,
 }
 
@@ -161,7 +160,6 @@ impl Jobs {
     }
 
     /// Follow the job that runs, from its next line on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the wizard follows a download that runs when a console comes back to it (its own commit)"))]
     pub(crate) fn follow(&self) -> Option<broadcast::Receiver<JobEvent>> {
         self.lock().slot.as_ref().map(|slot| slot.feed.subscribe())
     }

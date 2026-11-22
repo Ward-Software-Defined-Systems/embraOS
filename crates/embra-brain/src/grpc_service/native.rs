@@ -13,7 +13,7 @@
 
 use super::*;
 use crate::native_model::jobs::{JobEnd, JobEvent, JobKind, Jobs};
-use crate::native_model::{self, Env};
+use crate::native_model::{self, Env, mb};
 use crate::provider::openai_compat::OpenAiCompatPreset;
 use embra_boot::native_model::{self as contract, Installed, NativeModel};
 use std::time::Duration;
@@ -46,21 +46,6 @@ impl NativeHands {
     }
 }
 
-/// A size as the updater's lines say it.
-fn mb(bytes: u64) -> u64 {
-    bytes / (1024 * 1024)
-}
-
-/// How a model's file stands on this machine, for the selector's prompt.
-fn file_words(model: &NativeModel, env: &Env) -> String {
-    match contract::installed(model, &env.models) {
-        Installed::Verified => "installed".to_string(),
-        Installed::No => "not installed, downloaded first".to_string(),
-        Installed::Partial(bytes) => format!("{} of {} MB downloaded, the rest is downloaded first", mb(bytes), mb(model.bytes)),
-        Installed::Unverified(why) => format!("its file is checked first ({why})"),
-    }
-}
-
 /// The native model a typed name means: an id of the catalogue, whatever
 /// its case. The error names the catalogue.
 pub(super) fn native_model_choice(wanted: &str) -> Result<&'static NativeModel, String> {
@@ -76,18 +61,10 @@ pub(super) fn native_model_choice(wanted: &str) -> Result<&'static NativeModel, 
 /// first option as well as the default: the console's selector starts on
 /// the first option whatever the default, so Enter keeps the model.
 pub(super) fn native_model_selection(current: Option<&str>, hands: NativeHands) -> (SetupPrompt, OpenAiCompatSetupState) {
-    let mut ids: Vec<String> = contract::CATALOGUE.iter().map(|m| m.id.to_string()).collect();
-    if let Some(at) = current.and_then(|current| ids.iter().position(|id| id == current)) {
-        let kept = ids.remove(at);
-        ids.insert(0, kept);
-    }
-    let stands: Vec<String> = contract::CATALOGUE
-        .iter()
-        .map(|m| format!("{} is {} ({}, {} MB): {}", m.id, m.label, m.quantisation, mb(m.bytes), file_words(m, &hands.env)))
-        .collect();
+    let (question, ids) = native_model::catalogue_question(current, &hands.env);
     let prompt = SetupPrompt {
         field_type: SetupFieldType::Selector as i32,
-        prompt: format!("Select a native model (experimental). {}.", stands.join("; ")),
+        prompt: question,
         options: ids.clone(),
         default_value: ids.first().cloned().unwrap_or_default(),
     };
@@ -719,8 +696,8 @@ pub(super) async fn handle_native_before_a_session(args: &str, tx: &mpsc::Sender
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_model::test_support::machine;
-    use embra_boot::native_model::{Verified, Wanted, by_id};
+    use crate::native_model::test_support::{install, machine, stand_in};
+    use embra_boot::native_model::{Wanted, by_id};
     use std::ffi::OsString;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -775,25 +752,6 @@ mod tests {
         }
     }
 
-    /// The model's file as the updater leaves it: of the catalogue's size
-    /// (sparse: no byte is written) with the record that vouches for it.
-    fn install(model: &'static NativeModel, env: &Env) {
-        std::fs::create_dir_all(model.dir(&env.models)).unwrap();
-        let file = std::fs::File::create(model.file_path(&env.models)).unwrap();
-        file.set_len(model.bytes).unwrap();
-        let meta = std::fs::metadata(model.file_path(&env.models)).unwrap();
-        contract::write_verified(&model.verified_path(&env.models), &Verified::of(model, &meta)).unwrap();
-        assert_eq!(contract::installed(model, &env.models), Installed::Verified);
-    }
-
-    /// A stand-in for the updater, run as `/bin/sh <script>` (see the jobs'
-    /// own tests).
-    fn stand_in(root: &std::path::Path, body: &str) -> Vec<OsString> {
-        let script = root.join("updater.sh");
-        std::fs::write(&script, format!("{body}\n")).unwrap();
-        vec![OsString::from("/bin/sh"), script.into_os_string()]
-    }
-
     /// What a console is told next, in two minutes at most: a deadline no
     /// loaded machine reaches when the job works.
     async fn told(rx: &mut mpsc::Receiver<Result<ConversationResponse, Status>>) -> String {
@@ -837,9 +795,9 @@ mod tests {
         // A download that stopped, and a file nobody checked.
         std::fs::create_dir_all(nine().dir(&env.models)).unwrap();
         std::fs::File::create(nine().partial_path(&env.models)).unwrap().set_len(1024 * 1024 * 1024).unwrap();
-        assert_eq!(file_words(nine(), &env), "1024 of 5417 MB downloaded, the rest is downloaded first");
+        assert_eq!(native_model::file_words(nine(), &env), "1024 of 5417 MB downloaded, the rest is downloaded first");
         std::fs::remove_file(four().verified_path(&env.models)).unwrap();
-        assert!(file_words(four(), &env).starts_with("its file is checked first ("), "{}", file_words(four(), &env));
+        assert!(native_model::file_words(four(), &env).starts_with("its file is checked first ("), "{}", native_model::file_words(four(), &env));
     }
 
     /// A model whose file is installed is asked for at once: the stored
