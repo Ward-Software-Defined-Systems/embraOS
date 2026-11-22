@@ -22,7 +22,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable, closed with `v0.23.0-phase1` (2026-11-01). Phase 2 — In progress, first released as `v0.24.0-phase2` (2026-11-13), latest release `v0.27.0-phase2` (2026-11-20; the working branch is `phase2`): the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, the network on every card (DHCP or a static address, Wi-Fi, a hostname, a clock checked while the OS runs), the drivers of the hypervisors, of wired hardware and of the common Wi-Fi card families with their firmware and microcode, the web console on the machine's display with keyboard and mouse, turns that survive a failed model call, a restart or a power cut (`/continue`), eight themes for the web console, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
+**Current Status:** Phase 1 — Stable, closed with `v0.23.0-phase1` (2026-11-01). Phase 2 — In progress, first released as `v0.24.0-phase2` (2026-11-13), latest release `v0.28.0-phase2` (2026-11-22; the working branch is `phase2`): the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, the network on every card (DHCP or a static address, Wi-Fi, a hostname, a clock checked while the OS runs), the drivers of the hypervisors, of wired hardware, of the common Wi-Fi card families and of Intel's and AMD's graphics, with their firmware and microcode, the web console on the machine's display with keyboard and mouse, turns that survive a failed model call, a restart or a power cut (`/continue`), eight themes for the web console, and a UEFI installer ISO for bare metal and the hypervisors ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
 > **Supported platforms.** embraOS boots on UEFI firmware with Secure Boot off, on x86_64
 > and aarch64: from the disk image, from the same disk converted for a hypervisor, or
@@ -35,7 +35,7 @@
 > with an AMD processor, and a Raspberry Pi 5 through a UEFI firmware. The drivers of
 > wired hardware and of the common Wi-Fi card families, with their firmware, and the CPU
 > microcode are in the image. The latest release,
-> `v0.27.0-phase2`, publishes the installer ISOs (x86_64 and aarch64, one per storage
+> `v0.28.0-phase2`, publishes the installer ISOs (x86_64 and aarch64, one per storage
 > engine); the disk image and the hypervisor conversions come from a build. What each
 > surface has been validated on, and what is still TBD, is in
 > [docs/VALIDATION-STATUS.md](docs/VALIDATION-STATUS.md).
