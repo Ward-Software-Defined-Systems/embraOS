@@ -30,9 +30,10 @@
 > Apple Silicon; VMware ESXi 8.0 U2 (the OVA and the ISO); Microsoft Hyper-V generation 2
 > (the VHDX and the ISO); VMware Fusion on Apple Silicon (the ISO); Parallels Desktop 26.5
 > on an Intel Mac (the machine it imports and the ISO) and Parallels Desktop on Apple
-> Silicon (the ISO); and bare metal on two machines so far: a YouYeeToo X1 single-board
-> computer installed from the ISO, and a Lenovo ThinkPad E550 laptop. The drivers of wired
-> hardware and of the common Wi-Fi card families, with their firmware, and the CPU
+> Silicon (the ISO); and bare metal on five machines so far: a YouYeeToo X1 single-board
+> computer, a Lenovo ThinkPad E550 laptop, an AWOW NY41S stick PC, a Beelink SER mini PC
+> with an AMD processor, and a Raspberry Pi 5 through a UEFI firmware. The drivers of
+> wired hardware and of the common Wi-Fi card families, with their firmware, and the CPU
 > microcode are in the image. The latest release,
 > `v0.27.0-phase2`, publishes the installer ISOs (x86_64 and aarch64, one per storage
 > engine); the disk image and the hypervisor conversions come from a build. What each

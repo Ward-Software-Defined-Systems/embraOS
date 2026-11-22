@@ -15,7 +15,7 @@ import os
 import subprocess
 
 OUT = os.path.dirname(os.path.abspath(__file__))
-W, H = 1200, 1177
+W, H = 1200, 1189
 SCALE = 2
 
 # ---------------------------------------------------------------- palette --
@@ -232,7 +232,7 @@ def slab(y, h, title, color, lines, order_note=None):
 # The four slabs stack with a 24 px gap for the connector's label; a slab is
 # 35 px to its first line and 12.6 px a line after it.
 Y_EMBRAD, H_EMBRAD = 712, 120
-Y_KERNEL, H_KERNEL = Y_EMBRAD + H_EMBRAD + 24, 70
+Y_KERNEL, H_KERNEL = Y_EMBRAD + H_EMBRAD + 24, 82
 Y_GRUB, H_GRUB = Y_KERNEL + H_KERNEL + 24, 82
 Y_HOST, H_HOST = Y_GRUB + H_GRUB + 24, 84
 assert Y_HOST + H_HOST + 37 == H, "the canvas ends 37 px under the last slab"
@@ -248,7 +248,8 @@ slab(Y_EMBRAD, H_EMBRAD, "embrad · PID 1 · init and service supervisor", SLAB,
 ])
 slab(Y_KERNEL, H_KERNEL, "Linux kernel 6.18 LTS · Buildroot 2026.02.1 · initramfs /init = embra-init", KERNEL, [
     "drivers built in: virtio, AHCI, NVMe, pvscsi, vmxnet3, Hyper-V, wired NICs, SAS, RAID, USB · Wi-Fi drivers as modules · every linux-firmware family on the rootfs · probe-time firmware and CPU microcode as initrds",
-    "SquashFS (xz) · ext4 · the firmware's framebuffer (simpledrm) or the hypervisor's display: the boot log, then the display console drawn in software · console=tty0 console=ttyS0 | ttyAMA0 · embra.slot=a|b",
+    "SquashFS (xz) · ext4 · the display through the kernel's own driver, the hypervisor's, or the firmware's framebuffer (simpledrm): the boot log, then the display console drawn in software",
+    "on the kernel line: console=tty0 console=ttyS0 | ttyAMA0 · embra.slot=a|b",
     "embra-init (sync, no tokio): mounts proc, sys, dev → / from the slot's partition by GPT name (rootfs_a | rootfs_b), read-only → /embra/state from state → /embra/data from data → chroot → exec /sbin/embrad",
 ])
 slab(Y_GRUB, H_GRUB, "UEFI firmware · GRUB 2.12 on the EFI System Partition · the A/B state in grubenv", KERNEL, [
