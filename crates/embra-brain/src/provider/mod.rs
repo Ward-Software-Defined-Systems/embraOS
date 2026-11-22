@@ -66,6 +66,44 @@ impl ProviderKind {
             ProviderKind::LmStudio => "LM Studio",
         }
     }
+
+    /// Every provider, in the order the lists name them.
+    pub const ALL: [ProviderKind; 4] =
+        [ProviderKind::Anthropic, ProviderKind::Gemini, ProviderKind::Ollama, ProviderKind::LmStudio];
+
+    /// The wire this provider speaks. Every place that treats the providers
+    /// by family matches on this and on nothing else (no wildcard arm, no
+    /// list of stored names), so a provider added to the enum has to be
+    /// placed here before anything compiles. Guard
+    /// `no_place_tells_the_providers_apart_by_a_wildcard_or_a_list_of_names`.
+    pub fn wire(self) -> Wire {
+        match self {
+            ProviderKind::Anthropic => Wire::Anthropic,
+            ProviderKind::Gemini => Wire::Gemini,
+            ProviderKind::Ollama => Wire::OpenAiCompat(openai_compat::OpenAiCompatPreset::Ollama),
+            ProviderKind::LmStudio => Wire::OpenAiCompat(openai_compat::OpenAiCompatPreset::LmStudio),
+        }
+    }
+
+    /// The stored names as the end of a sentence: `'anthropic', 'gemini',
+    /// 'ollama', or 'lm_studio'`.
+    pub fn named_list() -> String {
+        let names: Vec<String> = Self::ALL.iter().map(|k| format!("'{}'", k.as_str())).collect();
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{}, or {last}", rest.join(", ")),
+            Some((last, _)) => last.clone(),
+            None => String::new(),
+        }
+    }
+}
+
+/// The wire families: Anthropic's, Gemini's, and the OpenAI-compatible one
+/// with the preset that speaks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wire {
+    Anthropic,
+    Gemini,
+    OpenAiCompat(openai_compat::OpenAiCompatPreset),
 }
 
 /// The operator's name for a provider stored as a string
@@ -237,4 +275,171 @@ pub trait LlmProvider: Send + Sync {
         &self,
         descriptors: &[&'static crate::tools::registry::ToolDescriptor],
     ) -> ToolManifest;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openai_compat::OpenAiCompatPreset;
+    use super::*;
+
+    /// One stored name, one label and one wire for each provider, and the
+    /// preset a provider is read both ways.
+    #[test]
+    fn every_provider_has_one_stored_name_one_label_and_one_wire() {
+        // A provider added to the enum stops this match from compiling: it
+        // gets its place here, in `ALL` and in `wire`.
+        let place = |kind: ProviderKind| match kind {
+            ProviderKind::Anthropic => 0,
+            ProviderKind::Gemini => 1,
+            ProviderKind::Ollama => 2,
+            ProviderKind::LmStudio => 3,
+        };
+        assert_eq!(ProviderKind::ALL.len(), 4, "as many as the match above has arms");
+        let (mut names, mut labels) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+        for (at, kind) in ProviderKind::ALL.into_iter().enumerate() {
+            assert_eq!(place(kind), at, "{kind:?}");
+            assert_eq!(ProviderKind::from_str(kind.as_str()), Some(kind), "{kind:?}");
+            assert!(names.insert(kind.as_str()), "{kind:?} shares a stored name");
+            assert!(labels.insert(kind.label()), "{kind:?} shares a label");
+            assert_eq!(provider_label(kind.as_str()), kind.label());
+            match kind.wire() {
+                Wire::OpenAiCompat(preset) => {
+                    assert_eq!(preset.as_kind(), kind);
+                    assert_eq!(OpenAiCompatPreset::of(kind), Some(preset));
+                    assert!(OpenAiCompatPreset::ALL.contains(&preset), "{preset:?}");
+                }
+                Wire::Anthropic | Wire::Gemini => assert_eq!(OpenAiCompatPreset::of(kind), None, "{kind:?}"),
+            }
+        }
+        for preset in OpenAiCompatPreset::ALL {
+            assert_eq!(preset.as_kind().wire(), Wire::OpenAiCompat(preset));
+        }
+        assert_eq!(ProviderKind::from_str("openai"), None);
+        assert_eq!(provider_label("openai"), "openai", "a name that is no provider is shown as stored");
+    }
+
+    /// The sentence a mistyped provider gets ends with this list.
+    #[test]
+    fn the_named_list_is_the_stored_names_in_order() {
+        assert_eq!(ProviderKind::named_list(), "'anthropic', 'gemini', 'ollama', or 'lm_studio'");
+    }
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Whether an arm's first words name a provider: a kind, a preset, a
+    /// wire (behind `Some(` and a path, or bare) or a stored name.
+    fn names_a_provider(arm: &str) -> bool {
+        let arm = arm.strip_prefix("Some(").unwrap_or(arm);
+        let bare = arm.trim_start_matches(|c: char| c.is_ascii_lowercase() || c == '_' || c == ':');
+        ["ProviderKind::", "OpenAiCompatPreset::", "Wire::"].iter().any(|set| bare.starts_with(set))
+            || ProviderKind::ALL.iter().any(|kind| arm.starts_with(&format!("\"{}\"", kind.as_str())))
+    }
+
+    /// The lines of `source` where an arm that names a provider has a
+    /// wildcard or a bare binding for a sibling (`_ => ..`, `other => ..`):
+    /// the arm a provider added later falls into without anyone deciding.
+    /// Siblings are the arms at the same indentation in the same block.
+    fn wildcards_beside_a_provider_arm(source: &str) -> Vec<usize> {
+        let lines: Vec<&str> = source.lines().collect();
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let catches_the_rest = |line: &str| {
+            line.trim().split_once("=>").is_some_and(|(pattern, _)| {
+                let pattern = pattern.trim();
+                pattern.starts_with("_ if ")
+                    || (!pattern.is_empty()
+                        && pattern.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+            })
+        };
+        let mut found = std::collections::BTreeSet::new();
+        for (at, line) in lines.iter().enumerate() {
+            if !line.contains("=>") || !names_a_provider(line.trim()) {
+                continue;
+            }
+            let depth = indent(line);
+            let in_block = |other: &str| other.trim().is_empty() || indent(other) >= depth;
+            let before = lines[..at].iter().rev().take_while(|other| in_block(other)).count();
+            let after = lines[at + 1..].iter().take_while(|other| in_block(other)).count();
+            for (sibling, other) in lines.iter().enumerate().take(at + after + 1).skip(at - before) {
+                if indent(other) == depth && catches_the_rest(other) {
+                    found.insert(sibling + 1);
+                }
+            }
+        }
+        found.into_iter().collect()
+    }
+
+    /// No place in the brain tells the providers apart by a wildcard arm or
+    /// by a list of stored names: three wildcards once meant LM Studio for
+    /// every preset that was not Ollama, and a provider added to the enum
+    /// would have been LM Studio there without a compile error. A family
+    /// decision matches on `ProviderKind::wire()`, a preset on its own
+    /// variants, and every arm names what it is for.
+    ///
+    /// Not read: this file (the names, the labels and the wire are defined
+    /// here), `provider/image/` (the image provider's own set), `migrations/`
+    /// (a step reads what was stored when it was written), and tests.
+    #[test]
+    fn no_place_tells_the_providers_apart_by_a_wildcard_or_a_list_of_names() {
+        // The scan finds the shapes it is for, and leaves a match alone that
+        // names every arm.
+        let preset_by_wildcard = "    let preset = match kind {\n        ProviderKind::Ollama => A,\n        _ => B,\n    };\n";
+        assert_eq!(wildcards_beside_a_provider_arm(preset_by_wildcard), vec![3]);
+        let name_by_wildcard = "match provider {\n    \"gemini\" => a(),\n\n    // the rest\n    _ => b(),\n}\n";
+        assert_eq!(wildcards_beside_a_provider_arm(name_by_wildcard), vec![5]);
+        let by_binding = "match active {\n    Some(crate::provider::Wire::Gemini) => a(),\n    cloud => b(cloud),\n}\n";
+        assert_eq!(wildcards_beside_a_provider_arm(by_binding), vec![3]);
+        let guarded = "match kind {\n    ProviderKind::Gemini => a(),\n    _ if x => b(),\n    ProviderKind::Anthropic => c(),\n}\n";
+        assert_eq!(wildcards_beside_a_provider_arm(guarded), vec![3]);
+        let named = "match kind.wire() {\n    Wire::Gemini => {\n        match other {\n            _ => a(),\n        }\n    }\n    Wire::Anthropic | Wire::OpenAiCompat(_) => b(),\n}\nmatch n {\n    _ => c(),\n}\n";
+        assert_eq!(wildcards_beside_a_provider_arm(named), Vec::<usize>::new());
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&src, &mut files);
+        files.sort();
+        // Two stored names offered as one pattern, in either order.
+        let mut lists = Vec::new();
+        for a in ProviderKind::ALL {
+            for b in ProviderKind::ALL {
+                if a != b {
+                    lists.push(format!("\"{}\" | \"{}\"", a.as_str(), b.as_str()));
+                }
+            }
+        }
+        let (mut read, mut hits) = (0usize, Vec::new());
+        for file in files {
+            let name = file.strip_prefix(&src).unwrap().display().to_string();
+            let test_file = name.ends_with("tests.rs");
+            if name == "provider/mod.rs" || name.starts_with("provider/image/") || name.starts_with("migrations/") || test_file {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            // What stands above a file's first test module.
+            let production = text.split("\n#[cfg(test)]\n").next().unwrap_or("");
+            read += 1;
+            for line in wildcards_beside_a_provider_arm(production) {
+                hits.push(format!("src/{name}:{line}: a wildcard arm beside an arm that names a provider"));
+            }
+            for (n, line) in production.lines().enumerate() {
+                if lists.iter().any(|list| line.contains(list.as_str())) {
+                    hits.push(format!("src/{name}:{}: two stored names as one pattern", n + 1));
+                }
+            }
+        }
+        assert!(read > 100, "the brain's sources were read: {read} files");
+        assert!(
+            hits.is_empty(),
+            "match on ProviderKind::wire() or on the preset, with every arm named:\n{}",
+            hits.join("\n")
+        );
+    }
 }

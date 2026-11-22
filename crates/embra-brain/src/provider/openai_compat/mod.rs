@@ -122,6 +122,17 @@ impl OpenAiCompatPreset {
             Self::LmStudio => "http://localhost:1234",
         }
     }
+
+    /// Every preset, in the order the lists name them.
+    pub const ALL: [Self; 2] = [Self::Ollama, Self::LmStudio];
+
+    /// The preset a provider is, when it is one.
+    pub fn of(kind: ProviderKind) -> Option<Self> {
+        match kind.wire() {
+            super::Wire::OpenAiCompat(preset) => Some(preset),
+            super::Wire::Anthropic | super::Wire::Gemini => None,
+        }
+    }
 }
 
 pub struct OpenAICompatProvider {

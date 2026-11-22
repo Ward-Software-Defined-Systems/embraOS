@@ -7,7 +7,8 @@ use tracing::info;
 use crate::db::WardsonDbClient;
 use crate::provider::anthropic::AnthropicProvider;
 use crate::provider::gemini::GeminiProvider;
-use crate::provider::{LlmProvider, ProviderKind, ValidationResult};
+use crate::provider::openai_compat::OpenAiCompatPreset;
+use crate::provider::{LlmProvider, ProviderKind, ValidationResult, Wire};
 use embra_common::proto::brain::*;
 
 /// The phase the running build belongs to: the pre-release part of the
@@ -361,7 +362,7 @@ impl OpenAiCompatConfig {
     /// model stored, the endpoint blank.
     pub fn gateway_only_presets(&self) -> Vec<crate::provider::openai_compat::OpenAiCompatPreset> {
         use crate::provider::openai_compat::OpenAiCompatPreset;
-        [OpenAiCompatPreset::Ollama, OpenAiCompatPreset::LmStudio]
+        OpenAiCompatPreset::ALL
             .into_iter()
             .filter(|p| {
                 let (endpoint, model) = self.fields(*p);
@@ -943,26 +944,17 @@ pub async fn run_config_wizard_grpc(
     // Sprint 5: OpenAI-compat presets dispatch into the new sub-flow
     // (Endpoint → Bearer → Probe-and-Select). Existing 2-way path
     // covers Anthropic/Gemini unchanged.
-    let openai_compat_setup = match provider_kind {
-        ProviderKind::Ollama => Some(
+    let openai_compat_setup = match provider_kind.wire() {
+        Wire::OpenAiCompat(preset) => Some(
             crate::setup::wizard::run_openai_compat_subflow(
-                crate::provider::openai_compat::OpenAiCompatPreset::Ollama,
+                preset,
                 gateway.as_ref().map(|(g, _)| g),
                 tx,
                 response_rx,
             )
             .await?,
         ),
-        ProviderKind::LmStudio => Some(
-            crate::setup::wizard::run_openai_compat_subflow(
-                crate::provider::openai_compat::OpenAiCompatPreset::LmStudio,
-                gateway.as_ref().map(|(g, _)| g),
-                tx,
-                response_rx,
-            )
-            .await?,
-        ),
-        _ => None,
+        Wire::Anthropic | Wire::Gemini => None,
     };
 
     // Honor an env-var of the wrong shape with a clear info message
@@ -1310,44 +1302,10 @@ pub async fn run_config_wizard_grpc(
     };
     // Sprint 4: include the active model so the console status bar
     // refreshes from its first-paint default to whatever provider
-    // the operator just selected. Inline match — display_model_for
-    // lives in grpc_service.rs and we don't want a circular dep.
-    // Sprint 5: OpenAI-compat presets show the operator-selected
-    // model id (Ollama/LM Studio) populated from the sub-flow.
-    let model: String = match config.api_provider.as_str() {
-        // Gemini: the seeded alias, shown the way the turn path shows it.
-        "gemini" => crate::provider::gemini::display_name_for(
-            config
-                .gemini_model
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(crate::provider::gemini::DEFAULT_MODEL),
-        ),
-        "ollama" => {
-            if config.openai_compat.ollama_model.is_empty() {
-                "ollama".to_string()
-            } else {
-                config.openai_compat.ollama_model.clone()
-            }
-        }
-        "lm_studio" => {
-            if config.openai_compat.lm_studio_model.is_empty() {
-                "lm_studio".to_string()
-            } else {
-                config.openai_compat.lm_studio_model.clone()
-            }
-        }
-        // Anthropic (and any unknown): reflect the chosen/persisted model
-        // so the status bar shows what the operator selected (every
-        // Anthropic wizard label now seeds it explicitly). (Inline rather
-        // than calling grpc_service's resolver — that would be a circular
-        // dep, per the note above.)
-        _ => config
-            .anthropic_model
-            .clone()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string()),
-    };
+    // the operator just selected: the stored model, as
+    // `stored_model_display` reads it (a preset shows the model id the
+    // sub-flow stored).
+    let model: String = stored_model_display(&config.api_provider, &config);
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
             ModeTransition {
@@ -1362,6 +1320,76 @@ pub async fn run_config_wizard_grpc(
     })).await;
 
     Ok(config)
+}
+
+/// The model a stored configuration names for `provider`, for display: the
+/// stored values alone. The turn path's own name for it also takes the
+/// environment's overrides (`grpc_service::display_model_for`).
+pub(crate) fn stored_model_display(provider: &str, config: &SystemConfig) -> String {
+    match ProviderKind::from_str(provider).map(ProviderKind::wire) {
+        Some(Wire::Gemini) => crate::provider::gemini::display_name_for(
+            config
+                .gemini_model
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(crate::provider::gemini::DEFAULT_MODEL),
+        ),
+        Some(Wire::OpenAiCompat(preset)) => preset_model_display(preset, &config.openai_compat),
+        // Anthropic, and a stored name that is no provider, which reads as
+        // Anthropic everywhere: the model the operator chose (every
+        // Anthropic wizard label seeds it), else the default's name.
+        Some(Wire::Anthropic) | None => config
+            .anthropic_model
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string()),
+    }
+}
+
+/// A preset's model for display: the stored id, or the preset's stored
+/// name while no model is chosen (a first boot before the wizard ends).
+pub(crate) fn preset_model_display(preset: OpenAiCompatPreset, presets: &OpenAiCompatConfig) -> String {
+    let (_, model) = presets.fields(preset);
+    if model.is_empty() {
+        preset.as_kind().as_str().to_string()
+    } else {
+        model.to_string()
+    }
+}
+
+#[cfg(test)]
+mod stored_model_display_tests {
+    use super::*;
+
+    /// The model a status token names from the stored values: each
+    /// provider's own, a preset's name while no model is chosen, and
+    /// Anthropic's for a stored name that is no provider.
+    #[test]
+    fn the_stored_model_is_named_per_provider() {
+        let mut config = SystemConfig::boot_fallback(String::new(), "UTC".to_string());
+        let default_gemini = crate::provider::gemini::display_name_for(crate::provider::gemini::DEFAULT_MODEL);
+        assert_eq!(stored_model_display("gemini", &config), default_gemini);
+        config.gemini_model = Some(String::new());
+        assert_eq!(stored_model_display("gemini", &config), default_gemini, "an empty value is no value");
+
+        for (name, other) in [("anthropic", "nobody"), ("nobody", "anthropic")] {
+            config.anthropic_model = None;
+            assert_eq!(stored_model_display(name, &config), crate::provider::anthropic::DEFAULT_DISPLAY_NAME);
+            config.anthropic_model = Some("fable-5".to_string());
+            assert_eq!(stored_model_display(name, &config), "fable-5", "{name} reads as {other} does");
+        }
+
+        for preset in OpenAiCompatPreset::ALL {
+            let name = preset.as_kind().as_str();
+            assert_eq!(stored_model_display(name, &config), name, "no model chosen yet");
+            assert_eq!(preset_model_display(preset, &config.openai_compat), name);
+        }
+        config.openai_compat.ollama_model = "qwen3.5:9b".to_string();
+        config.openai_compat.lm_studio_model = "qwen/qwen3.5-9b".to_string();
+        assert_eq!(stored_model_display("ollama", &config), "qwen3.5:9b");
+        assert_eq!(stored_model_display("lm_studio", &config), "qwen/qwen3.5-9b");
+        assert_eq!(stored_model_display("anthropic", &config), "fable-5", "a preset's model is its own");
+    }
 }
 
 #[cfg(test)]

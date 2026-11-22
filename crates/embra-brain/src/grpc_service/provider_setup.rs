@@ -1,6 +1,7 @@
 //! Providers: the switch, the setup flows of `/provider --setup`, the model and effort resolvers, `build_provider_from_config`.
 
 use super::*;
+use crate::provider::Wire;
 
 /// Sprint 5 follow-up: post-wizard reconfigure for OpenAI-compat
 /// presets. Set by `/provider --setup <ollama|lm_studio>`; advanced
@@ -154,10 +155,7 @@ pub(super) async fn handle_provider_command(
                 Some(k) => k,
                 None => {
                     send_msg(
-                        format!(
-                            "Unknown provider '{}'. Use 'anthropic', 'gemini', 'ollama', or 'lm_studio'.",
-                            explicit
-                        ),
+                        format!("Unknown provider '{}'. Use {}.", explicit, ProviderKind::named_list()),
                         SystemMessageType::Error,
                     )
                     .await;
@@ -165,31 +163,23 @@ pub(super) async fn handle_provider_command(
                 }
             }
         };
-        // OpenAI-compat presets dispatch to the multi-step
-        // reconfigure flow (Sprint 5 follow-up). Anthropic/Gemini
-        // continue with the single-step pending_key_setup pattern.
-        match target {
-            ProviderKind::Ollama | ProviderKind::LmStudio => {
+        // A preset goes to the multi-step reconfigure flow. Anthropic and
+        // Gemini take a key: the prompt goes out as a setup message, and
+        // the next user input is intercepted (`pending_key_setup`).
+        let prompt_text = match target.wire() {
+            Wire::OpenAiCompat(preset) => {
                 // Clear any other pending state — only one --setup
                 // flow at a time.
                 *pending_key_setup.lock().await = None;
-                enter_openai_compat_setup(target, tx, db, pending_openai_compat_setup).await;
+                enter_openai_compat_setup(preset, tx, db, pending_openai_compat_setup).await;
                 return;
             }
-            ProviderKind::Anthropic | ProviderKind::Gemini => {
-                // Clear any in-flight OpenAI-compat reconfigure too.
-                *pending_openai_compat_setup.lock().await = None;
-                *pending_key_setup.lock().await = Some(KeySetupStep::Key(target));
-            }
-        }
-        // Prompt for the key. Console renders as a system message;
-        // the next user input will be intercepted.
-        let prompt_text = match target {
-            ProviderKind::Anthropic => "Enter your Anthropic API key (next message):",
-            ProviderKind::Gemini => "Enter your Gemini API key (next message):",
-            // Unreachable — handled by the dispatch match above.
-            ProviderKind::Ollama | ProviderKind::LmStudio => unreachable!(),
+            Wire::Anthropic => "Enter your Anthropic API key (next message):",
+            Wire::Gemini => "Enter your Gemini API key (next message):",
         };
+        // Clear any in-flight OpenAI-compat reconfigure too.
+        *pending_openai_compat_setup.lock().await = None;
+        *pending_key_setup.lock().await = Some(KeySetupStep::Key(target));
         let _ = tx
             .send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::Setup(
@@ -205,8 +195,8 @@ pub(super) async fn handle_provider_command(
         return;
     }
 
-    match action {
-        "" | "status" => {
+    match (action, ProviderKind::from_str(action)) {
+        ("" | "status", _) => {
             let cfg = config::load_config(db).await.ok();
             let provider = cfg
                 .as_ref()
@@ -230,7 +220,11 @@ pub(super) async fn handle_provider_command(
             // is the active provider.
             let wait = cfg
                 .as_ref()
-                .filter(|_| matches!(provider.as_str(), "ollama" | "lm_studio"))
+                .filter(|_| {
+                    ProviderKind::from_str(&provider)
+                        .and_then(crate::provider::openai_compat::OpenAiCompatPreset::of)
+                        .is_some()
+                })
                 .map(|c| format!(" Model wait: {}.", super::slash::model_wait_words(&c.openai_compat)))
                 .unwrap_or_default();
             send_msg(
@@ -242,8 +236,7 @@ pub(super) async fn handle_provider_command(
             )
             .await;
         }
-        "anthropic" | "gemini" | "ollama" | "lm_studio" => {
-            let target = ProviderKind::from_str(action).unwrap();
+        (_, Some(target)) => {
             // Pre-check: is the target configured? For Anthropic/Gemini
             // that's a recorded API key; for OpenAI-compat presets it's
             // an endpoint + model in `config.system.openai_compat`.
@@ -279,8 +272,8 @@ pub(super) async fn handle_provider_command(
             //   through the gateway may have no direct endpoint). Bearer is
             //   intentionally NOT required — no-auth Ollama is a valid
             //   configuration.
-            let refusal: Option<String> = match target {
-                ProviderKind::Anthropic | ProviderKind::Gemini => cfg
+            let refusal: Option<String> = match target.wire() {
+                Wire::Anthropic | Wire::Gemini => cfg
                     .key_for(target)
                     .is_none()
                     .then(|| {
@@ -290,16 +283,7 @@ pub(super) async fn handle_provider_command(
                             target.as_str()
                         )
                     }),
-                ProviderKind::Ollama | ProviderKind::LmStudio => {
-                    let preset = match target {
-                        ProviderKind::Ollama => {
-                            crate::provider::openai_compat::OpenAiCompatPreset::Ollama
-                        }
-                        ProviderKind::LmStudio => {
-                            crate::provider::openai_compat::OpenAiCompatPreset::LmStudio
-                        }
-                        _ => unreachable!(),
-                    };
+                Wire::OpenAiCompat(preset) => {
                     cfg.openai_compat
                         .for_preset_routed(preset, cfg.provider_gateway.as_ref())
                         .err()
@@ -345,9 +329,9 @@ pub(super) async fn handle_provider_command(
             }
             perform_provider_swap(target, db, session_mgr, tx).await;
         }
-        _ => {
+        (unknown, None) => {
             send_msg(
-                format!("Unknown provider '{}'. Use 'anthropic', 'gemini', 'ollama', or 'lm_studio'.", action),
+                format!("Unknown provider '{}'. Use {}.", unknown, ProviderKind::named_list()),
                 SystemMessageType::Error,
             )
             .await;
@@ -378,8 +362,8 @@ pub(super) async fn perform_provider_swap(
         // Sprint 5: OpenAI-compat presets are pre-checked for
         // endpoint + model configuration rather than api_key presence.
         // Bearer comes from runtime env; absence is OK (no-auth path).
-        let target_key: String = match target {
-            ProviderKind::Anthropic | ProviderKind::Gemini => match cfg.key_for(target) {
+        let target_key: String = match target.wire() {
+            Wire::Anthropic | Wire::Gemini => match cfg.key_for(target) {
                 Some(k) => k.to_string(),
                 None => {
                     let _ = tx
@@ -398,16 +382,7 @@ pub(super) async fn perform_provider_swap(
                     return;
                 }
             },
-            ProviderKind::Ollama | ProviderKind::LmStudio => {
-                let preset = match target {
-                    ProviderKind::Ollama => {
-                        crate::provider::openai_compat::OpenAiCompatPreset::Ollama
-                    }
-                    ProviderKind::LmStudio => {
-                        crate::provider::openai_compat::OpenAiCompatPreset::LmStudio
-                    }
-                    _ => unreachable!(),
-                };
+            Wire::OpenAiCompat(preset) => {
                 if let Err(reason) = cfg
                     .openai_compat
                     .for_preset_routed(preset, cfg.provider_gateway.as_ref())
@@ -576,15 +551,10 @@ pub(super) async fn perform_provider_swap(
 /// matching the post-`9b4b64d` resolve-fresh pattern Anthropic and
 /// Gemini use to avoid stale-after-swap bugs.
 pub(super) fn build_openai_compat_provider(
-    kind: ProviderKind,
+    preset: crate::provider::openai_compat::OpenAiCompatPreset,
     config: &config::SystemConfig,
 ) -> Result<Arc<dyn LlmProvider>, String> {
     use crate::provider::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset};
-    let preset = match kind {
-        ProviderKind::Ollama => OpenAiCompatPreset::Ollama,
-        ProviderKind::LmStudio => OpenAiCompatPreset::LmStudio,
-        _ => unreachable!("build_openai_compat_provider called with non-OpenAI-compat kind"),
-    };
     // The base is the stored endpoint, or the provider gateway's `{url}/ollama`
     // or `{url}/lmstudio` while the gateway is on, when the gateway's own
     // upstream answers; a preset set up through the gateway with no direct
@@ -607,7 +577,7 @@ pub(super) fn build_openai_compat_provider(
     // wait is the operator's (`/model-wait`), else the default.
     Ok(Arc::new(
         provider
-            .with_reasoning_effort(resolve_provider_effort(kind, config))
+            .with_reasoning_effort(resolve_provider_effort(preset.as_kind(), config))
             .with_model_wait(config.openai_compat.model_wait()),
     ))
 }
@@ -623,40 +593,27 @@ pub(crate) fn provider_probe_target(
     boot_key: &str,
 ) -> Option<crate::provider::health::ProbeTarget> {
     use crate::provider::health::ProbeTarget;
-    use crate::provider::openai_compat::OpenAiCompatPreset;
     let kind = ProviderKind::from_str(&cfg.api_provider).unwrap_or(ProviderKind::Anthropic);
-    match kind {
-        ProviderKind::Anthropic | ProviderKind::Gemini => {
-            let key = cfg
-                .key_for(kind)
-                .map(str::to_string)
-                .unwrap_or_else(|| boot_key.to_string());
-            if key.is_empty() {
-                return None;
-            }
-            let model = match kind {
-                ProviderKind::Anthropic => resolve_anthropic_model(cfg).0,
-                _ => resolve_gemini_model_id(cfg),
-            };
-            Some(ProbeTarget {
-                kind,
-                model,
-                key,
-                endpoint: crate::provider::gateway::base_for(
-                    cfg.provider_gateway.as_ref(),
-                    kind,
-                    match kind {
-                        ProviderKind::Anthropic => crate::provider::anthropic::DIRECT_BASE,
-                        _ => crate::provider::gemini::DIRECT_BASE,
-                    },
-                ),
-            })
+    // A provider reached with a key: without one there is nothing to probe.
+    let keyed = |model: fn(&config::SystemConfig) -> String, direct: &str| {
+        let key = cfg
+            .key_for(kind)
+            .map(str::to_string)
+            .unwrap_or_else(|| boot_key.to_string());
+        if key.is_empty() {
+            return None;
         }
-        ProviderKind::Ollama | ProviderKind::LmStudio => {
-            let preset = match kind {
-                ProviderKind::Ollama => OpenAiCompatPreset::Ollama,
-                _ => OpenAiCompatPreset::LmStudio,
-            };
+        Some(ProbeTarget {
+            kind,
+            model: model(cfg),
+            key,
+            endpoint: crate::provider::gateway::base_for(cfg.provider_gateway.as_ref(), kind, direct),
+        })
+    };
+    match kind.wire() {
+        Wire::Anthropic => keyed(|c| resolve_anthropic_model(c).0, crate::provider::anthropic::DIRECT_BASE),
+        Wire::Gemini => keyed(resolve_gemini_model_id, crate::provider::gemini::DIRECT_BASE),
+        Wire::OpenAiCompat(preset) => {
             // The routed base: the stored endpoint, or the gateway's prefix
             // while it is on; a preset without a direct endpoint reads as
             // unconfigured while the gateway is off.
@@ -698,8 +655,8 @@ pub(crate) fn build_provider_from_config(
         .key_for(kind)
         .map(str::to_string)
         .unwrap_or_else(|| fallback_key.to_string());
-    match kind {
-        ProviderKind::Gemini => {
+    match kind.wire() {
+        Wire::Gemini => {
             let model_id = resolve_gemini_model_id(cfg);
             // The base first: `with_cache` builds the cache manager on it.
             let p = GeminiProvider::with_model(active_key, model_id)
@@ -715,7 +672,7 @@ pub(crate) fn build_provider_from_config(
             };
             Ok(Arc::new(p))
         }
-        ProviderKind::Anthropic => {
+        Wire::Anthropic => {
             let (model_id, display) = resolve_anthropic_model(cfg);
             Ok(Arc::new(
                 AnthropicProvider::with_model(active_key, model_id, display)
@@ -727,7 +684,7 @@ pub(crate) fn build_provider_from_config(
                     .with_effort(resolve_anthropic_effort(cfg)),
             ))
         }
-        ProviderKind::Ollama | ProviderKind::LmStudio => build_openai_compat_provider(kind, cfg),
+        Wire::OpenAiCompat(preset) => build_openai_compat_provider(preset, cfg),
     }
 }
 
@@ -739,24 +696,12 @@ pub(crate) fn build_provider_from_config(
 /// finishes). Sprint 5: signature changed from `-> &'static str` to
 /// `-> String` because OpenAI-compat models can't be hardcoded literals.
 pub(super) fn display_model_for(provider: &str, config: &config::SystemConfig) -> String {
-    match provider {
-        "gemini" => crate::provider::gemini::display_name_for(&resolve_gemini_model_id(config)),
-        "anthropic" => resolve_anthropic_model(config).1,
-        "ollama" => {
-            if config.openai_compat.ollama_model.is_empty() {
-                "ollama".to_string()
-            } else {
-                config.openai_compat.ollama_model.clone()
-            }
-        }
-        "lm_studio" => {
-            if config.openai_compat.lm_studio_model.is_empty() {
-                "lm_studio".to_string()
-            } else {
-                config.openai_compat.lm_studio_model.clone()
-            }
-        }
-        _ => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
+    match ProviderKind::from_str(provider).map(ProviderKind::wire) {
+        Some(Wire::Gemini) => crate::provider::gemini::display_name_for(&resolve_gemini_model_id(config)),
+        Some(Wire::Anthropic) => resolve_anthropic_model(config).1,
+        Some(Wire::OpenAiCompat(preset)) => config::preset_model_display(preset, &config.openai_compat),
+        // A stored name that is no provider reads as Anthropic everywhere.
+        None => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
     }
 }
 
@@ -776,18 +721,11 @@ pub(super) const BEARER_SKIP: &str = "Skip";
 /// current config + env-var bearer, captures snapshot defaults,
 /// emits the initial Endpoint Text prompt.
 pub(super) async fn enter_openai_compat_setup(
-    target: ProviderKind,
+    preset: crate::provider::openai_compat::OpenAiCompatPreset,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     db: &Arc<WardsonDbClient>,
     pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-    let preset = match target {
-        ProviderKind::Ollama => OpenAiCompatPreset::Ollama,
-        ProviderKind::LmStudio => OpenAiCompatPreset::LmStudio,
-        _ => unreachable!("enter_openai_compat_setup called with non-OpenAI-compat kind"),
-    };
-
     let cfg = config::load_config(db).await.ok();
     let (current_endpoint, current_model) = cfg
         .as_ref()
@@ -1493,11 +1431,13 @@ pub(super) fn step_after_saved_key(target: ProviderKind) -> Option<KeySetupStep>
     }
 }
 
-/// "Anthropic" or "Gemini", for the model step's messages.
+/// "Anthropic" or "Gemini", for the model step's messages. The step is
+/// reached for those two alone (`step_after_saved_key`); a preset reads as
+/// Anthropic here and in the four matches below, as it did.
 pub(super) fn cloud_provider_name(target: ProviderKind) -> &'static str {
-    match target {
-        ProviderKind::Gemini => "Gemini",
-        _ => "Anthropic",
+    match target.wire() {
+        Wire::Gemini => "Gemini",
+        Wire::Anthropic | Wire::OpenAiCompat(_) => "Anthropic",
     }
 }
 
@@ -1508,9 +1448,9 @@ pub(super) fn cloud_provider_name(target: ProviderKind) -> &'static str {
 /// `opus-4.7`, an env override, the customtools id) leaves the wizard
 /// order; the prompt names it either way.
 pub(super) fn cloud_model_selection(target: ProviderKind, cfg: &config::SystemConfig) -> SetupPrompt {
-    let labels: &[&str] = match target {
-        ProviderKind::Gemini => &config::GEMINI_WIZARD_LABELS,
-        _ => &config::ANTHROPIC_WIZARD_LABELS,
+    let labels: &[&str] = match target.wire() {
+        Wire::Gemini => &config::GEMINI_WIZARD_LABELS,
+        Wire::Anthropic | Wire::OpenAiCompat(_) => &config::ANTHROPIC_WIZARD_LABELS,
     };
     let current = display_model_for(target.as_str(), cfg);
     let mut options: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
@@ -1534,9 +1474,9 @@ pub(super) fn cloud_model_selection(target: ProviderKind, cfg: &config::SystemCo
 
 /// The alias one of the provider's wizard labels seeds.
 pub(super) fn model_alias_for_label(target: ProviderKind, label: &str) -> Option<String> {
-    match target {
-        ProviderKind::Gemini => config::gemini_model_from_label(label),
-        _ => config::anthropic_model_from_label(label),
+    match target.wire() {
+        Wire::Gemini => config::gemini_model_from_label(label),
+        Wire::Anthropic | Wire::OpenAiCompat(_) => config::anthropic_model_from_label(label),
     }
 }
 
@@ -1544,11 +1484,11 @@ pub(super) fn model_alias_for_label(target: ProviderKind, label: &str) -> Option
 /// labels, or an alias typed the way `/model` takes it.
 pub(super) fn model_alias_for_pick(target: ProviderKind, answer: &str) -> Option<String> {
     let answer = answer.trim();
-    model_alias_for_label(target, answer).or_else(|| match target {
-        ProviderKind::Gemini => {
-            parse_gemini_model_choice(answer).map(|(_, alias)| alias.to_string())
+    model_alias_for_label(target, answer).or_else(|| match target.wire() {
+        Wire::Gemini => parse_gemini_model_choice(answer).map(|(_, alias)| alias.to_string()),
+        Wire::Anthropic | Wire::OpenAiCompat(_) => {
+            parse_anthropic_model_choice(answer).map(|(_, display)| display.to_string())
         }
-        _ => parse_anthropic_model_choice(answer).map(|(_, display)| display.to_string()),
     })
 }
 
@@ -1611,9 +1551,9 @@ pub(super) async fn handle_setup_model_pick(
         .await;
         return;
     };
-    match target {
-        ProviderKind::Gemini => cfg.gemini_model = Some(alias.clone()),
-        _ => cfg.anthropic_model = Some(alias.clone()),
+    match target.wire() {
+        Wire::Gemini => cfg.gemini_model = Some(alias.clone()),
+        Wire::Anthropic | Wire::OpenAiCompat(_) => cfg.anthropic_model = Some(alias.clone()),
     }
     if let Err(e) = config::save_config(db, &cfg).await {
         send(
@@ -1953,20 +1893,18 @@ pub(super) async fn handle_model_command(
     let active = cfg.api_provider.clone();
     let trimmed = args.trim();
 
-    match ProviderKind::from_str(&active) {
-        Some(kind @ (ProviderKind::Ollama | ProviderKind::LmStudio)) => {
-            let preset = match kind {
-                ProviderKind::Ollama => crate::provider::openai_compat::OpenAiCompatPreset::Ollama,
-                _ => crate::provider::openai_compat::OpenAiCompatPreset::LmStudio,
-            };
+    match ProviderKind::from_str(&active).map(ProviderKind::wire) {
+        Some(Wire::OpenAiCompat(preset)) => {
             handle_local_model_command(preset, trimmed, cfg, tx, db, session_mgr, pending_openai_compat_setup).await;
             return;
         }
-        Some(ProviderKind::Gemini) => {
+        Some(Wire::Gemini) => {
             handle_gemini_model_command(trimmed, cfg, tx, db, session_mgr).await;
             return;
         }
-        _ => {}
+        // Anthropic, and a stored name that is no provider, which reads as
+        // Anthropic everywhere.
+        Some(Wire::Anthropic) | None => {}
     }
 
     let options = anthropic_model_options();

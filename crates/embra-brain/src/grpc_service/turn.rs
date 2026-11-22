@@ -174,20 +174,18 @@ async fn handle_turn(
             // build_openai_compat_provider.
             let active_kind = ProviderKind::from_str(&loaded_config.api_provider)
                 .unwrap_or(ProviderKind::Anthropic);
-            let needs_api_key = matches!(
-                active_kind,
-                ProviderKind::Anthropic | ProviderKind::Gemini
-            );
-            if needs_api_key
+            // The environment variable that carries the key, for a provider
+            // that takes one.
+            let key_env_var = match active_kind.wire() {
+                crate::provider::Wire::Anthropic => Some("ANTHROPIC_API_KEY"),
+                crate::provider::Wire::Gemini => Some("GEMINI_API_KEY"),
+                crate::provider::Wire::OpenAiCompat(_) => None,
+            };
+            if let Some(env_var) = key_env_var
                 && api_key.is_empty()
                 && loaded_config.key_for(active_kind).is_none()
             {
                 let provider_label = active_kind.label();
-                let env_var = match active_kind {
-                    ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
-                    ProviderKind::Gemini => "GEMINI_API_KEY",
-                    _ => unreachable!(),
-                };
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
                         SystemMessage {

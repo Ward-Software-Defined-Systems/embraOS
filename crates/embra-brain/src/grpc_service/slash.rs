@@ -1104,11 +1104,11 @@ pub(super) fn apply_model_wait(
     presets: &mut config::OpenAiCompatConfig,
     active: ProviderKind,
 ) -> (bool, String) {
-    let scope = match active {
-        ProviderKind::Ollama | ProviderKind::LmStudio => String::new(),
-        cloud => format!(
+    let scope = match active.wire() {
+        crate::provider::Wire::OpenAiCompat(_) => String::new(),
+        crate::provider::Wire::Anthropic | crate::provider::Wire::Gemini => format!(
             " It applies to Ollama and LM Studio; the active provider is {}, whose waits are fixed.",
-            cloud.label()
+            active.label()
         ),
     };
     match action {
@@ -1613,7 +1613,9 @@ pub(super) async fn handle_attach_command(
                         count
                     );
                     if let Ok(cfg) = config::load_config(db).await
-                        && matches!(cfg.api_provider.as_str(), "ollama" | "lm_studio")
+                        && ProviderKind::from_str(&cfg.api_provider)
+                            .and_then(crate::provider::openai_compat::OpenAiCompatPreset::of)
+                            .is_some()
                     {
                         note.push_str(&format!(
                             "\nNote: the active provider is {} — image input works only if the loaded model is vision-capable.",
@@ -2020,11 +2022,7 @@ pub(super) async fn handle_effort_command(
 
     let kind = ProviderKind::from_str(&cfg.api_provider).unwrap_or(ProviderKind::Anthropic);
     let label = kind.label();
-    let preset = match kind {
-        ProviderKind::Ollama => Some(OpenAiCompatPreset::Ollama),
-        ProviderKind::LmStudio => Some(OpenAiCompatPreset::LmStudio),
-        _ => None,
-    };
+    let preset = OpenAiCompatPreset::of(kind);
     let local_model: Option<String> = preset.and_then(|p| non_empty(cfg.openai_compat.fields(p).1));
     let trimmed = args.trim();
 

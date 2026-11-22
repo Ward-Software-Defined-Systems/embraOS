@@ -148,14 +148,11 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
         .unwrap_or_default();
     let active_provider = std::env::var("EMBRA_PROVIDER").unwrap_or_default();
-    let is_openai_compat = matches!(active_provider.as_str(), "ollama" | "lm_studio");
+    let preset = provider::ProviderKind::from_str(&active_provider)
+        .and_then(provider::openai_compat::OpenAiCompatPreset::of);
     if api_key.is_empty() {
-        if is_openai_compat {
-            let bearer_env = match active_provider.as_str() {
-                "ollama" => "EMBRA_OLLAMA_BEARER",
-                "lm_studio" => "EMBRA_LM_STUDIO_BEARER",
-                _ => unreachable!(),
-            };
+        if let Some(preset) = preset {
+            let bearer_env = provider::openai_compat::bearer_env_var(preset);
             let bearer_present = std::env::var(bearer_env).map(|s| !s.is_empty()).unwrap_or(false);
             info!(
                 "OpenAI-compat provider '{}' configured (bearer {})",

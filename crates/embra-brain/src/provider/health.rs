@@ -32,7 +32,7 @@ use super::anthropic::{API_VERSION as ANTHROPIC_API_VERSION, MODELS_PATH as ANTH
 use super::gateway::host_label;
 use super::gemini::V1BETA as GEMINI_V1BETA;
 use super::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset};
-use super::{ProviderError, ProviderKind};
+use super::{ProviderError, ProviderKind, Wire};
 use crate::proactive::{Notification, Priority};
 
 /// Bound on one probe request (mirrors the providers' key-validation
@@ -259,16 +259,16 @@ pub async fn probe(target: Option<&ProbeTarget>) -> ProviderProbe {
     let Some(t) = target else {
         return ProviderProbe::unconfigured();
     };
-    match t.kind {
-        ProviderKind::Anthropic => {
+    match t.kind.wire() {
+        Wire::Anthropic => {
             let url = format!("{}{ANTHROPIC_MODELS_PATH}/{}", t.endpoint, t.model);
             probe_model_url(t, &url, &host_label(&t.endpoint)).await
         }
-        ProviderKind::Gemini => {
+        Wire::Gemini => {
             let url = format!("{}{GEMINI_V1BETA}/models/{}", t.endpoint, t.model);
             probe_model_url(t, &url, &host_label(&t.endpoint)).await
         }
-        ProviderKind::Ollama | ProviderKind::LmStudio => probe_openai_compat(t).await,
+        Wire::OpenAiCompat(preset) => probe_openai_compat(t, preset).await,
     }
 }
 
@@ -342,11 +342,7 @@ fn network_error_text(e: &reqwest::Error) -> String {
 /// Ollama / LM Studio: `GET {base}/v1/models` through the wizard's own
 /// `probe_models`, then an exact-id membership check (the wizard stores
 /// the id the server listed, so exact is right).
-async fn probe_openai_compat(t: &ProbeTarget) -> ProviderProbe {
-    let preset = match t.kind {
-        ProviderKind::Ollama => OpenAiCompatPreset::Ollama,
-        _ => OpenAiCompatPreset::LmStudio,
-    };
+async fn probe_openai_compat(t: &ProbeTarget, preset: OpenAiCompatPreset) -> ProviderProbe {
     let mut out = ProviderProbe::base(t, t.endpoint.clone());
     let started = Instant::now();
     match OpenAICompatProvider::probe_models(preset, &t.endpoint, Some(&t.key)).await {

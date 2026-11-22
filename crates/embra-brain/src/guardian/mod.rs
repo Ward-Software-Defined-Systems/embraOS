@@ -942,10 +942,13 @@ async fn define(
 /// recorded config key and only falls back to this. OpenAI-compat presets
 /// carry their bearer in env, so this returns empty for them (unused).
 fn provider_state_key(cfg: &SystemConfig) -> String {
-    let path = match crate::provider::ProviderKind::from_str(&cfg.api_provider) {
-        Some(crate::provider::ProviderKind::Anthropic) => "/embra/state/api_key_anthropic",
-        Some(crate::provider::ProviderKind::Gemini) => "/embra/state/api_key_gemini",
-        _ => return String::new(),
+    use crate::provider::{ProviderKind, Wire};
+    let path = match ProviderKind::from_str(&cfg.api_provider).map(ProviderKind::wire) {
+        Some(Wire::Anthropic) => "/embra/state/api_key_anthropic",
+        Some(Wire::Gemini) => "/embra/state/api_key_gemini",
+        // A preset carries its bearer in the environment, and a stored name
+        // that is no provider has no key file.
+        Some(Wire::OpenAiCompat(_)) | None => return String::new(),
     };
     std::fs::read_to_string(path)
         .map(|s| s.trim().to_string())

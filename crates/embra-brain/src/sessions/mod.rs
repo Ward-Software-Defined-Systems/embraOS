@@ -460,27 +460,17 @@ impl SessionStore {
         // a Gemini-configured brain).
         let (provider, model) = match crate::config::load_config(&self.db).await {
             Ok(cfg) => {
-                let m = match cfg.api_provider.as_str() {
-                    // Gemini: the stored alias or id, shown the way the
-                    // turn path shows it (`display_name_for`).
-                    "gemini" => crate::provider::gemini::display_name_for(
-                        cfg.gemini_model
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or(crate::provider::gemini::DEFAULT_MODEL),
-                    ),
-                    // Anthropic: reflect the persisted model alias (set by
-                    // the wizard / `/model`), falling back to the default's
-                    // display. Display metadata only — the resolver in
-                    // grpc_service.rs owns the request-time id.
-                    _ => cfg
-                        .anthropic_model
-                        .clone()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| {
-                            crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string()
-                        }),
+                // Display metadata only: the resolvers of the turn path own
+                // the request-time id. Gemini records its stored model and
+                // every other provider Anthropic's, a session created on
+                // Ollama or LM Studio included, as before this match named
+                // them.
+                use crate::provider::{ProviderKind, Wire};
+                let recorded_as = match ProviderKind::from_str(&cfg.api_provider).map(ProviderKind::wire) {
+                    Some(Wire::Gemini) => ProviderKind::Gemini,
+                    Some(Wire::Anthropic | Wire::OpenAiCompat(_)) | None => ProviderKind::Anthropic,
                 };
+                let m = crate::config::stored_model_display(recorded_as.as_str(), &cfg);
                 (Some(cfg.api_provider), Some(m))
             }
             Err(_) => (None, None),

@@ -585,11 +585,11 @@ mod native_loop_tests {
     fn build_openai_compat_provider_unconfigured_errors() {
         // Empty endpoint/model in config → preset reports unconfigured.
         let cfg = empty_config();
-        let err = build_openai_compat_provider(ProviderKind::Ollama, &cfg)
+        let err = build_openai_compat_provider(crate::provider::openai_compat::OpenAiCompatPreset::Ollama, &cfg)
             .err()
             .expect("expected error");
         assert!(err.contains("not configured"), "got: {err}");
-        let err = build_openai_compat_provider(ProviderKind::LmStudio, &cfg)
+        let err = build_openai_compat_provider(crate::provider::openai_compat::OpenAiCompatPreset::LmStudio, &cfg)
             .err()
             .expect("expected error");
         assert!(err.contains("not configured"), "got: {err}");
@@ -600,7 +600,7 @@ mod native_loop_tests {
         let mut cfg = empty_config();
         cfg.openai_compat.ollama_endpoint = "http://localhost:11434".to_string();
         cfg.openai_compat.ollama_model = "gpt-oss:20b".to_string();
-        let provider = build_openai_compat_provider(ProviderKind::Ollama, &cfg).unwrap();
+        let provider = build_openai_compat_provider(crate::provider::openai_compat::OpenAiCompatPreset::Ollama, &cfg).unwrap();
         assert_eq!(provider.kind(), ProviderKind::Ollama);
         assert_eq!(provider.display_name(), "gpt-oss:20b");
     }
@@ -646,7 +646,7 @@ mod native_loop_tests {
         // build_openai_compat_provider reads env each call; we can't
         // observe the bearer field directly (it's private) but we can
         // verify construction succeeds without panic.
-        let _ = build_openai_compat_provider(ProviderKind::Ollama, &cfg).unwrap();
+        let _ = build_openai_compat_provider(crate::provider::openai_compat::OpenAiCompatPreset::Ollama, &cfg).unwrap();
         unsafe {
             std::env::remove_var("EMBRA_OLLAMA_BEARER");
         }
