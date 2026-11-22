@@ -122,6 +122,7 @@ EMBRA_NTP=off ./scripts/run-qemu-aarch64.sh    # the time server the OS asks in 
 EMBRA_BOOT=direct ./scripts/run-qemu-aarch64.sh    # kernel + initramfs from the host: no firmware, no GRUB menu
 EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu-aarch64.sh   # QEMU's DHCP leases this address: the banner's second URL
 EMBRA_USB_HOST=0bda:c811 ./scripts/run-qemu-aarch64.sh      # hand a USB device of this host to the VM (a Wi-Fi adapter)
+EMBRA_MEMORY=12G EMBRA_CPUS=8 ./scripts/run-qemu-aarch64.sh # the VM's memory (4G) and processors (4); EMBRA_CPU=<model> names another processor model
 EMBRA_ISO=output/images/embraos.iso ./scripts/run-qemu-aarch64.sh disk.qcow2   # boot the installer onto a blank qemu-img disk
 EMBRA_ISO_AS=usb EMBRA_DISK_IF=nvme ...            # the medium as a USB stick, the target on NVMe (a DVD on virtio-scsi and
                                                    # virtio-blk by default; EMBRA_DISK_IF=scsi is virtio-scsi)

@@ -9,7 +9,7 @@
 #   ./embraos-backup.sh list                      # List available backups
 #   ./embraos-backup.sh verify                    # Verify current disk image has valid data
 #   ./embraos-backup.sh --image /path/embraos.img verify   # Target a specific image
-#   ./embraos-backup.sh self-test                 # Check the STATE rule below on scratch directories (no root, no image)
+#   ./embraos-backup.sh self-test                 # Check the STATE and DATA rules below on scratch directories (no root, no image)
 #
 # Image resolution: --image <path> → $EMBRAOS_IMAGE → <root>/buildroot-src/output/images/
 # embraos.img → <root>/output/images/embraos.img (same precedence as run-qemu.sh and
@@ -39,6 +39,10 @@
 #       The storage engine's own directory, copied whole; its `.engine` marker
 #       names the engine (fjall: one directory per collection under partitions/;
 #       rocksdb: the column families inside one directory of .sst files)
+#     - workspace/, and everything else on it but backups/ (the OS's own
+#       snapshots) and models/ (the files of the native models, experimental:
+#       gigabytes each and installed again when wanted). A restore leaves the
+#       image's own models where they are (DATA_MACHINE_OWN below).
 #
 # Ordering: WardSONDB does NOT need to be running. This is a file-level backup.
 # The engine picks up the data directory on next start. The files are crash-consistent
@@ -214,6 +218,44 @@ copy_state_in() {
     rsync -a ${3:+"$3"} "${excludes[@]}" "$1/" "$2/"
 }
 
+# --- What of DATA belongs to the machine and to no backup -----------------
+# models/ holds the files of the native models (experimental): each is the
+# catalogue's bytes, gigabytes of them, and is installed again when wanted.
+# The OS's own snapshot holds none and its restore leaves them where they are
+# (it names the two directories of DATA it archives and replaces:
+# crates/embra-update/src/snapshot.rs). This script does the same: a backup
+# carries no model, and a restore leaves the image's own in place. A backup
+# made before this rule carries the models its image had; none is copied
+# back. `self-test` runs the three steps on scratch directories.
+DATA_MACHINE_OWN=(models)
+
+# rsync's exclusions for those names, at DATA's root and nowhere deeper.
+data_excludes() {
+    local name
+    for name in "${DATA_MACHINE_OWN[@]}"; do printf -- '--exclude=/%s\n' "$name"; done
+}
+
+# <mounted DATA> <a backup's data directory> [rsync option]. backups/ holds
+# the snapshots the OS takes itself (embra-update): each is a copy of STATE
+# and DATA already, so they stay out of a host backup.
+copy_data_out() {
+    local excludes; mapfile -t excludes < <(data_excludes)
+    rsync -a ${3:+"$3"} --exclude 'backups/' "${excludes[@]}" "$1/" "$2/"
+}
+
+# <mounted DATA>: everything on it goes but what is the machine's own.
+clear_data() {
+    local name keep=()
+    for name in "${DATA_MACHINE_OWN[@]}"; do keep+=( ! -name "$name" ); done
+    find "$1" -mindepth 1 -maxdepth 1 "${keep[@]}" -exec rm -rf -- {} + 2>/dev/null || true
+}
+
+# <a backup's data directory> <mounted DATA> [rsync option]
+copy_data_in() {
+    local excludes; mapfile -t excludes < <(data_excludes)
+    rsync -a ${3:+"$3"} "${excludes[@]}" "$1/" "$2/"
+}
+
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         log_error "This script must be run as root (need loop mount access)"
@@ -364,10 +406,10 @@ do_backup() {
 
     # --- Backup DATA (includes workspace/ — /embra/workspace is a bind
     # mount of /embra/data/workspace, so data/ is the one canonical copy).
-    # backups/ holds the snapshots the OS takes itself (embra-update): each
-    # is a copy of STATE and DATA already, so they stay out of a host backup.
+    # The OS's own snapshots and the native models stay out (copy_data_out).
     log_step "Backing up DATA partition..."
-    rsync -a --info=progress2 --exclude 'backups/' "${MOUNT_DATA}/" "${backup_path}/data/"
+    copy_data_out "$MOUNT_DATA" "${backup_path}/data" --info=progress2
+    log_info "Left out: the OS's own snapshots (backups/), and the machine's own: ${DATA_MACHINE_OWN[*]}"
 
     local data_files=$(find "${backup_path}/data" -type f | wc -l)
     local data_size=$(du -sh "${backup_path}/data" | cut -f1)
@@ -496,10 +538,12 @@ do_restore() {
         log_step "Restoring DATA partition..."
 
         # Clear existing data
-        # IMPORTANT: This removes any seed data from a fresh image build
-        find "$MOUNT_DATA" -mindepth 1 -delete 2>/dev/null || true
+        # IMPORTANT: This removes any seed data from a fresh image build.
+        # The native models stay: they are the machine's, and no backup's.
+        clear_data "$MOUNT_DATA"
 
-        rsync -a --info=progress2 "${backup_path}/data/" "${MOUNT_DATA}/"
+        copy_data_in "${backup_path}/data" "$MOUNT_DATA" --info=progress2
+        log_info "Kept as the image has them: ${DATA_MACHINE_OWN[*]}"
 
         local data_files=$(find "$MOUNT_DATA" -type f | wc -l)
         log_info "DATA restored: ${data_files} files"
@@ -650,8 +694,9 @@ do_verify() {
 }
 
 # --- Self-test ---
-# The STATE rule on scratch directories: what a backup leaves out, what a
-# restore removes, keeps and copies. No root, no image, no mount.
+# The STATE rule and the DATA rule on scratch directories: what a backup
+# leaves out, what a restore removes, keeps and copies. No root, no image,
+# no mount.
 do_self_test() {
     local t fails=0
     t=$(mktemp -d /tmp/embra-backup-selftest.XXXXXX)
@@ -694,6 +739,38 @@ do_self_test() {
     check "a restore onto a new image copies no token from an older backup" absent "$t/new/web-console"
     check "a restore onto a new image copies no saved clock from an older backup" absent "$t/new/last-known-time"
     check "a restore onto a new image brings the rest" test -f "$t/new/pki/ca.crt" -a -f "$t/new/network/settings"
+
+    # A machine's DATA: the database, the workspace, the OS's own snapshots
+    # and a native model.
+    mkdir -p "$t/data/wardsondb" "$t/data/workspace/project/models" "$t/data/backups/2026-01-01_manual" "$t/data/models/qwen3.5-4b" "$t/backup/data"
+    echo segment > "$t/data/wardsondb/seg"; echo notes > "$t/data/workspace/notes"; echo mine > "$t/data/workspace/project/models/file"
+    echo snapshot > "$t/data/backups/2026-01-01_manual/backup.tar.gz"; echo weights > "$t/data/models/qwen3.5-4b/model.gguf"
+    copy_data_out "$t/data" "$t/backup/data"
+    check "a backup holds the database and the workspace" test -f "$t/backup/data/wardsondb/seg" -a -f "$t/backup/data/workspace/notes"
+    check "a backup holds no native model" absent "$t/backup/data/models"
+    check "a backup does not hold the OS's own snapshots" absent "$t/backup/data/backups"
+    check "a directory called models inside the workspace is no exclusion" holds "$t/backup/data/workspace/project/models/file" mine
+
+    # A backup of before the rule, which carries a model, onto an image with
+    # a model of its own.
+    mkdir -p "$t/olddata/models/qwen3.5-9b" "$t/imgdata/models/qwen3.5-4b" "$t/imgdata/wardsondb" "$t/imgdata/stale/dir"
+    cp -a "$t/backup/data/." "$t/olddata/"
+    echo weights-of-the-backup > "$t/olddata/models/qwen3.5-9b/model.gguf"
+    echo weights-of-the-image > "$t/imgdata/models/qwen3.5-4b/model.gguf"
+    echo seed > "$t/imgdata/wardsondb/seed"; echo gone > "$t/imgdata/stale/dir/file"; echo gone > "$t/imgdata/.hidden"
+    clear_data "$t/imgdata"
+    check "a restore removes the image's database" absent "$t/imgdata/wardsondb"
+    check "a restore removes whatever else DATA held, hidden files too" test ! -e "$t/imgdata/stale" -a ! -e "$t/imgdata/.hidden"
+    copy_data_in "$t/olddata" "$t/imgdata"
+    check "a restore brings the backup's database and workspace" test -f "$t/imgdata/wardsondb/seg" -a -f "$t/imgdata/workspace/notes" -a ! -e "$t/imgdata/wardsondb/seed"
+    check "a restore keeps the image's own native model" holds "$t/imgdata/models/qwen3.5-4b/model.gguf" weights-of-the-image
+    check "a restore copies no native model from an older backup" absent "$t/imgdata/models/qwen3.5-9b"
+
+    # An image without a model: a backup's is still not copied.
+    mkdir -p "$t/newdata"
+    clear_data "$t/newdata"; copy_data_in "$t/olddata" "$t/newdata"
+    check "a restore onto a new image copies no native model from an older backup" absent "$t/newdata/models"
+    check "a restore onto a new image brings the rest of DATA" test -f "$t/newdata/wardsondb/seg" -a -f "$t/newdata/workspace/project/models/file"
 
     rm -rf "$t"
     if [ "$fails" -eq 0 ]; then
@@ -739,7 +816,7 @@ case "$COMMAND" in
         echo "  sudo $0 [--image PATH] restore [BACKUP_NAME]     Restore into disk image (latest if no name)"
         echo "  sudo $0 list                                     List available backups"
         echo "  sudo $0 [--image PATH] verify                    Check disk image has valid data"
-        echo "  $0 self-test                                     Check what a backup leaves out of STATE and a restore keeps (no root, no image)"
+        echo "  $0 self-test                                     Check what a backup leaves out of STATE and DATA and a restore keeps (no root, no image)"
         echo ""
         echo "Options:"
         echo "  --image PATH        Disk image to operate on (default: buildroot-src/output/images/ then output/images/)"

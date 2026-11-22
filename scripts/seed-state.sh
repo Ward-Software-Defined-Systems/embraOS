@@ -82,7 +82,9 @@ seeding, so a clean first boot and a fresh seed are one command:
   ./scripts/seed-state.sh --wipe state,data --ca-dir <dir> # reset, then seed
 
 Wiping STATE destroys the soul hash, PKI and API keys; wiping DATA destroys
-WardSONDB — all memory, sessions and the workspace. Both are irreversible.
+WardSONDB — all memory, sessions and the workspace — with the in-OS backups
+and the files of the native models (experimental; a model is installed
+again). Both are irreversible.
 Wiping DATA alone also removes STATE/soul.sha256: a sealed hash with no soul
 document halts the next boot.
 
@@ -280,7 +282,7 @@ if [ -n "$WIPE" ]; then
     echo ""
     echo "WIPE — reformats these partitions in $IMAGE:"
     [ "$wipe_state" -eq 1 ] && echo "  STATE ('$STATE_PART') — soul hash, PKI, API keys, config"
-    [ "$wipe_data" -eq 1 ]  && echo "  DATA  ('$DATA_PART') — WardSONDB: all memory, sessions, workspace, and the in-OS backups"
+    [ "$wipe_data" -eq 1 ]  && echo "  DATA  ('$DATA_PART') — WardSONDB: all memory, sessions, workspace, the in-OS backups, and the native models' files"
     if [ "$wipe_data" -eq 1 ] && [ "$wipe_state" -eq 0 ]; then
         echo "  and STATE/soul.sha256 (a sealed hash with no soul document halts the boot)"
     fi

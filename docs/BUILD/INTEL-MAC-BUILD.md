@@ -176,7 +176,8 @@ EMBRA_BOOT=direct ./scripts/run-qemu.sh    # kernel + initramfs from the host: n
 The launcher is the one of [QUICK-START.md](QUICK-START.md), whose run section lists its
 other `EMBRA_*` knobs: the log filter, the serial image protocol, the installer medium and
 its buses, the DHCP start address, the time server (`EMBRA_NTP`), a USB device of the host
-handed to the VM (`EMBRA_USB_HOST`), the firmware pair and the display
+handed to the VM (`EMBRA_USB_HOST`), the VM's memory, processors and processor model
+(`EMBRA_MEMORY`, `EMBRA_CPUS`, `EMBRA_CPU`), the firmware pair and the display
 switches (the note below says what `EMBRA_VNC=1` meets on a Mac).
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM

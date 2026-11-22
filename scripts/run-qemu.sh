@@ -29,6 +29,12 @@
 #       (10.0.2.200 shows the banner's second URL on the leased address).
 #   EMBRA_USB_HOST=<vendor>:<product>   a USB device of this host handed to the
 #       VM, by the ids lsusb shows (a Wi-Fi adapter: 0bda:c811)
+#   EMBRA_MEMORY=<size>         the VM's memory, a number and M or G (4G)
+#   EMBRA_CPUS=<n>              the VM's processors (4)
+#   EMBRA_CPU=<model>           the VM's processor model as QEMU names it (host, max, Nehalem).
+#       Without it QEMU's own default, a plain x86-64 without AVX; host is this
+#       machine's processor and needs KVM or HVF. A native model (experimental)
+#       reads a prompt several times faster with AVX2 than without.
 # The clock's knob, which reaches the kernel line:
 #   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks in
 #       this boot (else /network time's, the DHCP lease's, then time.cloudflare.com); off asks none
@@ -69,8 +75,26 @@ else
     exit 1
 fi
 
-MEMORY="4G"
-CPUS="4"
+MEMORY="${EMBRA_MEMORY:-4G}"
+CPUS="${EMBRA_CPUS:-4}"
+
+# The VM's memory, processors and processor model. A native model
+# (experimental) wants more than the defaults: its file's size and its
+# window's memory beside the OS, and the instruction sets its speed comes
+# from (QEMU's own default model is a plain processor without them).
+if ! [[ "$MEMORY" =~ ^[1-9][0-9]*[MG]$ ]]; then
+    echo "ERROR: EMBRA_MEMORY must be a number and M or G (4G, 12G, 8192M), got '$MEMORY'" >&2; exit 2
+fi
+if ! [[ "$CPUS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: EMBRA_CPUS must be a number of processors, got '$CPUS'" >&2; exit 2
+fi
+if [ -n "${EMBRA_CPU:-}" ] && ! [[ "$EMBRA_CPU" =~ ^[A-Za-z0-9_.+=,-]+$ ]]; then
+    echo "ERROR: EMBRA_CPU must be a processor model as QEMU names it (host, max, Nehalem), got '$EMBRA_CPU'" >&2; exit 2
+fi
+CPU_ARGS=()
+if [ -n "${EMBRA_CPU:-}" ]; then
+    CPU_ARGS=(-cpu "$EMBRA_CPU")
+fi
 
 # Auto-detect best acceleration
 ACCEL=""
@@ -263,6 +287,9 @@ echo "  Image: $IMAGE"
 echo "  Boot: $EMBRA_BOOT"
 echo "  Memory: $MEMORY"
 echo "  CPUs: $CPUS"
+if [ -n "${EMBRA_CPU:-}" ]; then
+    echo "  CPU model: $EMBRA_CPU (EMBRA_CPU)"
+fi
 echo "  Acceleration: $ACCEL_NAME"
 echo "  Serial console: this terminal"
 if [ "${EMBRA_TUI:-}" = "1" ]; then
@@ -335,6 +362,7 @@ if [ "$EMBRA_BOOT" = "direct" ]; then
     # path. embra.slot=a names the slot the kernel came from.
     qemu-system-x86_64 \
         $ACCEL \
+        ${CPU_ARGS[@]+"${CPU_ARGS[@]}"} \
         -m "$MEMORY" \
         -smp "$CPUS" \
         "${DISK_ARGS[@]}" \
@@ -368,6 +396,7 @@ echo ""
 qemu-system-x86_64 \
     -machine q35 \
     $ACCEL \
+    ${CPU_ARGS[@]+"${CPU_ARGS[@]}"} \
     -m "$MEMORY" \
     -smp "$CPUS" \
     -drive if=pflash,format=raw,readonly=on,file="$FW_CODE" \

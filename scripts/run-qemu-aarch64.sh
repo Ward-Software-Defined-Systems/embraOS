@@ -26,6 +26,10 @@
 #                                   NVMe or virtio-scsi
 #   EMBRA_USB_HOST=<vendor>:<product>   a USB device of this host handed to the VM, by the ids lsusb
 #                                   shows (a Wi-Fi adapter: 0bda:c811)
+#   EMBRA_MEMORY=<size>             the VM's memory, a number and M or G (4G)
+#   EMBRA_CPUS=<n>                  the VM's processors (4)
+#   EMBRA_CPU=<model>               the VM's processor model as QEMU names it, in place of this
+#                                   launcher's choice (host with HVF or KVM, max without)
 # An image named *.qcow2 is opened as qcow2 (a disk the installer wrote).
 # The clock's knob, which reaches the kernel line:
 #   EMBRA_NTP=<host>[:<port>]|off   embra.ntp: the time server the OS asks in
@@ -63,8 +67,22 @@ fi
 # ARM64 kernel is "Image" (flat binary), not "bzImage" (x86 boot wrapper)
 KERNEL_NAME="Image"
 
-MEMORY="4G"
-CPUS="4"
+MEMORY="${EMBRA_MEMORY:-4G}"
+CPUS="${EMBRA_CPUS:-4}"
+
+# The VM's memory, processors and processor model. A native model
+# (experimental) wants more than the defaults: its file's size and its
+# window's memory beside the OS, and the instruction sets its speed comes
+# from (QEMU's own default model is a plain processor without them).
+if ! [[ "$MEMORY" =~ ^[1-9][0-9]*[MG]$ ]]; then
+    echo "ERROR: EMBRA_MEMORY must be a number and M or G (4G, 12G, 8192M), got '$MEMORY'" >&2; exit 2
+fi
+if ! [[ "$CPUS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: EMBRA_CPUS must be a number of processors, got '$CPUS'" >&2; exit 2
+fi
+if [ -n "${EMBRA_CPU:-}" ] && ! [[ "$EMBRA_CPU" =~ ^[A-Za-z0-9_.+=,-]+$ ]]; then
+    echo "ERROR: EMBRA_CPU must be a processor model as QEMU names it (host, max, Nehalem), got '$EMBRA_CPU'" >&2; exit 2
+fi
 
 # Auto-detect best acceleration
 ACCEL=""
@@ -79,6 +97,9 @@ elif [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL="-accel kvm"
     ACCEL_NAME="KVM (Linux)"
     CPU_MODEL="-cpu host"
+fi
+if [ -n "${EMBRA_CPU:-}" ]; then
+    CPU_MODEL="-cpu $EMBRA_CPU"
 fi
 
 # Detect host terminal size and pass it to the guest (the serial TUI's size).
@@ -218,6 +239,9 @@ echo "  Image: $IMAGE"
 echo "  Boot: $EMBRA_BOOT"
 echo "  Memory: $MEMORY"
 echo "  CPUs: $CPUS"
+if [ -n "${EMBRA_CPU:-}" ]; then
+    echo "  CPU model: $EMBRA_CPU (EMBRA_CPU)"
+fi
 echo "  Acceleration: $ACCEL_NAME"
 echo "  Serial console: this terminal"
 if [ "${EMBRA_TUI:-}" = "1" ]; then
