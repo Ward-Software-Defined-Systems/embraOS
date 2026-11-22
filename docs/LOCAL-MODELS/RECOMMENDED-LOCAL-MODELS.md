@@ -4,6 +4,8 @@
 
 The wizard's selector reads `GET /v1/models` from the configured server, so any pulled (Ollama) or loaded (LM Studio) model is selectable regardless of what's listed here.
 
+This page is about models on a server of your own, on another host. The models that run on the embraOS machine itself are the native models, which are experimental and have a page of their own: [NATIVE-MODELS.md](../OPERATIONS/NATIVE-MODELS.md).
+
 ## The test fleet
 
 | Host | Server | Memory |
@@ -136,6 +138,7 @@ Every turn replays the whole session: the system prompt, the history, the turn's
 |---|---|---|
 | LM Studio with the preset | Refuses: the stream opens and answers inside it with one error frame, then closes. | `Brain error: the model server answered with an error: Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.` The turn ends there. The operator's message and the reply so far are saved, and the saved reply ends with `(response interrupted by a failed model call)`, or is `(turn interrupted by a failed model call)` when nothing had been written. |
 | Ollama, an MLX build | Refuses: HTTP 400 before any stream opens (`input length (N tokens) exceeds the model's maximum context length (M tokens)`; read from Ollama's source, `mlxrunner/pipeline.go`, not yet seen live). | `Brain error: HTTP 400:` with the server's message. The turn ends there, with the same marker. |
+| A native model (experimental) | Refuses: HTTP 400 before any stream opens. llama.cpp's server never trims a request. | `Brain error: HTTP 400:` with the sizes in a sentence: `the request is N tokens and the native model is loaded with a context window of M. /native context <tokens> loads it with a larger one, which takes more memory; or continue in a new session (/new <name>)`. The turn ends there, with the same marker. |
 | Ollama, a GGUF build | Trims. First the oldest messages go, keeping the system prompt and the latest message, logged at debug level only (`truncating input messages which exceed context length`, with `OLLAMA_DEBUG=1`). If the system prompt, the tool list and the latest message still do not fit, the prompt itself is cut: the first few tokens and the last ones, about half the window in all, logged at WARN (`truncating input prompt`; `server/prompt.go` and `llm/llama_server.go` in Ollama's source). | Nothing. The model answers from what is left and the turn ends normally. |
 
 **A refused turn stays refused.** The brain logs the refusal at ERROR with the sizes of the tool results that went out with the request. The history only grows, so continue in a new session (`/new <name>`; the knowledge graph and the memories are shared).
@@ -185,13 +188,14 @@ A local model reads a long prompt in silence before the first byte of its
 answer, and a slow one writes a long tool call in silence inside it. Neither
 is a fault, and embraOS waits through both. The **model wait** is how long a
 call waits while Ollama or LM Studio sends nothing: 120 minutes, unless you
-set another.
+set another. It holds for a native model (experimental) as well, where it
+also bounds the wait for the model's file to be read at a load.
 
 - The clock starts when a request is sent, and starts again when the answer
   begins and at each piece of it. It bounds a silence, never the length of an
   answer.
 - `/model-wait` shows it, `/model-wait <minutes>` sets it for both local
-  presets, and `/model-wait reset` goes back to 120 minutes. A change applies
+  presets and for a native model, and `/model-wait reset` goes back to 120 minutes. A change applies
   from your next message. `/provider` names the wait while a local preset is
   active.
 - **Esc** ends a wait at any time: the request is dropped and its connection

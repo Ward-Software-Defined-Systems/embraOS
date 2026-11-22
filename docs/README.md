@@ -6,7 +6,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 
 - [ROADMAP.md](ROADMAP.md) — Phase 0–5 delivery status, sprint by sprint, the post-Sprint-5 increments, the code-review pit stop and Phase 2.
 - [CHANGE-LOG.md](CHANGE-LOG.md) — Chronological merge log for `main`, anchored on tagged releases.
-- [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — The 7-layer continuity architecture, the boot chain and disk layout, the network, trust boundaries, the four LLM providers, reasoning controls, prompt caching.
+- [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — The 7-layer continuity architecture, the boot chain and disk layout, the network, trust boundaries, the five LLM providers, reasoning controls, prompt caching.
 - [OPEN-PROBLEMS.md](OPEN-PROBLEMS.md) — Unresolved Phase 2–3 design questions tracked at the architecture level.
 - [VALIDATION-STATUS.md](VALIDATION-STATUS.md) — What embraOS has been run on, platform by platform, and what is still TBD. The one page that carries that status.
 
@@ -23,6 +23,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 - [OPERATIONS/UPDATES-AND-BACKUPS.md](OPERATIONS/UPDATES-AND-BACKUPS.md) — The two OS slots and GRUB's A/B state, the in-OS backups (`/backup`, the boot menu), restoring, and the signed OS update.
 - [OPERATIONS/TOOL-REFERENCE.md](OPERATIONS/TOOL-REFERENCE.md) — All 121 built-in tools by category, plus workspace/GitHub/SSH safety notes.
 - [OPERATIONS/LOCAL-AI-GATEWAY.md](OPERATIONS/LOCAL-AI-GATEWAY.md) — Routing every provider through WSDS Local AI Gateway with `/local-ai-gateway`: what goes through, what stays direct, what the gateway records and blocks; under evaluation for vendoring.
+- [OPERATIONS/NATIVE-MODELS.md](OPERATIONS/NATIVE-MODELS.md) — Native models (experimental): a model that runs on the machine itself. The two models and what they need, a model's file, `/native`, a native model as the provider, the `native_ask` tool, the model server.
 
 ## Local models — `LOCAL-MODELS/`
 

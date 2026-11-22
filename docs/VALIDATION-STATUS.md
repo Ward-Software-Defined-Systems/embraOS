@@ -134,6 +134,24 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | HTTPS with the CA the image was built with | Bare metal | |
 | A certificate refused on its dates, with the clock named | | a machine whose clock is behind |
 
+## Native models (experimental)
+
+Every row is the 4B (`qwen3.5-4b`) on the machine's processor. The model server in these runs is the recipe's, built in a Buildroot output of its own and put into the root filesystem of the last image: an image build with the recipe has not been run.
+
+| What | Validated on | TBD |
+|---|---|---|
+| The model server as the recipe builds it: started inside the image's root filesystem, the CPU backend chosen for the processor (the host's with AVX2, and two processor models without AVX), the listener on loopback alone | QEMU | an image build with the recipe and its read-back of the root filesystem, x86_64 and aarch64; a run on aarch64 |
+| A model's file from the source: the download with its progress, a cancel, the rest fetched after a check of what had arrived, the file verified against the catalogue; the 9B refused on a DATA of 4 GiB; a removal; a second job refused while one runs; a download that goes on when its console leaves | QEMU | the 9B's file, on a disk larger than the image's; a download through a certificate authority of the operator's own |
+| A model's file by upload: through the page's `/native` form on a machine at the first-boot wizard (the picker, the progress, the file installed); a file of the catalogue's size with other content refused and nothing kept; the refusals before the first byte | QEMU, in Chrome 156 (the form) and with curl (the refusals) | the display console's notice; Safari and Firefox; a phone |
+| The model server kept by embrad: loaded at the wizard's answer and at `/native use`, ended at `/native off` with its memory free again, loaded again for another context window, after a reboot and after a restore; a message sent while the model loads, answered after the load | QEMU, with 12 GiB and eight processors | |
+| Memory running out: with 3 GiB the kernel ends the model server each time it loads, embrad leaves it after the third, the database, the brain and the web console stay up, and the turn, `/native` and the provider pill say why; with 5 GiB the model loads at the default window | QEMU | a model server ended for memory after it had answered, and one that was left alone asked for again with `/native use` (unit tests cover both) |
+| The first boot on the native answer: the notice, the model question, the file downloaded at the wizard, a console that leaves during the download and one that returns, the summary; Learning Mode's first and last phase led by the model with thinking on, the import of the shipped identity, the seal; the web console's own terminal, attached beside the console that answered, got the model's greeting and was in the session after the seal | QEMU | the identity written with a native model through every phase of Learning Mode, without an import |
+| A session on the model: the whole tool list read, `time` and `remember` called with valid arguments and answered from, a stop inside an answer, thinking off and on (`/effort`), a request over a window of 4,096 tokens refused with both sizes, `/native off` and `/native remove` refused while it leads, an operator's Guardian tool refused for the replicant check that is not run, the session after a reboot | QEMU | the 9B; a session on a processor without AVX |
+| `native_ask` from a session another provider leads: a plain question, named tools and the whole tool list offered (the call reported and not run), a system text with a limit on the answer, a name that is no tool, a stop during a call, no model loaded; the switch between providers that leaves the model loaded | QEMU, with a stand-in for the other provider | a hosted provider leading |
+| A backup and a restore with a model on DATA: the snapshot without the model, the model in place and loaded after the restore | QEMU | an update staged with a model on DATA |
+| A release from before native models started on a configuration that names one: the provider taken for Anthropic, the turn refused for the missing key; back on the newer release, the native settings as they were | QEMU, with the programs of `v0.28.0-phase2` | |
+| A machine that is not a VM | | a model loaded and a session, on each of the five |
+
 ## Guardian tools
 
 | What | Validated on | TBD |
