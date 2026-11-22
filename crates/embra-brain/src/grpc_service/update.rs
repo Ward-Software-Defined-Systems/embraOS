@@ -490,6 +490,10 @@ pub(super) enum SetupCommand {
     /// The provider gateway's certificate authority goes in before the
     /// provider is set up.
     Ca,
+    /// A native model's file (experimental) is installed, watched and
+    /// removed while the setup runs: the setup's own question may be
+    /// waiting for a download.
+    Native,
     /// A machine on a network without DHCP is given its address before
     /// anything that needs the network.
     Network,
@@ -508,6 +512,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
     match command.trim() {
         "/backup" => SetupCommand::Backup,
         "/ca" => SetupCommand::Ca,
+        "/native" => SetupCommand::Native,
         "/network" => SetupCommand::Network,
         "/reboot" => SetupCommand::Reboot,
         "/theme" => SetupCommand::Theme,
@@ -520,7 +525,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
 /// the command but that it was not run: the word may be one no command has.
 pub(super) fn later_notice(command: &str) -> String {
     let shown: String = command.trim().chars().take(40).collect();
-    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca, /network, /reboot, /theme and /web-token are.")
+    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca, /native, /network, /reboot, /theme and /web-token are.")
 }
 
 /// What the stages before a session do with a client's frame: the
@@ -534,10 +539,12 @@ pub(super) fn later_notice(command: &str) -> String {
 /// DHCP is given its address there (`/network static`), and a console URL
 /// that someone else has seen is replaced there (`/web-token rotate`), and
 /// the look of the console all of that is done in is chosen there
-/// (`/theme`). So `/backup`, `/ca`, `/network`, `/reboot`, `/theme` and
-/// `/web-token` are answered as
-/// in a session, the confirmation of a restore is taken, and any other
-/// command gets one line.
+/// (`/theme`), and a native model's file is installed and watched there
+/// (`/native`: the setup's own question may wait for a download). So
+/// `/backup`, `/ca`, `/native`, `/network`, `/reboot`, `/theme` and
+/// `/web-token` are answered as in a session (of `/native`, the forms that
+/// change no stored configuration), the confirmation of a restore is taken,
+/// and any other command gets one line.
 #[derive(Clone)]
 pub(crate) struct SetupCommands {
     tx: mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -577,6 +584,10 @@ impl SetupCommands {
                 match setup_command(&cmd.command) {
                     SetupCommand::Backup => handle_backup_command(&cmd.args, &self.tx, &self.pending_restore).await,
                     SetupCommand::Ca => super::ca::handle_ca_command(&cmd.args, &self.tx).await,
+                    SetupCommand::Native => {
+                        use crate::native_model::{Env, jobs::Jobs};
+                        super::native::handle_native_before_a_session(&cmd.args, &self.tx, &Env::in_force(), Jobs::shared()).await
+                    }
                     SetupCommand::Network => super::network::handle_network_command(&cmd.args, &self.tx).await,
                     SetupCommand::Reboot => handle_reboot_command(&cmd.args, &self.tx).await,
                     SetupCommand::Theme => super::theme::handle_theme_command(&cmd.args, &self.tx).await,
@@ -634,10 +645,11 @@ mod backup_tests {
     }
 
     /// Before a session the operator's messages go to the stage, `/backup`,
-    /// `/ca`, `/network`, `/reboot` and `/web-token` are answered, and any
-    /// other command gets its one line: none is dropped without a word.
+    /// `/ca`, `/native`, `/network`, `/reboot`, `/theme` and `/web-token`
+    /// are answered, and any other command gets its one line: none is
+    /// dropped without a word.
     #[tokio::test]
-    async fn before_a_session_backup_ca_network_reboot_theme_and_web_token_are_answered_and_any_other_command_is_told_to_wait() {
+    async fn before_a_session_backup_ca_native_network_reboot_theme_and_web_token_are_answered_and_any_other_command_is_told_to_wait() {
         let (tx, mut rx) = mpsc::channel(16);
         let pending = Arc::new(Mutex::new(None));
         let door = SetupCommands::new(&tx, &pending);
@@ -665,6 +677,18 @@ mod backup_tests {
         let import = said(&mut rx);
         assert_eq!(import.len(), 1);
         assert!(import[0].starts_with("Credentials in the URL are refused") && import[0].ends_with("Nothing was written."), "{import:?}");
+
+        // `/native` is the command itself: its usage; a refusal only the
+        // command gives; and the forms that change the stored
+        // configuration, which the setup is still writing, are told so.
+        assert_eq!(door.take(command("/native", "help")).await, None);
+        assert_eq!(said(&mut rx), vec![super::super::native::native_usage()], "/native is answered as in a session");
+        assert_eq!(door.take(command("/native", "install qwen3.5-27b")).await, None);
+        assert_eq!(said(&mut rx), vec!["'qwen3.5-27b' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b. /native help shows the forms.".to_string()]);
+        for stored in ["use qwen3.5-4b", "off", "context 32768"] {
+            assert_eq!(door.take(command("/native", stored)).await, None);
+            assert_eq!(said(&mut rx), vec![super::super::native::NATIVE_NOT_BEFORE_A_SESSION.to_string()], "{stored}");
+        }
 
         // `/network` is the command itself too: its usage, and a refusal
         // only the command gives (no such card on this host).
@@ -697,7 +721,7 @@ mod backup_tests {
             assert_eq!(door.take(command(other, "now")).await, None);
             let line = said(&mut rx);
             assert_eq!(line, vec![later_notice(other)], "{other}");
-            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca, /network, /reboot, /theme and /web-token are"), "{line:?}");
+            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca, /native, /network, /reboot, /theme and /web-token are"), "{line:?}");
         }
 
         // A frame the stages never read is still not theirs, and says nothing.

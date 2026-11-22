@@ -1,8 +1,15 @@
-//! Native models (experimental) in the operator's commands: the pick of a
-//! model. `/model` while a native model leads the session and `/provider
-//! --setup native` offer the catalogue (`native_model_selection`); the pick
-//! asks embrad to keep the model loaded (`pick_native_model`), after its
-//! file was downloaded and checked when it is not on the machine.
+//! Native models (experimental) in the operator's commands.
+//!
+//! The pick of a model: `/model` while a native model leads the session and
+//! `/provider --setup native` offer the catalogue (`native_model_selection`),
+//! and `/native use` takes a model's id; the pick asks embrad to keep the
+//! model loaded (`pick_native_model`), after its file was downloaded and
+//! checked when it is not on the machine.
+//!
+//! `/native` itself: the models' files and the jobs on them, which are the
+//! machine's matters and are answered before a session too, and what the
+//! stored configuration keeps loaded (`use`, `off`, `context`), in a
+//! session.
 
 use super::*;
 use crate::native_model::jobs::{JobEnd, JobEvent, JobKind, Jobs};
@@ -107,14 +114,26 @@ async fn say(tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: S
         .await;
 }
 
+/// What asking for a model came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Loaded {
+    /// Another model than before, or the first.
+    Changed,
+    /// The model it was already.
+    AsItWas,
+    /// The model it was already, whose server embrad no longer started: it
+    /// is started again (`native_model::ask_again_if_halted`).
+    Restarted,
+}
+
 /// Ask for `model` to be kept loaded: the stored configuration names it,
 /// the record embrad follows is written from it, and the health probe is
-/// asked to look. Returns the configuration and whether the model changed.
+/// asked to look. Returns the configuration and what the asking came to.
 pub(super) async fn load_native_model(
     model: &'static NativeModel,
     db: &Arc<WardsonDbClient>,
     env: &Env,
-) -> Result<(config::SystemConfig, bool), String> {
+) -> Result<(config::SystemConfig, Loaded), String> {
     let mut cfg = config::load_config(db).await.map_err(|e| format!("the configuration could not be read ({e})"))?;
     let changed = cfg.openai_compat.native_model != model.id;
     if changed {
@@ -124,24 +143,32 @@ pub(super) async fn load_native_model(
     // The record also when the configuration said it already: one that was
     // lost is written again.
     native_model::follow(env, &cfg.openai_compat)?;
+    let loaded = match changed {
+        true => Loaded::Changed,
+        false if native_model::ask_again_if_halted(env).await? => Loaded::Restarted,
+        false => Loaded::AsItWas,
+    };
     crate::provider::health::request_probe();
-    Ok((cfg, changed))
+    Ok((cfg, loaded))
 }
 
 /// What a load says, by whether a native model leads the session.
-fn loaded_words(cfg: &config::SystemConfig, model: &NativeModel, changed: bool) -> String {
+fn loaded_words(cfg: &config::SystemConfig, model: &NativeModel, loaded: Loaded) -> String {
     let leads = ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native);
-    match (leads, changed) {
-        (true, true) => format!(
+    let switch = "Switch to it with /provider native when ready.";
+    match (leads, loaded) {
+        (true, Loaded::Changed) => format!(
             "Native model set to {} (experimental). embrad loads it within seconds, and your next message waits for it.",
             model.id
         ),
-        (true, false) => format!("{} is the native model already.", model.id),
-        (false, true) => format!(
-            "{} is asked for (experimental): embrad loads it within seconds. Switch to it with /provider native when ready.",
-            model.id
+        (true, Loaded::AsItWas) => format!("{} is the native model already.", model.id),
+        (false, Loaded::Changed) => format!("{} is asked for (experimental): embrad loads it within seconds. {switch}", model.id),
+        (false, Loaded::AsItWas) => format!("{} is asked for already. {switch}", model.id),
+        (leads, Loaded::Restarted) => format!(
+            "{} is asked for again: its model server had ended three times before it answered and was no longer started. embrad starts it now{}",
+            model.id,
+            if leads { ", and your next message waits for it.".to_string() } else { format!(". {switch}") }
         ),
-        (false, false) => format!("{} is asked for already. Switch to it with /provider native when ready.", model.id),
     }
 }
 
@@ -149,9 +176,9 @@ fn loaded_words(cfg: &config::SystemConfig, model: &NativeModel, changed: bool) 
 /// leads the session.
 async fn load_and_say(model: &'static NativeModel, tx: &mpsc::Sender<Result<ConversationResponse, Status>>, db: &Arc<WardsonDbClient>, hands: &NativeHands) {
     match load_native_model(model, db, &hands.env).await {
-        Ok((cfg, changed)) => {
-            say(tx, loaded_words(&cfg, model, changed), SystemMessageType::Info).await;
-            if changed && ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native) {
+        Ok((cfg, loaded)) => {
+            say(tx, loaded_words(&cfg, model, loaded), SystemMessageType::Info).await;
+            if loaded == Loaded::Changed && ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native) {
                 send_brain_status(tx, &cfg, &hands.session_mgr, model.id).await;
             }
         }
@@ -314,6 +341,378 @@ pub(super) fn apply_native_effort(args: &str, oc: &mut config::OpenAiCompatConfi
             )
         }
         other => (false, format!("'{other}' is not on or off. {how}"), SystemMessageType::Error),
+    }
+}
+
+// ── /native ──────────────────────────────────────────────────────────────
+
+/// The catalogue's ids, as a usage or a refusal names them.
+fn catalogue_ids() -> String {
+    contract::CATALOGUE.iter().map(|m| m.id).collect::<Vec<_>>().join(", ")
+}
+
+/// What `/native help` answers.
+pub(super) fn native_usage() -> String {
+    format!(
+        "Usage: /native | /native install <model> | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n  \
+         A native model (experimental) runs on this machine; the catalogue: {}. /native shows the models, what is kept loaded, the model server and the job that runs. \
+         install downloads a model's file and checks it. use loads a model, installing it first when it is not there, and off frees its memory: \
+         both whichever provider leads the session, and /provider native switches to a loaded model. \
+         context is the window the loaded model is given. remove deletes a model's file. cancel stops the job that runs.",
+        catalogue_ids()
+    )
+}
+
+/// What `/native use`, `off` and `context` answer before a session: they
+/// change the stored configuration, which the setup is still writing.
+pub(super) const NATIVE_NOT_BEFORE_A_SESSION: &str = "Not run before setup is complete: /native use, off and context change the stored configuration, and the setup's own question chooses the model. /native, /native install, /native remove and /native cancel are answered now.";
+
+/// The forms of `/native` that work on the models' files and the jobs: the
+/// machine's matters, answered before a session too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MachineAction {
+    Show,
+    Help,
+    Install(&'static NativeModel),
+    Remove(&'static NativeModel),
+    Cancel,
+}
+
+/// The forms that change what the stored configuration keeps loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoredAction {
+    Use(&'static NativeModel),
+    Off,
+    Context(ContextAction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ContextAction {
+    Show,
+    Set(u32),
+    Reset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum NativeAction {
+    Machine(MachineAction),
+    Stored(StoredAction),
+    /// What was wrong with the command, in a sentence.
+    Refused(String),
+}
+
+/// Read `/native`'s arguments; pure.
+pub(super) fn parse_native(args: &str) -> NativeAction {
+    let mut words = args.split_whitespace();
+    let verb = words.next().unwrap_or("").to_ascii_lowercase();
+    let (first, more) = (words.next(), words.next().is_some());
+    let refused = |what: String| NativeAction::Refused(format!("{what} /native help shows the forms."));
+    // A form that takes nothing after its word.
+    let alone = |action: NativeAction| match first {
+        None => action,
+        Some(_) => refused(format!("/native {verb} takes nothing after it.")),
+    };
+    // A form that takes one model of the catalogue.
+    let model = |action: fn(&'static NativeModel) -> NativeAction| match (first, more) {
+        (Some(name), false) => match contract::CATALOGUE.iter().find(|m| m.id.eq_ignore_ascii_case(name)) {
+            Some(model) => action(model),
+            None => refused(format!("'{name}' is not a native model; the catalogue: {}.", catalogue_ids())),
+        },
+        _ => refused(format!("/native {verb} takes one model: {}.", catalogue_ids())),
+    };
+    match verb.as_str() {
+        "" | "status" | "list" => alone(NativeAction::Machine(MachineAction::Show)),
+        "help" => alone(NativeAction::Machine(MachineAction::Help)),
+        "cancel" => alone(NativeAction::Machine(MachineAction::Cancel)),
+        "off" => alone(NativeAction::Stored(StoredAction::Off)),
+        "install" => model(|m| NativeAction::Machine(MachineAction::Install(m))),
+        "remove" => model(|m| NativeAction::Machine(MachineAction::Remove(m))),
+        "use" => model(|m| NativeAction::Stored(StoredAction::Use(m))),
+        "context" => match (first, more) {
+            (None, _) => NativeAction::Stored(StoredAction::Context(ContextAction::Show)),
+            (Some(word), false) if word.eq_ignore_ascii_case("reset") => NativeAction::Stored(StoredAction::Context(ContextAction::Reset)),
+            // 65536, or 65,536 as a figure is written.
+            (Some(word), false) => match word.replace([',', '_'], "").parse::<u32>() {
+                Ok(tokens) => NativeAction::Stored(StoredAction::Context(ContextAction::Set(tokens))),
+                Err(_) => refused(format!("'{}' is not a number of tokens.", word.chars().take(40).collect::<String>())),
+            },
+            (Some(_), true) => refused("/native context takes one number of tokens, or reset.".to_string()),
+        },
+        other => refused(format!("'{}' is not a form of /native.", other.chars().take(40).collect::<String>())),
+    }
+}
+
+/// How a job ended, for the line that shows the last one.
+fn end_words(end: &JobEnd) -> String {
+    match end {
+        JobEnd::Done => "done".to_string(),
+        JobEnd::Nothing(line) => line.clone(),
+        JobEnd::Refused(why) | JobEnd::Failed(why) => format!("it did not finish ({why})"),
+        JobEnd::Stopped => "stopped".to_string(),
+    }
+}
+
+/// `/native`: the models' files as the updater lists them, what embrad is
+/// asked to keep loaded, what it says of the model server, and the job that
+/// runs or ran last. `cfg` is the stored configuration when there is one:
+/// before a session there may be none, and the record says what is asked.
+pub(super) async fn show_native(env: &Env, jobs: &Jobs, cfg: Option<&config::SystemConfig>) -> String {
+    let mut lines = vec!["Native models (experimental): a model that runs on this machine.".to_string()];
+    match native_model::jobs::list(env).await {
+        Ok(listed) => lines.extend(listed.lines().map(|line| format!("  {line}"))),
+        Err(why) => lines.push(format!("  The models' files could not be listed: {why}.")),
+    }
+    let (wanted, _) = env.records();
+    lines.push(match wanted {
+        Ok(Some(wanted)) => {
+            let thinking = cfg.map(|cfg| {
+                let on = crate::provider::openai_compat::native::thinks(cfg.openai_compat.native_effort_by_model.get(wanted.model.id).map(String::as_str));
+                if on { ", thinking on" } else { ", thinking off" }
+            });
+            let leads = cfg.is_some_and(|cfg| ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native));
+            format!(
+                "  Kept loaded: {}, context window {}{}.{}",
+                wanted.model.id,
+                wanted.context,
+                thinking.unwrap_or_default(),
+                if leads { " It leads the session." } else { "" }
+            )
+        }
+        Ok(None) => "  Kept loaded: none. /native use <model> loads one.".to_string(),
+        Err(why) => format!("  Kept loaded: the settings cannot be read ({why})."),
+    });
+    if let Some(words) = native_model::server_words(env) {
+        lines.push(format!("  The model server: {words}."));
+    }
+    match (jobs.running(), jobs.last()) {
+        (Some(running), _) => {
+            let how_far = running.last_line.map(|line| format!(": {line}")).unwrap_or_default();
+            lines.push(format!("  The {} of {} runs{how_far}. /native cancel stops it.", running.kind.noun(), running.model.id));
+        }
+        (None, _) if contract::job_running(&env.models) => {
+            lines.push("  A model job runs that this brain did not start: an upload through the web console.".to_string());
+        }
+        (None, Some(last)) => lines.push(format!("  The last job, the {} of {}: {}.", last.kind.noun(), last.model.id, end_words(&last.end))),
+        (None, None) => {}
+    }
+    lines.push("  /native help shows the forms.".to_string());
+    lines.join("\n")
+}
+
+/// Start a job on a model's file and follow it for the console that asked.
+async fn start_job(kind: JobKind, model: &'static NativeModel, tx: &mpsc::Sender<Result<ConversationResponse, Status>>, env: &Env, jobs: &Jobs) {
+    let events = match jobs.start(env, kind, model) {
+        Ok(events) => events,
+        Err(running) => {
+            let how_far = running.last_line.map(|line| format!(" ({line})")).unwrap_or_default();
+            say(
+                tx,
+                format!(
+                    "Not started: the {} of {} runs{how_far}, and one job runs at a time. /native cancel stops it.",
+                    running.kind.noun(),
+                    running.model.id
+                ),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+    };
+    let started = match kind {
+        JobKind::Install => format!(
+            "Installing {}: its file ({} MB) is downloaded and checked, and the lines below follow the updater. The session stays usable; /native cancel stops it.",
+            model.id,
+            mb(model.bytes)
+        ),
+        JobKind::Remove => format!("Removing the file of {}.", model.id),
+    };
+    say(tx, started, SystemMessageType::Info).await;
+    let tx = tx.clone();
+    tokio::spawn(async move { follow_to_the_end(kind, model, events, &tx).await });
+}
+
+/// A job's lines to the console that started it, then how it ended.
+async fn follow_to_the_end(
+    kind: JobKind,
+    model: &'static NativeModel,
+    mut events: broadcast::Receiver<JobEvent>,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+) {
+    let end = loop {
+        match events.recv().await {
+            Ok(JobEvent::Line(line)) => say(tx, line, SystemMessageType::Info).await,
+            Ok(JobEvent::Ended(end)) => break end,
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    };
+    let (said, how) = match (kind, end) {
+        (JobKind::Install, JobEnd::Done) => (format!("{} is installed. /native use {} loads it.", model.id, model.id), SystemMessageType::Info),
+        // The updater's own last line said it.
+        (JobKind::Remove, JobEnd::Done) | (_, JobEnd::Nothing(_)) => return,
+        (_, JobEnd::Refused(why) | JobEnd::Failed(why)) => {
+            (format!("The {} of {} did not finish: {why}.", kind.noun(), model.id), SystemMessageType::Error)
+        }
+        (JobKind::Install, JobEnd::Stopped) => (
+            format!("The download of {} was stopped. What arrived is kept, and the next install goes on from it.", model.id),
+            SystemMessageType::Info,
+        ),
+        (JobKind::Remove, JobEnd::Stopped) => (format!("The removal of {} was stopped.", model.id), SystemMessageType::Info),
+    };
+    say(tx, said, how).await;
+}
+
+/// The forms of `/native` that need no stored configuration.
+async fn machine_action(
+    action: MachineAction,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    env: &Env,
+    jobs: &Jobs,
+    cfg: Option<&config::SystemConfig>,
+) {
+    match action {
+        MachineAction::Show => say(tx, show_native(env, jobs, cfg).await, SystemMessageType::Info).await,
+        MachineAction::Help => say(tx, native_usage(), SystemMessageType::Info).await,
+        MachineAction::Install(model) => start_job(JobKind::Install, model, tx, env, jobs).await,
+        MachineAction::Remove(model) => start_job(JobKind::Remove, model, tx, env, jobs).await,
+        MachineAction::Cancel => {
+            let said = match jobs.stop() {
+                Some(running) => format!("Stopping the {} of {}.", running.kind.noun(), running.model.id),
+                None if contract::job_running(&env.models) => {
+                    "The model job that runs was not started by this brain (an upload through the web console): it ends with its upload.".to_string()
+                }
+                None => "No model job runs.".to_string(),
+            };
+            say(tx, said, SystemMessageType::Info).await;
+        }
+    }
+}
+
+/// `/native off`: no model is kept loaded any more. Refused while a native
+/// model leads the session, which would be left without its model.
+async fn native_off(tx: &mpsc::Sender<Result<ConversationResponse, Status>>, db: &Arc<WardsonDbClient>, env: &Env) {
+    let mut cfg = match config::load_config(db).await {
+        Ok(cfg) => cfg,
+        Err(e) => return say(tx, format!("/native off: the configuration could not be read ({e}). Nothing was changed."), SystemMessageType::Error).await,
+    };
+    if ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native) {
+        return say(
+            tx,
+            "Not freed: a native model leads the session, and /native off would leave it without its model. Switch to another provider first (/provider <name>, with no session open), then /native off.".to_string(),
+            SystemMessageType::Error,
+        )
+        .await;
+    }
+    let Some(model) = non_empty(&cfg.openai_compat.native_model) else {
+        // A record that asks for one all the same is put right.
+        let _ = native_model::follow(env, &cfg.openai_compat);
+        return say(tx, "No native model is kept loaded.".to_string(), SystemMessageType::Info).await;
+    };
+    cfg.openai_compat.native_model.clear();
+    if let Err(e) = config::save_config(db, &cfg).await {
+        return say(tx, format!("/native off: the configuration could not be saved ({e}). Nothing was changed."), SystemMessageType::Error).await;
+    }
+    match native_model::follow(env, &cfg.openai_compat) {
+        Ok(_) => {
+            say(
+                tx,
+                format!(
+                    "{model} is no longer kept loaded (experimental): embrad ends the model server within seconds, and its memory is free. /native use {model} loads it again."
+                ),
+                SystemMessageType::Info,
+            )
+            .await
+        }
+        Err(why) => say(tx, format!("/native off: {why}. The brain writes the record again at its next start."), SystemMessageType::Error).await,
+    }
+}
+
+/// `/native context`: the window the model kept loaded is given. A change
+/// is a new record: embrad ends the model server and starts it again.
+async fn native_context(action: ContextAction, tx: &mpsc::Sender<Result<ConversationResponse, Status>>, db: &Arc<WardsonDbClient>, env: &Env) {
+    let mut cfg = match config::load_config(db).await {
+        Ok(cfg) => cfg,
+        Err(e) => return say(tx, format!("/native context: the configuration could not be read ({e}). Nothing was changed."), SystemMessageType::Error).await,
+    };
+    let Some(model) = cfg.openai_compat.chosen_native_model() else {
+        return say(tx, config::PresetNotReady::NoModel(OpenAiCompatPreset::Native).to_string(), SystemMessageType::Error).await;
+    };
+    let current = cfg.openai_compat.native_context(model);
+    let stored = cfg.openai_compat.native_context_by_model.get(model.id).copied();
+    // The window asked for, and the figure the configuration keeps for it:
+    // none is the model's default.
+    let (wanted, keep) = match action {
+        ContextAction::Show => {
+            let whose = if stored.is_some() { "set with /native context" } else { "the default" };
+            return say(
+                tx,
+                format!(
+                    "{} is kept loaded with a context window of {current} tokens ({whose}). {} takes {} to {} tokens. /native context <tokens> loads it again with another window; a larger one takes more memory. /native context reset goes back to {}.",
+                    model.id,
+                    model.label,
+                    contract::SMALLEST_CONTEXT,
+                    model.largest_context,
+                    model.default_context
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+        }
+        ContextAction::Set(tokens) => match model.context_ok(tokens) {
+            Ok(tokens) => (tokens, Some(tokens)),
+            Err(why) => return say(tx, format!("{why}. Nothing was changed."), SystemMessageType::Error).await,
+        },
+        ContextAction::Reset => (model.default_context, None),
+    };
+    if keep == stored {
+        return say(tx, format!("{} is kept loaded with a context window of {current} tokens already.", model.id), SystemMessageType::Info).await;
+    }
+    match keep {
+        Some(tokens) => cfg.openai_compat.native_context_by_model.insert(model.id.to_string(), tokens),
+        None => cfg.openai_compat.native_context_by_model.remove(model.id),
+    };
+    if let Err(e) = config::save_config(db, &cfg).await {
+        return say(tx, format!("/native context: the configuration could not be saved ({e}). Nothing was changed."), SystemMessageType::Error).await;
+    }
+    if let Err(why) = native_model::follow(env, &cfg.openai_compat) {
+        return say(tx, format!("/native context: {why}. The brain writes the record again at its next start."), SystemMessageType::Error).await;
+    }
+    crate::provider::health::request_probe();
+    let said = if wanted == current {
+        // The same window as before: only whose figure it is has changed.
+        format!("{} keeps its context window of {current} tokens.", model.id)
+    } else {
+        format!(
+            "{} gets a context window of {wanted} tokens (experimental): embrad ends the model server and loads the model again within seconds. A turn in flight on it is cut, and /continue sends its last call again.",
+            model.id
+        )
+    };
+    say(tx, said, SystemMessageType::Info).await;
+}
+
+/// `/native` in a session.
+pub(super) async fn handle_native_command(args: &str, tx: &mpsc::Sender<Result<ConversationResponse, Status>>, db: &Arc<WardsonDbClient>, hands: &NativeHands) {
+    match parse_native(args) {
+        NativeAction::Refused(why) => say(tx, why, SystemMessageType::Error).await,
+        NativeAction::Stored(StoredAction::Use(model)) => pick_native_model(model, tx, db, hands).await,
+        NativeAction::Stored(StoredAction::Off) => native_off(tx, db, &hands.env).await,
+        NativeAction::Stored(StoredAction::Context(action)) => native_context(action, tx, db, &hands.env).await,
+        NativeAction::Machine(action) => {
+            let cfg = config::load_config(db).await.ok();
+            machine_action(action, tx, &hands.env, &hands.jobs, cfg.as_ref()).await
+        }
+    }
+}
+
+/// `/native` before a session (the wizard, Learning Mode, the identity
+/// import's dialogue): the models' files and the jobs are the machine's
+/// matters and are answered; what the stored configuration keeps loaded is
+/// the setup's to choose.
+pub(super) async fn handle_native_before_a_session(args: &str, tx: &mpsc::Sender<Result<ConversationResponse, Status>>, env: &Env, jobs: &Jobs) {
+    match parse_native(args) {
+        NativeAction::Refused(why) => say(tx, why, SystemMessageType::Error).await,
+        NativeAction::Stored(_) => say(tx, NATIVE_NOT_BEFORE_A_SESSION.to_string(), SystemMessageType::Info).await,
+        NativeAction::Machine(action) => machine_action(action, tx, env, jobs, None).await,
     }
 }
 
@@ -644,5 +1043,331 @@ mod tests {
         assert!(thinking(&oc));
         oc.set_model(OpenAiCompatPreset::Native, "qwen3.5-4b");
         assert!(!thinking(&oc));
+    }
+
+    // ── /native ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn native_is_read_into_its_forms() {
+        use {MachineAction as M, StoredAction as S};
+        let machine = NativeAction::Machine;
+        let stored = NativeAction::Stored;
+        for show in ["", "   ", "status", "list", "LIST"] {
+            assert_eq!(parse_native(show), machine(M::Show), "{show:?}");
+        }
+        assert_eq!(parse_native("help"), machine(M::Help));
+        assert_eq!(parse_native("install qwen3.5-4b"), machine(M::Install(four())));
+        assert_eq!(parse_native("remove QWEN3.5-9B"), machine(M::Remove(nine())));
+        assert_eq!(parse_native("cancel"), machine(M::Cancel));
+        assert_eq!(parse_native("use qwen3.5-9b"), stored(S::Use(nine())));
+        assert_eq!(parse_native("off"), stored(S::Off));
+        assert_eq!(parse_native("context"), stored(S::Context(ContextAction::Show)));
+        assert_eq!(parse_native("context 32768"), stored(S::Context(ContextAction::Set(32_768))));
+        assert_eq!(parse_native("context 65,536"), stored(S::Context(ContextAction::Set(65_536))));
+        assert_eq!(parse_native("Context Reset"), stored(S::Context(ContextAction::Reset)));
+        for (bad, why) in [
+            ("install", "/native install takes one model: qwen3.5-4b, qwen3.5-9b."),
+            ("use qwen3.5-4b qwen3.5-9b", "/native use takes one model: qwen3.5-4b, qwen3.5-9b."),
+            ("remove qwen3.5-27b", "'qwen3.5-27b' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b."),
+            ("off now", "/native off takes nothing after it."),
+            ("list all", "/native list takes nothing after it."),
+            ("context many", "'many' is not a number of tokens."),
+            ("context 1 2", "/native context takes one number of tokens, or reset."),
+            ("context -4", "'-4' is not a number of tokens."),
+            ("frobnicate", "'frobnicate' is not a form of /native."),
+        ] {
+            assert_eq!(parse_native(bad), NativeAction::Refused(format!("{why} /native help shows the forms.")), "{bad}");
+        }
+        // Every model of the catalogue is a model each form takes, and the usage names it.
+        for model in &contract::CATALOGUE {
+            for verb in ["install", "use", "remove"] {
+                assert!(!matches!(parse_native(&format!("{verb} {}", model.id)), NativeAction::Refused(_)), "{verb} {}", model.id);
+            }
+            assert!(native_usage().contains(model.id), "{}", model.id);
+        }
+        assert!(native_usage().starts_with("Usage: /native | /native install <model> | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n"));
+    }
+
+    /// A stand-in for the updater that answers the three commands `/native`
+    /// runs: the list, an install that waits for `gate`, and a removal the
+    /// updater refuses.
+    fn updater(root: &std::path::Path, gate: &std::path::Path) -> Vec<OsString> {
+        stand_in(
+            root,
+            &format!(
+                "case \"$1\" in\n\
+                 model-list)\n  echo 'qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): installed'\n  echo 'qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5417 MB, Apache-2.0): not installed'\n  echo 'DATA has 1840 MB free' ;;\n\
+                 model-install)\n  echo \"$2: received 270 of 5417 MB (5%)\"\n  until [ -e '{}' ]; do sleep 0.02; done\n  echo \"$2: installed and verified\" ;;\n\
+                 model-remove)\n  echo \"refused: the settings ask for $2 to be kept loaded; free it first (/native off)\" >&2\n  exit 2 ;;\n\
+                 esac",
+                gate.display()
+            ),
+        )
+    }
+
+    fn config_of(provider: &str, openai_compat: serde_json::Value) -> config::SystemConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase2",
+            "created_at": "", "version": "test", "api_provider": provider, "openai_compat": openai_compat,
+        }))
+        .expect("a configuration")
+    }
+
+    #[tokio::test]
+    async fn native_shows_the_files_what_is_kept_loaded_the_server_and_the_job() {
+        use crate::native_model::test_support::status;
+        use embra_boot::native_model::ServiceState;
+        let (root, mut env) = machine("native-show");
+        let gate = root.join("go-on");
+        env.updater = updater(&root, &gate);
+        let jobs = Jobs::default();
+
+        // Before a session, with nothing asked for and no embrad on the machine.
+        assert_eq!(
+            show_native(&env, &jobs, None).await,
+            "Native models (experimental): a model that runs on this machine.\n  \
+             qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): installed\n  \
+             qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5417 MB, Apache-2.0): not installed\n  \
+             DATA has 1840 MB free\n  \
+             Kept loaded: none. /native use <model> loads one.\n  \
+             /native help shows the forms."
+        );
+
+        // A model kept loaded that leads the session, thinking off, its server ready.
+        let wanted = Wanted::new(four());
+        contract::write_settings(&env.settings, Some(&wanted)).unwrap();
+        contract::write_status(&env.status, &status(ServiceState::Ready, Some(wanted), "")).unwrap();
+        let cfg = config_of("native", serde_json::json!({"native_model": "qwen3.5-4b", "native_effort_by_model": {"qwen3.5-4b": "low"}}));
+        let shown = show_native(&env, &jobs, Some(&cfg)).await;
+        assert!(
+            shown.contains("\n  Kept loaded: qwen3.5-4b, context window 65536, thinking off. It leads the session.\n  The model server: ready, context window 65536.\n  /native help"),
+            "{shown}"
+        );
+        // Another provider leads; the model thinks; before a session the thinking is not said.
+        let cfg = config_of("anthropic", serde_json::json!({"native_model": "qwen3.5-4b"}));
+        assert!(show_native(&env, &jobs, Some(&cfg)).await.contains("\n  Kept loaded: qwen3.5-4b, context window 65536, thinking on.\n"));
+        assert!(show_native(&env, &jobs, None).await.contains("\n  Kept loaded: qwen3.5-4b, context window 65536.\n"));
+
+        // A job that runs, with how far it is; then how it ended.
+        let (tx, mut rx) = mpsc::channel(16);
+        machine_action(MachineAction::Install(nine()), &tx, &env, &jobs, None).await;
+        assert_eq!(
+            told(&mut rx).await,
+            "Installing qwen3.5-9b: its file (5417 MB) is downloaded and checked, and the lines below follow the updater. The session stays usable; /native cancel stops it."
+        );
+        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+        assert!(show_native(&env, &jobs, None)
+            .await
+            .contains("\n  The download of qwen3.5-9b runs: qwen3.5-9b: received 270 of 5417 MB (5%). /native cancel stops it.\n"));
+        // One job at a time.
+        machine_action(MachineAction::Remove(four()), &tx, &env, &jobs, None).await;
+        assert_eq!(
+            told(&mut rx).await,
+            "Not started: the download of qwen3.5-9b runs (qwen3.5-9b: received 270 of 5417 MB (5%)), and one job runs at a time. /native cancel stops it."
+        );
+        std::fs::write(&gate, "").unwrap();
+        assert_eq!(told(&mut rx).await, "qwen3.5-9b: installed and verified");
+        assert_eq!(told(&mut rx).await, "qwen3.5-9b is installed. /native use qwen3.5-9b loads it.");
+        assert!(show_native(&env, &jobs, None).await.contains("\n  The last job, the download of qwen3.5-9b: done.\n"));
+
+        // A removal the updater refuses is said in the updater's words.
+        machine_action(MachineAction::Remove(four()), &tx, &env, &jobs, None).await;
+        assert_eq!(told(&mut rx).await, "Removing the file of qwen3.5-4b.");
+        assert_eq!(
+            told(&mut rx).await,
+            "The removal of qwen3.5-4b did not finish: refused: the settings ask for qwen3.5-4b to be kept loaded; free it first (/native off)."
+        );
+
+        // No updater on this machine: the rest is shown all the same.
+        env.updater = vec![OsString::from(root.join("no-such-updater"))];
+        let shown = show_native(&env, &jobs, None).await;
+        assert!(shown.contains("\n  The models' files could not be listed: the updater could not be run ("), "{shown}");
+        assert!(shown.contains("\n  Kept loaded: qwen3.5-4b, context window 65536.\n"), "{shown}");
+
+        machine_action(MachineAction::Help, &tx, &env, &jobs, None).await;
+        assert_eq!(told(&mut rx).await, native_usage());
+    }
+
+    #[tokio::test]
+    async fn native_cancel_stops_the_job_that_runs() {
+        let (root, mut env) = machine("native-cancel");
+        env.updater = updater(&root, &root.join("never"));
+        let jobs = Jobs::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        machine_action(MachineAction::Cancel, &tx, &env, &jobs, None).await;
+        assert_eq!(told(&mut rx).await, "No model job runs.");
+
+        machine_action(MachineAction::Install(nine()), &tx, &env, &jobs, None).await;
+        assert!(told(&mut rx).await.starts_with("Installing qwen3.5-9b: "));
+        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+        machine_action(MachineAction::Cancel, &tx, &env, &jobs, None).await;
+        assert_eq!(told(&mut rx).await, "Stopping the download of qwen3.5-9b.");
+        assert_eq!(told(&mut rx).await, "The download of qwen3.5-9b was stopped. What arrived is kept, and the next install goes on from it.");
+        assert!(jobs.running().is_none());
+
+        // A job this brain did not start holds the models' lock: an upload.
+        let lock = contract::job_lock(&env.models).unwrap().expect("no job holds it");
+        machine_action(MachineAction::Cancel, &tx, &env, &jobs, None).await;
+        assert_eq!(
+            told(&mut rx).await,
+            "The model job that runs was not started by this brain (an upload through the web console): it ends with its upload."
+        );
+        assert!(show_native(&env, &jobs, None)
+            .await
+            .contains("\n  A model job runs that this brain did not start: an upload through the web console.\n"));
+        drop(lock);
+    }
+
+    /// A database that holds `cfg` and takes its saves.
+    async fn db_with(cfg: &config::SystemConfig) -> MockServer {
+        let server = MockServer::start().await;
+        let envelope = |data: serde_json::Value| ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "meta": {}, "data": data}));
+        Mock::given(method("GET")).and(path("/config.system/docs/config")).respond_with(envelope(serde_json::to_value(cfg).unwrap())).mount(&server).await;
+        Mock::given(method("GET")).and(path("/config.system")).respond_with(envelope(serde_json::json!({}))).mount(&server).await;
+        Mock::given(method("POST")).and(path("/config.system/docs")).respond_with(envelope(serde_json::json!({"_id": "config"}))).mount(&server).await;
+        server
+    }
+
+    /// The `openai_compat` block of each configuration saved, in order.
+    async fn saved(server: &MockServer) -> Vec<serde_json::Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/config.system/docs")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).expect("a configuration")["openai_compat"].clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn native_off_frees_the_model_and_is_refused_while_one_leads_the_session() {
+        let (_root, env) = machine("native-off");
+        let wanted = Wanted::new(four());
+        contract::write_settings(&env.settings, Some(&wanted)).unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // A native model leads the session: refused, and nothing is touched.
+        let server = db_with(&config_of("native", serde_json::json!({"native_model": "qwen3.5-4b"}))).await;
+        native_off(&tx, &Arc::new(WardsonDbClient::from_url(&server.uri())), &env).await;
+        assert_eq!(
+            told(&mut rx).await,
+            "Not freed: a native model leads the session, and /native off would leave it without its model. Switch to another provider first (/provider <name>, with no session open), then /native off."
+        );
+        assert!(saved(&server).await.is_empty());
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(wanted)));
+
+        // Another provider leads: the configuration keeps none, and the record names none.
+        let server = db_with(&config_of("anthropic", serde_json::json!({"native_model": "qwen3.5-4b", "native_context_by_model": {"qwen3.5-4b": 32768}}))).await;
+        native_off(&tx, &Arc::new(WardsonDbClient::from_url(&server.uri())), &env).await;
+        assert_eq!(
+            told(&mut rx).await,
+            "qwen3.5-4b is no longer kept loaded (experimental): embrad ends the model server within seconds, and its memory is free. /native use qwen3.5-4b loads it again."
+        );
+        let saved = saved(&server).await;
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].get("native_model").is_none(), "none is kept loaded: {}", saved[0]);
+        assert_eq!(saved[0]["native_context_by_model"]["qwen3.5-4b"], 32768, "the model's window stays its own");
+        assert_eq!(contract::read_settings(&env.settings), Ok(None));
+
+        // None is kept loaded.
+        let server = db_with(&config_of("anthropic", serde_json::json!({}))).await;
+        native_off(&tx, &Arc::new(WardsonDbClient::from_url(&server.uri())), &env).await;
+        assert_eq!(told(&mut rx).await, "No native model is kept loaded.");
+    }
+
+    #[tokio::test]
+    async fn native_context_shows_sets_and_resets_the_loaded_models_window() {
+        let (_root, env) = machine("native-context");
+        contract::write_settings(&env.settings, Some(&Wanted::new(four()))).unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let run = |cfg: config::SystemConfig, action: ContextAction| {
+            let (tx, env) = (tx.clone(), env.clone());
+            async move {
+                let server = db_with(&cfg).await;
+                native_context(action, &tx, &Arc::new(WardsonDbClient::from_url(&server.uri())), &env).await;
+                saved(&server).await
+            }
+        };
+        let default = || config_of("native", serde_json::json!({"native_model": "qwen3.5-4b"}));
+        let narrowed = || config_of("native", serde_json::json!({"native_model": "qwen3.5-4b", "native_context_by_model": {"qwen3.5-4b": 32768}}));
+
+        assert!(run(default(), ContextAction::Show).await.is_empty());
+        assert_eq!(
+            told(&mut rx).await,
+            "qwen3.5-4b is kept loaded with a context window of 65536 tokens (the default). Qwen3.5 4B takes 1024 to 262144 tokens. /native context <tokens> loads it again with another window; a larger one takes more memory. /native context reset goes back to 65536."
+        );
+        assert!(run(narrowed(), ContextAction::Show).await.is_empty());
+        assert!(told(&mut rx).await.starts_with("qwen3.5-4b is kept loaded with a context window of 32768 tokens (set with /native context). "));
+
+        // A window: stored for the model, and the record asks for it.
+        let saved_set = run(default(), ContextAction::Set(32_768)).await;
+        assert_eq!(
+            told(&mut rx).await,
+            "qwen3.5-4b gets a context window of 32768 tokens (experimental): embrad ends the model server and loads the model again within seconds. A turn in flight on it is cut, and /continue sends its last call again."
+        );
+        assert_eq!(saved_set.len(), 1);
+        assert_eq!(saved_set[0]["native_context_by_model"]["qwen3.5-4b"], 32768);
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(Wanted { context: 32_768, ..Wanted::new(four()) })));
+
+        // The same window again: nothing to do.
+        assert!(run(narrowed(), ContextAction::Set(32_768)).await.is_empty());
+        assert_eq!(told(&mut rx).await, "qwen3.5-4b is kept loaded with a context window of 32768 tokens already.");
+        assert!(run(default(), ContextAction::Reset).await.is_empty());
+        assert_eq!(told(&mut rx).await, "qwen3.5-4b is kept loaded with a context window of 65536 tokens already.");
+
+        // Back to the default.
+        let saved_reset = run(narrowed(), ContextAction::Reset).await;
+        assert!(told(&mut rx).await.starts_with("qwen3.5-4b gets a context window of 65536 tokens (experimental): "));
+        assert!(saved_reset[0].get("native_context_by_model").is_none(), "{}", saved_reset[0]);
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(Wanted::new(four()))));
+        // The default's own figure, set as the model's: the window stays.
+        let saved_same = run(default(), ContextAction::Set(65_536)).await;
+        assert_eq!(told(&mut rx).await, "qwen3.5-4b keeps its context window of 65536 tokens.");
+        assert_eq!(saved_same[0]["native_context_by_model"]["qwen3.5-4b"], 65536);
+
+        // A window the model cannot be given, and no model kept loaded.
+        assert!(run(default(), ContextAction::Set(12)).await.is_empty());
+        assert_eq!(told(&mut rx).await, "12 is not a context window for Qwen3.5 4B: 1024 to 262144 tokens. Nothing was changed.");
+        assert!(run(config_of("anthropic", serde_json::json!({})), ContextAction::Set(32_768)).await.is_empty());
+        assert_eq!(told(&mut rx).await, "No native model is chosen. /native lists the models, and /native use <model> loads one (experimental).");
+    }
+
+    /// `/native use` on the model kept loaded whose server embrad no longer
+    /// starts: the load asks for it again, and the reply says so.
+    #[test]
+    fn a_load_says_when_a_halted_server_is_started_again() {
+        let leads = config_of("native", serde_json::json!({"native_model": "qwen3.5-4b"}));
+        assert_eq!(
+            loaded_words(&leads, four(), Loaded::Restarted),
+            "qwen3.5-4b is asked for again: its model server had ended three times before it answered and was no longer started. embrad starts it now, and your next message waits for it."
+        );
+        let other = config_of("gemini", serde_json::json!({"native_model": "qwen3.5-4b"}));
+        assert_eq!(
+            loaded_words(&other, four(), Loaded::Restarted),
+            "qwen3.5-4b is asked for again: its model server had ended three times before it answered and was no longer started. embrad starts it now. Switch to it with /provider native when ready."
+        );
+        assert_eq!(loaded_words(&leads, four(), Loaded::AsItWas), "qwen3.5-4b is the native model already.");
+    }
+
+    /// In a session every form is answered; before one, the forms that
+    /// change the stored configuration are told to wait.
+    #[tokio::test]
+    async fn native_before_a_session_answers_the_machines_forms_alone() {
+        let (root, mut env) = machine("native-before");
+        env.updater = updater(&root, &root.join("never"));
+        let jobs = Jobs::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        for stored in ["use qwen3.5-4b", "off", "context", "context 32768", "context reset"] {
+            handle_native_before_a_session(stored, &tx, &env, &jobs).await;
+            assert_eq!(told(&mut rx).await, NATIVE_NOT_BEFORE_A_SESSION, "{stored}");
+        }
+        assert!(!env.settings.exists(), "nothing was asked of embrad");
+        handle_native_before_a_session("", &tx, &env, &jobs).await;
+        assert!(told(&mut rx).await.starts_with("Native models (experimental): a model that runs on this machine.\n  qwen3.5-4b  "));
+        handle_native_before_a_session("frobnicate", &tx, &env, &jobs).await;
+        assert_eq!(told(&mut rx).await, "'frobnicate' is not a form of /native. /native help shows the forms.");
+        handle_native_before_a_session("cancel", &tx, &env, &jobs).await;
+        assert_eq!(told(&mut rx).await, "No model job runs.");
     }
 }

@@ -53,6 +53,11 @@ Model:
   /effort reset                          Clear the active provider's stored level
   /model-wait                            Show how long embraOS waits while Ollama, LM Studio or a native model sends nothing (default 120 minutes)
   /model-wait <minutes>|reset            Set that wait for the three of them, or go back to the default; Esc ends a wait
+  /native                                Native models (experimental): the models' files, what is kept loaded, the model server, the job that runs
+  /native install <model>                Download a model's file and check it (qwen3.5-4b|qwen3.5-9b); /native cancel stops the job that runs
+  /native use <model> | off              Keep a model loaded, installing it first when needed, or free its memory; whichever provider leads
+  /native context [<tokens>|reset]       The context window the loaded model is given
+  /native remove <model>                 Delete a model's file
   /local-ai-gateway                      Show WSDS Local AI Gateway's URL and whether requests go through it
   /local-ai-gateway <url>|on|off|reset   Route every provider request through its unified listener (http(s)://host:4000,
                                          which must answer with its x-local-ai-gateway header); off keeps the URL

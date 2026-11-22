@@ -18,10 +18,6 @@
 //!   runs of the OS's updater, one at a time, kept where every console can
 //!   ask for them ([`jobs`]).
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "/native starts, shows and stops the jobs; the command comes with its own commit")
-)]
 pub(crate) mod jobs;
 
 use std::ffi::OsString;
@@ -36,6 +32,9 @@ use crate::provider::openai_compat::{OpenAiCompatPreset, span_words};
 
 /// How often the records are read again while embrad has not followed.
 const FOLLOW_POLL: Duration = Duration::from_secs(1);
+/// How long embrad is given to say that it let go of a server it no longer
+/// starts: four of its looks.
+const RELEASE_WAIT: Duration = Duration::from_secs(20);
 
 /// Where the records are read and written, and how the updater is run. The
 /// machine's is [`Env::in_force`]; a test names its own.
@@ -201,6 +200,42 @@ pub(crate) async fn until_followed(env: &Env, model: &str, wait: Duration) -> Re
             }
             Gate::Wait => tokio::time::sleep(FOLLOW_POLL).await,
         }
+    }
+}
+
+/// A model server that ended three times before it answered is no longer
+/// started until the record changes, and asking for the same model again
+/// changes nothing in it. So when embrad's status is halted on what the
+/// record asks: the record asks for none, embrad is waited for until it
+/// says so, and the record asks again, which begins its counts anew.
+/// `Ok(false)` when nothing is halted, and nothing was touched.
+pub(crate) async fn ask_again_if_halted(env: &Env) -> Result<bool, String> {
+    let (wanted, status) = env.records();
+    let (Ok(Some(wanted)), Some(status)) = (wanted, status) else { return Ok(false) };
+    if status.state != ServiceState::Halted || status.model != Some(wanted.model) || status.context != Some(wanted.context) {
+        return Ok(false);
+    }
+    let write = |wanted: Option<&Wanted>| {
+        contract::write_settings(&env.settings, wanted)
+            .map_err(|e| format!("the native model's settings could not be written to {}: {e}", env.settings.display()))
+    };
+    write(None)?;
+    let started = tokio::time::Instant::now();
+    let let_go = loop {
+        tokio::time::sleep(FOLLOW_POLL).await;
+        match env.records().1 {
+            Some(status) if status.state == ServiceState::Off => break true,
+            _ if started.elapsed() >= RELEASE_WAIT => break false,
+            _ => {}
+        }
+    };
+    // Asked for again either way: the record never stays without the model
+    // the configuration keeps.
+    write(Some(&wanted))?;
+    if let_go {
+        Ok(true)
+    } else {
+        Err(format!("embrad did not let go of the model server within {} seconds", RELEASE_WAIT.as_secs()))
     }
 }
 
@@ -476,6 +511,63 @@ mod tests {
             "embrad has not started the native model after 5 minutes: its status is off; the request was dropped. /native shows what the model server is doing, and /model-wait sets how long embraOS waits"
         );
         assert_eq!(start.elapsed(), Duration::from_secs(300));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_halted_server_is_asked_for_again_with_nothing_asked_in_between() {
+        let (_root, env) = machine("ask-again");
+        contract::write_settings(&env.settings, Some(&four())).unwrap();
+        let halted = status(ServiceState::Halted, Some(four()), "the model server ended 3 times before it answered");
+        contract::write_status(&env.status, &halted).unwrap();
+
+        // embrad, as far as this needs it: at a look it sees the record that
+        // names none, and says off.
+        let embrad = {
+            let (settings, status_path) = (env.settings.clone(), env.status.clone());
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(2500)).await;
+                    if contract::read_settings(&settings) == Ok(None) {
+                        contract::write_status(&status_path, &status(ServiceState::Off, None, "")).unwrap();
+                        return;
+                    }
+                }
+            }
+        };
+        let start = tokio::time::Instant::now();
+        let (asked, ()) = within_a_day(async { tokio::join!(ask_again_if_halted(&env), embrad) }).await;
+        assert_eq!(asked, Ok(true));
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(four())), "the model is asked for again");
+        assert_eq!(start.elapsed(), Duration::from_secs(3), "at the first look after embrad's");
+
+        // Nothing is halted: nothing is written, and there is no wait.
+        for fine in [
+            status(ServiceState::Ready, Some(four()), ""),
+            status(ServiceState::Loading, Some(four()), ""),
+            status(ServiceState::Unavailable, Some(four()), "qwen3.5-4b is not installed"),
+            // Halted on what was asked before: embrad has not looked at this record yet.
+            status(ServiceState::Halted, Some(nine()), "ended"),
+        ] {
+            contract::write_status(&env.status, &fine).unwrap();
+            let written = std::fs::metadata(&env.settings).unwrap().modified().unwrap();
+            let start = tokio::time::Instant::now();
+            assert_eq!(within_a_day(ask_again_if_halted(&env)).await, Ok(false), "{fine:?}");
+            assert_eq!(start.elapsed(), Duration::ZERO);
+            assert_eq!(std::fs::metadata(&env.settings).unwrap().modified().unwrap(), written);
+        }
+        std::fs::remove_file(&env.status).unwrap();
+        assert_eq!(within_a_day(ask_again_if_halted(&env)).await, Ok(false), "no embrad on this machine");
+
+        // An embrad that never lets go: said after its four looks, and the
+        // record asks for the model all the same.
+        contract::write_status(&env.status, &halted).unwrap();
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            within_a_day(ask_again_if_halted(&env)).await,
+            Err("embrad did not let go of the model server within 20 seconds".to_string())
+        );
+        assert_eq!(start.elapsed(), Duration::from_secs(20));
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(four())));
     }
 
     #[test]

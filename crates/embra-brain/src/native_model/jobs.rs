@@ -1,7 +1,8 @@
-//! The jobs on a native model's file (experimental): a download, a check, a
-//! removal. Each is a run of the OS's updater (`embra-update model-install`,
-//! `model-verify`, `model-remove <id>`), which does the work, holds the
-//! models' lock and says how far it is, a line every five per cent.
+//! The jobs on a native model's file (experimental): an install (a download
+//! and its check) and a removal. Each is a run of the OS's updater
+//! (`embra-update model-install`, `model-remove <id>`), which does the work,
+//! holds the models' lock and says how far it is, a line every five per
+//! cent.
 //!
 //! One job at a time, kept in one place for the whole brain
 //! ([`Jobs::shared`]). The console that started a job is sent its lines; any
@@ -20,7 +21,8 @@ use tokio::sync::{Notify, broadcast};
 
 use super::Env;
 
-/// The lines of a job that are kept for a console that asks after it ended.
+/// The lines of a job that are kept while it runs: its latest is how far it
+/// is, and the last of a job that had nothing to do is what it found.
 const TAIL: usize = 8;
 /// The lines a console that follows a job may be behind by. A job says
 /// about thirty.
@@ -29,8 +31,9 @@ const FEED: usize = 256;
 /// What a job does to a model's file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum JobKind {
+    /// Download a model's file and check it; a file that is there is
+    /// checked, and a download that stopped goes on.
     Install,
-    Verify,
     Remove,
 }
 
@@ -39,7 +42,6 @@ impl JobKind {
     pub(crate) fn command(self) -> &'static str {
         match self {
             JobKind::Install => "model-install",
-            JobKind::Verify => "model-verify",
             JobKind::Remove => "model-remove",
         }
     }
@@ -48,7 +50,6 @@ impl JobKind {
     pub(crate) fn noun(self) -> &'static str {
         match self {
             JobKind::Install => "download",
-            JobKind::Verify => "check",
             JobKind::Remove => "removal",
         }
     }
@@ -86,8 +87,6 @@ pub(crate) struct Finished {
     pub(crate) kind: JobKind,
     pub(crate) model: &'static NativeModel,
     pub(crate) end: JobEnd,
-    /// The updater's last lines.
-    pub(crate) lines: Vec<String>,
 }
 
 /// What a console that follows a job is sent.
@@ -101,6 +100,7 @@ pub(crate) enum JobEvent {
 struct Slot {
     running: Running,
     stop: Arc<Notify>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by `follow`, which the wizard calls (its own commit)"))]
     feed: broadcast::Sender<JobEvent>,
 }
 
@@ -161,6 +161,7 @@ impl Jobs {
     }
 
     /// Follow the job that runs, from its next line on.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the wizard follows a download that runs when a console comes back to it (its own commit)"))]
     pub(crate) fn follow(&self) -> Option<broadcast::Receiver<JobEvent>> {
         self.lock().slot.as_ref().map(|slot| slot.feed.subscribe())
     }
@@ -192,9 +193,30 @@ impl Jobs {
     fn ended(&self, kind: JobKind, model: &'static NativeModel, end: JobEnd) {
         let mut inner = self.lock();
         inner.slot = None;
-        let lines = inner.tail.iter().cloned().collect();
-        inner.last = Some(Finished { kind, model, end, lines });
+        inner.last = Some(Finished { kind, model, end });
     }
+}
+
+/// How long the updater is given to list the models.
+const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The updater's own list: a line a model of the catalogue with how its
+/// file stands on this machine, then DATA's free space (`model-list`).
+pub(crate) async fn list(env: &Env) -> Result<String, String> {
+    let Some((program, leading)) = env.updater.split_first() else {
+        return Err("no updater is named".to_string());
+    };
+    let mut cmd = crate::tools::subprocess(program);
+    cmd.args(leading).arg("model-list").stdin(Stdio::null());
+    let out = tokio::time::timeout(LIST_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| format!("the updater did not answer within {} s", LIST_TIMEOUT.as_secs()))?
+        .map_err(|e| format!("the updater could not be run ({e})"))?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    let errors = String::from_utf8_lossy(&out.stderr);
+    Err(errors.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no reason given").trim().to_string())
 }
 
 /// Run the updater for one job, to its end or to a stop.
@@ -325,7 +347,7 @@ mod tests {
         // It follows the job from here on.
         let mut second = jobs.follow().expect("a job to follow");
         // One job at a time: a second one is refused with the one that runs.
-        let refused = jobs.start(&env, JobKind::Verify, by_id("qwen3.5-9b").unwrap()).expect_err("a job runs");
+        let refused = jobs.start(&env, JobKind::Remove, by_id("qwen3.5-9b").unwrap()).expect_err("a job runs");
         assert_eq!((refused.kind, refused.model.id), (JobKind::Install, "qwen3.5-4b"));
 
         std::fs::write(&gate, "").unwrap();
@@ -336,8 +358,6 @@ mod tests {
         assert!(jobs.running().is_none() && jobs.follow().is_none(), "the job is over for who hears of its end");
         let last = jobs.last().expect("the job that ran");
         assert_eq!((last.kind, last.model.id, &last.end), (JobKind::Install, "qwen3.5-4b", &JobEnd::Done));
-        assert_eq!(last.lines.len(), 3);
-        assert!(last.lines[2].starts_with("qwen3.5-4b: installed and verified "), "{:?}", last.lines);
         assert_eq!(std::fs::read_to_string(&args).unwrap().trim(), "model-install qwen3.5-4b");
 
         // And the next job starts: a removal, by its own command.
@@ -369,7 +389,6 @@ mod tests {
         }
         let last = jobs.last().expect("the job ended");
         assert_eq!(last.end, JobEnd::Done);
-        assert_eq!(last.lines.last().map(String::as_str), Some("qwen3.5-4b: installed and verified"));
     }
 
     /// A stop ends the updater itself, not only the wait for it.
@@ -412,7 +431,7 @@ mod tests {
             ("kill -9 $$", JobEnd::Failed("the updater was ended by a signal (no reason given)".into())),
         ] {
             env.updater = stand_in(&root, body);
-            let mut events = jobs.start(&env, JobKind::Verify, four()).expect("the job before it ended");
+            let mut events = jobs.start(&env, JobKind::Remove, four()).expect("the job before it ended");
             assert_eq!(end_of(&mut events).await, expected, "{body}");
         }
         // No updater on this machine: said, and the next job can start.
@@ -425,10 +444,26 @@ mod tests {
         assert_eq!(end_of(&mut events).await, JobEnd::Failed("no updater is named".into()));
     }
 
+    #[tokio::test]
+    async fn the_list_is_the_updaters_own() {
+        let (root, mut env) = machine("job-list");
+        env.updater = stand_in(&root, "echo \"asked: $1\"\necho 'qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): installed'\necho 'DATA has 1840 MB free'");
+        assert_eq!(
+            list(&env).await.as_deref(),
+            Ok("asked: model-list\nqwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): installed\nDATA has 1840 MB free")
+        );
+        env.updater = stand_in(&root, "echo 'DATA could not be read' >&2; exit 1");
+        assert_eq!(list(&env).await, Err("DATA could not be read".to_string()));
+        env.updater = vec![OsString::from(root.join("no-such-updater"))];
+        assert!(list(&env).await.unwrap_err().starts_with("the updater could not be run ("));
+        env.updater = Vec::new();
+        assert_eq!(list(&env).await, Err("no updater is named".to_string()));
+    }
+
     #[test]
     fn a_job_names_the_updaters_command_and_the_operators_word() {
-        let named: Vec<_> = [JobKind::Install, JobKind::Verify, JobKind::Remove].into_iter().map(|kind| (kind.command(), kind.noun())).collect();
-        assert_eq!(named, [("model-install", "download"), ("model-verify", "check"), ("model-remove", "removal")]);
+        let named: Vec<_> = [JobKind::Install, JobKind::Remove].into_iter().map(|kind| (kind.command(), kind.noun())).collect();
+        assert_eq!(named, [("model-install", "download"), ("model-remove", "removal")]);
         // The brain's shared registry is one.
         assert!(std::ptr::eq(Jobs::shared(), Jobs::shared()));
     }

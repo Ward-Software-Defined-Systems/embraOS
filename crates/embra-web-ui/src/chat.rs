@@ -516,6 +516,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/model", "show / switch the model"),
         ("/effort", "show / set the active provider's effort"),
         ("/model-wait", "local models: show / set how long a silent server is waited for"),
+        ("/native", "native models (experimental): show / install <model> / use <model> / off / context <tokens> / remove <model> / cancel"),
         ("/local-ai-gateway", "provider gateway: show / <url> / on / off / reset"),
         ("/embeddings", "semantic similarity: status / on / off"),
         ("/embeddings backfill", "embed nodes that need it"),
