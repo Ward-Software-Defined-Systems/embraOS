@@ -60,6 +60,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; Parallels; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the stick (HDMI: the page, a keyboard, a mouse and the 1920x1080 mode); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click); the Pi (HDMI: the page, a keyboard, a mouse and a click) | |
 | A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA); bare metal (a held modifier) | |
 | A firmware framebuffer (`ramfb`): 800x600, and 1024x768 on request | QEMU; QEMU on Apple Silicon | |
+| More than one graphics card: the page on the card that has a display connected | QEMU (the firmware's framebuffer beside a virtio-gpu card, each in turn without a display) | a machine with two cards |
 | `embra.kioskmode=` | QEMU (standard VGA, virtio-gpu, a firmware framebuffer), GRUB's Diagnostics entry among the ways in | |
 | The page's scale: 2 on a mode 2560 pixels wide, 1 below, and `embra.kioskscale=` for either | QEMU (standard VGA, at 1920x1080 and at 2560x1440) | bare metal |
 | The menu: Copy, Paste, This console's URL | QEMU; QEMU on an Intel Mac and on Apple Silicon | |

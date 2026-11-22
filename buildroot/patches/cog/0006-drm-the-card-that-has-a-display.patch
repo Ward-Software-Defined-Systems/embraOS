@@ -1,0 +1,146 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] drm: the card that has a display
+
+The DRM platform took the first card libdrm lists that has mode-setting
+resources and gave up when no display was connected to it, without a look at
+a second card. A machine with two cards lists the one without a display first
+when that card's driver registers first: a laptop whose panel is on the
+processor's graphics and whose second card drives no output of its own. The
+platform now takes the first card that has a display connected, among the
+cards libdrm lists and then among the card nodes it leaves out, and the first
+card with resources when none has one, which is the card it took before.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/platform/drm/cog-platform-drm.c
++++ b/platform/drm/cog-platform-drm.c
+@@ -330,14 +330,33 @@
+     }
+ }
+ 
++/* Whether a card has a display: one of its connectors reports one connected. */
++static gboolean
++card_has_display(int fd, const drmModeRes *resources)
++{
++    for (int i = 0; i < resources->count_connectors; ++i) {
++        drmModeConnector *connector = drmModeGetConnector(fd, resources->connectors[i]);
++        if (!connector)
++            continue;
++
++        gboolean connected = connector->connection == DRM_MODE_CONNECTED;
++        drmModeFreeConnector(connector);
++        if (connected)
++            return TRUE;
++    }
++
++    return FALSE;
++}
++
+ /* The first card node that opens and has mode-setting resources, for a card
+  * libdrm's enumeration leaves out: drmGetDevices2() tells a card by the bus
+  * of the device behind it (PCI, USB, platform, virtio, host1x, faux) and
+  * skips every other one. Hyper-V's synthetic video is a VMBus device: the
+- * enumeration is empty there, and /dev/dri/card0 works all the same. Returns
+- * the descriptor and the resources, or -1. */
++ * enumeration is empty there, and /dev/dri/card0 works all the same. With
++ * with_display, the first such node whose card has a display connected.
++ * Returns the descriptor and the resources, or -1. */
+ static int
+-open_card_node(drmModeRes **resources)
++open_card_node(drmModeRes **resources, gboolean with_display)
+ {
+     for (int minor = 0; minor < 64; ++minor) {
+         char path[64];
+@@ -348,11 +367,12 @@
+             continue;
+ 
+         *resources = drmModeGetResources(fd);
+-        if (*resources) {
++        if (*resources && (!with_display || card_has_display(fd, *resources))) {
+             g_debug("init_drm: using %s, a card libdrm does not enumerate", path);
+             return fd;
+         }
+ 
++        g_clear_pointer(resources, drmModeFreeResources);
+         close(fd);
+     }
+ 
+@@ -381,7 +401,7 @@
+ 
+     if (!supported) {
+         drmModeRes *resources = NULL;
+-        int fd = open_card_node(&resources);
++        int fd = open_card_node(&resources, FALSE);
+         if (fd >= 0) {
+             drmModeFreeResources(resources);
+             close(fd);
+@@ -430,30 +450,61 @@
+             g_debug ("init_drm:   DRM_NODE_RENDER: %s", device->nodes[DRM_NODE_RENDER]);
+     }
+ 
++    /* The card that has a display. A machine may have more than one card, and
++     * the first one listed need not be the one a display hangs on: a laptop
++     * whose panel is on the processor's graphics lists its second card first
++     * when that card's driver registers first, and that card drives no output
++     * of its own. The first card with resources is kept for the case that no
++     * card has a display connected: it is the card taken before. */
++    int first_fd = -1;
++    drmModeRes *first_resources = NULL;
++
+     for (int i = 0; i < num_devices; ++i) {
+         drmDevice* device = devices[i];
+         if (!(device->available_nodes & (1 << DRM_NODE_PRIMARY)))
+             continue;
+ 
+-        drm_data.fd = open (device->nodes[DRM_NODE_PRIMARY], O_RDWR);
+-        if (drm_data.fd < 0)
++        int fd = open (device->nodes[DRM_NODE_PRIMARY], O_RDWR);
++        if (fd < 0)
+             continue;
+ 
+-        drm_data.base_resources = drmModeGetResources (drm_data.fd);
+-        if (drm_data.base_resources) {
++        drmModeRes *resources = drmModeGetResources (fd);
++        if (resources && card_has_display (fd, resources)) {
+             g_debug ("init_drm: using device %p, DRM_NODE_PRIMARY %s",
+                      device, device->nodes[DRM_NODE_PRIMARY]);
++            drm_data.fd = fd;
++            drm_data.base_resources = resources;
+             break;
+         }
+ 
+-        close (drm_data.fd);
+-        drm_data.fd = -1;
++        if (resources && !first_resources) {
++            first_fd = fd;
++            first_resources = resources;
++            continue;
++        }
++
++        g_clear_pointer (&resources, drmModeFreeResources);
++        close (fd);
+     }
+ 
+     drmFreeDevices(devices, num_devices);
+ 
++    /* No card libdrm lists has a display: one it leaves out may. */
+     if (!drm_data.base_resources)
+-        drm_data.fd = open_card_node(&drm_data.base_resources);
++        drm_data.fd = open_card_node(&drm_data.base_resources, TRUE);
++
++    if (drm_data.base_resources) {
++        if (first_resources) {
++            drmModeFreeResources (first_resources);
++            close (first_fd);
++        }
++    } else if (first_resources) {
++        g_debug ("init_drm: no card has a display connected, using the first card");
++        drm_data.fd = first_fd;
++        drm_data.base_resources = first_resources;
++    } else {
++        drm_data.fd = open_card_node(&drm_data.base_resources, FALSE);
++    }
+ 
+     if (!drm_data.base_resources)
+         return FALSE;
