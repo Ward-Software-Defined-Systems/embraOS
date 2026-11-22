@@ -71,16 +71,22 @@ fn shared_client() -> reqwest::Client {
     })
 }
 
-/// What the operator reads when the model wait ran out: before the answer
-/// began, or in the middle of it.
-pub(super) fn silent_sentence(waited: Duration, in_the_answer: bool) -> String {
+/// A wait as the operator reads it: in minutes where it is whole minutes,
+/// as `/model-wait` sets it.
+pub(crate) fn span_words(waited: Duration) -> String {
     let secs = waited.as_secs();
-    let length = match (secs.is_multiple_of(60), secs / 60, secs) {
+    match (secs.is_multiple_of(60), secs / 60, secs) {
         (true, 1, _) => "1 minute".to_string(),
         (true, minutes, _) => format!("{minutes} minutes"),
         (false, _, 1) => "1 second".to_string(),
         (false, _, secs) => format!("{secs} seconds"),
-    };
+    }
+}
+
+/// What the operator reads when the model wait ran out: before the answer
+/// began, or in the middle of it.
+pub(super) fn silent_sentence(waited: Duration, in_the_answer: bool) -> String {
+    let length = span_words(waited);
     let what = if in_the_answer {
         "in the middle of its answer; the connection was closed"
     } else {
@@ -171,6 +177,10 @@ pub struct OpenAICompatProvider {
     /// the request is dropped, the connection closes and nothing is tried
     /// again.
     model_wait: Duration,
+    /// Where a native model's request reads what embrad was asked and what
+    /// it says (`native_model::until_followed`). The server presets ask
+    /// nothing of it.
+    native_env: crate::native_model::Env,
 }
 
 impl OpenAICompatProvider {
@@ -201,7 +211,16 @@ impl OpenAICompatProvider {
             display_name,
             reasoning_effort_override: None,
             model_wait: Duration::from_secs(DEFAULT_MODEL_WAIT_MINUTES * 60),
+            native_env: crate::native_model::Env::in_force(),
         }
+    }
+
+    /// A machine of a test's own for the two records a native model's
+    /// request reads.
+    #[cfg(test)]
+    pub(crate) fn with_native_env(mut self, env: crate::native_model::Env) -> Self {
+        self.native_env = env;
+        self
     }
 
     /// The model wait in place of the default: the one the operator set
@@ -275,14 +294,22 @@ impl OpenAICompatProvider {
         url: &str,
         body: &OpenAIChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
-        let attempt = self.post_once(url, body).await;
         match self.preset {
-            // A native model's server answers 503 while it reads the model's
-            // file: the request waits for it (`native::until_loaded`).
-            OpenAiCompatPreset::Native => native::until_loaded(self.model_wait, attempt, || self.post_once(url, body))
-                .await
-                .map_err(native::in_the_brains_words),
+            // Every request to a native model goes this way. First the
+            // server must be the one embrad keeps for this model: until
+            // embrad has followed the record, the one on the port may hold
+            // another, and it would answer (`native_model::until_followed`).
+            // Then it answers 503 while it reads the model's file, and the
+            // request waits for it (`native::until_loaded`).
+            OpenAiCompatPreset::Native => {
+                crate::native_model::until_followed(&self.native_env, &self.model_id, self.model_wait).await?;
+                let attempt = self.post_once(url, body).await;
+                native::until_loaded(self.model_wait, attempt, || self.post_once(url, body))
+                    .await
+                    .map_err(native::in_the_brains_words)
+            }
             OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio => {
+                let attempt = self.post_once(url, body).await;
                 if should_retry(&attempt) {
                     tokio::time::sleep(RETRY_DELAY).await;
                     return self.post_once(url, body).await;
@@ -1678,6 +1705,62 @@ mod tests {
         for field in ["chat_template_kwargs", "temperature", "top_p", "top_k", "min_p", "presence_penalty"] {
             assert!(studio.get(field).is_none(), "{field}: {studio}");
         }
+    }
+
+    /// A native model's request asks the two records first. Nothing is sent
+    /// to a port no server for this model will come to, and the operator
+    /// reads why; with the server embrad keeps for the model, the request
+    /// goes. (The wait for an embrad that has not followed yet is
+    /// `native_model`'s own test, on the paused clock.)
+    #[tokio::test]
+    async fn a_native_models_request_is_sent_to_the_server_embrad_keeps_for_it_and_to_no_other() {
+        use embra_boot::native_model::{self as contract, ServiceState, Wanted};
+        let server = MockServer::start().await;
+        let body = sse_body(&[r#"{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#]);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body).insert_header("content-type", "text/event-stream"))
+            .mount(&server)
+            .await;
+        let (_root, env) = crate::native_model::test_support::machine("provider-gate");
+        let four = Wanted::new(contract::by_id("qwen3.5-4b").unwrap());
+        let status = crate::native_model::test_support::status;
+        let provider = || {
+            OpenAICompatProvider::new(OpenAiCompatPreset::Native, server.uri(), None, "qwen3.5-4b".to_string()).with_native_env(env.clone())
+        };
+        let turn = [ApiMessage::user_text("hi")];
+        let (system, tools) = (system_bundle(), empty_manifest());
+        let sent = || async { server.received_requests().await.unwrap().len() };
+
+        // The model's file is not installed: no server will come.
+        contract::write_settings(&env.settings, Some(&four)).unwrap();
+        contract::write_status(&env.status, &status(ServiceState::Unavailable, Some(four), "qwen3.5-4b is not installed")).unwrap();
+        let Err(err) = provider().stream_turn(&turn, &system, &tools, LlmRequestOptions::default()).await else {
+            panic!("a request went to a server that holds no model")
+        };
+        assert!(matches!(&err, ProviderError::Connect(_)), "{err:?}");
+        assert_eq!(err.to_string(), "the native model is not loaded: qwen3.5-4b is not installed. /native shows what the model server is doing");
+        // Nothing is asked for at all.
+        contract::write_settings(&env.settings, None).unwrap();
+        contract::write_status(&env.status, &status(ServiceState::Off, None, "")).unwrap();
+        let Err(err) = provider().stream_turn(&turn, &system, &tools, LlmRequestOptions::default()).await else {
+            panic!("a request went though no model is loaded")
+        };
+        assert_eq!(err.to_string(), "No native model is chosen. /native lists the models, and /native use <model> loads one (experimental).");
+        assert_eq!(sent().await, 0, "nothing was sent");
+
+        // embrad keeps the server for this model: the request goes.
+        contract::write_settings(&env.settings, Some(&four)).unwrap();
+        contract::write_status(&env.status, &status(ServiceState::Ready, Some(four), "")).unwrap();
+        let events = collect_events(provider().stream_turn(&turn, &system, &tools, LlmRequestOptions::default()).await.unwrap()).await;
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Complete(_))), "{events:?}");
+        assert_eq!(sent().await, 1);
+
+        // A server preset asks nothing of the records, whatever they say.
+        contract::write_status(&env.status, &status(ServiceState::Halted, Some(four), "ended")).unwrap();
+        let studio = OpenAICompatProvider::lm_studio(server.uri(), None, "m".to_string()).with_native_env(env.clone());
+        let _ = studio.stream_turn(&turn, &system, &tools, LlmRequestOptions::default()).await.unwrap();
+        assert_eq!(sent().await, 2);
     }
 
     #[tokio::test]

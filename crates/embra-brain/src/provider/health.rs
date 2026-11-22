@@ -290,7 +290,7 @@ pub async fn probe(target: Option<&ProbeTarget>) -> ProviderProbe {
             let url = format!("{}{GEMINI_V1BETA}/models/{}", t.endpoint, t.model);
             probe_model_url(t, &url, &host_label(&t.endpoint)).await
         }
-        Wire::OpenAiCompat(preset) => probe_openai_compat(t, preset).await,
+        Wire::OpenAiCompat(preset) => probe_openai_compat(t, preset, &crate::native_model::Env::in_force()).await,
     }
 }
 
@@ -365,7 +365,11 @@ fn network_error_text(e: &reqwest::Error) -> String {
 /// through the wizard's own `probe_models`, then an exact-id membership
 /// check (the wizard stores the id the server listed, and embrad starts the
 /// native model's server under the catalogue's id, so exact is right).
-async fn probe_openai_compat(t: &ProbeTarget, preset: OpenAiCompatPreset) -> ProviderProbe {
+///
+/// `native` is where a native model's two records are read, for a server
+/// that does not answer on its port: they say whether one is coming, and
+/// why not when none is.
+async fn probe_openai_compat(t: &ProbeTarget, preset: OpenAiCompatPreset, native: &crate::native_model::Env) -> ProviderProbe {
     let mut out = ProviderProbe::base(t, t.endpoint.clone());
     let started = Instant::now();
     match OpenAICompatProvider::probe_models(preset, &t.endpoint, Some(&t.key)).await {
@@ -411,6 +415,24 @@ async fn probe_openai_compat(t: &ProbeTarget, preset: OpenAiCompatPreset) -> Pro
                 // there, and not an error.
                 503 if !takes_a_bearer && native::is_loading(&body) => out.loading = true,
                 s => out.error = Some(format!("HTTP {s} from /v1/models")),
+            }
+        }
+        Err(e @ ProviderError::Network(_)) => {
+            use crate::native_model::NoAnswer;
+            let coming = match preset {
+                OpenAiCompatPreset::Native => crate::native_model::no_answer(native, &t.model),
+                OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio => NoAnswer::Unknown,
+            };
+            match coming {
+                // embrad has not followed the record yet (it looks every five
+                // seconds), or its server does not listen yet: there soon,
+                // and nothing to announce.
+                NoAnswer::Starting => {
+                    out.reachable = true;
+                    out.loading = true;
+                }
+                NoAnswer::NotLoaded(why) => out.error = Some(why),
+                NoAnswer::Unknown => out.error = Some(e.to_string()),
             }
         }
         Err(e) => out.error = Some(e.to_string()),
@@ -1099,6 +1121,63 @@ mod tests {
         let p = probe(Some(&target(ProviderKind::LmStudio, "m", &studio.uri()))).await;
         assert_eq!((p.model_present, &p.context_window), (Some(true), &None));
         assert_eq!(props_requests(&studio).await, 0);
+    }
+
+    /// A native model's server that does not answer on its port. The two
+    /// records say what that is: a server that is coming (embrad has not
+    /// looked at the record yet, or the server does not listen yet) is
+    /// loading and nothing is announced; one that will not come is
+    /// unreachable, with embrad's reason.
+    #[tokio::test]
+    async fn a_native_models_server_that_does_not_answer_is_starting_or_said_in_embrads_words() {
+        use crate::native_model::test_support::{machine, status};
+        use embra_boot::native_model::{self as contract, ServiceState, Wanted};
+        let (_root, env) = machine("probe-no-answer");
+        let four = Wanted::new(contract::by_id("qwen3.5-4b").unwrap());
+        // A port nothing listens on.
+        let t = target(ProviderKind::Native, "qwen3.5-4b", "http://127.0.0.1:1");
+        let run = || probe_openai_compat(&t, OpenAiCompatPreset::Native, &env);
+
+        // No record at all (no embrad on this machine): the transport's words.
+        let p = run().await;
+        assert!(!p.reachable && !p.loading);
+        assert_eq!(p.error.as_deref(), Some("network: connection refused: http://127.0.0.1:1/v1/models"));
+
+        // The record asks for the model and embrad has not looked yet; then
+        // it has started the server, which does not listen yet.
+        contract::write_settings(&env.settings, Some(&four)).unwrap();
+        for said in [status(ServiceState::Off, None, ""), status(ServiceState::Loading, Some(four), "")] {
+            contract::write_status(&env.status, &said).unwrap();
+            let p = run().await;
+            assert!(p.reachable && p.loading && p.error.is_none(), "{said:?}: {p:?}");
+            assert!(transition_events(None, &p).is_empty(), "nothing to announce");
+        }
+
+        // No server will come: embrad's reason, and the notice names `/native` once.
+        let halted = "the model server ended 3 times before it answered (signal 9: killed, by the kernel when memory ran out or by hand); nothing more is tried until the settings change";
+        contract::write_status(&env.status, &status(ServiceState::Halted, Some(four), halted)).unwrap();
+        let p = run().await;
+        assert!(!p.reachable && !p.loading);
+        assert_eq!(p.error.as_deref(), Some(format!("the native model is not loaded: {halted}").as_str()));
+        let n = transition_events(None, &p);
+        assert_eq!(n.len(), 1);
+        assert_eq!(
+            n[0].message,
+            format!("LLM provider native (http://127.0.0.1:1) is unreachable: the native model is not loaded: {halted} — turns will fail until it is back. /native shows what the model server is doing, or switch with /provider.")
+        );
+        assert_eq!(n[0].message.matches("/native").count(), 1);
+
+        // embrad says the server answers and it does not: the transport's words.
+        contract::write_status(&env.status, &status(ServiceState::Ready, Some(four), "")).unwrap();
+        let p = run().await;
+        assert!(!p.reachable && !p.loading);
+        assert_eq!(p.error.as_deref(), Some("network: connection refused: http://127.0.0.1:1/v1/models"));
+
+        // A server preset's port that does not answer is not a native model's.
+        contract::write_status(&env.status, &status(ServiceState::Off, None, "")).unwrap();
+        let p = probe_openai_compat(&target(ProviderKind::Ollama, "m", "http://127.0.0.1:1"), OpenAiCompatPreset::Ollama, &env).await;
+        assert!(!p.reachable && !p.loading);
+        assert_eq!(p.error.as_deref(), Some("network: connection refused: http://127.0.0.1:1/v1/models"));
     }
 
     /// A native model's window is the server's to say at each probe: a

@@ -31,6 +31,7 @@ mod setup;
 mod guardian;
 mod media;
 mod embedding;
+mod native_model;
 mod net;
 mod network;
 mod network_wifi;
@@ -242,6 +243,18 @@ async fn main() -> anyhow::Result<()> {
             if api_key.is_empty() && !cfg.api_key.is_empty() {
                 info!("Loaded API key from WardSONDB config");
                 api_key = cfg.api_key.clone();
+            }
+            // Native models (experimental): the record embrad follows says
+            // what the stored configuration asks, at every start. Only a
+            // configuration that was read decides; before the wizard has
+            // stored one, the record is the wizard's.
+            match native_model::follow(&native_model::Env::in_force(), &cfg.openai_compat) {
+                Ok(native_model::Followed::AsItWas) => {}
+                Ok(native_model::Followed::Written(Some(wanted))) => {
+                    info!("native model: the record now asks for {} with a context window of {}", wanted.model.id, wanted.context)
+                }
+                Ok(native_model::Followed::Written(None)) => info!("native model: the record now asks for none"),
+                Err(why) => warn!("native model: {why}"),
             }
             // Resolve abbreviations (PDT → America/Los_Angeles) so chrono-tz can parse
             tools::resolve_timezone(&cfg.timezone)

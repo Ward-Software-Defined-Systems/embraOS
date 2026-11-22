@@ -332,6 +332,23 @@ impl OpenAiCompatConfig {
         std::time::Duration::from_secs(minutes.saturating_mul(60))
     }
 
+    /// The native model kept loaded (experimental), when this release's
+    /// catalogue knows it; `None` while none is, and for a stored id it
+    /// does not know.
+    pub fn chosen_native_model(&self) -> Option<&'static embra_boot::native_model::NativeModel> {
+        embra_boot::native_model::by_id(&self.native_model)
+    }
+
+    /// The context window a native model is loaded with: the operator's
+    /// for it (`/native context`), else the model's default. A stored one
+    /// the model cannot be given is its default too.
+    pub fn native_context(&self, model: &embra_boot::native_model::NativeModel) -> u32 {
+        self.native_context_by_model
+            .get(model.id)
+            .and_then(|stored| model.context_ok(*stored).ok())
+            .unwrap_or(model.default_context)
+    }
+
     /// The stored endpoint and model of a preset as they are; either may be
     /// empty. [`Self::for_preset_routed`] is the rule for whether the preset
     /// can answer.

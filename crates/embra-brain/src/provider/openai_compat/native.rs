@@ -135,12 +135,7 @@ pub(super) fn in_the_brains_words(e: ProviderError) -> ProviderError {
 /// What the operator reads when the model was still loading when the model
 /// wait ran out.
 pub(super) fn still_loading_sentence(waited: Duration) -> String {
-    let minutes = waited.as_secs() / 60;
-    let length = match (waited.as_secs().is_multiple_of(60), minutes) {
-        (true, 1) => "1 minute".to_string(),
-        (true, minutes) => format!("{minutes} minutes"),
-        (false, _) => format!("{} seconds", waited.as_secs()),
-    };
+    let length = super::span_words(waited);
     format!(
         "the native model was still loading after {length}; the request was dropped. /native shows what the model server is doing, and /model-wait sets how long embraOS waits"
     )
