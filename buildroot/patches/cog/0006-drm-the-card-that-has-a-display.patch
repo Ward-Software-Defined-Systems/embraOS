@@ -3,12 +3,14 @@ Subject: [PATCH] drm: the card that has a display
 
 The DRM platform took the first card libdrm lists that has mode-setting
 resources and gave up when no display was connected to it, without a look at
-a second card. A machine with two cards lists the one without a display first
-when that card's driver registers first: a laptop whose panel is on the
-processor's graphics and whose second card drives no output of its own. The
-platform now takes the first card that has a display connected, among the
-cards libdrm lists and then among the card nodes it leaves out, and the first
-card with resources when none has one, which is the card it took before.
+a second card. libdrm lists the cards in the order /dev/dri is read, and a
+tmpfs lists its newest entry first: the card whose driver registered last
+comes first, whether a display hangs on it or not. A machine whose display is
+on the card of a driver that registers early, with a second card of a later
+driver and nothing connected to that one, got no picture. The platform now
+takes the first card that has a display connected, among the cards libdrm
+lists and then among the card nodes it leaves out, and the first card with
+resources when none has one, which is the card it took before.
 
 Upstream: not yet submitted (embraOS carries this until it is).
 Signed-off-by: William Mangum <william@wsds.io>
@@ -80,11 +82,11 @@ Signed-off-by: William Mangum <william@wsds.io>
      }
  
 +    /* The card that has a display. A machine may have more than one card, and
-+     * the first one listed need not be the one a display hangs on: a laptop
-+     * whose panel is on the processor's graphics lists its second card first
-+     * when that card's driver registers first, and that card drives no output
-+     * of its own. The first card with resources is kept for the case that no
-+     * card has a display connected: it is the card taken before. */
++     * the first one listed need not be the one a display hangs on: the cards
++     * come in the order /dev/dri is read, a tmpfs lists its newest entry
++     * first, and so the card whose driver registered last leads the list.
++     * The first card with resources is kept for the case that no card has a
++     * display connected: it is the card taken before. */
 +    int first_fd = -1;
 +    drmModeRes *first_resources = NULL;
 +
