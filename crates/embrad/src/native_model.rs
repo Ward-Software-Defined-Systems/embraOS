@@ -140,6 +140,9 @@ pub(crate) struct Keeper {
     /// How the last run ended, or why a start failed; empty when a server
     /// answered since, and when the settings changed.
     last_end: String,
+    /// The same in a few words, for the sentence of a server that is left
+    /// alone, which says the rest itself.
+    last_how: String,
     /// What was last written, so that a tick with nothing new writes nothing.
     published: Option<Status>,
 }
@@ -166,7 +169,9 @@ pub(crate) fn server_args(wanted: &Wanted, paths: &Paths) -> Vec<String> {
         &CHECKPOINTS_MAX.to_string(),
         "--cache-ram",
         &cache_mib(wanted.context).to_string(),
-        "--no-webui",
+        // The build has no web page; the switch says so to the server too.
+        // `--no-webui` is the name llama.cpp 1.0.0 calls deprecated.
+        "--no-ui",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -239,7 +244,17 @@ impl Keeper {
     }
 
     pub(crate) fn with_paths(enabled: bool, paths: Paths) -> Self {
-        Keeper { enabled, paths, followed: None, server: None, exits: 0, unready_exits: 0, last_end: String::new(), published: None }
+        Keeper {
+            enabled,
+            paths,
+            followed: None,
+            server: None,
+            exits: 0,
+            unready_exits: 0,
+            last_end: String::new(),
+            last_how: String::new(),
+            published: None,
+        }
     }
 
     /// The server's process, for the reaper to leave alone.
@@ -265,6 +280,7 @@ impl Keeper {
             self.stop().await;
             (self.exits, self.unready_exits) = (0, 0);
             self.last_end.clear();
+            self.last_how.clear();
             self.followed = Some(followed.clone());
         }
         let wanted = match followed {
@@ -297,7 +313,7 @@ impl Keeper {
                 ServiceState::Halted,
                 format!(
                     "the model server ended {} times before it answered ({}); nothing more is tried until the settings change",
-                    self.unready_exits, self.last_end
+                    self.unready_exits, self.last_how
                 ),
             ),
             // A start that failed, below the count.
@@ -328,15 +344,17 @@ impl Keeper {
         match server.child.try_wait() {
             Ok(Some(status)) => {
                 use std::os::unix::process::ExitStatusExt;
-                let mut reason = format!("the model server ended ({})", ended_words(status));
+                let mut how = ended_words(status);
                 // What it said last explains an error and a crash. Killed, it
                 // said nothing about it: its last line is an ordinary one.
                 if status.signal() != Some(libc::SIGKILL)
                     && let Some(line) = last_log_line(&self.paths.log)
                 {
-                    reason.push_str(&format!("; its last line: {line}"));
+                    how.push_str(&format!("; its last line: {line}"));
                 }
+                let reason = format!("the model server ended ({how})");
                 warn!("native model: {reason}");
+                self.last_how = how;
                 self.exits += 1;
                 if !server.ready {
                     self.unready_exits += 1;
@@ -349,6 +367,7 @@ impl Keeper {
                     server.ready = true;
                     self.unready_exits = 0;
                     self.last_end.clear();
+                    self.last_how.clear();
                     info!("native model: {} answers on {}:{}", server.wanted.model.id, self.paths.host, self.paths.port);
                 }
             }
@@ -389,6 +408,7 @@ impl Keeper {
                 self.server = Some(Server { child, wanted, ready: false });
             }
             Err(e) => {
+                self.last_how = format!("it could not be started, {}: {e}", self.paths.server.display());
                 self.last_end = format!("the model server could not be started ({}: {e})", self.paths.server.display());
                 warn!("native model: {}", self.last_end);
                 self.exits += 1;
@@ -569,11 +589,11 @@ mod tests {
                 "-b", "512",
                 "--ctx-checkpoints", "32",
                 "--cache-ram", "3796",
-                "--no-webui",
+                "--no-ui",
             ]
         );
         // No flag that reaches outside the machine or loads another file.
-        for flag in ["--hf-repo", "-hf", "--model-url", "-mu", "--api-key", "--ssl-key-file", "--models-dir", "--webui"] {
+        for flag in ["--hf-repo", "-hf", "--model-url", "-mu", "--api-key", "--ssl-key-file", "--models-dir", "--webui", "--ui", "--no-webui"] {
             assert!(!args.iter().any(|a| a == flag), "{flag}");
         }
         // The prompt cache follows the window: one prompt that fills it,
@@ -698,7 +718,7 @@ mod tests {
         assert_eq!((status.state, status.exits, status.pid), (ServiceState::Halted, 3, None));
         assert_eq!(
             status.reason,
-            "the model server ended 3 times before it answered (the model server ended (exit code 1); its last line: error: failed to load model); nothing more is tried until the settings change"
+            "the model server ended 3 times before it answered (exit code 1; its last line: error: failed to load model); nothing more is tried until the settings change"
         );
         for _ in 0..5 {
             keeper.tick().await;
@@ -805,6 +825,8 @@ mod tests {
         keeper.tick().await;
         let status = rig.status();
         assert_eq!((status.state, status.exits), (ServiceState::Halted, 3));
+        assert!(status.reason.starts_with("the model server ended 3 times before it answered (it could not be started, "), "{}", status.reason);
+        assert!(status.reason.ends_with("); nothing more is tried until the settings change"), "{}", status.reason);
     }
 
     #[tokio::test]
