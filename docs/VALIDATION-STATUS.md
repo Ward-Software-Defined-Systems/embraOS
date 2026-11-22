@@ -4,7 +4,7 @@ What embraOS has been run on, and what has not been run yet. This is the one pag
 
 **As of:** 2026-11-21, after `v0.27.0-phase2`.
 
-x86_64 under QEMU on Linux is the reference platform: what the manual describes has been run there, unless a row below marks it TBD. The tables list what has been run beyond that, and every item that is still TBD. An item marked TBD has not been run; it is not known to fail.
+x86_64 under QEMU on Linux is the reference platform: what the manual describes has been run there, unless a row below marks it TBD or is about hardware a VM does not have: such a row names the machines it ran on. The tables list what has been run beyond that, and every item that is still TBD. An item marked TBD has not been run; it is not known to fail.
 
 ## The platforms
 
@@ -21,7 +21,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | Bare metal | a YouYeeToo X1 single-board computer (Intel Celeron N5105, 16 GB of memory, eMMC, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
 | The laptop | a second machine that is not a VM: a Lenovo ThinkPad E550 (Intel Core i7-5500U, 8 GB of memory, a SATA SSD, an Intel Ethernet port, an Intel Wireless-AC 7265 card, Intel graphics on its own panel, and a second graphics card without a display of its own, an AMD Radeon of the Southern Islands family) |
 | The stick | a third machine that is not a VM: an AWOW NY41S stick PC (Intel Celeron J4105, 8 GB of memory, eMMC, an Intel Dual Band Wireless-AC 3165 card, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
-| The Beelink | a fourth machine that is not a VM, the first with an AMD processor: a Beelink SER mini PC (AMD Ryzen 5 5560U, 16 GB of memory, an NVMe SSD, a Realtek RTL8168h Ethernet port, an Intel Wi-Fi 6 AX200 card, AMD Radeon graphics on HDMI) |
+| The Beelink | a fourth x86_64 machine that is not a VM, the first with an AMD processor: a Beelink SER mini PC (AMD Ryzen 5 5560U, 16 GB of memory, an NVMe SSD, a Realtek RTL8168h Ethernet port, an Intel Wi-Fi 6 AX200 card, AMD Radeon graphics on HDMI) |
 | The Pi | an aarch64 machine that is not a VM: a Raspberry Pi 5 (8 GB of memory, board revision 1.1, an SD card, a Linksys AE1000 USB Wi-Fi adapter on a Ralink RT3572), started by a UEFI firmware whose files are on the installed card's EFI partition |
 
 ## Images and boot

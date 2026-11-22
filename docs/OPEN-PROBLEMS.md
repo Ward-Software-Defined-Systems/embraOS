@@ -93,3 +93,4 @@ The display is a boot console: GRUB's menu, the boot log, the banner with the co
 - The display console loads the loopback page with TLS errors ignored; trusting embra-trustd's CA through GIO instead is the follow-up.
 - A Compose table for xkbcommon (the kernel of a dead-key layout) is not shipped.
 - The seven patches are carried, not upstream.
+- QEMU's emulated Radeon (`-device ati-vga,model=rv100`) is not a display to start the image on: the kernel's `radeon` driver takes the card, and the kernel stops in the driver's mode setting before the OS starts. `nomodeset` on the kernel line starts that VM on the firmware's framebuffer. No hypervisor's default display is that card.

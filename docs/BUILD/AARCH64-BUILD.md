@@ -533,7 +533,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
 | Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
 | Display console | the web console on the display through WPE WebKit and cog | the same stack, on a virtio-gpu display with a USB keyboard and tablet (1920x1080; the command under [Boot](#3-boot)) or on `ramfb`, the firmware's framebuffer (800x600); the launcher has no display switch (WebKit's compile is the heaviest phase of the build: about 3.5 GiB of VM memory per job, the `JOBS` note above) |
-| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` + `linux-aarch64.fragment` (the two frequency drivers the base configuration leaves as modules, built in), read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (1478 modules with them, 82 MB uncompressed under `/lib/modules`). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others |
+| Kernel fragments | `linux.fragment` + `linux-x86_64.fragment`, read back at build time; the wireless drivers as modules and no other | `linux.fragment` + `linux-aarch64.fragment` (two of the frequency drivers the base configuration leaves as modules, built in), read back the same way; the wireless drivers as modules beside the arm64 base configuration's own (about 1,480 modules with them, 82 MB uncompressed under `/lib/modules`). The base configuration's own wireless drivers are on embrad's list like the fragment's, but for Qualcomm's WCN36xx, which the fragment turns off (its firmware is named by a board's device tree); nothing loads the others |
 | Installer medium | `embraos.iso`, UEFI, bare metal and the hypervisors | `embraos.iso` for this architecture: GRUB's arm64 loader (`BOOTAA64.EFI`), the same menu and installer, `EMBRA_ISO` on the launcher ([Boot](#3-boot)) |
 | Microcode | `/boot/ucode.cpio` with Intel's and AMD's files, loaded first | the empty archive, so GRUB's line is the same |
 | A Buildroot tree from before `v0.24.0-phase2` | `make util-linux-libs-dirclean util-linux-dirclean mesa3d-dirclean eudev-dirclean` once | the same, inside the Docker build |
@@ -1081,7 +1081,7 @@ You will see `--device /dev/ttyS0` if you grep the source (`embrad`'s
 embra-console's `run_tui(_device)` ignores that argument and renders the TUI
 to its inherited `stdout`, which embrad wires to the real console (`ttyAMA0` on
 aarch64, `ttyS0` on x86_64). The serial TUI (`EMBRA_TUI=1`) therefore attaches
-correctly on Apple Silicon with **no code change** — verified on aarch64.
+correctly on Apple Silicon with **no code change**.
 
 ### End-to-End Validation
 
@@ -1104,7 +1104,7 @@ The regression checklist for this host. Run it after any canonical-build bump:
    the in-OS `/opt/rust` toolchain on aarch64 (Step 3.5).
 6. **Serial-TUI path:** relaunch with `EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh`.
    Banner shows `UI mode: serial TUI (EMBRA_TUI=1)`; the TUI attaches on this
-   terminal (verified on aarch64); `https://localhost:3345` does not respond.
+   terminal; `https://localhost:3345` does not respond.
 7. **Reboot / soul verify:** `Ctrl-A X`, relaunch (web mode) — second-boot soul SHA-256
    verification passes; sessions/memory persisted on the DATA partition.
 

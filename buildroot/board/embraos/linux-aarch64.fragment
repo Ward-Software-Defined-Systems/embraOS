@@ -4,8 +4,8 @@
 # merge on both architectures with no symbol dropped, so these stay out of
 # it. The read-back assert in scripts/lib/image-common.sh checks every line.
 
-# CPU frequency: the two drivers the arm64 base configuration builds as
-# modules, built in. This image loads wireless drivers alone, so a module
+# CPU frequency: two of the drivers the arm64 base configuration builds
+# as modules, built in. This image loads wireless drivers alone, so a module
 # nothing loads is a driver the machine does not have, and the machines
 # these two serve had no frequency policy for the shared fragment's
 # `performance` default to start. The Raspberry Pi's driver sets the CPU
@@ -15,6 +15,8 @@
 # declare _CPC for the processors. A machine with neither is refused by
 # both and keeps what it had. The drivers the base configuration builds in
 # (cpufreq-dt, SCMI, SCPI and the ones of single SoC families) are as they
-# were.
+# were, and so are the three others it builds as modules (Allwinner's,
+# NXP's i.MX, MediaTek's for its newer chips): a board those serve has no
+# frequency policy here.
 CONFIG_ARM_RASPBERRYPI_CPUFREQ=y
 CONFIG_ACPI_CPPC_CPUFREQ=y
