@@ -45,6 +45,8 @@ pub(crate) struct Env {
     pub(crate) settings: PathBuf,
     /// What embrad says of the model server: the brain reads it.
     pub(crate) status: PathBuf,
+    /// The models' files: the brain reads how a model's file stands.
+    pub(crate) models: PathBuf,
     /// The updater's command line: the program, and in a test the arguments
     /// a stand-in needs before a command's own.
     pub(crate) updater: Vec<OsString>,
@@ -55,6 +57,7 @@ impl Env {
         Env {
             settings: PathBuf::from(contract::SETTINGS_PATH),
             status: PathBuf::from(contract::STATUS_PATH),
+            models: PathBuf::from(contract::MODELS_DIR),
             updater: vec![OsString::from(crate::grpc_service::UPDATER)],
         }
     }
@@ -201,6 +204,24 @@ pub(crate) async fn until_followed(env: &Env, model: &str, wait: Duration) -> Re
     }
 }
 
+/// The model server in a few words for a status line, by the two records;
+/// `None` on a machine without embrad's status.
+pub(crate) fn server_words(env: &Env) -> Option<String> {
+    let (wanted, status) = env.records();
+    let status = status?;
+    let asked = wanted.as_ref().ok().and_then(|wanted| wanted.as_ref());
+    // Whether the status is about what the record asks now.
+    let follows = asked.is_some_and(|wanted| status.model == Some(wanted.model) && status.context == Some(wanted.context));
+    Some(match (status.state, asked) {
+        (ServiceState::Disabled, _) => said(&status),
+        (_, None) => "off".to_string(),
+        (_, Some(wanted)) if !follows => format!("embrad is about to start it for {}", wanted.model.id),
+        (ServiceState::Ready, Some(wanted)) => format!("ready, context window {}", wanted.context),
+        (ServiceState::Loading, Some(wanted)) => format!("loading {}, context window {}", wanted.model.id, wanted.context),
+        (ServiceState::Unavailable | ServiceState::Halted | ServiceState::Off, Some(_)) => format!("not loaded: {}", said(&status)),
+    })
+}
+
 /// What the records say of a model server that does not answer on its port.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NoAnswer {
@@ -240,6 +261,7 @@ pub(crate) mod test_support {
         let env = Env {
             settings: root.join("state").join("native-model").join("settings"),
             status: root.join("run").join("native-model-status"),
+            models: root.join("data").join("models"),
             updater: vec![OsString::from("/nonexistent/embra-update")],
         };
         (root, env)
@@ -454,6 +476,28 @@ mod tests {
             "embrad has not started the native model after 5 minutes: its status is off; the request was dropped. /native shows what the model server is doing, and /model-wait sets how long embraOS waits"
         );
         assert_eq!(start.elapsed(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn the_model_server_is_said_in_a_few_words_for_a_status_line() {
+        let (_root, env) = machine("server-words");
+        assert_eq!(server_words(&env), None, "no embrad on this machine");
+        let words = |said: Status| {
+            contract::write_status(&env.status, &said).unwrap();
+            server_words(&env).unwrap()
+        };
+        assert_eq!(words(status(ServiceState::Off, None, "")), "off");
+        contract::write_settings(&env.settings, Some(&four())).unwrap();
+        assert_eq!(words(status(ServiceState::Off, None, "")), "embrad is about to start it for qwen3.5-4b");
+        assert_eq!(words(status(ServiceState::Ready, Some(nine()), "")), "embrad is about to start it for qwen3.5-4b");
+        assert_eq!(words(status(ServiceState::Loading, Some(four()), "")), "loading qwen3.5-4b, context window 65536");
+        assert_eq!(words(status(ServiceState::Ready, Some(four()), "")), "ready, context window 65536");
+        assert_eq!(words(status(ServiceState::Unavailable, Some(four()), "qwen3.5-4b is not installed")), "not loaded: qwen3.5-4b is not installed");
+        assert_eq!(words(status(ServiceState::Halted, Some(four()), "")), "not loaded: the model server is halted");
+        assert_eq!(
+            words(status(ServiceState::Disabled, None, "native models are switched off on the kernel line (embra.native=0)")),
+            "native models are switched off on the kernel line (embra.native=0)"
+        );
     }
 
     #[test]

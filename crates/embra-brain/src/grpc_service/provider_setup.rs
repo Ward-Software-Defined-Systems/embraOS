@@ -3,12 +3,6 @@
 use super::*;
 use crate::provider::Wire;
 
-/// What `/provider --setup native` answers: the flow below asks for an
-/// endpoint, a bearer and a model the server lists, and a native model has
-/// the first two fixed and its models in a catalogue.
-pub(super) const NATIVE_HAS_NO_SETUP: &str = "A native model (experimental) has no endpoint and no key to set up. \
-     /native lists the models, and /native use <model> loads one.";
-
 /// Sprint 5 follow-up: post-wizard reconfigure for OpenAI-compat
 /// presets. Set by `/provider --setup <ollama|lm_studio>`; advanced
 /// one transition per intercepted UserMessage; cleared on completion
@@ -28,6 +22,9 @@ pub struct OpenAiCompatSetupState {
     /// are listed through its prefix, and the endpoint typed is the direct
     /// path for when the gateway is off, `none` allowed.
     pub gateway: Option<config::ProviderGateway>,
+    /// A native model's selector (experimental): what the pick works with
+    /// (`native::native_model_selection`). `None` on a server preset.
+    pub(crate) native: Option<super::native::NativeHands>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,8 +170,13 @@ pub(super) async fn handle_provider_command(
         // Gemini take a key: the prompt goes out as a setup message, and
         // the next user input is intercepted (`pending_key_setup`).
         let prompt_text = match target.wire() {
+            // A native model has no endpoint and no bearer: its setup is
+            // the model step alone, over the catalogue. The pick loads the
+            // model; `/provider native` switches to it.
             Wire::OpenAiCompat(crate::provider::openai_compat::OpenAiCompatPreset::Native) => {
-                send_msg(NATIVE_HAS_NO_SETUP.to_string(), SystemMessageType::Info).await;
+                *pending_key_setup.lock().await = None;
+                let hands = super::native::NativeHands::in_force(in_turn, session_mgr);
+                super::native::handle_native_model_command("", &cfg, tx, db, pending_openai_compat_setup, hands).await;
                 return;
             }
             Wire::OpenAiCompat(preset) => {
@@ -237,10 +239,17 @@ pub(super) async fn handle_provider_command(
                 })
                 .map(|c| format!(" Model wait: {}.", super::slash::model_wait_words(&c.openai_compat)))
                 .unwrap_or_default();
+            // A native model's server is embrad's: what it is doing is said
+            // with the provider (`/native` says more).
+            let server = (ProviderKind::from_str(&provider) == Some(ProviderKind::Native))
+                .then(|| crate::native_model::server_words(&crate::native_model::Env::in_force()))
+                .flatten()
+                .map(|words| format!(" The model server (experimental): {words}."))
+                .unwrap_or_default();
             send_msg(
                 format!(
-                    "Active provider: {}. Model: {}. Session: {}.{}{}",
-                    provider, model, session, gateway, wait
+                    "Active provider: {}. Model: {}. Session: {}.{}{}{}",
+                    provider, model, session, gateway, wait, server
                 ),
                 SystemMessageType::Info,
             )
@@ -368,6 +377,7 @@ pub(super) async fn perform_provider_swap(
     //    /embra/state/api_key so the supervisor's existing read path
     //    keeps working until a future change teaches embrad about
     //    per-provider STATE.
+    let mut left_loaded: Option<String> = None;
     if let Ok(mut cfg) = config::load_config(db).await {
         // Sprint 5: OpenAI-compat presets are pre-checked for
         // endpoint + model configuration rather than api_key presence.
@@ -412,6 +422,11 @@ pub(super) async fn perform_provider_swap(
                 String::new()
             }
         };
+        // Leaving a native model leaves it loaded: `/native off` is what
+        // frees its memory, and the operator is told so below.
+        if target != ProviderKind::Native && ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native) {
+            left_loaded = non_empty(&cfg.openai_compat.native_model);
+        }
         cfg.api_provider = target.as_str().to_string();
         cfg.api_key = target_key.clone();
         if let Err(e) = config::save_config(db, &cfg).await {
@@ -491,9 +506,10 @@ pub(super) async fn perform_provider_swap(
             response_type: Some(conversation_response::ResponseType::System(
                 SystemMessage {
                     content: format!(
-                        "Provider switched to {}. Next turn will use {}.",
+                        "Provider switched to {}. Next turn will use {}.{}",
                         target.as_str(),
-                        model_for_swap_msg
+                        model_for_swap_msg,
+                        left_loaded_note(left_loaded.as_deref())
                     ),
                     msg_type: SystemMessageType::Info as i32,
                 },
@@ -549,6 +565,15 @@ pub(super) async fn perform_provider_swap(
             )),
         }))
         .await;
+}
+
+/// What a switch away from a native model adds: the model stays loaded,
+/// and how its memory is freed.
+pub(super) fn left_loaded_note(model: Option<&str>) -> String {
+    match model {
+        Some(model) => format!(" The native model {model} stays loaded (experimental): /native off frees its memory."),
+        None => String::new(),
+    }
 }
 
 /// Construct an `OpenAICompatProvider` for the given `ProviderKind`
@@ -750,6 +775,7 @@ pub(super) async fn enter_openai_compat_setup(
         step: OpenAiCompatSetupStep::AwaitingEndpoint,
         model_only: false,
         gateway,
+        native: None,
     };
     let prompt = endpoint_prompt(&state, false);
     *pending.lock().await = Some(state);
@@ -1142,6 +1168,25 @@ pub(super) async fn complete_openai_compat_setup(
     db: &Arc<WardsonDbClient>,
     pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) -> SetupStepOutcome {
+    // A native model's pick (experimental) stores no endpoint and no bearer:
+    // it loads the model, after its file was installed when it is not there.
+    if let crate::provider::openai_compat::OpenAiCompatPreset::Native = state.preset {
+        *pending.lock().await = None;
+        let picked = super::native::native_model_choice(&model).ok().zip(state.native.as_ref());
+        let Some((picked, hands)) = picked else {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                        content: format!("'{model}' is not a native model of the catalogue. Run /model again to pick from the list."),
+                        msg_type: SystemMessageType::Error as i32,
+                    })),
+                }))
+                .await;
+            return SetupStepOutcome::Error;
+        };
+        super::native::pick_native_model(picked, tx, db, hands).await;
+        return SetupStepOutcome::Complete;
+    }
     // 1. Persist endpoint + model on config; api_provider untouched.
     let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
@@ -1833,6 +1878,9 @@ pub(super) fn automatic_effort_phrase(model: &str) -> String {
 /// - Ollama and LM Studio: a model the server lists. Without a name the
 ///   server's list comes back as a selector (`local_model_selection`), and
 ///   the pick goes through the reconfigure flow's model step alone.
+/// - A native model (experimental): a model of the catalogue, by the same
+///   selector or by name (`native::handle_native_model_command`). The pick
+///   loads it, after its file was installed when it is not on the machine.
 /// - Gemini: one of `GEMINI_MODEL_CHOICES`, persisted as the alias in
 ///   `SystemConfig.gemini_model` (`handle_gemini_model_command`).
 ///
@@ -1844,6 +1892,7 @@ pub(super) async fn handle_model_command(
     db: &Arc<WardsonDbClient>,
     session_mgr: &Arc<RwLock<SessionManager>>,
     pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+    in_turn: &Arc<AtomicBool>,
 ) {
     let send = |content: String, kind: SystemMessageType| {
         let tx = tx.clone();
@@ -1877,6 +1926,12 @@ pub(super) async fn handle_model_command(
     let trimmed = args.trim();
 
     match ProviderKind::from_str(&active).map(ProviderKind::wire) {
+        // A native model's choices are the catalogue's, not a server's list.
+        Some(Wire::OpenAiCompat(crate::provider::openai_compat::OpenAiCompatPreset::Native)) => {
+            let hands = super::native::NativeHands::in_force(in_turn, session_mgr);
+            super::native::handle_native_model_command(trimmed, &cfg, tx, db, pending_openai_compat_setup, hands).await;
+            return;
+        }
         Some(Wire::OpenAiCompat(preset)) => {
             handle_local_model_command(preset, trimmed, cfg, tx, db, session_mgr, pending_openai_compat_setup).await;
             return;
@@ -2219,6 +2274,7 @@ pub(super) fn local_model_selection(
         step: OpenAiCompatSetupStep::AwaitingModelSelection { endpoint, bearer, models },
         model_only: true,
         gateway,
+        native: None,
     };
     (prompt, state)
 }

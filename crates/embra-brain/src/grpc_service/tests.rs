@@ -912,6 +912,7 @@ mod setup_reconfigure_tests {
             step,
             model_only: false,
             gateway: None,
+            native: None,
         }
     }
 
@@ -2268,7 +2269,8 @@ mod gemini_model_tests {
         ))));
         let pending = Arc::new(Mutex::new(None));
         let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
-        handle_model_command(args, &tx, &db, &session_mgr, &pending).await;
+        let in_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        handle_model_command(args, &tx, &db, &session_mgr, &pending, &in_turn).await;
         drop(tx);
         let (mut said, mut status) = (Vec::new(), Vec::new());
         while let Some(Ok(r)) = rx.recv().await {
@@ -2544,11 +2546,11 @@ mod key_setup_model_step_tests {
         }
     }
 
-    /// The provider flow asks for an endpoint, a bearer and a model the
-    /// server lists: a native model has none of the three to ask for, and is
-    /// not switched to before one is chosen.
+    /// A native model (experimental) has no endpoint and no bearer to ask
+    /// for: its setup is the model step alone, over the catalogue. It is
+    /// not switched to before a model is loaded.
     #[tokio::test]
-    async fn a_native_model_is_not_set_up_by_the_provider_flow_nor_switched_to_without_one() {
+    async fn a_native_models_setup_is_the_model_step_and_it_is_not_switched_to_without_a_model() {
         let db_server = config_db("gemini").await;
         let pending_key_setup = Arc::new(Mutex::new(None));
         let pending_openai_compat_setup = Arc::new(Mutex::new(None));
@@ -2562,26 +2564,118 @@ mod key_setup_model_step_tests {
             pending_session_delete: Arc::new(Mutex::new(None)),
             pending_backup_restore: Arc::new(Mutex::new(None)),
         };
-        for (arg, expected) in [
-            ("--setup native", NATIVE_HAS_NO_SETUP),
-            ("native", "No native model is chosen. /native lists the models, and /native use <model> loads one (experimental)."),
-        ] {
-            let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
-            handle_provider_command(arg, &tx, &ctx).await;
-            drop(tx);
-            let mut said = Vec::new();
-            while let Some(Ok(r)) = rx.recv().await {
-                match r.response_type {
-                    Some(conversation_response::ResponseType::System(m)) => said.push(m.content),
-                    other => panic!("{arg}: a response that is no message: {other:?}"),
-                }
+        // The switch: refused, with the way to a model.
+        let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+        handle_provider_command("native", &tx, &ctx).await;
+        drop(tx);
+        let mut said = Vec::new();
+        while let Some(Ok(r)) = rx.recv().await {
+            match r.response_type {
+                Some(conversation_response::ResponseType::System(m)) => said.push(m.content),
+                other => panic!("a response that is no message: {other:?}"),
             }
-            assert_eq!(said.len(), 1, "{arg}: {said:?}");
-            assert!(said[0].ends_with(expected), "{arg}: {}", said[0]);
-            assert!(pending_key_setup.lock().await.is_none() && pending_openai_compat_setup.lock().await.is_none(), "{arg}: no flow began");
         }
+        assert_eq!(said, ["No native model is chosen. /native lists the models, and /native use <model> loads one (experimental)."]);
+        assert!(pending_key_setup.lock().await.is_none() && pending_openai_compat_setup.lock().await.is_none(), "no flow began");
+
+        // The setup: the selector of the catalogue, and the flow waits at its model step.
+        *pending_key_setup.lock().await = Some(KeySetupStep::Key(ProviderKind::Anthropic));
+        let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+        handle_provider_command("--setup native", &tx, &ctx).await;
+        drop(tx);
+        let mut prompts = Vec::new();
+        while let Some(Ok(r)) = rx.recv().await {
+            match r.response_type {
+                Some(conversation_response::ResponseType::Setup(p)) => prompts.push(p),
+                other => panic!("a response that is no prompt: {other:?}"),
+            }
+        }
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].field_type, SetupFieldType::Selector as i32);
+        assert!(prompts[0].prompt.starts_with("Select a native model (experimental). "), "{}", prompts[0].prompt);
+        let catalogue: Vec<&str> = embra_boot::native_model::CATALOGUE.iter().map(|m| m.id).collect();
+        assert_eq!(prompts[0].options, catalogue, "every model of the catalogue, none kept loaded yet");
+        assert!(pending_key_setup.lock().await.is_none(), "one setup flow at a time");
+        let state = pending_openai_compat_setup.lock().await.take().expect("the flow waits for the pick");
+        assert!(matches!(state.preset, crate::provider::openai_compat::OpenAiCompatPreset::Native) && state.model_only && state.native.is_some());
+        assert!(matches!(&state.step, OpenAiCompatSetupStep::AwaitingModelSelection { models, .. } if models == &prompts[0].options));
+
         let writes = db_server.received_requests().await.unwrap().iter().filter(|r| r.method != wiremock::http::Method::GET).count();
         assert_eq!(writes, 0, "nothing was stored");
+    }
+
+    /// `/model` while a native model leads the session offers the same
+    /// catalogue, the model kept loaded first; a name that is no model of
+    /// it is refused with the catalogue, and nothing is stored.
+    #[tokio::test]
+    async fn on_a_native_model_the_model_command_offers_the_catalogue() {
+        let db_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {
+                "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase2",
+                "created_at": "", "version": "test", "api_provider": "native",
+                "openai_compat": {"native_model": "qwen3.5-9b"},
+            }})))
+            .mount(&db_server)
+            .await;
+        let db = Arc::new(WardsonDbClient::from_url(&db_server.uri()));
+        let session_mgr = Arc::new(RwLock::new(SessionManager::new(WardsonDbClient::from_url(&db_server.uri()))));
+        let in_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let pending = Arc::new(Mutex::new(None));
+        let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+        handle_model_command("", &tx, &db, &session_mgr, &pending, &in_turn).await;
+        let Some(Ok(ConversationResponse { response_type: Some(conversation_response::ResponseType::Setup(prompt)) })) = rx.recv().await else {
+            panic!("a selector")
+        };
+        assert_eq!(prompt.options, ["qwen3.5-9b", "qwen3.5-4b"], "the model kept loaded first");
+        assert_eq!(prompt.default_value, "qwen3.5-9b");
+        assert!(pending.lock().await.as_ref().is_some_and(|state| state.model_only && state.native.is_some()));
+
+        let pending = Arc::new(Mutex::new(None));
+        handle_model_command("qwen3.5-27b", &tx, &db, &session_mgr, &pending, &in_turn).await;
+        let Some(Ok(ConversationResponse { response_type: Some(conversation_response::ResponseType::System(said)) })) = rx.recv().await else {
+            panic!("a refusal")
+        };
+        assert_eq!(said.msg_type, SystemMessageType::Error as i32);
+        assert_eq!(
+            said.content,
+            "'qwen3.5-27b' is not a native model. The catalogue (experimental): qwen3.5-4b, qwen3.5-9b. /model alone picks from the list."
+        );
+        assert!(pending.lock().await.is_none());
+        let writes = db_server.received_requests().await.unwrap().iter().filter(|r| r.method != wiremock::http::Method::GET).count();
+        assert_eq!(writes, 0, "nothing was stored");
+    }
+
+    /// A switch away from a native model leaves it loaded, and the reply
+    /// says how its memory is freed; any other switch adds nothing.
+    #[test]
+    fn leaving_a_native_model_says_that_it_stays_loaded() {
+        assert_eq!(
+            left_loaded_note(Some("qwen3.5-4b")),
+            " The native model qwen3.5-4b stays loaded (experimental): /native off frees its memory."
+        );
+        assert_eq!(left_loaded_note(None), "");
+    }
+
+    /// An attached image on a native model is not sent: the note says so,
+    /// where a server preset's says that the model decides.
+    #[test]
+    fn an_attached_images_note_follows_the_active_provider() {
+        assert_eq!(image_note("anthropic"), "");
+        assert_eq!(image_note("gemini"), "");
+        assert_eq!(image_note("no provider"), "");
+        for preset in ["ollama", "lm_studio"] {
+            assert_eq!(
+                image_note(preset),
+                format!("\nNote: the active provider is {preset} — image input works only if the loaded model is vision-capable.")
+            );
+        }
+        assert_eq!(
+            image_note("native"),
+            "\nNote: the active provider is a native model (experimental), which reads text only — the image is not sent; the model is told that one was attached."
+        );
     }
 
     #[tokio::test]
@@ -3752,6 +3846,10 @@ mod model_wait_tests {
         assert!(said.starts_with("Model wait: 120 minutes (the default)."), "{said}");
         assert!(said.contains("Esc ends a wait") && said.contains("/model-wait reset"), "{said}");
         assert!(!said.contains("active provider"), "on a local preset there is nothing to add: {said}");
+        assert!(said.contains("while Ollama, LM Studio or a native model sends nothing"), "{said}");
+        // A native model is a preset too: nothing to add there either.
+        let (_, said) = apply_model_wait(ModelWaitAction::Set(240), &mut presets(None), ProviderKind::Native);
+        assert_eq!(said, "Model wait set to 240 minutes. It applies from the next message.");
 
         let (changed, said) = apply_model_wait(ModelWaitAction::Set(240), &mut stored, ProviderKind::LmStudio);
         assert!(changed);
@@ -3765,7 +3863,7 @@ mod model_wait_tests {
         assert_eq!(stored.model_wait_minutes, Some(1));
         assert_eq!(
             said,
-            "Model wait set to 1 minute. It applies from the next message. It applies to Ollama and LM Studio; the active provider is Anthropic, whose waits are fixed."
+            "Model wait set to 1 minute. It applies from the next message. It applies to Ollama, LM Studio and a native model; the active provider is Anthropic, whose waits are fixed."
         );
 
         let (changed, said) = apply_model_wait(ModelWaitAction::Reset, &mut stored, ProviderKind::Gemini);
@@ -3784,7 +3882,10 @@ mod model_wait_tests {
         cfg.openai_compat.ollama_model = "qwen3.8:27b".into();
         cfg.openai_compat.lm_studio_endpoint = "http://mac:1234".into();
         cfg.openai_compat.lm_studio_model = "qwen/qwen3.8-27b".into();
-        for kind in ["ollama", "lm_studio"] {
+        // A native model (experimental) is built by the same builder: the
+        // wait bounds its silences and the load of its file alike.
+        cfg.openai_compat.native_model = "qwen3.5-4b".into();
+        for kind in ["ollama", "lm_studio", "native"] {
             cfg.api_provider = kind.to_string();
             cfg.openai_compat.model_wait_minutes = None;
             let built = build_provider_from_config(&cfg, "", None).unwrap();

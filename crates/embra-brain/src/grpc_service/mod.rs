@@ -5,6 +5,7 @@
 mod attach;
 mod ca;
 mod learning_loop;
+mod native;
 mod network;
 mod provider_setup;
 mod slash;

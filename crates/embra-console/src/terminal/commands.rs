@@ -37,19 +37,22 @@ Turn:
 
 Model:
   /provider                              Show active provider, model, session
-  /provider <anthropic|gemini|ollama|lm_studio>
-                                         Switch provider for future turns
+  /provider <anthropic|gemini|ollama|lm_studio|native>
+                                         Switch provider for future turns (native: a model on this machine, experimental)
   /provider --setup <anthropic|gemini>   Add/replace an API key, then pick the model (multi-turn)
   /provider --setup <ollama|lm_studio>   Reconfigure endpoint, bearer, model (multi-turn)
-  /model                                 Show the model; Ollama / LM Studio: pick from the server's list
+  /provider --setup native               Pick a native model (experimental); its file is downloaded first when it is not installed
+  /model                                 Show the model; Ollama / LM Studio: pick from the server's list; native: from the catalogue
   /model <name>                          Switch the model (next message): opus-5.5|opus-5|opus-4.8|
                                          fable-5.1|fable-5, gemini-3.1-pro|gemini-4-argon,
-                                         or a model the Ollama / LM Studio server lists
+                                         a model the Ollama / LM Studio server lists,
+                                         or a native model (experimental): qwen3.5-4b|qwen3.5-9b
   /effort                                Show the active provider's effort level and what is sent
   /effort <low|medium|high|xhigh|max>    Set effort for the active provider (Anthropic default max; Gemini high; local presets verbatim, model-validated)
+  /effort <on|off>                       A native model (experimental) has no levels: think first, or answer without thinking
   /effort reset                          Clear the active provider's stored level
-  /model-wait                            Show how long embraOS waits while Ollama or LM Studio sends nothing (default 120 minutes)
-  /model-wait <minutes>|reset            Set that wait for both local presets, or go back to the default; Esc ends a wait
+  /model-wait                            Show how long embraOS waits while Ollama, LM Studio or a native model sends nothing (default 120 minutes)
+  /model-wait <minutes>|reset            Set that wait for the three of them, or go back to the default; Esc ends a wait
   /local-ai-gateway                      Show WSDS Local AI Gateway's URL and whether requests go through it
   /local-ai-gateway <url>|on|off|reset   Route every provider request through its unified listener (http(s)://host:4000,
                                          which must answer with its x-local-ai-gateway header); off keeps the URL

@@ -597,6 +597,7 @@ fn provider_label(kind: &str) -> &str {
         "gemini" => "Gemini",
         "ollama" => "Ollama",
         "lm_studio" => "LM Studio",
+        "native" => "Native (experimental)",
         other => other,
     }
 }
