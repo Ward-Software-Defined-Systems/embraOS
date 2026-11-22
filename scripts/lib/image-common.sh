@@ -449,7 +449,7 @@ assert_firmware_present() {
         have=$((have + drv_have)); lack=$((lack + drv_lack))
         printf '  firmware %-16s %3d of %3d names present%s\n' "$drv" "$drv_have" $((drv_have + drv_lack)) "${absent:+ (absent:$absent)}"
         case "$drv" in
-            bnx2|bnx2x|qed|i915|amdgpu|ice|cxgb4|r8169|r8152|tg3|e100)
+            bnx2|bnx2x|qed|i915|amdgpu|radeon|ice|cxgb4|r8169|r8152|tg3|e100)
                 [ "$drv_have" -gt 0 ] || fatal="$fatal $drv"
                 ;;
         esac

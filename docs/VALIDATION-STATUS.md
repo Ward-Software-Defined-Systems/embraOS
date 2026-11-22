@@ -39,6 +39,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | An Intel CPU sleeps by the kernel's own idle states for its model (Intel's idle driver; before, by the states its firmware declares) | | An Intel machine that is not a VM: the idle driver reads `intel_idle` |
 | aarch64: a machine the Raspberry Pi's frequency driver or ACPI's CPPC driver serves has a frequency policy (both are built in; before, modules that nothing loaded) | | A Raspberry Pi started with a device tree, or an Arm machine whose ACPI tables declare `_CPC`: a policy exists and reads `performance` |
 | An AMD machine's graphics are driven by the kernel's own driver (`amdgpu`, its firmware in the boot archive; before, the firmware's framebuffer alone) | | An AMD machine that is not a VM: a picture after boot with the driver bound, the display console in its mode; `nomodeset` back on the firmware's framebuffer |
+| A Radeon from before `amdgpu` is driven by the kernel's `radeon` driver (its firmware in the boot archive; before, no driver took such a card) | | A machine with such a card: the driver bound; with the display on that card, a picture after boot and the display console in its mode |
 | `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it) | a machine that cannot power itself off; aarch64 |
 
 ## The installer (`embraos.iso`)

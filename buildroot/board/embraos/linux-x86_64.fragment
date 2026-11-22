@@ -68,3 +68,12 @@ CONFIG_INTEL_IDLE=y
 # kernel line keeps the firmware's framebuffer in place of either driver.
 CONFIG_DRM_AMDGPU=y
 CONFIG_DRM_AMD_DC=y
+# The Radeons from before amdgpu: the radeon driver, for the cards and the
+# processors' graphics up to the Southern Islands and Sea Islands families
+# (a laptop's second card of those years is one). The kernel still gives
+# those two families to radeon: amdgpu takes them only with options this
+# fragment leaves off, and declines them at probe otherwise. Like amdgpu
+# the driver asks for its firmware at probe and takes the display over
+# from the firmware's framebuffer first, so it is in PROBE_DRIVERS too,
+# and `nomodeset` keeps the firmware's framebuffer in place of it as well.
+CONFIG_DRM_RADEON=y

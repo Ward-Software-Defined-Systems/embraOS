@@ -74,15 +74,15 @@ echo "post_build.sh: $(ls "$LIC" | wc -l) licence files of linux-firmware under 
 # probes before the rootfs is mounted finds its blob in the initramfs's
 # /lib/firmware. The open-time families (the NICs' blobs at ifup) stay on
 # the rootfs alone. The set is the drivers whose probe wants the blob:
-# i915 (GuC, HuC, DMC), amdgpu (a Radeon's own blobs: the driver takes the
-# display over from the firmware's framebuffer and does not come up
-# without them), the E800's DDP package, qed, cxgb4. The image build reads
-# this list from the line below and refuses an archive that lacks a blob
-# of theirs the rootfs holds (assert_probe_firmware_archived in
-# scripts/lib/image-common.sh): keep the line's form.
+# i915 (GuC, HuC, DMC), amdgpu and radeon (a Radeon's own blobs: either
+# driver takes the display over from the firmware's framebuffer and does
+# not come up without them), the E800's DDP package, qed, cxgb4. The image
+# build reads this list from the line below and refuses an archive that
+# lacks a blob of theirs the rootfs holds (assert_probe_firmware_archived
+# in scripts/lib/image-common.sh): keep the line's form.
 MODINFO="$(ls "${TARGET_DIR}"/lib/modules/*/modules.builtin.modinfo | head -n1)"
 FW_STAGE="$(mktemp -d)"
-PROBE_DRIVERS="i915 amdgpu ice qed cxgb4"
+PROBE_DRIVERS="i915 amdgpu radeon ice qed cxgb4"
 for drv in $PROBE_DRIVERS; do
     tr '\0' '\n' < "$MODINFO" | sed -n "s/^${drv}\.firmware=//p" | sort -u | while read -r name; do
         for cand in "$name" "$name.xz" "$name.zst"; do
