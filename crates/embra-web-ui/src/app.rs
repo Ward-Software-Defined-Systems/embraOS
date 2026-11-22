@@ -163,6 +163,14 @@ const BACKUP_UPLOAD: &str = "upload";
 /// What the backup picker offers: a download of `GET /api/backups/<name>`
 /// is `<name>.tar.gz`.
 const BACKUP_ACCEPT: &str = ".gz,.tgz,application/gzip,application/x-gzip";
+/// The `/native` form's action that is the page's own (experimental): it
+/// opens the file picker and streams a model's file to `PUT
+/// /api/models/<id>`, for a machine that cannot reach the catalogue's
+/// source. Nothing is typed into the console, so it works whatever stage the
+/// machine is in, the first-boot wizard among them.
+const NATIVE_IMPORT: &str = "import";
+/// What the model picker offers: the catalogue's files are GGUF.
+const MODEL_ACCEPT: &str = ".gguf";
 
 /// The name a backup is uploaded under: the one the operator typed, or the
 /// file's own without its `.tar.gz`, without the ` (1)` a browser adds to a
@@ -314,9 +322,9 @@ const SPECS: &[Spec] = &[
         join: " ", guided: false,
         fields: &[t("Minutes / reset", "blank = show current", false)] },
     Spec { cmd: "/native", title: "Native models (experimental)",
-        note: "A model that runs on this machine. Blank = the models' files, what is kept loaded, the model server and the job that runs. install downloads a model's file and checks it; use loads a model (installing it first when needed) and off frees its memory, whichever provider leads the session; context is the loaded model's window, a number of tokens or reset; remove deletes a model's file; cancel stops the job that runs.",
+        note: "A model that runs on this machine. Blank = the models' files, what is kept loaded, the model server and the job that runs. install downloads a model's file and checks it; import uploads one from this browser, for a machine that cannot reach the source (the machine tells which model the file is and checks it); use loads a model (installing it first when needed) and off frees its memory, whichever provider leads the session; context is the loaded model's window, a number of tokens or reset; remove deletes a model's file; cancel stops the job that runs.",
         join: " ", guided: false,
-        fields: &[sel("Action", &["(show)", "install", "use", "off", "context", "remove", "cancel"], false),
+        fields: &[sel("Action", &["(show)", "install", NATIVE_IMPORT, "use", "off", "context", "remove", "cancel"], false),
             t("Model (install, use, remove) or tokens (context)", "qwen3.5-4b · qwen3.5-9b · 32768 · reset", false)] },
     Spec { cmd: "/provider --setup", title: "Provider setup (guided)",
         note: "Pick a provider, then answer the prompts in the console below. native (experimental) asks which model to load.",
@@ -554,6 +562,8 @@ pub fn App() -> impl IntoView {
     // name typed in the form for the file it picks (blank = the file's own).
     let backup_input = NodeRef::<leptos::html::Input>::new();
     let backup_as = RwSignal::new(String::new());
+    // Hidden file input behind the /native form's import action.
+    let model_input = NodeRef::<leptos::html::Input>::new();
     let filter = RwSignal::new(String::new());
     // Parameter modal: Some(spec index) when open.
     let modal = RwSignal::new(None::<usize>);
@@ -768,6 +778,19 @@ pub fn App() -> impl IntoView {
                                 if let Some(file) = input_el.files().and_then(|f| f.get(0)) {
                                     let name = backup_name_for(&file.name(), &backup_as.get_untracked());
                                     term::upload_backup(&file, &name);
+                                }
+                                input_el.set_value("");
+                            }
+                        } />
+                    // A native model's file (experimental): picked through the
+                    // /native form's import action, streamed by embra-term.js.
+                    <input node_ref=model_input type="file" accept=MODEL_ACCEPT
+                        style="display:none"
+                        on:change=move |_| {
+                            if let Some(el) = model_input.get() {
+                                let input_el: &web_sys::HtmlInputElement = &el;
+                                if let Some(file) = input_el.files().and_then(|f| f.get(0)) {
+                                    term::upload_model(&file);
                                 }
                                 input_el.set_value("");
                             }
@@ -1020,6 +1043,18 @@ pub fn App() -> impl IntoView {
                         }
                         return;
                     }
+                    // A model's file the same way: the picker, then HTTP.
+                    if SPECS[i].cmd == "/native"
+                        && vals.with(|v| v.first().map(String::as_str) == Some(NATIVE_IMPORT))
+                    {
+                        modal.set(None);
+                        if term::model_upload_allowed()
+                            && let Some(el) = model_input.get()
+                        {
+                            el.click();
+                        }
+                        return;
+                    }
                     let line = build(&SPECS[i], &vals.get());
                     match line {
                         Some(l) => {
@@ -1260,6 +1295,17 @@ mod tests {
             Some("/ca import uploads/ca.pem sha256:AB:CD")
         );
         assert_eq!(build(form, &["remove".into(), "gateway-ca-14312f40.pem".into(), String::new()]).as_deref(), Some("/ca remove gateway-ca-14312f40.pem"));
+    }
+
+    /// The import is an action of the `/native` form and the page's own, as
+    /// the backup's upload is: the form opens on the status.
+    #[test]
+    fn the_native_form_offers_the_import_among_its_actions() {
+        let spec = SPECS.iter().find(|s| s.cmd == "/native").expect("the /native form");
+        assert!(spec.fields[0].choices.contains(&NATIVE_IMPORT));
+        assert_eq!(spec.fields[0].choices[0], "(show)", "the form opens on the status, not on the upload");
+        assert!(spec.note.contains("import uploads one from this browser"), "{}", spec.note);
+        assert!(spec.title.contains("experimental"));
     }
 
     #[test]

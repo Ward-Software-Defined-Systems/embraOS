@@ -44,6 +44,12 @@ pub struct AppState {
     /// Held by the one backup upload that runs: a second one is told so,
     /// and two never take DATA's room between them.
     pub backup_upload: Arc<tokio::sync::Mutex<()>>,
+    /// Where the OS keeps the native models' files (`models.rs`,
+    /// experimental): `/embra/data/models` in the OS, a temporary directory
+    /// in a test.
+    pub models_root: Arc<std::path::Path>,
+    /// Held by the one model upload that runs.
+    pub model_upload: Arc<tokio::sync::Mutex<()>>,
     /// The trust service's gRPC endpoint: `GET /api/ca.crt` asks it for
     /// the CA certificate (`ca.rs`). Nothing listens there in a test.
     pub trust_addr: String,
@@ -80,6 +86,8 @@ impl AppState {
             backups_root: Arc::from(std::env::temp_dir().as_path()),
             updater: Arc::from(std::path::Path::new("/nonexistent/embra-update")),
             backup_upload: Arc::new(tokio::sync::Mutex::new(())),
+            models_root: Arc::from(std::env::temp_dir().as_path()),
+            model_upload: Arc::new(tokio::sync::Mutex::new(())),
             trust_addr: "http://127.0.0.1:1".to_string(),
             theme_file: Arc::from(Self::scratch_theme_file().as_path()),
         };

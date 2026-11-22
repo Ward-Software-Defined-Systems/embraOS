@@ -331,9 +331,10 @@ fn catalogue_ids() -> String {
 /// What `/native help` answers.
 pub(super) fn native_usage() -> String {
     format!(
-        "Usage: /native | /native install <model> | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n  \
+        "Usage: /native | /native install <model> | /native import | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n  \
          A native model (experimental) runs on this machine; the catalogue: {}. /native shows the models, what is kept loaded, the model server and the job that runs. \
-         install downloads a model's file and checks it. use loads a model, installing it first when it is not there, and off frees its memory: \
+         install downloads a model's file and checks it; import says how a file comes in through the web console, for a machine that cannot reach the source. \
+         use loads a model, installing it first when it is not there, and off frees its memory: \
          both whichever provider leads the session, and /provider native switches to a loaded model. \
          context is the window the loaded model is given. remove deletes a model's file. cancel stops the job that runs.",
         catalogue_ids()
@@ -342,7 +343,23 @@ pub(super) fn native_usage() -> String {
 
 /// What `/native use`, `off` and `context` answer before a session: they
 /// change the stored configuration, which the setup is still writing.
-pub(super) const NATIVE_NOT_BEFORE_A_SESSION: &str = "Not run before setup is complete: /native use, off and context change the stored configuration, and the setup's own question chooses the model. /native, /native install, /native remove and /native cancel are answered now.";
+pub(super) const NATIVE_NOT_BEFORE_A_SESSION: &str = "Not run before setup is complete: /native use, off and context change the stored configuration, and the setup's own question chooses the model. /native, /native install, /native import, /native remove and /native cancel are answered now.";
+
+/// What `/native import` answers. The upload itself is the web console's
+/// (`PUT /api/models/<id>`, embra-web's `models.rs`): the brain holds
+/// neither the file nor the console's token, and never prints the console's
+/// URL. The source of each file is the catalogue's, where another machine
+/// can fetch it.
+pub(super) fn import_instructions() -> String {
+    let files: Vec<String> = contract::CATALOGUE.iter().map(|m| format!("{} for {} ({} MB, from {})", m.file, m.id, mb(m.bytes), m.url())).collect();
+    format!(
+        "A model's file comes in through the web console, from a browser on another machine (experimental): in the sidebar, /native with the action import, then the file. \
+         It is for a machine that cannot reach the catalogue's source. The files: {}. \
+         The machine tells which model a file is by its name and size, checks it against the catalogue's sha256 while it arrives, and keeps nothing of a file that is not the catalogue's. \
+         /native use <model> loads it then.",
+        files.join("; ")
+    )
+}
 
 /// The forms of `/native` that work on the models' files and the jobs: the
 /// machine's matters, answered before a session too.
@@ -351,6 +368,8 @@ pub(super) enum MachineAction {
     Show,
     Help,
     Install(&'static NativeModel),
+    /// How a model's file comes in by upload: said, not done here.
+    Import,
     Remove(&'static NativeModel),
     Cancel,
 }
@@ -400,6 +419,7 @@ pub(super) fn parse_native(args: &str) -> NativeAction {
     match verb.as_str() {
         "" | "status" | "list" => alone(NativeAction::Machine(MachineAction::Show)),
         "help" => alone(NativeAction::Machine(MachineAction::Help)),
+        "import" => alone(NativeAction::Machine(MachineAction::Import)),
         "cancel" => alone(NativeAction::Machine(MachineAction::Cancel)),
         "off" => alone(NativeAction::Stored(StoredAction::Off)),
         "install" => model(|m| NativeAction::Machine(MachineAction::Install(m))),
@@ -550,6 +570,7 @@ async fn machine_action(
     match action {
         MachineAction::Show => say(tx, show_native(env, jobs, cfg).await, SystemMessageType::Info).await,
         MachineAction::Help => say(tx, native_usage(), SystemMessageType::Info).await,
+        MachineAction::Import => say(tx, import_instructions(), SystemMessageType::Info).await,
         MachineAction::Install(model) => start_job(JobKind::Install, model, tx, env, jobs).await,
         MachineAction::Remove(model) => start_job(JobKind::Remove, model, tx, env, jobs).await,
         MachineAction::Cancel => {
@@ -1014,6 +1035,8 @@ mod tests {
             assert_eq!(parse_native(show), machine(M::Show), "{show:?}");
         }
         assert_eq!(parse_native("help"), machine(M::Help));
+        assert_eq!(parse_native("import"), machine(M::Import));
+        assert_eq!(parse_native("import qwen3.5-4b"), NativeAction::Refused("/native import takes nothing after it. /native help shows the forms.".into()));
         assert_eq!(parse_native("install qwen3.5-4b"), machine(M::Install(four())));
         assert_eq!(parse_native("remove QWEN3.5-9B"), machine(M::Remove(nine())));
         assert_eq!(parse_native("cancel"), machine(M::Cancel));
@@ -1043,7 +1066,22 @@ mod tests {
             }
             assert!(native_usage().contains(model.id), "{}", model.id);
         }
-        assert!(native_usage().starts_with("Usage: /native | /native install <model> | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n"));
+        assert!(native_usage().starts_with("Usage: /native | /native install <model> | /native import | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n"));
+    }
+
+    /// `/native import` says how and where from, and prints no address of
+    /// the console and no token: the brain holds neither.
+    #[test]
+    fn the_import_form_says_how_and_prints_no_address_or_token_of_its_own() {
+        let said = import_instructions();
+        assert!(said.starts_with("A model's file comes in through the web console, from a browser on another machine (experimental): in the sidebar, /native with the action import, then the file."), "{said}");
+        for model in &contract::CATALOGUE {
+            assert!(said.contains(&format!("{} for {} ({} MB, from {})", model.file, model.id, mb(model.bytes), model.url())), "{}: {said}", model.id);
+        }
+        assert!(said.contains("keeps nothing of a file that is not the catalogue's") && said.ends_with("/native use <model> loads it then."), "{said}");
+        for never in ["3345", "token", "/embraOS", "localhost", "127.0.0.1"] {
+            assert!(!said.contains(never), "{never}: {said}");
+        }
     }
 
     /// A stand-in for the updater that answers the three commands `/native`
@@ -1327,5 +1365,7 @@ mod tests {
         assert_eq!(told(&mut rx).await, "'frobnicate' is not a form of /native. /native help shows the forms.");
         handle_native_before_a_session("cancel", &tx, &env, &jobs).await;
         assert_eq!(told(&mut rx).await, "No model job runs.");
+        handle_native_before_a_session("import", &tx, &env, &jobs).await;
+        assert_eq!(told(&mut rx).await, import_instructions());
     }
 }

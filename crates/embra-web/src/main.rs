@@ -20,6 +20,7 @@ mod ca;
 mod chat_bridge;
 mod files;
 mod media;
+mod models;
 mod config;
 mod console_url;
 mod metrics;
@@ -109,6 +110,8 @@ async fn main() -> anyhow::Result<()> {
         theme_file: Arc::from(std::path::Path::new(embra_tools_core::theme::STATE_FILE)),
         updater: Arc::from(std::path::Path::new(backups::UPDATER)),
         backup_upload: Arc::new(tokio::sync::Mutex::new(())),
+        models_root: Arc::from(std::path::Path::new(models::MODELS_ROOT)),
+        model_upload: Arc::new(tokio::sync::Mutex::new(())),
         trust_addr: cfg.trust_addr.clone(),
     };
 

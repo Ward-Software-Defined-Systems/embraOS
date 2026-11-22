@@ -203,7 +203,7 @@ const BUSY: &str = "another backup is being uploaded; wait for it to end or canc
 /// when the connection closes (the kernel resets it), and the client sees a
 /// broken connection in place of the reason. A browser never waits for the
 /// go-ahead, which is why its page asks `upload-check` first.
-async fn refuse(headers: &HeaderMap, body: Body, status: StatusCode, error: String) -> Response {
+pub(crate) async fn refuse(headers: &HeaderMap, body: Body, status: StatusCode, error: String) -> Response {
     let waits = headers.get(header::EXPECT).and_then(|v| v.to_str().ok()).is_some_and(|v| v.trim().eq_ignore_ascii_case("100-continue"));
     if !waits {
         let mut frames = body.into_data_stream();
@@ -218,7 +218,7 @@ async fn refuse(headers: &HeaderMap, body: Body, status: StatusCode, error: Stri
 
 #[derive(serde::Deserialize)]
 pub struct UploadCheck {
-    bytes: Option<u64>,
+    pub(crate) bytes: Option<u64>,
 }
 
 /// `GET /api/backups/{name}/upload-check?bytes=N`: what a `PUT` of that size
@@ -263,7 +263,7 @@ enum Received {
 }
 
 /// The updater's reason: its last stderr line, without the command's name.
-fn reason(stderr: &[u8]) -> String {
+pub(crate) fn reason(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let line = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no reason given").trim();
     line.strip_prefix("import: ").unwrap_or(line).to_string()

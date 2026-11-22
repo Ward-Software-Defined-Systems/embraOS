@@ -42,6 +42,17 @@ extern "C" {
     /// request, as for the attachments).
     #[wasm_bindgen(js_name = embraUploadBackup)]
     pub fn upload_backup(file: &web_sys::File, name: &str);
+
+    /// Whether this page may pick a native model's file to upload: not the
+    /// display console's, and not while an upload runs.
+    #[wasm_bindgen(js_name = embraModelUploadAllowed)]
+    pub fn model_upload_allowed() -> bool;
+
+    /// Stream a native model's file to `PUT /api/models/<id>` (experimental).
+    /// The page asks the machine's catalogue which model the file is, by its
+    /// name and size, and shows the progress and the answer on its card.
+    #[wasm_bindgen(js_name = embraUploadModel)]
+    pub fn upload_model(file: &web_sys::File);
 }
 
 /// Boot xterm + the WebSocket against `el_id`.

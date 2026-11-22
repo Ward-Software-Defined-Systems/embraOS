@@ -206,6 +206,8 @@
       "The display console has nowhere to save a file. Open this console in a browser on another machine and click the same row there."],
     backup: ["Upload a backup from a browser on another machine",
       "The display console has no file picker and no files of its own. Open this console in a browser on another machine and upload the backup there: the /backup form, action upload."],
+    model: ["Upload a model's file from a browser on another machine",
+      "The display console has no file picker and no files of its own. Open this console in a browser on another machine and upload the model's file there: the /native form, action import."],
   };
   function embraKioskNeedsBrowser(kind, route) {
     const [title, ...text] = KIOSK_NEEDS_BROWSER[kind];
@@ -776,8 +778,8 @@
     let act = null;
     btn.addEventListener("click", () => { if (act) act(); });
     backupCard = {
-      open(name) {
-        title.textContent = "Backup upload: " + name;
+      open(name, what) {
+        title.textContent = (what || "Backup upload") + ": " + name;
         box.classList.remove("ok", "bad");
         bar.style.display = "block"; fill.style.width = "0%";
         box.style.display = "flex";
@@ -864,6 +866,84 @@
       const now = await embraBackupAsk(route, file.size);
       over("The connection ended before the machine's answer. " +
         (sent ? "The file had been sent whole: /backup list shows whether it was taken in." : "Nothing was kept.") +
+        (now.ok ? "" : " Asked again, the machine says: " + now.error), false);
+    };
+    xhr.onabort = () => over("Upload cancelled. Nothing was kept.", false);
+    card.action("Cancel", () => xhr.abort());
+    window.addEventListener("beforeunload", leave);
+    xhr.send(file);
+  };
+
+  // A native model's file (experimental; `PUT /api/models/<id>`, embra-web's
+  // models.rs), for a machine that cannot reach the catalogue's source. The
+  // shell's /native form picks the file; the machine's catalogue says which
+  // model a file is, by its name or else its size, and the same card shows
+  // the progress and the answer. One upload at a time, a backup's included.
+  window.embraModelUploadAllowed = function () {
+    if (window.embraKiosk) {
+      embraKioskNeedsBrowser("model");
+      return false;
+    }
+    return !backupXhr;
+  };
+
+  window.embraUploadModel = async function (file) {
+    if (backupXhr || !file) return;
+    const card = embraBackupCard();
+    card.open(file.name, "Model upload (experimental)");
+    card.action("Close", () => {});
+    card.say("Asking the machine which model this file is\u2026");
+    let models = [];
+    try {
+      const resp = await fetch("/api/models", { cache: "no-store" });
+      models = ((await resp.json()) || {}).models || [];
+    } catch (err) {
+      card.end("Not uploaded: the machine's catalogue could not be read (" + err + ")", false);
+      return;
+    }
+    const model = models.find((m) => m.file === file.name) || models.find((m) => m.bytes === file.size);
+    if (!model) {
+      card.end("Not uploaded: " + file.name + " (" + embraMb(file.size) + ") is no file of the catalogue. The catalogue: " +
+        models.map((m) => m.file + " (" + embraMb(m.bytes) + ")").join(", ") + ".", false);
+      return;
+    }
+    const route = "/api/models/" + encodeURIComponent(model.id);
+    card.open(model.id, "Model upload (experimental)");
+    card.say("Asking the machine whether " + embraMb(file.size) + " fits\u2026");
+    const first = await embraBackupAsk(route, file.size);
+    if (!first.ok) { card.end("Not uploaded: " + first.error, false); return; }
+    const xhr = new XMLHttpRequest();
+    backupXhr = xhr;
+    let sent = false;
+    // Leaving the page ends the upload: the browser asks first.
+    const leave = (e) => { e.preventDefault(); e.returnValue = ""; };
+    const over = (text, ok) => {
+      backupXhr = null;
+      window.removeEventListener("beforeunload", leave);
+      card.end(text, ok);
+    };
+    xhr.open("PUT", route);
+    xhr.responseType = "json";
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) card.progress(e.loaded, e.total); };
+    xhr.upload.onload = () => {
+      sent = true;
+      card.say("Sent " + embraMb(file.size) + "; the machine is finishing its check against the catalogue\u2026");
+    };
+    xhr.onload = () => {
+      const body = xhr.response || {};
+      if (xhr.status === 201) {
+        over("Checked against the catalogue and installed: " + model.id + ". Load it with /native use " + model.id + ".", true);
+      } else {
+        over("Not uploaded: " + (body.error || ("the machine answered " + xhr.status)), false);
+      }
+    };
+    xhr.onerror = async () => {
+      // No answer came. The machine is asked again, so that a refusal it
+      // sent into the closing connection is not lost.
+      const now = await embraBackupAsk(route, file.size);
+      over("The connection ended before the machine's answer. " +
+        (sent ? "The file had been sent whole: /native shows whether it was installed." : "Nothing was kept.") +
         (now.ok ? "" : " Asked again, the machine says: " + now.error), false);
     };
     xhr.onabort = () => over("Upload cancelled. Nothing was kept.", false);

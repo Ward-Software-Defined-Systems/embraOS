@@ -164,6 +164,15 @@ pub async fn serve(
             get(crate::backups::api_backup_get).put(crate::backups::api_backup_put),
         )
         .route("/api/backups/{name}/upload-check", get(crate::backups::api_backup_upload_check))
+        // A native model's file (experimental), for a machine that cannot
+        // reach the catalogue's source: the catalogue with each file's name
+        // and size, and the file streamed to the updater's `model-import`,
+        // which checks it against the catalogue. Several gigabytes, taken as
+        // it arrives like a backup; DATA's room and the catalogue's size are
+        // what it meets (`models::upload_refusal`).
+        .route("/api/models", get(crate::models::api_models_list))
+        .route("/api/models/{id}", put(crate::models::api_model_put))
+        .route("/api/models/{id}/upload-check", get(crate::models::api_model_upload_check))
         // The console's URLs with the token, for the display console's
         // menu: answered to this machine's own browser alone.
         .route("/api/console-url", get(api_console_url))
