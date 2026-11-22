@@ -19,7 +19,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | Parallels on Apple Silicon | Parallels Desktop on an Apple Silicon Mac, an aarch64 VM |
 | Fusion | VMware Fusion on Apple Silicon |
 | Bare metal | a YouYeeToo X1 single-board computer (Intel Celeron N5105, 16 GB of memory, eMMC, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
-| The laptop | a second machine that is not a VM: a Lenovo ThinkPad E550 (Intel Core i7-5500U, 8 GB of memory, a SATA SSD, an Intel Ethernet port, an Intel Wireless-AC 7265 card, Intel graphics on its own panel) |
+| The laptop | a second machine that is not a VM: a Lenovo ThinkPad E550 (Intel Core i7-5500U, 8 GB of memory, a SATA SSD, an Intel Ethernet port, an Intel Wireless-AC 7265 card, Intel graphics on its own panel, and a second graphics card without a display of its own, an AMD Radeon of the Southern Islands family) |
 | The stick | a third machine that is not a VM: an AWOW NY41S stick PC (Intel Celeron J4105, 8 GB of memory, eMMC, an Intel Dual Band Wireless-AC 3165 card, a Realtek RTL8168h Ethernet port, Intel graphics on HDMI) |
 | The Pi | an aarch64 machine that is not a VM: a Raspberry Pi 5 (8 GB of memory, board revision 1.1, an SD card, a Linksys AE1000 USB Wi-Fi adapter on a Ralink RT3572), started by a UEFI firmware whose files are on the installed card's EFI partition |
 
@@ -39,7 +39,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | An Intel CPU's idle states come through Intel's idle driver: the kernel's own for a model the driver has a table for, the firmware's for any other (before, the firmware's on every machine) | The stick and the laptop, models the driver has a table for: the idle driver reads `intel_idle`, with the kernel's states for the model (eight on the stick, where it read `acpi_idle` and four; nine on the laptop). Bare metal, a model it has no table for: the idle driver reads `intel_idle`, with the states its firmware declares | |
 | aarch64: a machine the Raspberry Pi's frequency driver or ACPI's CPPC driver serves has a frequency policy (both are built in; before, modules that nothing loaded) | | A Raspberry Pi started with a device tree, or an Arm machine whose ACPI tables declare `_CPC`: a policy exists and reads `performance` |
 | An AMD machine's graphics are driven by the kernel's own driver (`amdgpu`, its firmware in the boot archive; before, the firmware's framebuffer alone) | | An AMD machine that is not a VM: a picture after boot with the driver bound, the display console in its mode; `nomodeset` back on the firmware's framebuffer |
-| A Radeon from before `amdgpu` is driven by the kernel's `radeon` driver (its firmware in the boot archive; before, no driver took such a card) | | A machine with such a card: the driver bound; with the display on that card, a picture after boot and the display console in its mode |
+| A Radeon from before `amdgpu` is driven by the kernel's `radeon` driver (its firmware in the boot archive; before, no driver took such a card) | The laptop, on its second card: the driver bound, with the card's firmware loaded | A machine with the display on such a card: a picture after boot and the display console in its mode |
 | `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it) | a machine that cannot power itself off; aarch64 |
 
 ## The installer (`embraos.iso`)
@@ -61,7 +61,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; Parallels; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the stick (HDMI: the page, a keyboard, a mouse and the 1920x1080 mode); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click); the Pi (HDMI: the page, a keyboard, a mouse and a click) | |
 | A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA); bare metal (a held modifier) | |
 | A firmware framebuffer (`ramfb`): 800x600, and 1024x768 on request | QEMU; QEMU on Apple Silicon | |
-| More than one graphics card: the page on the card that has a display connected | QEMU (the firmware's framebuffer beside a virtio-gpu card, each in turn without a display) | a machine with two cards |
+| More than one graphics card: the page on the card that has a display connected | QEMU (the firmware's framebuffer beside a virtio-gpu card, each in turn without a display); the laptop (a second card with a driver and without a display: the page on the panel) | |
 | `embra.kioskmode=` | QEMU (standard VGA, virtio-gpu, a firmware framebuffer), GRUB's Diagnostics entry among the ways in | |
 | The page's scale: 2 on a mode 2560 pixels wide, 1 below, and `embra.kioskscale=` for either | QEMU (standard VGA, at 1920x1080 and at 2560x1440) | bare metal |
 | The menu: Copy, Paste, This console's URL | QEMU; QEMU on an Intel Mac and on Apple Silicon | |
