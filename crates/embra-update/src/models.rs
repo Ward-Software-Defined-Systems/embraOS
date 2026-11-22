@@ -31,8 +31,6 @@ use crate::Outcome;
 
 /// The models' directory under DATA.
 const MODELS_SUBDIR: &str = "models";
-/// The lock every job takes, in the models' directory.
-const LOCK_FILE: &str = ".lock";
 /// The reads from a source and from a file, one buffer at a time.
 const CHUNK: usize = 4 * 1024 * 1024;
 /// DATA's free space is looked at again each time this much has been written.
@@ -64,29 +62,22 @@ pub struct Limits<'a> {
     pub free: &'a dyn Fn(&Path) -> io::Result<u64>,
 }
 
-/// One job at a time. The lock is the kernel's: it goes when the job ends,
-/// however it ends.
+/// One job at a time: the models' lock (`native::job_lock`), the kernel's,
+/// which goes when the job ends, however it ends. embrad and the brain ask
+/// about it to say that a model is being installed.
 pub struct JobLock {
     _file: File,
 }
 
 /// Take the lock, or say that another job holds it.
 pub fn job_lock(models: &Path) -> Result<JobLock, Outcome> {
-    use std::os::unix::io::AsRawFd;
-    let failed = |what: &str, e: io::Error| Outcome::Failed(format!("{what} {}: {e}", models.display()));
-    fs::create_dir_all(models).map_err(|e| failed("create", e))?;
-    let file = File::create(models.join(LOCK_FILE)).map_err(|e| failed("the lock under", e))?;
-    // SAFETY: a valid descriptor, held by `file` for as long as the lock is.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let e = io::Error::last_os_error();
-        return Err(match e.kind() {
-            io::ErrorKind::WouldBlock => Outcome::Refused(
-                "refused: another model job is running (an install, an import, a check or a removal); it has to end first".to_string(),
-            ),
-            _ => failed("the lock under", e),
-        });
+    match native::job_lock(models) {
+        Ok(Some(file)) => Ok(JobLock { _file: file }),
+        Ok(None) => Err(Outcome::Refused(
+            "refused: another model job is running (an install, an import, a check or a removal); it has to end first".to_string(),
+        )),
+        Err(e) => Err(Outcome::Failed(format!("the lock under {}: {e}", models.display()))),
     }
-    Ok(JobLock { _file: file })
 }
 
 /// A progress line each [`PROGRESS_STEP`] percent of a file: twenty a file
@@ -626,7 +617,7 @@ pub fn remove_command(roots: &Roots, model: &NativeModel, out: &mut impl Write) 
     if let Ok(Some(wanted)) = native::read_settings(&settings_path(roots))
         && wanted.model.id == model.id
     {
-        return Outcome::Refused(format!("refused: {} is the model kept loaded; free it first (/native off)", model.id));
+        return Outcome::Refused(format!("refused: the settings ask for {} to be kept loaded; free it first (/native off)", model.id));
     }
     let models = models_dir(roots);
     let _lock = match job_lock(&models) {
@@ -879,7 +870,7 @@ mod tests {
         fs::write(model.partial_path(&models), vec![0u8; 3 * 1024 * 1024]).unwrap();
         native::write_settings(&settings_path(&roots), Some(&native::Wanted::new(model))).unwrap();
         let outcome = remove_command(&roots, model, &mut Vec::new());
-        assert_eq!(words(&outcome), ("refused", "refused: qwen3.5-4b is the model kept loaded; free it first (/native off)"));
+        assert_eq!(words(&outcome), ("refused", "refused: the settings ask for qwen3.5-4b to be kept loaded; free it first (/native off)"));
         assert!(model.partial_path(&models).exists());
 
         // Another model kept loaded, or none: this one goes.
@@ -907,7 +898,9 @@ mod tests {
             assert!(reason.contains("another model job is running"), "{reason}");
         }
         assert_eq!(names(&model, &models), Vec::<String>::new(), "the refused import wrote nothing");
+        assert!(native::job_running(&models), "a reader sees the job");
         drop(held);
+        assert!(!native::job_running(&models));
         assert_eq!(words(&import_with(&roots, &model, CONTENT, &mut Vec::new(), &LIMITS)).0, "done");
         fs::remove_dir_all(&roots.parent).unwrap();
     }

@@ -138,6 +138,10 @@ pub struct Supervisor {
     /// The display console is registered (udevd and embra-kiosk after
     /// embra-web): the banner says so.
     kiosk: bool,
+    /// The model server of native models (experimental): no service of the
+    /// list above, kept by the reconcile loop's tick as the settings on
+    /// STATE say (`native_model.rs`).
+    model_server: crate::native_model::Keeper,
 }
 
 impl Supervisor {
@@ -156,9 +160,16 @@ impl Supervisor {
             web_token_rotation_failed: false,
             boot_stdio: None,
             services: Vec::new(),
+            model_server: crate::native_model::Keeper::new(cmdline.native()),
             cmdline,
             kiosk: false,
         }
+    }
+
+    /// One tick of the model server's keeper: the reconcile loop calls it
+    /// after the pass over the services.
+    pub async fn keep_model_server(&mut self) {
+        self.model_server.tick().await;
     }
 
     /// Register all embraOS services in dependency order: `start_all`
@@ -269,26 +280,16 @@ impl Supervisor {
         // API key: prefer the per-provider STATE file (D2). Falls
         // back to the legacy /embra/state/api_key (mirrors active),
         // then to {ANTHROPIC,GEMINI}_API_KEY env.
-        // OpenAI-compat presets don't have an api_key; bearer is read
-        // separately below and threaded via EMBRA_*_BEARER env vars.
-        let per_provider_path = match api_provider.as_str() {
-            "gemini" => "/embra/state/api_key_gemini",
-            "ollama" | "lm_studio" => "", // no api_key for OpenAI-compat
-            _ => "/embra/state/api_key_anthropic",
-        };
-        let env_key_name = match api_provider.as_str() {
-            "gemini" => "GEMINI_API_KEY",
-            "ollama" | "lm_studio" => "", // no api_key env for OpenAI-compat
-            _ => "ANTHROPIC_API_KEY",
-        };
-        let api_key = if per_provider_path.is_empty() {
-            String::new()
-        } else {
-            std::fs::read_to_string(per_provider_path)
+        // A provider without a key gets none (`key_sources`); a preset's
+        // bearer is read separately below and threaded via EMBRA_*_BEARER
+        // env vars.
+        let api_key = match key_sources(&api_provider) {
+            None => String::new(),
+            Some((per_provider_path, env_key_name)) => std::fs::read_to_string(per_provider_path)
                 .or_else(|_| std::fs::read_to_string("/embra/state/api_key"))
                 .or_else(|_| std::env::var(env_key_name))
                 .unwrap_or_default()
-                .trim().to_string()
+                .trim().to_string(),
         };
         // Loopback alone: embra-apid beside it is the brain's one client.
         let mut brain_args = vec![
@@ -850,13 +851,19 @@ impl Supervisor {
                 release_display();
             }
         }
+        // The model server after the brain, its one client.
+        self.model_server.stop().await;
     }
 
     /// The pids of the supervised children that are running: what the
     /// orphan reaper (`reconcile::reap_orphans`) leaves for tokio's `Child`
     /// to collect.
     pub fn child_pids(&self) -> Vec<u32> {
-        self.services.iter().filter_map(|s| s.child.as_ref().and_then(|c| c.id())).collect()
+        self.services
+            .iter()
+            .filter_map(|s| s.child.as_ref().and_then(|c| c.id()))
+            .chain(self.model_server.pid())
+            .collect()
     }
 
     /// Check if a service is still running. Returns true if alive.
@@ -1056,7 +1063,26 @@ impl Supervisor {
 }
 
 /// How long a service has to exit on SIGTERM before it is killed.
-const STOP_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// The providers the brain reaches without an API key: the
+/// OpenAI-compatible presets, whose stored names these are. Any other name,
+/// and none, takes a key.
+pub(crate) const KEYLESS_PROVIDERS: [&str; 3] = ["ollama", "lm_studio", "native"];
+
+/// Where the key of the stored provider comes from: its file on STATE and
+/// the environment variable that stands in for it. `None` for a provider
+/// that has no key. A name that is no provider, and no name, read as
+/// Anthropic, as they do in the brain.
+pub(crate) fn key_sources(api_provider: &str) -> Option<(&'static str, &'static str)> {
+    if KEYLESS_PROVIDERS.contains(&api_provider) {
+        return None;
+    }
+    Some(match api_provider {
+        "gemini" => ("/embra/state/api_key_gemini", "GEMINI_API_KEY"),
+        _ => ("/embra/state/api_key_anthropic", "ANTHROPIC_API_KEY"),
+    })
+}
 
 /// Stops one child: SIGTERM, `grace` to exit on it, SIGKILL after. A
 /// service that handles SIGTERM closes its files first — WardSONDB its
@@ -2359,6 +2385,24 @@ mod shutdown_during_restart_tests {
     fn the_last_processes_are_ended_by_pid_one_alone() {
         assert_ne!(std::process::id(), 1);
         end_every_other_process();
+    }
+}
+
+#[cfg(test)]
+mod key_source_tests {
+    use super::*;
+
+    /// A native model has no key, as Ollama and LM Studio have none: before
+    /// it was named here the brain was handed Anthropic's.
+    #[test]
+    fn a_provider_without_a_key_is_handed_none() {
+        for keyless in ["ollama", "lm_studio", "native"] {
+            assert_eq!(key_sources(keyless), None, "{keyless}");
+        }
+        assert_eq!(key_sources("gemini"), Some(("/embra/state/api_key_gemini", "GEMINI_API_KEY")));
+        for anthropic in ["anthropic", "", "nobody"] {
+            assert_eq!(key_sources(anthropic), Some(("/embra/state/api_key_anthropic", "ANTHROPIC_API_KEY")), "{anthropic:?}");
+        }
     }
 }
 

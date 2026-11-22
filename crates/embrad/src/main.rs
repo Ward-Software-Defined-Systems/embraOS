@@ -34,6 +34,7 @@ mod clock;
 mod console;
 mod modes;
 mod mount;
+mod native_model;
 mod reconcile;
 mod net;
 mod wifi;

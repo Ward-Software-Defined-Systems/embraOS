@@ -306,6 +306,23 @@ impl Cmdline {
         wifi
     }
 
+    /// `embra.native=0`: no model server is started in this boot (native
+    /// models, experimental), the way out when a native model takes the
+    /// machine's memory or stops on its processor. The last `1` or `0` wins,
+    /// any other value is ignored, and without one the settings on STATE
+    /// decide.
+    pub fn native(&self) -> bool {
+        let mut native = true;
+        for t in &self.tokens {
+            match t.as_str() {
+                "embra.native=1" => native = true,
+                "embra.native=0" => native = false,
+                _ => {}
+            }
+        }
+        native
+    }
+
     /// `embra.kbd=<layout>`, the display console's keyboard layout; the
     /// last non-empty value.
     pub fn keyboard_layout(&self) -> Option<&str> {
@@ -388,6 +405,18 @@ mod tests {
         assert!(Cmdline::parse("embra.wifi=0 embra.wifi=1").wifi());
         assert!(!Cmdline::parse("embra.wifi=1 quiet embra.wifi=0").wifi());
         assert!(Cmdline::parse("embra.wifi=no embra.wifi=").wifi(), "any other value is ignored");
+    }
+
+    #[test]
+    fn embra_native_0_starts_no_model_server_and_the_last_word_wins() {
+        assert!(Cmdline::parse("console=ttyS0 quiet").native(), "without the knob the settings decide");
+        assert!(!Cmdline::parse("embra.native=0").native());
+        assert!(Cmdline::parse("embra.native=0 embra.native=1").native());
+        assert!(!Cmdline::parse("embra.native=1 quiet embra.native=0").native());
+        assert!(Cmdline::parse("embra.native=off embra.native=").native(), "any other value is ignored");
+        // The boot menu's list of knobs names it.
+        let menu = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../buildroot/board/embraos/grub.cfg.in")).unwrap();
+        assert!(menu.contains("echo \"  embra.native=0 "), "the boot menu's list of knobs");
     }
 
     #[test]

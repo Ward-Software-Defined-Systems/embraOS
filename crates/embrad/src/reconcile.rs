@@ -3,6 +3,7 @@
 //! Continuously monitors service health and restarts failed services,
 //! answers the operator's request for a new web console token
 //! (`Supervisor::rotate_web_token`),
+//! follows the settings of the model server (`native_model::Keeper`),
 //! reaps the orphans that reparent to PID 1 (#18), and handles the signals
 //! that stop the machine — SIGTERM and SIGINT for a restart, SIGUSR2 for a
 //! power-off (`Stop`) — during a restart's backoff and health wait as well,
@@ -77,13 +78,16 @@ pub(crate) async fn run_until(
 }
 
 /// One tick: the operator's request for a new web console token, when one
-/// is on STATE, and then the pass over the services. Cancelled by a shutdown
-/// signal, which stops everything next.
+/// is on STATE, then the pass over the services, then the model server
+/// (native models, experimental: started and ended as the settings on STATE
+/// say, never awaited). Cancelled by a shutdown signal, which stops
+/// everything next.
 async fn tick(supervisor: &mut Supervisor) {
     if supervisor.web_token_rotation_asked() {
         supervisor.rotate_web_token().await;
     }
     reconcile_once(supervisor).await;
+    supervisor.keep_model_server().await;
 }
 
 /// One pass over the services: a service that exited is restarted under

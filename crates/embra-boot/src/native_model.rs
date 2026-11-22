@@ -7,6 +7,10 @@
 //! repository, with its size and its sha256, so what runs is what was
 //! tested.
 //!
+//! One job at a time changes the models' directory (an install, an import,
+//! a check, a removal): a lock on a file in it, which the updater takes and
+//! any reader can ask about.
+//!
 //! Three records, one `key=value` a line. Each has one parser, and a record
 //! is taken whole or not at all: a line the parser does not accept refuses
 //! the record, and the reason is a sentence for the operator.
@@ -71,6 +75,8 @@ pub const SMALLEST_CONTEXT: u32 = 1_024;
 
 /// The name of a model's verification record, in the model's directory.
 const VERIFIED_FILE: &str = "verified";
+/// The file a model job locks, in the models' directory.
+const JOB_LOCK_FILE: &str = ".lock";
 /// What a download is called until it is whole: the file's name and this.
 const PARTIAL_SUFFIX: &str = ".partial";
 /// How much of a record's line a refusal quotes.
@@ -232,6 +238,51 @@ fn read_record(path: &Path, what: &str) -> Result<Option<String>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{what} could not be read: {e}")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The job lock: the updater takes it, anyone asks about it.
+
+/// A lock over the whole of an open file, of the kind that belongs to the
+/// open file and not to the process (`F_OFD_SETLK`): it goes when the file
+/// is closed, however its holder ends, and whether one is held can be asked
+/// without taking one (`F_OFD_GETLK`).
+fn whole_file(kind: libc::c_int) -> libc::flock {
+    // SAFETY: a struct of integers; zero is a valid value of each.
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = kind as libc::c_short;
+    lock.l_whence = libc::SEEK_SET as libc::c_short;
+    lock
+}
+
+/// Take the models' job lock. `Some` is the lock, held until the file is
+/// dropped; `None` when another job holds it. The directory is made when it
+/// is not there.
+pub fn job_lock(models: &Path) -> std::io::Result<Option<std::fs::File>> {
+    use std::os::unix::io::AsRawFd;
+    std::fs::create_dir_all(models)?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(models.join(JOB_LOCK_FILE))?;
+    let lock = whole_file(libc::F_WRLCK);
+    // SAFETY: a valid descriptor and a lock description that lives for the call.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &lock) } == 0 {
+        return Ok(Some(file));
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EAGAIN) | Some(libc::EACCES) => Ok(None),
+        _ => Err(e),
+    }
+}
+
+/// Whether a model job runs now: its lock is held. Nothing is taken to find
+/// out, so a job that starts at the same moment is not refused for it.
+pub fn job_running(models: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let Ok(file) = std::fs::File::open(models.join(JOB_LOCK_FILE)) else { return false };
+    let mut lock = whole_file(libc::F_RDLCK);
+    // SAFETY: a valid descriptor and a lock description the call writes into.
+    let asked = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_GETLK, &mut lock) };
+    asked == 0 && lock.l_type != libc::F_UNLCK as libc::c_short
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +987,26 @@ mod tests {
         }
         // One sample is a whole status with CRLF line ends; nothing else forms a record.
         assert_eq!(accepted, 1, "of {} samples", samples.len());
+    }
+
+    #[test]
+    fn the_job_lock_is_held_by_one_and_seen_by_all_without_being_taken() {
+        let models = crate::net::tests::scratch("native-lock").join("models");
+        assert!(!job_running(&models), "no directory, no job");
+        let held = job_lock(&models).unwrap().expect("the first job takes the lock");
+        assert!(job_running(&models));
+        assert!(job_lock(&models).unwrap().is_none(), "a second job is told that one runs");
+        // Asking takes nothing: the holder still holds it, and asking again says the same.
+        assert!(job_running(&models) && job_running(&models));
+        assert!(job_lock(&models).unwrap().is_none());
+        drop(held);
+        assert!(!job_running(&models), "the lock goes with the file");
+        let again = job_lock(&models).unwrap();
+        assert!(again.is_some() && job_running(&models));
+        drop(again);
+        // The lock's file is no model's directory and no file of a model.
+        assert!(CATALOGUE.iter().all(|m| m.id != JOB_LOCK_FILE && m.file != JOB_LOCK_FILE));
+        std::fs::remove_dir_all(models.parent().unwrap()).unwrap();
     }
 
     #[test]
