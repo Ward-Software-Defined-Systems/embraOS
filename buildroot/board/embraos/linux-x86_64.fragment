@@ -51,10 +51,11 @@ CONFIG_X86_PKG_TEMP_THERMAL=y
 # Idle states: Intel's own driver, which carries the kernel's table of idle
 # states for each Intel CPU model. The base config leaves it out, and a
 # machine's idle states were then the ones its firmware's ACPI tables
-# declare, through acpi_idle. With it, a CPU the driver lists sleeps by the
-# kernel's table; an Intel CPU it does not list takes the firmware's states
-# through this driver; an AMD CPU and a virtual machine (no MWAIT) are
-# refused by it and keep what they had.
+# declare, through acpi_idle. With it, a CPU the driver has a table for
+# sleeps by the kernel's table; an Intel CPU it has none for (a model it
+# does not list, or lists without a table, as Jasper Lake) takes the
+# firmware's states through this driver; an AMD CPU and a virtual machine
+# (no MWAIT) are refused by it and keep what they had.
 CONFIG_INTEL_IDLE=y
 # AMD's graphics: the amdgpu driver with its display engine, for the Radeon
 # of an AMD CPU and for a Radeon card (the base config has Intel's i915
