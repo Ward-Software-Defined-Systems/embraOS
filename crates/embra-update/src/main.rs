@@ -189,6 +189,7 @@ fn run(cmd: Command, op: &mut console::Operator) -> anyhow::Result<Outcome> {
         }
         Command::GrowData { console: _ } => Ok(grow::grow_data_command(op)),
         Command::ModelList => Ok(models::list_command(&roots, op)),
+        Command::ModelInstall { model } => Ok(models::install_command(&roots, model, op)),
         // The file comes on standard input, as a backup's archive does.
         Command::ModelImport { model } => Ok(models::import_command(&roots, model, std::io::stdin().lock(), op)),
         Command::ModelVerify { model } => Ok(models::verify_command(&roots, model, op)),

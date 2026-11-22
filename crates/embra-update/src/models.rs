@@ -3,9 +3,12 @@
 //! bytes or it is not kept. A file read from standard input (the web
 //! console's upload) is hashed while it is written under a `.partial` name;
 //! it gets its final name, and the verification record embrad starts a
-//! model by, only when its size and its sha256 are the catalogue's. `verify`
-//! hashes an installed file again and writes that record, or removes a file
-//! that is not the catalogue's.
+//! model by, only when its size and its sha256 are the catalogue's. A
+//! download (`install`) is written the same way from the catalogue's URL, and
+//! what a stopped one left under the `.partial` name is the start of the
+//! next: the bytes there are hashed again and the rest is asked for with an
+//! HTTP range. `verify` hashes an installed file again and writes that
+//! record, or removes a file that is not the catalogue's.
 //!
 //! One job at a time: a lock in the models directory, held until the job
 //! ends. DATA's reserve stays free, as beside a snapshot.
@@ -14,13 +17,14 @@
 //! names the two directories of DATA it holds, and this is neither. A model
 //! is downloaded again, not backed up.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use embra_boot::native_model::{self as native, Installed, NativeModel, Verified};
 use sha2::{Digest, Sha256};
 
+use crate::fetch::{self, Opened};
 use crate::paths::RESERVE_BYTES;
 use crate::snapshot::{Roots, enough_space, free_bytes, sync_dir, tree_bytes};
 use crate::Outcome;
@@ -35,6 +39,9 @@ const CHUNK: usize = 4 * 1024 * 1024;
 const RESERVE_CHECK_EVERY: u64 = 32 * 1024 * 1024;
 /// A progress line each time this many percent more of a file are done.
 const PROGRESS_STEP: u64 = 5;
+/// The requests one download makes at most. Each after the first asks for
+/// the rest, and only when the one before brought bytes.
+const REQUESTS_MAX: u32 = 20;
 
 /// The models' directory: `native::MODELS_DIR` in the OS.
 pub fn models_dir(roots: &Roots) -> PathBuf {
@@ -182,16 +189,18 @@ fn copy_hashed(job: &CopyJob, source: &mut dyn Read, dest: &mut File, hasher: &m
     if done < model.bytes { Copied::Short(done) } else { Copied::Whole }
 }
 
-/// The sha256 of a file, with progress lines.
-fn hash_file(path: &Path, model: &NativeModel, out: &mut dyn Write) -> io::Result<String> {
+/// Feed `hasher` the first `len` bytes of `path`, with progress lines.
+fn hash_into(hasher: &mut Sha256, path: &Path, len: u64, model: &NativeModel, out: &mut dyn Write) -> io::Result<()> {
     let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
     let mut progress = Progress::new(model, "checked", 0);
     let mut done: u64 = 0;
-    loop {
-        let n = match file.read(&mut buf) {
-            Ok(0) => break,
+    while done < len {
+        let want = (len - done).min(buf.len() as u64) as usize;
+        let n = match file.read(&mut buf[..want]) {
+            Ok(0) => {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("it ended after {done} of {len} bytes")));
+            }
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
@@ -200,7 +209,39 @@ fn hash_file(path: &Path, model: &NativeModel, out: &mut dyn Write) -> io::Resul
         done += n as u64;
         progress.at(done, out);
     }
-    Ok(hex::encode(hasher.finalize()))
+    Ok(())
+}
+
+/// What a check of an installed file found.
+enum Checked {
+    /// The catalogue's file, with its sha256: its record is written.
+    Catalogue(String),
+    /// Another file, removed with its record: how it differs.
+    Removed(String),
+}
+
+/// Hash the installed file. The catalogue's gets its record; any other is
+/// removed.
+fn check_file(model: &NativeModel, models: &Path, out: &mut dyn Write) -> Result<Checked, String> {
+    let path = model.file_path(models);
+    let len = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?.len();
+    let removed = |why: String| {
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(model.verified_path(models));
+        Ok(Checked::Removed(why))
+    };
+    if len != model.bytes {
+        return removed(format!("{} is {len} bytes and the catalogue's file is {}", model.file, model.bytes));
+    }
+    let _ = writeln!(out, "{}: checking {} ({} MB)", model.id, model.file, mb(model.bytes));
+    let mut hasher = Sha256::new();
+    hash_into(&mut hasher, &path, len, model, out).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let sha256 = hex::encode(hasher.finalize());
+    if sha256 != model.sha256 {
+        return removed(format!("the sha256 of {} is {}…, not {}…", model.file, &sha256[..16], &model.sha256[..16]));
+    }
+    record(model, models)?;
+    Ok(Checked::Catalogue(sha256))
 }
 
 /// Give a whole, hashed `.partial` its final name and write the record that
@@ -376,31 +417,206 @@ pub fn verify_command(roots: &Roots, model: &NativeModel, out: &mut impl Write) 
         Ok(lock) => lock,
         Err(outcome) => return outcome,
     };
-    let path = model.file_path(&models);
-    let len = match fs::metadata(&path) {
-        Ok(meta) if meta.is_file() => meta.len(),
-        _ => return Outcome::Refused(format!("refused: {} is not installed", model.id)),
-    };
-    let removed = |why: String| {
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(model.verified_path(&models));
-        Outcome::Failed(format!("{why}: it is not {}'s file and was removed. Install {} again", model.label, model.id))
-    };
-    if len != model.bytes {
-        return removed(format!("{} is {len} bytes and the catalogue's file is {}", model.file, model.bytes));
+    if !model.file_path(&models).is_file() {
+        return Outcome::Refused(format!("refused: {} is not installed", model.id));
     }
-    let _ = writeln!(out, "{}: checking {} ({} MB)", model.id, model.file, mb(model.bytes));
-    let sha256 = match hash_file(&path, model, out) {
-        Ok(sha256) => sha256,
-        Err(e) => return Outcome::Failed(format!("reading {}: {e}", path.display())),
+    match check_file(model, &models, out) {
+        Ok(Checked::Catalogue(sha256)) => {
+            let _ = writeln!(out, "{}: verified ({} MB, sha256 {}…)", model.id, mb(model.bytes), &sha256[..16]);
+            Outcome::Done
+        }
+        Ok(Checked::Removed(why)) => {
+            Outcome::Failed(format!("{why}: it is not {}'s file and was removed. Install {} again", model.label, model.id))
+        }
+        Err(reason) => Outcome::Failed(reason),
+    }
+}
+
+/// `model-install <id>`: the model's file downloaded from the catalogue's
+/// URL.
+pub fn install_command(roots: &Roots, model: &NativeModel, out: &mut impl Write) -> Outcome {
+    install_with(roots, model, &model.url(), out, &Limits { check_every: RESERVE_CHECK_EVERY, free: &free_bytes })
+}
+
+/// The download. A file that is there is checked first and nothing is asked
+/// for when it is the catalogue's. What an earlier download left under the
+/// `.partial` name is hashed again and the rest asked for with a range; a
+/// source that takes no range sends the whole again, once. A connection that
+/// ends early is followed by a request for the rest as long as it brought
+/// bytes, [`REQUESTS_MAX`] requests at most; what arrived stays for the next
+/// run. The whole file's sha256 decides: the catalogue's, or nothing is kept.
+pub fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut impl Write, limits: &Limits) -> Outcome {
+    let models = models_dir(roots);
+    let _lock = match job_lock(&models) {
+        Ok(lock) => lock,
+        Err(outcome) => return outcome,
     };
+    match native::installed(model, &models) {
+        Installed::Verified => return Outcome::Nothing(format!("{} is installed and verified; nothing to do", model.id)),
+        Installed::Unverified(reason) => {
+            let _ = writeln!(out, "{}: a file is there ({reason})", model.id);
+            match check_file(model, &models, out) {
+                Ok(Checked::Catalogue(sha256)) => {
+                    let _ = writeln!(out, "{}: it is the catalogue's file; verified ({} MB, sha256 {}…)", model.id, mb(model.bytes), &sha256[..16]);
+                    return Outcome::Done;
+                }
+                Ok(Checked::Removed(why)) => {
+                    let _ = writeln!(out, "{}: {why}: it is not {}'s file and was removed", model.id, model.label);
+                }
+                Err(reason) => return Outcome::Failed(reason),
+            }
+        }
+        Installed::Partial(_) | Installed::No => {}
+    }
+    let partial_path = model.partial_path(&models);
+    if let Err(e) = fs::create_dir_all(model.dir(&models)) {
+        return Outcome::Failed(format!("create {}: {e}", model.dir(&models).display()));
+    }
+    let mut partial = match OpenOptions::new().create(true).append(true).open(&partial_path) {
+        Ok(file) => file,
+        Err(e) => return Outcome::Failed(format!("open {}: {e}", partial_path.display())),
+    };
+    let io_failed = |what: &str, e: io::Error| Outcome::Failed(format!("{what} {}: {e}", partial_path.display()));
+    let mut done = match partial.metadata() {
+        Ok(meta) => meta.len(),
+        Err(e) => return io_failed("read", e),
+    };
+    let mut hasher = Sha256::new();
+    if done > model.bytes {
+        let _ = writeln!(out, "{}: what an earlier download left is larger than the file; starting again", model.id);
+        if let Err(e) = partial.set_len(0) {
+            return io_failed("empty", e);
+        }
+        done = 0;
+    } else if done > 0 {
+        let _ = writeln!(out, "{}: {} of {} MB are there from an earlier download; checking them", model.id, mb(done), mb(model.bytes));
+        if let Err(e) = hash_into(&mut hasher, &partial_path, done, model, out) {
+            return io_failed("read", e);
+        }
+    }
+    // An empty `.partial` is no download: it goes when the job ends without a byte.
+    let ended = |done: u64, outcome: Outcome| {
+        if done == 0 {
+            let _ = fs::remove_file(&partial_path);
+        }
+        outcome
+    };
+    let data = roots.data();
+    let free = match (limits.free)(&data) {
+        Ok(free) => free,
+        Err(e) => return ended(done, Outcome::Failed(format!("free space of {}: {e}", data.display()))),
+    };
+    if !enough_space(free, model.bytes - done, RESERVE_BYTES) {
+        let what = if done > 0 { format!("the rest of {}", model.label) } else { model.label.to_string() };
+        return ended(
+            done,
+            Outcome::Refused(format!(
+                "refused: DATA has {} MB free; {what} needs {} MB plus a reserve of {} MB",
+                mb(free),
+                mb(model.bytes - done),
+                mb(RESERVE_BYTES)
+            )),
+        );
+    }
+    let another_size = |size: u64| {
+        Outcome::Failed(format!(
+            "the source's file is {size} bytes and the catalogue's {} is {}; nothing was downloaded",
+            model.file, model.bytes
+        ))
+    };
+    if done < model.bytes {
+        let _ = writeln!(out, "{}: downloading {} ({} MB) from {url}", model.id, model.file, mb(model.bytes));
+    }
+    let client = match fetch::client() {
+        Ok(client) => client,
+        Err(reason) => return ended(done, Outcome::Failed(reason)),
+    };
+    let (mut requests, mut sent_whole_again) = (0u32, false);
+    while done < model.bytes {
+        requests += 1;
+        let mut before = done;
+        let mut body = match fetch::open_from(&client, url, done) {
+            Ok(Opened::Rest { body, total }) => {
+                if total != model.bytes {
+                    return ended(done, another_size(total));
+                }
+                body
+            }
+            Ok(Opened::Whole { body, length }) => {
+                if let Some(length) = length.filter(|length| *length != model.bytes) {
+                    return ended(done, another_size(length));
+                }
+                if done > 0 {
+                    if sent_whole_again {
+                        return Outcome::Failed(format!(
+                            "the source takes no ranges and the download stopped again, after {done} of {} bytes; what arrived is kept",
+                            model.bytes
+                        ));
+                    }
+                    let _ = writeln!(out, "{}: the source takes no ranges; the file comes again from its first byte", model.id);
+                    if let Err(e) = partial.set_len(0) {
+                        return io_failed("empty", e);
+                    }
+                    (done, before, hasher, sent_whole_again) = (0, 0, Sha256::new(), true);
+                }
+                body
+            }
+            Err(reason) => return ended(done, Outcome::Failed(reason)),
+        };
+        let job = CopyJob { model, limits, data: &data, verb: "downloaded" };
+        let (got, why) = match copy_hashed(&job, &mut body, &mut partial, &mut hasher, done, out) {
+            Copied::Whole => {
+                done = model.bytes;
+                continue;
+            }
+            Copied::Short(got) => (got, "the connection ended".to_string()),
+            Copied::Source(got, e) => (got, format!("the connection failed ({})", fetch::error_chain(&e))),
+            Copied::Long => {
+                let _ = fs::remove_file(&partial_path);
+                return Outcome::Failed(format!(
+                    "the source sent more than {} bytes, the size of {}; nothing of it is kept",
+                    model.bytes, model.file
+                ));
+            }
+            Copied::Reserve(free) => {
+                return Outcome::Refused(format!(
+                    "refused: DATA is down to {} MB free and its reserve of {} MB stays; what arrived is kept (/native remove frees it)",
+                    mb(free),
+                    mb(RESERVE_BYTES)
+                ));
+            }
+            Copied::Disk(e) => return io_failed("write", e),
+        };
+        done = got;
+        if got == before || requests >= REQUESTS_MAX {
+            return ended(
+                done,
+                Outcome::Failed(format!(
+                    "the download stopped after {got} of {} bytes: {why}. What arrived is kept, and installing again resumes it",
+                    model.bytes
+                )),
+            );
+        }
+        let _ = writeln!(out, "{}: {why} after {} of {} MB; asking for the rest", model.id, mb(got), mb(model.bytes));
+    }
+    let sha256 = hex::encode(hasher.finalize());
     if sha256 != model.sha256 {
-        return removed(format!("the sha256 of {} is {}…, not {}…", model.file, &sha256[..16], &model.sha256[..16]));
+        let _ = fs::remove_file(&partial_path);
+        return Outcome::Failed(format!(
+            "the download has the size of {} and its sha256 is {}…, not {}…; nothing of it is kept. Install {} again",
+            model.file,
+            &sha256[..16],
+            &model.sha256[..16],
+            model.id
+        ));
     }
-    if let Err(reason) = record(model, &models) {
+    if let Err(reason) = adopt(model, &models, partial) {
         return Outcome::Failed(reason);
     }
-    let _ = writeln!(out, "{}: verified ({} MB, sha256 {}…)", model.id, mb(model.bytes), &sha256[..16]);
+    let _ = writeln!(out, "{}: installed and verified ({} MB, sha256 {}…)", model.id, mb(model.bytes), &sha256[..16]);
+    if let Some(note) = space_note(roots, limits) {
+        let _ = writeln!(out, "{note}");
+    }
     Outcome::Done
 }
 
@@ -737,6 +953,303 @@ mod tests {
             resumed.at(done, &mut out);
         }
         assert_eq!(String::from_utf8(out).unwrap().lines().count(), 1);
+    }
+
+    use crate::fetch::test_support::{Answer, range_start, serve, step};
+
+    /// A file a connection can be cut in the middle of: 800,000 bytes.
+    fn file() -> Vec<u8> {
+        (0..200_000u32).flat_map(u32::to_le_bytes).collect()
+    }
+
+    /// The rest of `content` from a byte on, as a server that takes ranges
+    /// answers.
+    fn part(content: &[u8], from: usize) -> Answer {
+        Answer::new("HTTP/1.1 206 Partial Content", &content[from..])
+            .header(format!("content-range: bytes {from}-{}/{}", content.len() - 1, content.len()))
+    }
+
+    /// The byte each request asked from, in the order the requests came.
+    fn asked(heads: &std::sync::mpsc::Receiver<String>) -> Vec<Option<u64>> {
+        heads.try_iter().map(|head| range_start(&head)).collect()
+    }
+
+    /// Nothing listens here: a request to it fails the test that made it.
+    const NOBODY: &str = "http://127.0.0.1:1/unused";
+
+    #[test]
+    fn a_download_is_installed_with_its_record_after_one_request() {
+        let roots = temp_roots("model-download");
+        let content = file();
+        let model = tiny("tiny", &content);
+        let models = models_dir(&roots);
+        let whole = content.clone();
+        let (url, heads) = serve(vec![step(move |_| Answer::new("HTTP/1.1 200 OK", &whole))]);
+        let mut out = Vec::new();
+        assert_eq!(words(&install_with(&roots, &model, &url, &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(fs::read(model.file_path(&models)).unwrap(), content);
+        assert_eq!(native::installed(&model, &models), Installed::Verified);
+        assert_eq!(names(&model, &models), ["tiny.gguf", "verified"]);
+        assert_eq!(asked(&heads), [None], "one request, for the whole");
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains(&format!("tiny: downloading tiny.gguf (0 MB) from {url}")), "{said}");
+        assert!(said.contains("tiny: installed and verified"), "{said}");
+        // Again: nothing to do, and nobody is asked.
+        assert_eq!(
+            words(&install_with(&roots, &model, NOBODY, &mut Vec::new(), &LIMITS)),
+            ("nothing", "tiny is installed and verified; nothing to do")
+        );
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    #[test]
+    fn a_connection_that_ends_early_is_followed_by_a_request_for_the_rest() {
+        let roots = temp_roots("model-resume");
+        let content = file();
+        let model = tiny("tiny", &content);
+        let (first, second, third) = (content.clone(), content.clone(), content.clone());
+        let (url, heads) = serve(vec![
+            // The length promised, and the connection closed short of it.
+            step(move |_| Answer::new("HTTP/1.1 200 OK", &first).cut_after(300_000)),
+            // No length promised, and the body simply ends.
+            step(move |head| part(&second, range_start(head).unwrap() as usize).without_length().cut_after(200_000)),
+            step(move |head| part(&third, range_start(head).unwrap() as usize)),
+        ]);
+        let mut out = Vec::new();
+        let outcome = install_with(&roots, &model, &url, &mut out, &LIMITS);
+        let said = String::from_utf8(out).unwrap();
+        assert_eq!(words(&outcome), ("done", ""), "{said}");
+        assert_eq!(asked(&heads), [None, Some(300_000), Some(500_000)]);
+        assert_eq!(fs::read(model.file_path(&models_dir(&roots))).unwrap(), content);
+        assert_eq!(said.matches("asking for the rest").count(), 2, "{said}");
+        assert!(said.contains("tiny: the connection ended after 0 of 0 MB; asking for the rest"), "{said}");
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    #[test]
+    fn what_an_earlier_download_left_is_hashed_again_and_the_rest_asked_for() {
+        let roots = temp_roots("model-partial");
+        let content = file();
+        let model = tiny("tiny", &content);
+        let models = models_dir(&roots);
+        let start_with = |left: &[u8]| {
+            let _ = fs::remove_dir_all(model.dir(&models));
+            fs::create_dir_all(model.dir(&models)).unwrap();
+            fs::write(model.partial_path(&models), left).unwrap();
+        };
+        let the_rest = || {
+            let rest = content.clone();
+            serve(vec![step(move |head| part(&rest, range_start(head).unwrap() as usize))])
+        };
+
+        start_with(&content[..123_456]);
+        let (url, heads) = the_rest();
+        let mut out = Vec::new();
+        assert_eq!(words(&install_with(&roots, &model, &url, &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(asked(&heads), [Some(123_456)]);
+        assert_eq!(native::installed(&model, &models), Installed::Verified);
+        assert!(String::from_utf8(out).unwrap().contains("tiny: 0 of 0 MB are there from an earlier download; checking them"));
+
+        // Bytes that were not the file's: the whole hashes wrong and nothing is kept.
+        let mut left = content[..123_456].to_vec();
+        left[1_000] ^= 0xff;
+        start_with(&left);
+        let (url, _heads) = the_rest();
+        let outcome = install_with(&roots, &model, &url, &mut Vec::new(), &LIMITS);
+        let (kind, reason) = words(&outcome);
+        assert_eq!(kind, "failed");
+        assert!(reason.starts_with("the download has the size of tiny.gguf and its sha256 is "), "{reason}");
+        assert!(reason.ends_with("nothing of it is kept. Install tiny again"), "{reason}");
+        assert_eq!(names(&model, &models), Vec::<String>::new());
+
+        // All of it is there (a run that ended between the last byte and the rename): nobody is asked.
+        start_with(&content);
+        assert_eq!(words(&install_with(&roots, &model, NOBODY, &mut Vec::new(), &LIMITS)), ("done", ""));
+        assert_eq!(native::installed(&model, &models), Installed::Verified);
+
+        // More than the file is no start of it: the whole is asked for.
+        let mut more = content.clone();
+        more.extend_from_slice(b"and more");
+        start_with(&more);
+        let whole = content.clone();
+        let (url, heads) = serve(vec![step(move |_| Answer::new("HTTP/1.1 200 OK", &whole))]);
+        assert_eq!(words(&install_with(&roots, &model, &url, &mut Vec::new(), &LIMITS)), ("done", ""));
+        assert_eq!(asked(&heads), [None]);
+        assert_eq!(fs::read(model.file_path(&models)).unwrap(), content);
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    #[test]
+    fn a_source_that_takes_no_range_sends_the_file_again_once() {
+        let roots = temp_roots("model-noranges");
+        let content = file();
+        let model = tiny("tiny", &content);
+        let models = models_dir(&roots);
+        fs::create_dir_all(model.dir(&models)).unwrap();
+        fs::write(model.partial_path(&models), &content[..100_000]).unwrap();
+        let whole = content.clone();
+        let (url, heads) = serve(vec![step(move |_| Answer::new("HTTP/1.1 200 OK", &whole))]);
+        let mut out = Vec::new();
+        assert_eq!(words(&install_with(&roots, &model, &url, &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(asked(&heads), [Some(100_000)], "the rest was asked for");
+        assert_eq!(fs::read(model.file_path(&models)).unwrap(), content, "the whole came, and was written from the first byte");
+        assert!(String::from_utf8(out).unwrap().contains("tiny: the source takes no ranges; the file comes again from its first byte"));
+
+        // Cut on such a source: a further request would bring the whole a third time.
+        fs::remove_dir_all(model.dir(&models)).unwrap();
+        fs::create_dir_all(model.dir(&models)).unwrap();
+        fs::write(model.partial_path(&models), &content[..100_000]).unwrap();
+        let (first, second) = (content.clone(), content.clone());
+        let (url, heads) = serve(vec![
+            step(move |_| Answer::new("HTTP/1.1 200 OK", &first).cut_after(50_000)),
+            step(move |_| Answer::new("HTTP/1.1 200 OK", &second)),
+        ]);
+        let outcome = install_with(&roots, &model, &url, &mut Vec::new(), &LIMITS);
+        assert_eq!(
+            words(&outcome),
+            ("failed", "the source takes no ranges and the download stopped again, after 50000 of 800000 bytes; what arrived is kept")
+        );
+        assert_eq!(asked(&heads), [Some(100_000), Some(50_000)]);
+        assert_eq!(fs::read(model.partial_path(&models)).unwrap(), &content[..50_000]);
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    #[test]
+    fn a_file_of_another_size_at_the_source_is_refused_before_a_byte_is_written() {
+        let roots = temp_roots("model-size");
+        let content = file();
+        let model = tiny("tiny", &content);
+        let models = models_dir(&roots);
+        let other = content.clone();
+        let (url, _heads) = serve(vec![step(move |_| Answer::new("HTTP/1.1 200 OK", &other).declaring(800_001))]);
+        let outcome = install_with(&roots, &model, &url, &mut Vec::new(), &LIMITS);
+        let another_size = "the source's file is 800001 bytes and the catalogue's tiny.gguf is 800000; nothing was downloaded";
+        assert_eq!(words(&outcome), ("failed", another_size));
+        assert_eq!(names(&model, &models), Vec::<String>::new(), "no empty .partial is left");
+
+        // The same on a resume: what was there stays as it was.
+        fs::write(model.partial_path(&models), &content[..1_000]).unwrap();
+        let (url, _heads) = serve(vec![step(|_| {
+            Answer::new("HTTP/1.1 206 Partial Content", b"x").header("content-range: bytes 1000-800000/800001".into())
+        })]);
+        let outcome = install_with(&roots, &model, &url, &mut Vec::new(), &LIMITS);
+        assert_eq!(words(&outcome), ("failed", another_size));
+        assert_eq!(fs::read(model.partial_path(&models)).unwrap(), &content[..1_000]);
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    #[test]
+    fn a_request_that_brings_no_byte_ends_the_job_and_twenty_requests_are_the_most() {
+        let roots = temp_roots("model-nothing");
+        let content = file();
+        let model = tiny("tiny", &content);
+        let models = models_dir(&roots);
+        let whole = content.clone();
+        let (url, heads) = serve(vec![step(move |_| Answer::new("HTTP/1.1 200 OK", &whole).cut_after(0))]);
+        let outcome = install_with(&roots, &model, &url, &mut Vec::new(), &LIMITS);
+        let (kind, reason) = words(&outcome);
+        assert_eq!(kind, "failed");
+        assert!(reason.starts_with("the download stopped after 0 of 800000 bytes: the connection failed ("), "{reason}");
+        assert!(reason.ends_with("). What arrived is kept, and installing again resumes it"), "{reason}");
+        assert!(!reason.contains("http"), "the reason names no address: {reason}");
+        assert_eq!(asked(&heads), [None], "no second request after one that brought nothing");
+        assert_eq!(names(&model, &models), Vec::<String>::new(), "an empty .partial is no download");
+
+        let (url, _heads) = serve(vec![step(|_| Answer::new("HTTP/1.1 404 Not Found", b"no such file"))]);
+        let outcome = install_with(&roots, &model, &url, &mut Vec::new(), &LIMITS);
+        assert_eq!(words(&outcome), ("failed", format!("GET {url} → HTTP 404: Not Found").as_str()));
+        assert_eq!(names(&model, &models), Vec::<String>::new());
+
+        let outcome = install_with(&roots, &model, NOBODY, &mut Vec::new(), &LIMITS);
+        let (kind, reason) = words(&outcome);
+        assert_eq!(kind, "failed");
+        assert!(reason.starts_with(&format!("GET {NOBODY}: ")), "{reason}");
+        assert_eq!(reason.matches("http").count(), 1, "the address as it was given, once: {reason}");
+
+        // A byte a request, each asking for the rest: the twentieth request is the last.
+        let mut script = Vec::new();
+        for _ in 0..REQUESTS_MAX {
+            let rest = content.clone();
+            script.push(step(move |head| match range_start(head) {
+                None => Answer::new("HTTP/1.1 200 OK", &rest).cut_after(1),
+                Some(from) => part(&rest, from as usize).cut_after(1),
+            }));
+        }
+        let (url, heads) = serve(script);
+        let outcome = install_with(&roots, &model, &url, &mut Vec::new(), &LIMITS);
+        let (kind, reason) = words(&outcome);
+        assert_eq!(kind, "failed");
+        assert!(reason.starts_with("the download stopped after 20 of 800000 bytes"), "{reason}");
+        assert_eq!(asked(&heads), (0..20).map(|n| (n > 0).then_some(n)).collect::<Vec<_>>());
+        assert_eq!(fs::read(model.partial_path(&models)).unwrap(), &content[..20], "what arrived is kept");
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_there_is_checked_before_anybody_is_asked() {
+        let roots = temp_roots("model-there");
+        let content = file();
+        let model = tiny("tiny", &content);
+        let models = models_dir(&roots);
+        fs::create_dir_all(model.dir(&models)).unwrap();
+        fs::write(model.file_path(&models), &content).unwrap();
+        // The catalogue's bytes without a record: verified, and no request.
+        let mut out = Vec::new();
+        assert_eq!(words(&install_with(&roots, &model, NOBODY, &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(native::installed(&model, &models), Installed::Verified);
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("tiny: a file is there (the file was never checked)"), "{said}");
+        assert!(said.contains("tiny: it is the catalogue's file; verified"), "{said}");
+
+        // Other bytes under the file's name, and no record: removed, then downloaded.
+        let mut wrong = content.clone();
+        wrong[5] ^= 1;
+        fs::write(model.file_path(&models), &wrong).unwrap();
+        fs::remove_file(model.verified_path(&models)).unwrap();
+        let whole = content.clone();
+        let (url, heads) = serve(vec![step(move |_| Answer::new("HTTP/1.1 200 OK", &whole))]);
+        let mut out = Vec::new();
+        assert_eq!(words(&install_with(&roots, &model, &url, &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(asked(&heads), [None]);
+        assert_eq!(fs::read(model.file_path(&models)).unwrap(), content);
+        assert_eq!(native::installed(&model, &models), Installed::Verified);
+        assert!(String::from_utf8(out).unwrap().contains("it is not Tiny's file and was removed"));
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    #[test]
+    fn the_reserve_stops_a_download_and_what_arrived_is_kept() {
+        let roots = temp_roots("model-download-reserve");
+        let content = file();
+        let model = tiny("tiny", &content);
+        let models = models_dir(&roots);
+        // Before: the file and the reserve do not both fit, and nobody is asked.
+        let tight = |_: &Path| Ok(RESERVE_BYTES + 799_999);
+        let outcome = install_with(&roots, &model, NOBODY, &mut Vec::new(), &Limits { check_every: 8, free: &tight });
+        assert_eq!(words(&outcome), ("refused", "refused: DATA has 256 MB free; Tiny needs 0 MB plus a reserve of 256 MB"));
+        assert_eq!(names(&model, &models), Vec::<String>::new());
+        // With a part there, the rest is what has to fit.
+        fs::write(model.partial_path(&models), &content[..700_000]).unwrap();
+        let rest_does_not_fit = |_: &Path| Ok(RESERVE_BYTES + 99_999);
+        let outcome = install_with(&roots, &model, NOBODY, &mut Vec::new(), &Limits { check_every: 8, free: &rest_does_not_fit });
+        assert_eq!(words(&outcome), ("refused", "refused: DATA has 256 MB free; the rest of Tiny needs 0 MB plus a reserve of 256 MB"));
+        assert_eq!(fs::metadata(model.partial_path(&models)).unwrap().len(), 700_000, "what was there stays");
+
+        // During: DATA fills while the rest arrives.
+        let calls = std::cell::Cell::new(0u32);
+        let filling = |_: &Path| {
+            calls.set(calls.get() + 1);
+            Ok(if calls.get() == 1 { RESERVE_BYTES + 1_000_000 } else { RESERVE_BYTES - 1 })
+        };
+        let rest = content.clone();
+        let (url, _heads) = serve(vec![step(move |head| part(&rest, range_start(head).unwrap() as usize))]);
+        let outcome = install_with(&roots, &model, &url, &mut Vec::new(), &Limits { check_every: 8, free: &filling });
+        let (kind, reason) = words(&outcome);
+        assert_eq!(kind, "refused");
+        assert_eq!(reason, "refused: DATA is down to 255 MB free and its reserve of 256 MB stays; what arrived is kept (/native remove frees it)");
+        let kept = fs::read(model.partial_path(&models)).unwrap();
+        assert!(kept.len() > 700_000 && kept == content[..kept.len()], "{}", kept.len());
+        fs::remove_dir_all(&roots.parent).unwrap();
     }
 
     /// The models are DATA's, and no backup is: a snapshot holds none of

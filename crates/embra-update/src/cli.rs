@@ -20,6 +20,7 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
                                                                  the disk holds, STATE and DATA kept
   grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it
   model-list                                                     the native models (experimental) and how each one's file stands on DATA
+  model-install <model>                                          download a model's file from the catalogue's source, check it and install it; a stopped download is resumed
   model-import <model>                                           check a model's file read from standard input against the catalogue and install it (the web console's upload)
   model-verify <model>                                           hash an installed model's file again: the catalogue's file gets its record, any other is removed
   model-remove <model>                                           remove a model's file from DATA";
@@ -38,6 +39,7 @@ pub enum Command {
     Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool, upgrade: bool, allow_downgrade: bool },
     GrowData { console: bool },
     ModelList,
+    ModelInstall { model: &'static NativeModel },
     ModelImport { model: &'static NativeModel },
     ModelVerify { model: &'static NativeModel },
     ModelRemove { model: &'static NativeModel },
@@ -202,6 +204,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::ModelList)
         }
+        "model-install" => Ok(Command::ModelInstall { model: named_model("model-install", &mut positionals)? }),
         "model-import" => Ok(Command::ModelImport { model: named_model("model-import", &mut positionals)? }),
         "model-verify" => Ok(Command::ModelVerify { model: named_model("model-verify", &mut positionals)? }),
         "model-remove" => Ok(Command::ModelRemove { model: named_model("model-remove", &mut positionals)? }),
@@ -272,6 +275,7 @@ mod tests {
     fn a_model_command_names_one_model_of_the_catalogue() {
         let four = native_model::by_id("qwen3.5-4b").unwrap();
         assert_eq!(p("model-list"), Ok(Command::ModelList));
+        assert_eq!(p("model-install qwen3.5-4b"), Ok(Command::ModelInstall { model: four }));
         assert_eq!(p("model-import qwen3.5-4b"), Ok(Command::ModelImport { model: four }));
         assert_eq!(p("model-verify qwen3.5-4b"), Ok(Command::ModelVerify { model: four }));
         assert_eq!(p("model-remove qwen3.5-9b"), Ok(Command::ModelRemove { model: native_model::by_id("qwen3.5-9b").unwrap() }));
@@ -283,7 +287,7 @@ mod tests {
         assert!(p("model-list all").unwrap_err().contains("no positional"));
         assert!(p("model-import qwen3.5-4b --console").is_ok_and(|c| !c.console()), "a model job speaks on stdio");
         // Every model command is in the usage.
-        for command in ["model-list", "model-import <model>", "model-verify <model>", "model-remove <model>"] {
+        for command in ["model-list", "model-install <model>", "model-import <model>", "model-verify <model>", "model-remove <model>"] {
             assert!(USAGE.contains(&format!("\n  {command} ")), "{command}");
         }
     }
