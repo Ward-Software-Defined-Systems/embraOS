@@ -2,6 +2,8 @@
 //! needs a value and has none is an error naming it, like
 //! `embra_common::args::Flags` for the services (this binary is not one).
 
+use embra_boot::native_model::{self, NativeModel};
+
 pub const USAGE: &str = "usage: embra-update <command> [flags]
   snapshot [--label <l>] [--taken-by <who>] [--once] [--force] [--console]   a tar.gz of STATE and DATA under /embra/data/backups
   restore [<name>] [--yes] [--console]                           replace STATE and DATA with a backup
@@ -16,7 +18,11 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
                                                                  write embraOS from the installation medium to a local disk, or (--upgrade,
                                                                  and the installer's own question) into the other slot of the installation
                                                                  the disk holds, STATE and DATA kept
-  grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it";
+  grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it
+  model-list                                                     the native models (experimental) and how each one's file stands on DATA
+  model-import <model>                                           check a model's file read from standard input against the catalogue and install it (the web console's upload)
+  model-verify <model>                                           hash an installed model's file again: the catalogue's file gets its record, any other is removed
+  model-remove <model>                                           remove a model's file from DATA";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -31,6 +37,10 @@ pub enum Command {
     Rollback,
     Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool, upgrade: bool, allow_downgrade: bool },
     GrowData { console: bool },
+    ModelList,
+    ModelImport { model: &'static NativeModel },
+    ModelVerify { model: &'static NativeModel },
+    ModelRemove { model: &'static NativeModel },
 }
 
 impl Command {
@@ -66,6 +76,16 @@ fn valid_word(s: &str, max: usize) -> bool {
         _ => return false,
     }
     s.len() <= max && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// The catalogue model a `model-*` command names: one word, a model's id.
+fn named_model(sub: &str, positionals: &mut Vec<String>) -> Result<&'static NativeModel, String> {
+    let ids = native_model::CATALOGUE.iter().map(|m| m.id).collect::<Vec<_>>().join(", ");
+    let id = positionals.pop().ok_or_else(|| format!("{sub} needs a native model: {ids}"))?;
+    if !positionals.is_empty() {
+        return Err(format!("{sub} takes one native model: {ids}"));
+    }
+    native_model::by_id(&id).ok_or_else(|| format!("not a native model: {id:?} ({ids})"))
 }
 
 pub fn parse(args: &[String]) -> Result<Command, String> {
@@ -176,6 +196,15 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Install { media, disk, yes, console, force, upgrade, allow_downgrade })
         }
+        "model-list" => {
+            if !positionals.is_empty() {
+                return Err(format!("model-list takes no positional: {}", positionals.join(" ")));
+            }
+            Ok(Command::ModelList)
+        }
+        "model-import" => Ok(Command::ModelImport { model: named_model("model-import", &mut positionals)? }),
+        "model-verify" => Ok(Command::ModelVerify { model: named_model("model-verify", &mut positionals)? }),
+        "model-remove" => Ok(Command::ModelRemove { model: named_model("model-remove", &mut positionals)? }),
         other => Err(format!("unknown command {other:?}")),
     }
 }
@@ -237,6 +266,26 @@ mod tests {
         assert!(p("frobnicate").unwrap_err().contains("unknown command"));
         assert!(p("list --verbose").unwrap_err().contains("unknown flag"));
         assert!(p("").is_err());
+    }
+
+    #[test]
+    fn a_model_command_names_one_model_of_the_catalogue() {
+        let four = native_model::by_id("qwen3.5-4b").unwrap();
+        assert_eq!(p("model-list"), Ok(Command::ModelList));
+        assert_eq!(p("model-import qwen3.5-4b"), Ok(Command::ModelImport { model: four }));
+        assert_eq!(p("model-verify qwen3.5-4b"), Ok(Command::ModelVerify { model: four }));
+        assert_eq!(p("model-remove qwen3.5-9b"), Ok(Command::ModelRemove { model: native_model::by_id("qwen3.5-9b").unwrap() }));
+        assert_eq!(p("model-import").unwrap_err(), "model-import needs a native model: qwen3.5-4b, qwen3.5-9b");
+        assert_eq!(p("model-verify qwen3.5-4b qwen3.5-9b").unwrap_err(), "model-verify takes one native model: qwen3.5-4b, qwen3.5-9b");
+        for not_one in ["../etc", "qwen3.5-4b/..", "Qwen3.5-4B", "qwen3.5-27b", "Qwen3.5-4B-Q4_K_M.gguf"] {
+            assert!(p(&format!("model-remove {not_one}")).unwrap_err().starts_with("not a native model: "), "{not_one}");
+        }
+        assert!(p("model-list all").unwrap_err().contains("no positional"));
+        assert!(p("model-import qwen3.5-4b --console").is_ok_and(|c| !c.console()), "a model job speaks on stdio");
+        // Every model command is in the usage.
+        for command in ["model-list", "model-import <model>", "model-verify <model>", "model-remove <model>"] {
+            assert!(USAGE.contains(&format!("\n  {command} ")), "{command}");
+        }
     }
 
     #[test]

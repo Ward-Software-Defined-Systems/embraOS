@@ -1,6 +1,8 @@
 //! embra-update — the OS's own backups and updates: snapshots of STATE and
 //! DATA and their restore; the signed release checked, written into the
-//! inactive slot and staged for GRUB; the status and the rollback. Run by
+//! inactive slot and staged for GRUB; the status and the rollback; the files
+//! of the native models (experimental) on DATA, each checked against the
+//! catalogue. Run by
 //! embrad in a maintenance boot from the GRUB menu and by the brain for the
 //! operator's slash commands; never a tool of the model, with one exception
 //! that changes nothing: the brain runs `check --json` by itself, once a day
@@ -22,6 +24,7 @@ mod grow;
 mod import;
 mod install;
 mod manifest;
+mod models;
 mod paths;
 mod pubkey;
 mod slot;
@@ -185,5 +188,10 @@ fn run(cmd: Command, op: &mut console::Operator) -> anyhow::Result<Outcome> {
             Ok(install::install_command(std::path::Path::new(&media), wanted, force, op))
         }
         Command::GrowData { console: _ } => Ok(grow::grow_data_command(op)),
+        Command::ModelList => Ok(models::list_command(&roots, op)),
+        // The file comes on standard input, as a backup's archive does.
+        Command::ModelImport { model } => Ok(models::import_command(&roots, model, std::io::stdin().lock(), op)),
+        Command::ModelVerify { model } => Ok(models::verify_command(&roots, model, op)),
+        Command::ModelRemove { model } => Ok(models::remove_command(&roots, model, op)),
     }
 }
