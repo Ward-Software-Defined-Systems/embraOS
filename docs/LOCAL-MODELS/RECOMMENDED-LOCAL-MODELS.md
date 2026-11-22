@@ -20,7 +20,7 @@ The table says which *server* runs where, not that every model fits on every hos
 
 **Why the list is short.** MoE models need a minimum active-parameter count for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols, with enough stored knowledge to sound authoritative and not enough working memory to track what they have done. A dense model has no total/active split, so its parameter count is honest. Both vetted picks are dense: Qwen3.6 27B and Qwen3.8 27B (27B = 27B active).
 
-**The picks.** **Qwen3.8 27B** is the current recommendation, and its BF16 build on Ollama, `qwen3.8:27b-mlx-bf16`, is the preferred one (the operator's choice). **Qwen3.6 27B** remains vetted and fully supported; an instance that works needs no migration. Each was vetted against the complete tool surface of its day, not a subset: Qwen3.6 27B with 95 tools, Qwen3.8 27B with 116 (120 today). Qwen3.8 27B works on Ollama and on LM Studio.
+**The picks.** **Qwen3.8 27B** is the current recommendation, and its BF16 build on Ollama, `qwen3.8:27b-mlx-bf16`, is the preferred one (the operator's choice). **Qwen3.6 27B** remains vetted and fully supported; an instance that works needs no migration. Each was vetted against the complete tool surface of its day, not a subset: Qwen3.6 27B with 95 tools, Qwen3.8 27B with 116 (121 today). Qwen3.8 27B works on Ollama and on LM Studio.
 
 ### Local (Ollama / LM Studio)
 
@@ -230,4 +230,4 @@ See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 
 ---
 
-*Last updated: 2026-11-19.*
+*Last updated: 2026-11-22.*

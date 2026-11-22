@@ -155,9 +155,12 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // dump and the removal records back into the graph: 119. System went 3 → 4
 // with `update_check` (2026-11-15): the OS has an updater now, and the tool
 // runs its check, the signed manifest at the update source against the
-// running release; it applies nothing: 120.
+// running release; it applies nothing: 120. System went 4 → 5 with
+// `native_ask` (2026-11-22, experimental): one question to the model that
+// runs on the machine, from a session another provider leads; the calls it
+// asks for are reported and never run: 121.
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
-    ("system", "System", 4),
+    ("system", "System", 5),
     ("memory_knowledge", "Memory & Knowledge", 7),
     ("self_awareness", "Self-Awareness", 5),
     ("time_context", "Time & Context", 3),

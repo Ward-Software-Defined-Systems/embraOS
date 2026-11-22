@@ -24,6 +24,7 @@ pub mod guardian;
 pub mod jail;
 pub mod media;
 pub mod memory;
+pub mod native;
 pub mod registry;
 pub mod reminders;
 pub mod security;

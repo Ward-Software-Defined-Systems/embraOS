@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn tools_snapshot_bytes_are_frozen() {
         let snapshot = snapshot();
-        assert_eq!(snapshot.len(), 120, "registered tool count moved");
+        assert_eq!(snapshot.len(), 121, "registered tool count moved");
 
         let canonical = serde_json::to_string(&serde_json::Value::Array(snapshot.clone()))
             .expect("snapshot serializes");
@@ -152,7 +152,7 @@ mod tests {
             .collect();
         assert_eq!(
             sha256_hex(&canonical),
-            "cf4fd7c73cee52fdcccaf1ce5e695001f3e32bcc32e85d8f7e93bf64b8801a17",
+            "77d31fccd3afa09b3433cff6e287fccd967da65956e5377b8bfbdc2bf18f9af5",
             "TOOL MANIFEST BYTES MOVED. Do not update the pinned hash unless \
              the tool surface was changed on purpose.\n---\n{}",
             per_tool.join("\n")

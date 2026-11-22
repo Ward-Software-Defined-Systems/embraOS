@@ -40,7 +40,7 @@ use crate::provider::{
 };
 use crate::tools::registry::ToolDescriptor;
 
-use self::wire::{ModelsResponse, OpenAIChatRequest, OpenAIMessage, OpenAITool};
+use self::wire::{ModelsResponse, OpenAIChatRequest, OpenAIMessage, OpenAITool, Timings};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -181,6 +181,9 @@ pub struct OpenAICompatProvider {
     /// it says (`native_model::until_followed`). The server presets ask
     /// nothing of it.
     native_env: crate::native_model::Env,
+    /// The most tokens an answer may take. No turn sets one: an answer ends
+    /// by itself, or at the context window. `native_ask` passes its own.
+    max_tokens: Option<u32>,
 }
 
 impl OpenAICompatProvider {
@@ -212,7 +215,14 @@ impl OpenAICompatProvider {
             reasoning_effort_override: None,
             model_wait: Duration::from_secs(DEFAULT_MODEL_WAIT_MINUTES * 60),
             native_env: crate::native_model::Env::in_force(),
+            max_tokens: None,
         }
+    }
+
+    /// A limit on the tokens of this provider's answers; `None` is none.
+    pub(crate) fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        self.max_tokens = max_tokens;
+        self
     }
 
     /// A machine of a test's own for the two records a native model's
@@ -513,6 +523,141 @@ fn retriable(e: &ProviderError) -> bool {
     }
 }
 
+impl OpenAICompatProvider {
+    /// One call: its stream, and the server's `timings` of it, which arrive
+    /// once the stream has ended (`None` from a server that sends none and
+    /// after a stream that failed). `stream_turn` is this without the
+    /// timings; `native_ask` reports them.
+    pub(crate) async fn open_turn(
+        &self,
+        messages: &[ApiMessage],
+        system: &SystemPromptBundle,
+        tools: &ToolManifest,
+        options: LlmRequestOptions,
+    ) -> Result<(BoxStream<'static, StreamEvent>, tokio::sync::oneshot::Receiver<Option<Timings>>), ProviderError> {
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
+
+        let native = match self.preset {
+            OpenAiCompatPreset::Native => true,
+            OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio => false,
+        };
+        // Translate IR conversation → wire messages, prepending system. A
+        // call to a native model may come with no system text (`native_ask`
+        // without one): then no system message is sent, where an empty one
+        // would be. Every turn has a system prompt, so a turn's request is
+        // as it was.
+        let mut wire_messages = Vec::new();
+        if !(native && system.text.is_empty()) {
+            wire_messages.push(OpenAIMessage::System { content: system.text.clone() });
+        }
+        let body_messages = conv::ir_messages_to_wire(messages)
+            .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        wire_messages.extend(if native { native::messages(body_messages) } else { body_messages });
+
+        // Tool manifest → Vec<OpenAITool>. Empty manifest → omit tools.
+        let tools_vec: Vec<OpenAITool> = match &tools.wire_json {
+            JsonValue::Array(a) if !a.is_empty() => serde_json::from_value(JsonValue::Array(a.clone()))
+                .map_err(|e| ProviderError::Decode(format!("tool manifest: {e}")))?,
+            _ => Vec::new(),
+        };
+        let has_tools = !tools_vec.is_empty();
+
+        let mut body = OpenAIChatRequest {
+            model: self.model_id.clone(),
+            messages: wire_messages,
+            // Always a stream: there is no code that reads a whole response.
+            stream: true,
+            tools: if has_tools { Some(tools_vec) } else { None },
+            // OpenAI canonical `tool_choice`: plain string `"auto"`,
+            // NOT Anthropic's `{"type":"auto"}` object form. LM Studio
+            // emits `Invalid tool_choice type: 'object'. Supported
+            // string values: none, auto, required` for the object form.
+            // Stage 3 copied Anthropic's syntax by mistake.
+            tool_choice: if has_tools {
+                Some(json!("auto"))
+            } else {
+                None
+            },
+            // Locked Decision #4: by default send `reasoning_effort`
+            // only when the active model is reasoning-effort-aware.
+            // Sending to a non-reasoning model produces a `No valid
+            // custom reasoning fields found` warning on LM Studio and
+            // is silently dropped by Ollama. Omit entirely when
+            // unsupported. The four Ollama Cloud models route to "max",
+            // Qwen3.8 to "xhigh", other recognized reasoning models to
+            // "high" — see `reasoning_effort_for_model` doc. An operator
+            // override (`/effort`, `with_reasoning_effort`) is sent as-is —
+            // operator intent wins; `/effort` warns at set time when
+            // the model is not known to take the field.
+            reasoning_effort: self
+                .reasoning_effort_override
+                .clone()
+                .or_else(|| reasoning_effort_for_model(&self.model_id).map(String::from)),
+            max_tokens: self.max_tokens,
+            chat_template_kwargs: None,
+            sampling: None,
+        };
+        if native {
+            // Thinking switched on every request, the model card's sampling
+            // for it, and no `reasoning_effort` (`native.rs`).
+            native::shape(&mut body, native::thinks(self.reasoning_effort_override.as_deref()));
+        }
+
+        let response = self.post_with_retry(&url, &body).await?;
+
+        // Spawn the SSE consumer; events flow through an mpsc channel
+        // which is wrapped as a BoxStream<StreamEvent>.
+        let (tx, rx) = mpsc::channel::<StreamEvent>(256);
+        let model_id = self.model_id.clone();
+        let model_wait = self.model_wait;
+        let provider = self.preset.as_kind().as_str();
+        let tx_clone = tx.clone();
+        // The timings to whoever opened the call; a turn drops its end.
+        let (timings_tx, timings_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let ended = streaming::process_sse_stream(
+                response,
+                tx_clone.clone(),
+                model_id.clone(),
+                options.include_reasoning,
+                model_wait,
+            )
+            .await;
+            let _ = timings_tx.send(ended.as_ref().ok().copied().flatten());
+            match ended {
+                // One line per model call, when the server says what the call
+                // cost (llama.cpp's does, which runs the native models): how
+                // much of the prompt its cache served, what it read and what
+                // it wrote, and how fast. `system_logs` reads it.
+                Ok(Some(timings)) => info!(
+                    target: "openai_compat::timings",
+                    provider,
+                    model = %model_id,
+                    cached_tokens = timings.cached_tokens,
+                    prompt_tokens = timings.prompt_tokens,
+                    prompt_ms = timings.prompt_ms,
+                    prompt_tokens_per_second = timings.prompt_tokens_per_second,
+                    output_tokens = timings.output_tokens,
+                    output_ms = timings.output_ms,
+                    output_tokens_per_second = timings.output_tokens_per_second,
+                    "the model server's timings of the call"
+                ),
+                Ok(None) => {}
+                Err(e) => {
+                    let said = crate::provider::sse::stream_failure_text(&e);
+                    error!(target: "provider::openai_compat", "SSE stream error: {said}");
+                    let _ = tx_clone.send(StreamEvent::Error(said)).await;
+                }
+            }
+        });
+
+        Ok((Box::pin(ReceiverStream::new(rx)), timings_rx))
+    }
+}
+
 #[async_trait]
 impl LlmProvider for OpenAICompatProvider {
     fn display_name(&self) -> &str {
@@ -555,118 +700,7 @@ impl LlmProvider for OpenAICompatProvider {
         tools: &ToolManifest,
         options: LlmRequestOptions,
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
-
-        // Translate IR conversation → wire messages, prepending system.
-        let mut wire_messages = vec![OpenAIMessage::System {
-            content: system.text.clone(),
-        }];
-        let body_messages = conv::ir_messages_to_wire(messages)
-            .map_err(|e| ProviderError::Decode(e.to_string()))?;
-        let native = match self.preset {
-            OpenAiCompatPreset::Native => true,
-            OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio => false,
-        };
-        wire_messages.extend(if native { native::messages(body_messages) } else { body_messages });
-
-        // Tool manifest → Vec<OpenAITool>. Empty manifest → omit tools.
-        let tools_vec: Vec<OpenAITool> = match &tools.wire_json {
-            JsonValue::Array(a) if !a.is_empty() => serde_json::from_value(JsonValue::Array(a.clone()))
-                .map_err(|e| ProviderError::Decode(format!("tool manifest: {e}")))?,
-            _ => Vec::new(),
-        };
-        let has_tools = !tools_vec.is_empty();
-
-        let mut body = OpenAIChatRequest {
-            model: self.model_id.clone(),
-            messages: wire_messages,
-            // Always a stream: there is no code that reads a whole response.
-            stream: true,
-            tools: if has_tools { Some(tools_vec) } else { None },
-            // OpenAI canonical `tool_choice`: plain string `"auto"`,
-            // NOT Anthropic's `{"type":"auto"}` object form. LM Studio
-            // emits `Invalid tool_choice type: 'object'. Supported
-            // string values: none, auto, required` for the object form.
-            // Stage 3 copied Anthropic's syntax by mistake.
-            tool_choice: if has_tools {
-                Some(json!("auto"))
-            } else {
-                None
-            },
-            // Locked Decision #4: by default send `reasoning_effort`
-            // only when the active model is reasoning-effort-aware.
-            // Sending to a non-reasoning model produces a `No valid
-            // custom reasoning fields found` warning on LM Studio and
-            // is silently dropped by Ollama. Omit entirely when
-            // unsupported. The four Ollama Cloud models route to "max",
-            // Qwen3.8 to "xhigh", other recognized reasoning models to
-            // "high" — see `reasoning_effort_for_model` doc. An operator
-            // override (`/effort`, `with_reasoning_effort`) is sent as-is —
-            // operator intent wins; `/effort` warns at set time when
-            // the model is not known to take the field.
-            reasoning_effort: self
-                .reasoning_effort_override
-                .clone()
-                .or_else(|| reasoning_effort_for_model(&self.model_id).map(String::from)),
-            max_tokens: None,
-            chat_template_kwargs: None,
-            sampling: None,
-        };
-        if native {
-            // Thinking switched on every request, the model card's sampling
-            // for it, and no `reasoning_effort` (`native.rs`).
-            native::shape(&mut body, native::thinks(self.reasoning_effort_override.as_deref()));
-        }
-
-        let response = self.post_with_retry(&url, &body).await?;
-
-        // Spawn the SSE consumer; events flow through an mpsc channel
-        // which is wrapped as a BoxStream<StreamEvent>.
-        let (tx, rx) = mpsc::channel::<StreamEvent>(256);
-        let model_id = self.model_id.clone();
-        let model_wait = self.model_wait;
-        let provider = self.preset.as_kind().as_str();
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            match streaming::process_sse_stream(
-                response,
-                tx_clone.clone(),
-                model_id.clone(),
-                options.include_reasoning,
-                model_wait,
-            )
-            .await
-            {
-                // One line per model call, when the server says what the call
-                // cost (llama.cpp's does, which runs the native models): how
-                // much of the prompt its cache served, what it read and what
-                // it wrote, and how fast. `system_logs` reads it.
-                Ok(Some(timings)) => info!(
-                    target: "openai_compat::timings",
-                    provider,
-                    model = %model_id,
-                    cached_tokens = timings.cached_tokens,
-                    prompt_tokens = timings.prompt_tokens,
-                    prompt_ms = timings.prompt_ms,
-                    prompt_tokens_per_second = timings.prompt_tokens_per_second,
-                    output_tokens = timings.output_tokens,
-                    output_ms = timings.output_ms,
-                    output_tokens_per_second = timings.output_tokens_per_second,
-                    "the model server's timings of the call"
-                ),
-                Ok(None) => {}
-                Err(e) => {
-                    let said = crate::provider::sse::stream_failure_text(&e);
-                    error!(target: "provider::openai_compat", "SSE stream error: {said}");
-                    let _ = tx_clone.send(StreamEvent::Error(said)).await;
-                }
-            }
-        });
-
-        Ok(Box::pin(ReceiverStream::new(rx)))
+        self.open_turn(messages, system, tools, options).await.map(|(stream, _timings)| stream)
     }
 
     fn build_tool_manifest(&self, descriptors: &[&'static ToolDescriptor]) -> ToolManifest {

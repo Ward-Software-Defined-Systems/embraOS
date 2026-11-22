@@ -122,7 +122,7 @@ pub(crate) const MAX_TOOL_RESULT_IMAGES: usize = 4;
 /// need a tighter ceiling (`port_scan` per-port probes, `ssh_session_start`
 /// handshake, `gh_clone`, etc.) keep their own inner `tokio::time::timeout`
 /// wrappers; this is the backstop, not the operational limit.
-const MAX_TOOL_DURATION: std::time::Duration = std::time::Duration::from_secs(600);
+pub(crate) const MAX_TOOL_DURATION: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn apply_max_size(s: String) -> String {
     if s.len() <= MAX_TOOL_RESULT_SIZE {
