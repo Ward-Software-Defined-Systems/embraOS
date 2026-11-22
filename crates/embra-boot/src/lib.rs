@@ -7,7 +7,9 @@
 //! console URLs that follow from it, the web console's access token on STATE,
 //! what embrad made of the clock at boot (and the date arithmetic that
 //! reads the release stamp's build time), and what an installer needs: the
-//! layout, the medium, the disks. No runtime
+//! layout, the medium, the disks. The native models (experimental) have
+//! their contract here too: the catalogue, and the records embrad, the brain
+//! and the updater pass each other. No runtime
 //! and no dependency but `libc`: embra-init runs it from the initramfs,
 //! before anything else exists.
 
@@ -21,6 +23,7 @@ pub mod layout;
 pub mod loopdev;
 pub mod media;
 pub mod names;
+pub mod native_model;
 pub mod net;
 pub mod net_lease;
 pub mod net_settings;
