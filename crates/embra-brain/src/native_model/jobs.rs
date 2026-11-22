@@ -266,7 +266,9 @@ async fn run(jobs: &Jobs, updater: &[OsString], kind: JobKind, model: &'static N
         Ok(status) => match status.code() {
             Some(0) => JobEnd::Done,
             Some(3) => JobEnd::Nothing(jobs.latest().unwrap_or_else(|| "nothing to do".to_string())),
-            Some(2) => JobEnd::Refused(reason),
+            // The updater begins a refusal with the word; here the variant says it,
+            // and a sentence built on the reason reads without it.
+            Some(2) => JobEnd::Refused(reason.strip_prefix("refused: ").unwrap_or(&reason).to_string()),
             Some(_) => JobEnd::Failed(reason),
             None => JobEnd::Failed(format!("the updater was ended by a signal ({reason})")),
         },
@@ -417,7 +419,7 @@ mod tests {
             ("echo 'qwen3.5-4b: removed, 2613 MB freed'", JobEnd::Done),
             (
                 "echo 'refused: another model job is running (an install, an import, a check or a removal); it has to end first' >&2; exit 2",
-                JobEnd::Refused("refused: another model job is running (an install, an import, a check or a removal); it has to end first".into()),
+                JobEnd::Refused("another model job is running (an install, an import, a check or a removal); it has to end first".into()),
             ),
             ("echo 'qwen3.5-4b: checking'; echo 'qwen3.5-4b: nothing to do'; exit 3", JobEnd::Nothing("qwen3.5-4b: nothing to do".into())),
             ("exit 3", JobEnd::Nothing("nothing to do".into())),

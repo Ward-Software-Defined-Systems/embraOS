@@ -1171,7 +1171,7 @@ mod tests {
         assert_eq!(told(&mut rx).await, "Removing the file of qwen3.5-4b.");
         assert_eq!(
             told(&mut rx).await,
-            "The removal of qwen3.5-4b did not finish: refused: the settings ask for qwen3.5-4b to be kept loaded; free it first (/native off)."
+            "The removal of qwen3.5-4b did not finish: the settings ask for qwen3.5-4b to be kept loaded; free it first (/native off)."
         );
 
         // No updater on this machine: the rest is shown all the same.

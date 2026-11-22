@@ -277,11 +277,13 @@ fn space_note(roots: &Roots, limits: &Limits) -> Option<String> {
     Some(note)
 }
 
-/// The state of a model's file as the listing says it.
+/// The state of a model's file as the listing says it. A file that is not
+/// whole is called that and no more: a job may be writing it at this moment
+/// (the list takes no lock), and whoever shows the list says which job runs.
 fn state_words(model: &NativeModel, models: &Path) -> String {
     match native::installed(model, models) {
         Installed::No => "not installed".to_string(),
-        Installed::Partial(bytes) => format!("a download stopped at {} of {} MB", mb(bytes), mb(model.bytes)),
+        Installed::Partial(bytes) => format!("incomplete, {} of {} MB are there", mb(bytes), mb(model.bytes)),
         Installed::Unverified(reason) => format!("installed, not usable: {reason}"),
         Installed::Verified => "installed".to_string(),
     }
@@ -919,7 +921,7 @@ mod tests {
         assert_eq!(words(&list_command(&roots, &mut out)).0, "done");
         let said = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = said.lines().collect();
-        assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): a download stopped at 5 of 2613 MB");
+        assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): incomplete, 5 of 2613 MB are there");
         assert_eq!(lines[1], "qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5417 MB, Apache-2.0): installed, not usable: the file was never checked");
         assert!(lines[2].starts_with("DATA has ") && lines[2].ends_with(" MB free"), "{said}");
         assert_eq!(lines.len(), 3);

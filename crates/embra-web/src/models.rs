@@ -49,7 +49,8 @@ fn stands(model: &NativeModel, models: &Path) -> &'static str {
     match native::installed(model, models) {
         Installed::Verified => "installed",
         Installed::No => "not installed",
-        Installed::Partial(_) => "a download stopped",
+        // A job may be writing it at this moment.
+        Installed::Partial(_) => "incomplete",
         Installed::Unverified(_) => "installed, not usable",
     }
 }
