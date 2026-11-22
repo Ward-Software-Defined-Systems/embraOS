@@ -90,7 +90,7 @@ pub(super) fn messages(messages: Vec<OpenAIMessage>) -> Vec<OpenAIMessage> {
 
 /// Whether a 503's body is the server saying that it is still reading the
 /// model's file (`{"error":{"message":"Loading model","type":"unavailable_error","code":503}}`).
-pub(super) fn is_loading(body: &str) -> bool {
+pub(crate) fn is_loading(body: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.pointer("/error/message").and_then(|m| m.as_str()).map(|m| m.eq_ignore_ascii_case("loading model")))

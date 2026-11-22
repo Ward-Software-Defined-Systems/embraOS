@@ -955,6 +955,24 @@ fn provider_state_key(cfg: &SystemConfig) -> String {
         .unwrap_or_default()
 }
 
+/// What every caller of the check is told while a native model is the
+/// provider (experimental). The verdict is the active provider's model's,
+/// and a model of the size that runs on the machine is not a judge to gate
+/// a tool on: the check is not run, it decides nothing, and every caller
+/// fails closed. A tool that is ready keeps running: a call asks no check.
+const NO_CHECK_ON_A_NATIVE_MODEL: &str = "the replicant check is not run on a native model (experimental): judging a tool against the soul needs a larger model. Switch to another provider with /provider";
+
+/// Whether the model of the stored provider is asked for the verdict.
+fn judges_tools(provider: &str) -> bool {
+    use crate::provider::ProviderKind;
+    match ProviderKind::from_str(provider) {
+        Some(ProviderKind::Native) => false,
+        // A stored name that is no provider is `build_provider_from_config`'s
+        // to refuse.
+        Some(ProviderKind::Anthropic | ProviderKind::Gemini | ProviderKind::Ollama | ProviderKind::LmStudio) | None => true,
+    }
+}
+
 /// Run the replicant check against the sealed soul for a validated
 /// module — the shared Gate 2 used by BOTH the brain's `propose` and the
 /// operator's `define` (the soul gates both authoring paths). Returns:
@@ -963,7 +981,8 @@ fn provider_state_key(cfg: &SystemConfig) -> String {
 ///   (operator setup) or refuse (brain must not self-author ungated)).
 /// - `Err(msg)` — the check is configured but could not run/complete, or the
 ///   soul document is missing beside a stored hash (the state trustd halts
-///   on: tamper or data loss, never a first boot); callers fail closed
+///   on: tamper or data loss, never a first boot), or a native model is the
+///   provider (`NO_CHECK_ON_A_NATIVE_MODEL`); callers fail closed
 ///   (no compile/proposal).
 /// - `Ok(Some((verdict, model)))` — a completed judgment + the judging
 ///   model id (for the audit record).
@@ -1004,6 +1023,11 @@ async fn run_replicant_check_at(
         // A database error is not "no soul": every caller fails closed.
         Err(e) => return Err(format!("soul read failed — {e}")),
     };
+    // After the soul read: before the seal there is nothing to judge
+    // against on any provider, and a `define` proceeds as it always has.
+    if !judges_tools(&cfg.api_provider) {
+        return Err(NO_CHECK_ON_A_NATIVE_MODEL.to_string());
+    }
     let provider =
         crate::grpc_service::build_provider_from_config(cfg, &provider_state_key(cfg), None)
             .map_err(|e| format!("replicant check could not run — {e}"))?;
@@ -2874,6 +2898,80 @@ mod replicant_gate_tests {
         assert!(err.contains("sealed hash is stored"), "an empty file is still a stored hash: {err}");
         let absent = hash_file("absent2", None);
         assert!(matches!(run_replicant_check_at(&db, &config(), &module, &absent).await, Ok(None)));
+    }
+
+    /// While a native model is the provider (experimental) the check is not
+    /// run: no model is asked, nothing is decided, and a paste is not
+    /// compiled. Before the seal there is nothing to judge against, as on
+    /// every provider.
+    #[tokio::test]
+    async fn on_a_native_model_the_check_decides_nothing_and_a_caller_fails_closed() {
+        let module = embra_guardian::validate(embra_guardian::shipped::HTTP_REQUEST.source, &reserved_names())
+            .expect("the shipped source validates");
+        let native: SystemConfig = serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "api_provider": "native",
+            "openai_compat": {"native_model": "qwen3.5-4b"}
+        }))
+        .expect("a configuration on a native model");
+        let absent = hash_file("native-absent", None);
+
+        // A sealed soul, and the stored configuration the callers load.
+        let server = MockServer::start().await;
+        mount(&server, "GET", "/soul.invariant", ResponseTemplate::new(200)).await;
+        mount(&server, "GET", "/soul.invariant/docs/soul", envelope(serde_json::json!({"_id": "soul", "soul": {"name": "Embra", "purpose": "to help"}}))).await;
+        mount(&server, "GET", "/config.system/docs/config", envelope(serde_json::to_value(&native).unwrap())).await;
+        let db = Arc::new(WardsonDbClient::from_url(&server.uri()));
+
+        let err = run_replicant_check_at(&db, &native, &module, &absent).await.unwrap_err();
+        assert_eq!(err, NO_CHECK_ON_A_NATIVE_MODEL);
+        assert!(err.contains("(experimental)") && err.contains("/provider"), "{err}");
+
+        // The operator's paste: said in one sentence, and nothing compiled or written.
+        let said = define(&db, embra_guardian::shipped::HTTP_REQUEST.source, std::future::pending()).await;
+        assert_eq!(
+            said,
+            "guardian: the replicant check is not run on a native model (experimental): judging a tool against the soul needs a larger model. Switch to another provider with /provider. 'http_request' not compiled — try again."
+        );
+        // A stored tool's rebuild meets the same gate.
+        let stored = ToolDoc::building(
+            module.name.as_str(),
+            "x",
+            serde_json::json!({"type": "object"}),
+            embra_guardian::shipped::HTTP_REQUEST.source,
+            Vec::new(),
+            "1.94.1",
+            "2026-11-22T00:00:00Z",
+        );
+        assert_eq!(rebuild_gates(&db, &stored).await.err().as_deref(), Some(NO_CHECK_ON_A_NATIVE_MODEL));
+        let requests = server.received_requests().await.expect("the server records its requests");
+        assert!(
+            requests.iter().all(|r| r.method.as_str() == "GET"),
+            "nothing was written: {:?}",
+            requests.iter().map(|r| format!("{} {}", r.method, r.url.path())).collect::<Vec<_>>()
+        );
+
+        // The same configuration on another provider: the model is asked, as
+        // it always was. Its server refuses here, and that is what fails.
+        let model_server = MockServer::start().await;
+        mount(&model_server, "POST", "/v1/chat/completions", ResponseTemplate::new(400).set_body_string("no such model")).await;
+        let mut other = native.clone();
+        other.api_provider = "lm_studio".to_string();
+        other.openai_compat.lm_studio_endpoint = model_server.uri();
+        other.openai_compat.lm_studio_model = "m".to_string();
+        let err = run_replicant_check_at(&db, &other, &module, &absent).await.unwrap_err();
+        assert!(err.starts_with("replicant check could not complete") && err.contains("no such model"), "{err}");
+        assert_eq!(model_server.received_requests().await.expect("its requests").len(), 1, "the model was asked");
+
+        // Before the seal: nothing to judge against, on a native model as on any.
+        let unsealed = MockServer::start().await;
+        mount(&unsealed, "GET", "/soul.invariant", ResponseTemplate::new(404)).await;
+        let db = WardsonDbClient::from_url(&unsealed.uri());
+        assert!(matches!(run_replicant_check_at(&db, &native, &module, &absent).await, Ok(None)));
+
+        for (provider, asked) in [("anthropic", true), ("gemini", true), ("ollama", true), ("lm_studio", true), ("native", false), ("no provider", true)] {
+            assert_eq!(judges_tools(provider), asked, "{provider}");
+        }
     }
 
     #[test]

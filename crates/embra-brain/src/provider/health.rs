@@ -20,6 +20,13 @@
 //! with (`/api/ps`, [`ContextWindow`]): a GGUF build trims a request that
 //! does not fit and reports no error, so a window below
 //! [`CONTEXT_FLOOR_TOKENS`] is announced once, and its fix once.
+//!
+//! On a native model's server (experimental) the list is read the same
+//! way. While the server reads the model's file it answers 503: the
+//! provider is reachable, the result says that the model is loading, and
+//! nothing is announced. The window the model was loaded with is read from
+//! `/props`; the server refuses a longer request and never trims one, so
+//! the figure is shown and never announced.
 
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -31,7 +38,7 @@ use tokio::sync::Notify;
 use super::anthropic::{API_VERSION as ANTHROPIC_API_VERSION, MODELS_PATH as ANTHROPIC_MODELS_PATH};
 use super::gateway::host_label;
 use super::gemini::V1BETA as GEMINI_V1BETA;
-use super::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset};
+use super::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset, native};
 use super::{ProviderError, ProviderKind, Wire};
 use crate::proactive::{Notification, Priority};
 
@@ -83,11 +90,17 @@ pub struct ProviderProbe {
     pub checked_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// The window the model is loaded with — Ollama only, read from
+    /// The window the model is loaded with. On Ollama it is read from
     /// `/api/ps` while the model is loaded and kept while it is not
-    /// ([`carry_context_window`]). Absent until first seen.
+    /// ([`carry_context_window`]); on a native model's server, from
+    /// `/props` at every probe that finds the model. Absent until first
+    /// seen, and on every other provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<ContextWindow>,
+    /// A native model's server is reading the model's file: it is
+    /// reachable, and a request waits until it has. Absent otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub loading: bool,
 }
 
 /// What the model server says about the model's context window.
@@ -107,6 +120,10 @@ pub enum ContextWindow {
     /// The server does not report it: no `/api/ps`, or an Ollama that
     /// predates the field.
     Unavailable { reason: String },
+    /// A native model's server (experimental): the window the model was
+    /// loaded with. A longer request is refused with its size, never
+    /// trimmed, so the figure is never compared with a floor.
+    Loaded { tokens: u64, seen_at: DateTime<Utc> },
 }
 
 impl ContextWindow {
@@ -124,7 +141,9 @@ impl ContextWindow {
             } => format!(
                 "context window {tokens} tokens, under {CONTEXT_FLOOR_TOKENS}: Ollama trims without an error"
             ),
-            ContextWindow::Window { tokens, .. } => format!("context window {tokens} tokens"),
+            ContextWindow::Window { tokens, .. } | ContextWindow::Loaded { tokens, .. } => {
+                format!("context window {tokens} tokens")
+            }
             ContextWindow::ModelMaximum { .. } => "context window: the model's maximum".to_string(),
             ContextWindow::Unavailable { reason } => format!("context window not reported ({reason})"),
         }
@@ -145,6 +164,7 @@ impl ProviderProbe {
             checked_at: Utc::now(),
             error: Some("not configured".into()),
             context_window: None,
+            loading: false,
         }
     }
 
@@ -161,6 +181,7 @@ impl ProviderProbe {
             checked_at: Utc::now(),
             error: None,
             context_window: None,
+            loading: false,
         }
     }
 
@@ -198,6 +219,7 @@ impl ProviderProbe {
         parts.push(
             match (self.reachable, self.model_present) {
                 (false, _) => "unreachable",
+                (true, _) if self.loading => "the model is loading",
                 (true, Some(true)) => "model present",
                 (true, Some(false)) => "model NOT found",
                 (true, None) => "reachable",
@@ -339,9 +361,10 @@ fn network_error_text(e: &reqwest::Error) -> String {
     }
 }
 
-/// Ollama / LM Studio: `GET {base}/v1/models` through the wizard's own
-/// `probe_models`, then an exact-id membership check (the wizard stores
-/// the id the server listed, so exact is right).
+/// Ollama, LM Studio and a native model's server: `GET {base}/v1/models`
+/// through the wizard's own `probe_models`, then an exact-id membership
+/// check (the wizard stores the id the server listed, and embrad starts the
+/// native model's server under the catalogue's id, so exact is right).
 async fn probe_openai_compat(t: &ProbeTarget, preset: OpenAiCompatPreset) -> ProviderProbe {
     let mut out = ProviderProbe::base(t, t.endpoint.clone());
     let started = Instant::now();
@@ -358,28 +381,75 @@ async fn probe_openai_compat(t: &ProbeTarget, preset: OpenAiCompatPreset) -> Pro
                     t.model,
                     models.len()
                 ));
-            } else if t.kind == ProviderKind::Ollama && !is_cloud_model(&t.model) {
-                out.context_window = read_context_window(t).await;
+            } else {
+                out.context_window = match preset {
+                    OpenAiCompatPreset::Ollama if !is_cloud_model(&t.model) => read_context_window(t).await,
+                    OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio => None,
+                    OpenAiCompatPreset::Native => read_native_window(t).await,
+                };
             }
         }
-        Err(ProviderError::Http { status, .. }) => {
+        Err(ProviderError::Http { status, body }) => {
             out.reachable = true;
             out.latency_ms = Some(started.elapsed().as_millis() as u64);
+            // A bearer is a server preset's: a native model's server has
+            // none to reject.
+            let takes_a_bearer = match preset {
+                OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio => true,
+                OpenAiCompatPreset::Native => false,
+            };
             match status {
-                401 => {
+                401 if takes_a_bearer => {
                     out.key_state = Some("invalid".into());
                     out.error = Some("bearer rejected (401)".into());
                 }
-                403 => {
+                403 if takes_a_bearer => {
                     out.key_state = Some("forbidden".into());
                     out.error = Some("bearer not authorized (403)".into());
                 }
+                // The native model's server while it reads the model's file:
+                // there, and not an error.
+                503 if !takes_a_bearer && native::is_loading(&body) => out.loading = true,
                 s => out.error = Some(format!("HTTP {s} from /v1/models")),
             }
         }
         Err(e) => out.error = Some(e.to_string()),
     }
     out
+}
+
+/// The window a native model's server loaded the model with: `GET /props`,
+/// `default_generation_settings.n_ctx` (llama.cpp's server; embrad starts it
+/// with one slot, so the figure is the whole window). Built like
+/// `read_context_window`: a fresh client under `PROBE_TIMEOUT`.
+///
+/// `None` when the server could not answer now (a network error, a 5xx:
+/// it began to load another model between the two requests). `Unavailable`
+/// when it answered something else: a 4xx, or a body without the figure.
+async fn read_native_window(t: &ProbeTarget) -> Option<ContextWindow> {
+    let url = format!("{}/props", t.endpoint.trim_end_matches('/'));
+    let client = crate::net::builder().timeout(PROBE_TIMEOUT).build().ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    let status = resp.status();
+    if status.is_client_error() {
+        return Some(ContextWindow::Unavailable {
+            reason: format!("HTTP {} from /props", status.as_u16()),
+        });
+    }
+    if !status.is_success() {
+        return None;
+    }
+    let body = resp.bytes().await.ok()?;
+    let tokens = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.pointer("/default_generation_settings/n_ctx").and_then(serde_json::Value::as_u64))
+        .filter(|tokens| *tokens > 0);
+    Some(match tokens {
+        Some(tokens) => ContextWindow::Loaded { tokens, seen_at: Utc::now() },
+        None => ContextWindow::Unavailable {
+            reason: "the answer from /props names no context window".into(),
+        },
+    })
 }
 
 /// Ollama's cloud models (`:cloud`, `:<tag>-cloud`) run on ollama.com and
@@ -533,6 +603,10 @@ fn same_target(prev: &ProviderProbe, next: &ProviderProbe) -> bool {
 /// `OLLAMA_KEEP_ALIVE` (5 minutes by default); without the carry, every
 /// reload would read as a first sighting and repeat the warning. Only for
 /// the same target, and never over a fresh reading.
+///
+/// A native model's window is not kept: its server says it at every probe
+/// that finds the model, and while it loads, the window it had is not the
+/// one to show (the operator may have asked for another).
 pub fn carry_context_window(prev: Option<&ProviderProbe>, next: &mut ProviderProbe) {
     if next.context_window.is_some() {
         return;
@@ -540,7 +614,25 @@ pub fn carry_context_window(prev: Option<&ProviderProbe>, next: &mut ProviderPro
     if let Some(p) = prev
         && same_target(p, next)
     {
-        next.context_window = p.context_window.clone();
+        next.context_window = match &p.context_window {
+            Some(ContextWindow::Loaded { .. }) | None => None,
+            Some(
+                kept @ (ContextWindow::Window { .. }
+                | ContextWindow::ModelMaximum { .. }
+                | ContextWindow::Unavailable { .. }),
+            ) => Some(kept.clone()),
+        };
+    }
+}
+
+/// What the operator can do about a provider that is not reachable. A
+/// native model's server is embrad's to keep, and `/native` says what it is
+/// doing; any other is a server of the operator's.
+fn unreachable_remedy(kind: &str) -> &'static str {
+    match ProviderKind::from_str(kind) {
+        Some(ProviderKind::Native) => "/native shows what the model server is doing, or switch with /provider.",
+        Some(ProviderKind::Anthropic | ProviderKind::Gemini | ProviderKind::Ollama | ProviderKind::LmStudio)
+        | None => "Check the server, or switch with /provider.",
     }
 }
 
@@ -569,8 +661,10 @@ pub fn transition_events(prev: Option<&ProviderProbe>, next: &ProviderProbe) -> 
                 Priority::Critical,
                 format!(
                     "LLM provider {} ({}) is unreachable{why} — turns will fail until it is \
-                     back. Check the server, or switch with /provider.",
-                    next.kind, next.endpoint
+                     back. {}",
+                    next.kind,
+                    next.endpoint,
+                    unreachable_remedy(&next.kind)
                 ),
             ));
         }
@@ -719,8 +813,9 @@ mod tests {
         assert!(n[0].message.contains("run /model to pick"), "{}", n[0].message);
         assert!(!n[0].message.contains("--setup"), "{}", n[0].message);
 
-        // Gemini, Ollama and LM Studio pick their model with `/model` too.
-        for kind in [ProviderKind::Gemini, ProviderKind::Ollama, ProviderKind::LmStudio] {
+        // Gemini, Ollama, LM Studio and a native model pick their model
+        // with `/model` too.
+        for kind in [ProviderKind::Gemini, ProviderKind::Ollama, ProviderKind::LmStudio, ProviderKind::Native] {
             let mut absent = ProviderProbe::base(&target(kind, "m", ""), "host".into());
             absent.reachable = true;
             absent.model_present = Some(false);
@@ -867,6 +962,196 @@ mod tests {
         let p = probe(Some(&target(ProviderKind::Ollama, "x", "http://127.0.0.1:1"))).await;
         assert!(!p.reachable);
         assert!(probe(None).await.state() == "unknown");
+    }
+
+    /// What llama.cpp 1.0.0's server answers on every route while it reads
+    /// the model's file (read from a run).
+    const LOADING: &str = r#"{"error":{"message":"Loading model","type":"unavailable_error","code":503}}"#;
+
+    /// A native model's server that lists `ids` and answers `/props` with
+    /// `props`.
+    async fn native_server(ids: &[&str], props: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        let data: Vec<_> = ids.iter().map(|id| serde_json::json!({ "id": id, "object": "model", "meta": {"n_ctx": 1, "n_ctx_train": 262144} })).collect();
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "object": "list", "data": data, "models": [] })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/props")).respond_with(props).mount(&server).await;
+        server
+    }
+
+    async fn props_requests(server: &MockServer) -> usize {
+        server.received_requests().await.unwrap().iter().filter(|r| r.url.path() == "/props").count()
+    }
+
+    /// While the server reads the model's file every route answers 503. The
+    /// provider is there: the result says so, says that the model is
+    /// loading, and nothing is announced, whatever the result before it was.
+    #[tokio::test]
+    async fn a_native_model_that_is_loading_is_reachable_and_nothing_is_announced() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(503).set_body_string(LOADING)).mount(&server).await;
+        let t = target(ProviderKind::Native, "qwen3.5-4b", &server.uri());
+        let p = probe(Some(&t)).await;
+        assert!(p.reachable && p.loading, "{p:?}");
+        assert_eq!((p.model_present, p.key_state.as_deref(), p.error.as_deref(), &p.context_window), (None, None, None, &None));
+        assert_eq!(p.state(), "up");
+        assert!(p.healthy(), "nothing for the operator to do but wait");
+        assert!(p.summary_line().contains(" · the model is loading · "), "{}", p.summary_line());
+        assert_eq!(props_requests(&server).await, 0, "the window is asked of a server that lists the model");
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["loading"], true);
+
+        // Nothing is said: at the first probe, after a ready one, and at the next one.
+        let mut ready = ProviderProbe::base(&t, t.endpoint.clone());
+        ready.reachable = true;
+        ready.model_present = Some(true);
+        ready.key_state = Some("valid".into());
+        assert!(!serde_json::to_value(&ready).unwrap().as_object().unwrap().contains_key("loading"), "absent unless loading");
+        for prev in [None, Some(&ready), Some(&p)] {
+            assert!(transition_events(prev, &p).is_empty(), "{prev:?}");
+        }
+        assert!(transition_events(Some(&p), &ready).is_empty(), "loaded: nothing to announce either");
+        // After a server that was not there, it is back.
+        let mut down = ProviderProbe::base(&t, t.endpoint.clone());
+        down.error = Some("connection refused".into());
+        let back = transition_events(Some(&down), &p);
+        assert_eq!(back.len(), 1);
+        assert!(back[0].message.ends_with("is reachable again."), "{}", back[0].message);
+
+        // The same answer from a server preset is an error like any 5xx,
+        // and a 503 that is no load is one on a native model's server too.
+        let studio = probe(Some(&target(ProviderKind::LmStudio, "m", &server.uri()))).await;
+        assert!(studio.reachable && !studio.loading);
+        assert_eq!(studio.error.as_deref(), Some("HTTP 503 from /v1/models"));
+        let busy = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(503).set_body_string("no slot available")).mount(&busy).await;
+        let p = probe(Some(&target(ProviderKind::Native, "qwen3.5-4b", &busy.uri()))).await;
+        assert!(p.reachable && !p.loading);
+        assert_eq!(p.error.as_deref(), Some("HTTP 503 from /v1/models"));
+        // A native model's server has no bearer to reject.
+        let closed = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(401)).mount(&closed).await;
+        let p = probe(Some(&target(ProviderKind::Native, "qwen3.5-4b", &closed.uri()))).await;
+        assert_eq!((p.key_state.as_deref(), p.error.as_deref()), (None, Some("HTTP 401 from /v1/models")));
+        assert!(transition_events(None, &p).is_empty(), "and nobody is sent to a setup it does not have");
+    }
+
+    /// The window is the one the server says it loaded the model with
+    /// (`/props`, as llama.cpp 1.0.0 answers it), shown and never announced:
+    /// a longer request is refused with its size.
+    #[tokio::test]
+    async fn a_native_models_probe_reads_the_window_the_model_was_loaded_with() {
+        let props = |n_ctx: serde_json::Value| {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "default_generation_settings": {"n_ctx": n_ctx, "params": {"n_predict": -1}},
+                "total_slots": 1, "model_alias": "qwen3.5-4b", "model_path": "/embra/data/models/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf",
+                "chat_template": "{{ messages }}", "is_sleeping": false
+            }))
+        };
+        let server = native_server(&["qwen3.5-4b"], props(serde_json::json!(65536))).await;
+        let t = target(ProviderKind::Native, "qwen3.5-4b", &server.uri());
+        let p = probe(Some(&t)).await;
+        assert!(p.reachable && !p.loading && p.model_present == Some(true), "{p:?}");
+        assert_eq!(p.kind, "native");
+        assert!(matches!(p.context_window, Some(ContextWindow::Loaded { tokens: 65536, .. })), "{:?}", p.context_window);
+        assert!(p.summary_line().contains(" · model present · context window 65536 tokens · "), "{}", p.summary_line());
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!((json["context_window"]["state"].as_str(), json["context_window"]["tokens"].as_u64()), (Some("loaded"), Some(65536)));
+        assert!(transition_events(None, &p).is_empty());
+
+        // A window under the floor of a server that trims, and under the
+        // tool list itself: shown, and nothing is announced.
+        let small = native_server(&["qwen3.5-4b"], props(serde_json::json!(4096))).await;
+        let p = probe(Some(&target(ProviderKind::Native, "qwen3.5-4b", &small.uri()))).await;
+        assert!(matches!(p.context_window, Some(ContextWindow::Loaded { tokens: 4096, .. })));
+        assert!(transition_events(None, &p).is_empty(), "the server refuses a longer request: no silent cut to warn of");
+
+        // Another model than the one asked for: not found, and the window is not asked.
+        let other = native_server(&["qwen3.5-9b"], props(serde_json::json!(65536))).await;
+        let p = probe(Some(&target(ProviderKind::Native, "qwen3.5-4b", &other.uri()))).await;
+        assert_eq!((p.model_present, &p.context_window), (Some(false), &None));
+        assert_eq!(props_requests(&other).await, 0);
+
+        // What `/props` can answer besides.
+        for (answer, expected) in [
+            (ResponseTemplate::new(404), Some("HTTP 404 from /props")),
+            (props(serde_json::json!(0)), Some("the answer from /props names no context window")),
+            (props(serde_json::json!("many")), Some("the answer from /props names no context window")),
+            (ResponseTemplate::new(200).set_body_string("<html>a page</html>"), Some("the answer from /props names no context window")),
+            // It began to load another model between the two requests: no reading now.
+            (ResponseTemplate::new(503).set_body_string(LOADING), None),
+        ] {
+            let server = native_server(&["qwen3.5-4b"], answer).await;
+            let p = probe(Some(&target(ProviderKind::Native, "qwen3.5-4b", &server.uri()))).await;
+            assert!(p.reachable && p.model_present == Some(true) && p.error.is_none(), "the read changes nothing else: {p:?}");
+            match (expected, &p.context_window) {
+                (Some(reason), Some(ContextWindow::Unavailable { reason: said })) => assert_eq!(said, reason),
+                (None, None) => {}
+                (expected, got) => panic!("expected {expected:?}, got {got:?}"),
+            }
+        }
+
+        // The server presets ask no `/props`.
+        let studio = native_server(&["m"], props(serde_json::json!(65536))).await;
+        let p = probe(Some(&target(ProviderKind::LmStudio, "m", &studio.uri()))).await;
+        assert_eq!((p.model_present, &p.context_window), (Some(true), &None));
+        assert_eq!(props_requests(&studio).await, 0);
+    }
+
+    /// A native model's window is the server's to say at each probe: a
+    /// reading is not kept while the model loads (the operator may have
+    /// asked for another window), where Ollama's is kept while unloaded.
+    #[test]
+    fn a_native_models_window_is_not_kept_while_it_loads() {
+        let t = target(ProviderKind::Native, "qwen3.5-4b", "http://127.0.0.1:8091");
+        let mut ready = ProviderProbe::base(&t, t.endpoint.clone());
+        ready.reachable = true;
+        ready.model_present = Some(true);
+        ready.context_window = Some(ContextWindow::Loaded { tokens: 65536, seen_at: Utc::now() });
+        let mut loading = ProviderProbe::base(&t, t.endpoint.clone());
+        loading.reachable = true;
+        loading.loading = true;
+        carry_context_window(Some(&ready), &mut loading);
+        assert_eq!(loading.context_window, None);
+        // A fresh reading is never replaced, as before.
+        let mut again = ready.clone();
+        again.context_window = Some(ContextWindow::Loaded { tokens: 32768, seen_at: Utc::now() });
+        carry_context_window(Some(&ready), &mut again);
+        assert!(matches!(again.context_window, Some(ContextWindow::Loaded { tokens: 32768, .. })));
+        // Ollama's reading is kept, as before.
+        let prev = ollama("m:7b", window(4096));
+        let mut next = ollama("m:7b", None);
+        carry_context_window(Some(&prev), &mut next);
+        assert!(matches!(next.context_window, Some(ContextWindow::Window { tokens: 4096, .. })));
+    }
+
+    /// A native model's server is embrad's to keep: the operator is pointed
+    /// at `/native`, where every other provider's is a server to check.
+    #[test]
+    fn an_unreachable_provider_is_announced_with_what_the_operator_can_do() {
+        let down = |kind: ProviderKind, endpoint: &str| {
+            let mut p = ProviderProbe::base(&target(kind, "m", endpoint), endpoint.to_string());
+            p.error = Some("connection refused".into());
+            p
+        };
+        let n = transition_events(None, &down(ProviderKind::Native, "http://127.0.0.1:8091"));
+        assert_eq!(n.len(), 1);
+        assert_eq!(
+            n[0].message,
+            "LLM provider native (http://127.0.0.1:8091) is unreachable: connection refused — turns will fail until it is back. /native shows what the model server is doing, or switch with /provider."
+        );
+        for kind in [ProviderKind::Anthropic, ProviderKind::Gemini, ProviderKind::Ollama, ProviderKind::LmStudio] {
+            let n = transition_events(None, &down(kind, "host"));
+            assert_eq!(
+                n[0].message,
+                format!("LLM provider {} (host) is unreachable: connection refused — turns will fail until it is back. Check the server, or switch with /provider.", kind.as_str()),
+                "as it was"
+            );
+        }
+        assert_eq!(unreachable_remedy("a name that is no provider"), "Check the server, or switch with /provider.");
     }
 
     #[tokio::test]
