@@ -78,3 +78,14 @@ CONFIG_DRM_AMD_DC=y
 # from the firmware's framebuffer first, so it is in PROBE_DRIVERS too,
 # and `nomodeset` keeps the firmware's framebuffer in place of it as well.
 CONFIG_DRM_RADEON=y
+# A laptop with two graphics cards: the kernel's switch between them
+# (vga_switcheroo). radeon and amdgpu look for the firmware's switching
+# method (ATPX) only in a kernel built with it, and take a second card for
+# one they may power off only where they find the method. With it a Radeon
+# that drives no display is powered off five seconds after its last use
+# and woken when something opens it; without it radeon leaves such a card
+# running, and amdgpu powers it off only where the card's port has a power
+# resource or the card has BACO. A machine with one card, or with no such
+# method in its firmware, is not touched. `radeon.runpm=0` or
+# `amdgpu.runpm=0` on the kernel line leaves the card powered.
+CONFIG_VGA_SWITCHEROO=y
