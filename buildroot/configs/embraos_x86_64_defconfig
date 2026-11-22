@@ -137,6 +137,7 @@ BR2_PACKAGE_EMBRA_RUST_TOOLCHAIN=y
 BR2_PACKAGE_EMBRA_EMBEDDING_MODEL=y
 BR2_PACKAGE_WARDSONDB=y
 BR2_PACKAGE_EMBRA_UPDATE=y
+BR2_PACKAGE_EMBRA_LLAMA_CPP=y
 # Firmware for every driver the fragments build in: every linux-firmware
 # family through one symbol (buildroot/package/embra-firmware/Config.in,
 # counted against Buildroot's list at build time). The blobs land under

@@ -1,0 +1,24 @@
+config BR2_PACKAGE_EMBRA_LLAMA_CPP
+	bool "embra-llama-cpp"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on !BR2_STATIC_LIBS
+	depends on !BR2_PACKAGE_LLAMA_CPP
+	help
+	  The model server of native models (experimental): llama.cpp's
+	  llama-server at the release embraOS pins, the version in
+	  embra-llama-cpp.mk and the archive's sha256 in the hash file
+	  beside it. embrad keeps one running on loopback while the
+	  operator asked for a native model, and the brain is its one
+	  client.
+
+	  The server alone is built: no command-line tool, no web page,
+	  no TLS and no download code. The CPU backends are libraries
+	  under /usr/lib/llama-cpp, one for each instruction set, and
+	  the server loads the one the processor can run.
+
+	  Takes the place of Buildroot's llama-cpp package, whose recipe
+	  names an older build without these options; the two would
+	  install the same libraries, so only one is selected.
+
+	  https://github.com/ggml-org/llama.cpp

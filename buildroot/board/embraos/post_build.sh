@@ -205,6 +205,12 @@ for f in usr/sbin/wpa_supplicant usr/sbin/usb_modeswitch lib/firmware/regulatory
     }
 done
 [ -d "${TARGET_DIR}/usr/share/usb_modeswitch" ] || { echo "ERROR: /usr/share/usb_modeswitch is missing (BR2_PACKAGE_USB_MODESWITCH_DATA)" >&2; exit 1; }
+# The model server of native models (experimental) is a package of both
+# defconfigs, and its licence texts travel with it; the image scripts read
+# all of its files back after the build (assert_native_model_runtime,
+# scripts/lib/image-common.sh).
+[ -x "${TARGET_DIR}/usr/bin/llama-server" ] || { echo "ERROR: /usr/bin/llama-server is missing from the root filesystem (BR2_PACKAGE_EMBRA_LLAMA_CPP in the defconfig)" >&2; exit 1; }
+[ -s "${TARGET_DIR}/usr/share/licenses/llama.cpp/LICENSE" ] || { echo "ERROR: /usr/share/licenses/llama.cpp/LICENSE is missing from the target (the embra-llama-cpp recipe installs it)" >&2; exit 1; }
 # What the two recipes install beside the programs, and nothing here uses.
 # The supplicant's example configuration joins any open network; embrad
 # renders the configuration it runs with (crates/embra-boot/src/wifi.rs),

@@ -63,6 +63,14 @@ KERNEL_MIRROR="${KERNEL_MIRROR:-https://cdn.kernel.org/pub/linux/kernel}"
 # names.
 INTEL_MICROCODE_RECIPE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/package/embra-intel-microcode/embra-intel-microcode.mk"
 
+# The model server of native models (experimental) is pinned by its recipe as
+# well: the version in buildroot/package/embra-llama-cpp/embra-llama-cpp.mk
+# and the archive's sha256 in the hash file beside it. Buildroot's own
+# llama-cpp recipe names an older build, so that package is not selected.
+# assert_native_model_runtime reads the root filesystem back against the
+# build of the version the recipe names.
+LLAMA_CPP_RECIPE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/package/embra-llama-cpp/embra-llama-cpp.mk"
+
 # The embedding model (KG-02), pinned by sha256 like CI's Bootlin SDK: the
 # payload is fetched, never committed, and a changed upstream file fails
 # the build instead of silently shipping different weights. Verified
@@ -142,6 +150,48 @@ intel_microcode_version() {
     [ -n "$v" ] || return 1
     [ "$(printf '%s\n' "$v" | wc -l)" -eq 1 ] || return 1
     printf '%s\n' "$v"
+}
+
+# llama_cpp_version: the release of llama.cpp the recipe names, from its one
+# `EMBRA_LLAMA_CPP_VERSION = <version>` line. Nothing is printed and the
+# status is 1 when the recipe has no line of that form, or more than one.
+llama_cpp_version() {
+    local v
+    v="$(sed -n 's/^EMBRA_LLAMA_CPP_VERSION = \([0-9A-Za-z._-]\{1,\}\)$/\1/p' "$LLAMA_CPP_RECIPE" 2>/dev/null || true)"
+    [ -n "$v" ] || return 1
+    [ "$(printf '%s\n' "$v" | wc -l)" -eq 1 ] || return 1
+    printf '%s\n' "$v"
+}
+
+# clean_package_with_changed_recipe <buildroot dir> <package>: a package of
+# this tree that Buildroot compiles from a tarball is built once. Buildroot
+# rebuilds nothing whose options changed, so a recipe changed under
+# buildroot/package/<package>/ never reaches a build directory that exists
+# already: the image carries the build of the recipe before, and nothing
+# says so. The package therefore has a stamp beside the build directories,
+# the sha256 over its recipe files' names and bytes, and with another stamp
+# its build directories are removed here, before make: the one of the
+# version the recipe names, which is what `make <package>-dirclean` removes,
+# and any a version before left. The build directory is all such a package
+# keeps outside the target directory, which both image scripts repopulate.
+# Called by both of them for the model server.
+clean_package_with_changed_recipe() {
+    local br="$1" pkg="$2" dir stamp have sum d
+    dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/package/$pkg"
+    [ -d "$dir" ] || { echo "ERROR: no recipe directory $dir" >&2; exit 1; }
+    stamp="$br/output/build/.embraos-recipe-$pkg"
+    mkdir -p "$br/output/build"
+    have="$(cd "$dir" && find . -type f | LC_ALL=C sort)"
+    sum="$(cd "$dir" && printf '%s\n' "$have" | while IFS= read -r f; do
+               [ -n "$f" ] || continue; printf '%s\n' "$f"; cat "$f"
+           done | sha256sum | cut -d' ' -f1)"
+    [ "$(cat "$stamp" 2>/dev/null || true)" = "$sum" ] && return 0
+    for d in "$br/output/build/$pkg"-[0-9]*/; do
+        [ -d "$d" ] || continue
+        echo "recipe: buildroot/package/$pkg is not what ${d%/} was built from; removed, and $pkg builds again from its tarball"
+        rm -rf "${d%/}"
+    done
+    printf '%s\n' "$sum" > "$stamp"
 }
 
 # clean_packages_with_changed_patches <buildroot dir> <patches dir>: Buildroot
@@ -713,6 +763,7 @@ assert_rootfs_invariants() {
     else
         echo "release signing keys: none yet (scripts/update-signing.pub holds no key; the updater refuses every manifest until one is added)"
     fi
+    assert_native_model_runtime "$tgt" "$triple"
     assert_imported_cas
     assert_rootfs_names_no_builder_dir
 
@@ -732,6 +783,103 @@ assert_rootfs_invariants() {
         reject_image
     }
     echo "rootfs.squashfs: $sq_size bytes of a $slot_bytes-byte slot, xz"
+}
+
+# assert_native_model_runtime <target directory> <triple>: the model server
+# of native models (experimental) is in the root filesystem as its recipe
+# installs it (buildroot/package/embra-llama-cpp), from the build of the
+# version the recipe names. A package symbol Buildroot dropped is silent, and
+# so is a library the server would look for at start and not find: embrad
+# would report a model server that ends at once, on every machine. Checked:
+# the server; the CPU backends, the ones the build made and no other, with
+# the architecture's baseline among them; every library the server and its
+# libraries name is in the root filesystem, none of them a TLS or a transfer
+# library, and no run path is written into any; on x86_64, the server, its
+# libraries and the two backends below AVX use no AVX register (a processor
+# without AVX stops on the first such instruction); the licence texts are the
+# build's own.
+assert_native_model_runtime() {
+    local tgt="$1" triple="${2:-}" version src bin readelf objdump f name dyn n want have baseline lic count
+    local -a files plain
+    version="$(llama_cpp_version)" \
+        || reject_image "the model server's recipe has no line of the form 'EMBRA_LLAMA_CPP_VERSION = <version>' ($LLAMA_CPP_RECIPE)"
+    src="$BUILDROOT_DIR/output/build/embra-llama-cpp-$version"
+    bin="$src/buildroot-build/bin"
+    [ -x "$tgt/usr/bin/llama-server" ] \
+        || reject_image "/usr/bin/llama-server is missing from the rootfs (BR2_PACKAGE_EMBRA_LLAMA_CPP in the defconfig; buildroot/Config.in sources the package)"
+    [ -d "$bin" ] \
+        || reject_image "the model server in the rootfs is not the build of the version its recipe names ($version): $bin is not there"
+    readelf="$(ls "$BUILDROOT_DIR"/output/host/bin/*-buildroot-linux-musl-readelf 2>/dev/null | head -n 1)"
+    objdump="$(ls "$BUILDROOT_DIR"/output/host/bin/*-buildroot-linux-musl-objdump 2>/dev/null | head -n 1)"
+    { [ -n "$readelf" ] && [ -x "$readelf" ] && [ -n "$objdump" ] && [ -x "$objdump" ]; } \
+        || reject_image "Buildroot's readelf and objdump are not under $BUILDROOT_DIR/output/host/bin: the model server's files cannot be read back"
+
+    want="$(cd "$bin" && ls libggml-cpu-*.so 2>/dev/null | LC_ALL=C sort | tr '\n' ' ')"
+    have="$(cd "$tgt/usr/lib/llama-cpp" 2>/dev/null && ls | LC_ALL=C sort | tr '\n' ' ')"
+    { [ -n "$want" ] && [ "$have" = "$want" ]; } \
+        || reject_image "/usr/lib/llama-cpp in the rootfs holds '${have% }'; the model server's build made '${want% }'"
+    case "$triple" in
+        x86_64-*) baseline="libggml-cpu-x64.so" ;;
+        aarch64-*) baseline="libggml-cpu-armv8.0_1.so" ;;
+        *) baseline="" ;;
+    esac
+    if [ -n "$baseline" ] && [ ! -f "$tgt/usr/lib/llama-cpp/$baseline" ]; then
+        reject_image "/usr/lib/llama-cpp in the rootfs lacks $baseline, the CPU backend for a processor with no instruction set beyond the architecture's own"
+    fi
+
+    files=("$tgt/usr/bin/llama-server" "$tgt/usr/lib/libllama-server-impl.so")
+    for f in "$tgt"/usr/lib/libggml-base.so.* "$tgt"/usr/lib/libggml.so.* "$tgt"/usr/lib/libllama.so.* \
+             "$tgt"/usr/lib/libllama-common.so.* "$tgt"/usr/lib/libmtmd.so.*; do
+        # the file, not the link its soname names
+        if [ -f "$f" ] && [ ! -L "$f" ]; then files+=("$f"); fi
+    done
+    [ ${#files[@]} -eq 7 ] \
+        || reject_image "the rootfs holds ${#files[@]} of the model server's 7 files outside its backends (the server and six libraries under /usr/lib)"
+    plain=("${files[@]}")
+    for f in "$tgt"/usr/lib/llama-cpp/*.so; do
+        files+=("$f")
+    done
+    for f in "${files[@]}"; do
+        dyn="$("$readelf" -d "$f" 2>/dev/null)" || reject_image "/${f#"$tgt"/} in the rootfs could not be read as a program or a library"
+        if printf '%s\n' "$dyn" | grep -q -E '\((RPATH|RUNPATH)\)'; then
+            reject_image "/${f#"$tgt"/} in the rootfs carries a run path: $(printf '%s\n' "$dyn" | grep -E '\((RPATH|RUNPATH)\)' | head -n 1 | sed 's/.*\[\(.*\)\].*/\1/') (CMAKE_SKIP_RPATH in the recipe)"
+        fi
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            case "$name" in
+                libssl*|libcrypto*|libcurl*|libgnutls*)
+                    reject_image "/${f#"$tgt"/} in the rootfs loads $name: the model server is built without TLS and without a download client" ;;
+            esac
+            { [ -e "$tgt/usr/lib/$name" ] || [ -e "$tgt/lib/$name" ]; } \
+                || reject_image "/${f#"$tgt"/} in the rootfs loads $name, which is not in the rootfs: the model server would end at its start"
+        done <<NEEDED
+$(printf '%s\n' "$dyn" | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p')
+NEEDED
+    done
+
+    case "$triple" in
+        x86_64-*)
+            plain+=("$tgt/usr/lib/llama-cpp/libggml-cpu-x64.so")
+            [ ! -f "$tgt/usr/lib/llama-cpp/libggml-cpu-sse42.so" ] || plain+=("$tgt/usr/lib/llama-cpp/libggml-cpu-sse42.so")
+            for f in "${plain[@]}"; do
+                n="$("$objdump" -d --no-show-raw-insn "$f" 2>/dev/null | grep -c -E '%[yz]mm[0-9]' || true)"
+                [ "$n" = 0 ] \
+                    || reject_image "/${f#"$tgt"/} in the rootfs uses AVX registers ($n instructions): a processor without AVX stops on the first of them"
+            done
+            ;;
+    esac
+
+    count=0
+    for lic in "LICENSE:LICENSE" "vendor/cpp-httplib/LICENSE:LICENSE-cpp-httplib" "licenses/LICENSE-jsonhpp:LICENSE-nlohmann-json" \
+               "vendor/hash/xxhash/LICENSE:LICENSE-xxhash" "vendor/hash/rotate-bits/LICENSE.md:LICENSE-rotate-bits"; do
+        cmp -s "$src/${lic%%:*}" "$tgt/usr/share/licenses/llama.cpp/${lic##*:}" \
+            || reject_image "/usr/share/licenses/llama.cpp/${lic##*:} in the rootfs is missing or is not ${lic%%:*} of llama.cpp $version: the licence texts travel with the binaries"
+        count=$((count + 1))
+    done
+    have="$(ls "$tgt/usr/share/licenses/llama.cpp" | wc -l)"
+    [ "$have" -eq "$count" ] \
+        || reject_image "/usr/share/licenses/llama.cpp in the rootfs holds $have files; the recipe installs $count"
+    echo "native models (experimental): llama-server of llama.cpp $version, $(printf '%s\n' $want | wc -l) CPU backends${baseline:+ with $baseline}, every library it loads in the rootfs, no TLS library, no run path, $count licence texts"
 }
 
 # clean_packages_that_name_the_builder <buildroot dir>: a package whose file

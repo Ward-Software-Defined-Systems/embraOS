@@ -13,7 +13,7 @@
 # Buildroot runs.
 #
 # The root filesystem carries records of the build as well, which nothing
-# reads at run time: post_build.sh removes them (remove_build_records). Three
+# reads at run time: post_build.sh removes them (remove_build_records). Four
 # packages Buildroot compiles would name its own directory, and are handed a
 # stand-in or patched (BUILD_PATHS_BY_PACKAGE). The image scripts read the
 # whole target directory back. The kernel's banner names who built it, and is
@@ -228,15 +228,18 @@ remove_build_records() {
 
 # What Buildroot itself would compile its own directory into, as a shell
 # pattern under the target directory and the package behind it: sqlite's
-# shell and WebKit name their sources (`__FILE__`), libpsl the list its
-# table was made from. buildroot/external.mk hands the compiler a stand-in
-# for the first two and buildroot/patches/libpsl empties the third's name. A
-# package built before that still says where it was built, and Buildroot
-# rebuilds nothing whose options changed: packages_naming_builder_dirs finds
-# such a package in the target directory the last build left, and the image
-# scripts clean it before they repopulate that directory
-# (clean_packages_that_name_the_builder, image-common.sh).
-BUILD_PATHS_BY_PACKAGE=("usr/bin/sqlite3:sqlite" "usr/lib/libpsl.so.*:libpsl" "usr/lib/libWPEWebKit-*.so.*:wpewebkit")
+# shell, WebKit and the model server name their sources (`__FILE__`), libpsl
+# the list its table was made from. buildroot/external.mk hands the compiler
+# a stand-in for the first two, the model server's own recipe takes the same
+# stand-in, and buildroot/patches/libpsl empties libpsl's name. A package
+# built before that still says where it was built, and Buildroot rebuilds
+# nothing whose options changed: packages_naming_builder_dirs finds such a
+# package in the target directory the last build left, and the image scripts
+# clean it before they repopulate that directory
+# (clean_packages_that_name_the_builder, image-common.sh). One file stands
+# for a package: every library of the model server is compiled with the same
+# flags.
+BUILD_PATHS_BY_PACKAGE=("usr/bin/sqlite3:sqlite" "usr/lib/libpsl.so.*:libpsl" "usr/lib/libWPEWebKit-*.so.*:wpewebkit" "usr/lib/libllama.so.*:embra-llama-cpp")
 
 # package_that_compiled <path under the target directory>: the package of
 # BUILD_PATHS_BY_PACKAGE the file belongs to; status 1 for any other file.

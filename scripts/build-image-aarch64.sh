@@ -465,6 +465,11 @@ remove_stale_package_dirs "$BUILDROOT_DIR" embrad embra-apid embra-trustd embra-
 # (clean_packages_with_changed_patches, scripts/lib/image-common.sh).
 clean_packages_with_changed_patches "$BUILDROOT_DIR" "$(cd "$(dirname "$0")/.." && pwd)/buildroot/patches"
 
+# The model server builds again from its tarball when its recipe changed:
+# Buildroot rebuilds nothing whose options changed
+# (clean_package_with_changed_recipe, scripts/lib/image-common.sh).
+clean_package_with_changed_recipe "$BUILDROOT_DIR" embra-llama-cpp
+
 # A kernel built before its build was told what to name in its banner names
 # who built it: its build step runs again, a link
 # (relink_kernel_that_names_its_builder, scripts/lib/image-common.sh).
