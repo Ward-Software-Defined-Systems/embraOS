@@ -90,7 +90,7 @@ pub const MEDIA_HISTORY_MAX_BYTES_GEMINI: u64 = 12 * 1024 * 1024;
 pub fn history_image_bytes_for(kind: ProviderKind) -> u64 {
     match kind {
         ProviderKind::Gemini => MEDIA_HISTORY_MAX_BYTES_GEMINI,
-        ProviderKind::Anthropic | ProviderKind::Ollama | ProviderKind::LmStudio => {
+        ProviderKind::Anthropic | ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => {
             MEDIA_HISTORY_MAX_BYTES
         }
     }

@@ -94,6 +94,10 @@ pub(super) fn silent_sentence(waited: Duration, in_the_answer: bool) -> String {
 pub enum OpenAiCompatPreset {
     Ollama,
     LmStudio,
+    /// A model that runs on this machine (experimental): llama.cpp's server,
+    /// kept on loopback by embrad. No endpoint to store, no bearer, and
+    /// never through the provider gateway.
+    Native,
 }
 
 impl OpenAiCompatPreset {
@@ -103,6 +107,7 @@ impl OpenAiCompatPreset {
         match self {
             Self::Ollama => ProviderKind::Ollama,
             Self::LmStudio => ProviderKind::LmStudio,
+            Self::Native => ProviderKind::Native,
         }
     }
 
@@ -111,20 +116,33 @@ impl OpenAiCompatPreset {
         match self {
             Self::Ollama => "Ollama",
             Self::LmStudio => "LM Studio",
+            Self::Native => "Native (experimental)",
         }
     }
 
     /// Default base URL when the wizard's Endpoint step receives no
-    /// scheme + no port (operator typed only "localhost" or similar).
+    /// scheme + no port (operator typed only "localhost" or similar). A
+    /// native model's is its only one: the model server on loopback.
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::Ollama => "http://localhost:11434",
             Self::LmStudio => "http://localhost:1234",
+            Self::Native => embra_boot::native_model::BASE_URL,
         }
     }
 
     /// Every preset, in the order the lists name them.
-    pub const ALL: [Self; 2] = [Self::Ollama, Self::LmStudio];
+    pub const ALL: [Self; 3] = [Self::Ollama, Self::LmStudio, Self::Native];
+
+    /// The environment variable a developer overrides the preset's `/effort`
+    /// level with (embrad hands the brain none of them).
+    pub fn effort_env_var(self) -> &'static str {
+        match self {
+            Self::Ollama => "EMBRA_OLLAMA_EFFORT",
+            Self::LmStudio => "EMBRA_LM_STUDIO_EFFORT",
+            Self::Native => "EMBRA_NATIVE_EFFORT",
+        }
+    }
 
     /// The preset a provider is, when it is one.
     pub fn of(kind: ProviderKind) -> Option<Self> {
@@ -155,15 +173,19 @@ pub struct OpenAICompatProvider {
 }
 
 impl OpenAICompatProvider {
+    #[cfg(test)]
     pub fn ollama(base_url: String, bearer: Option<String>, model: String) -> Self {
         Self::new(OpenAiCompatPreset::Ollama, base_url, bearer, model)
     }
 
+    #[cfg(test)]
     pub fn lm_studio(base_url: String, bearer: Option<String>, model: String) -> Self {
         Self::new(OpenAiCompatPreset::LmStudio, base_url, bearer, model)
     }
 
-    fn new(
+    /// The provider of a preset. A native model's base is the loopback one
+    /// and it has no bearer: `build_openai_compat_provider` hands both in.
+    pub(crate) fn new(
         preset: OpenAiCompatPreset,
         base_url: String,
         bearer: Option<String>,
@@ -373,21 +395,30 @@ pub(crate) fn reasoning_effort_for_model(model_id: &str) -> Option<&'static str>
 }
 
 /// STATE file holding a preset's bearer token (mode 0600; written by the
-/// setup flows, exported by embrad at boot).
-pub(crate) fn bearer_state_path(preset: OpenAiCompatPreset) -> &'static str {
+/// setup flows, exported by embrad at boot). `None` for a native model: its
+/// server listens on loopback and takes no token.
+pub(crate) fn bearer_state_path(preset: OpenAiCompatPreset) -> Option<&'static str> {
     match preset {
-        OpenAiCompatPreset::Ollama => "/embra/state/bearer_ollama",
-        OpenAiCompatPreset::LmStudio => "/embra/state/bearer_lm_studio",
+        OpenAiCompatPreset::Ollama => Some("/embra/state/bearer_ollama"),
+        OpenAiCompatPreset::LmStudio => Some("/embra/state/bearer_lm_studio"),
+        OpenAiCompatPreset::Native => None,
     }
 }
 
 /// Env var carrying that bearer inside the brain process; read per call
 /// so a post-setup swap needs no restart.
-pub(crate) fn bearer_env_var(preset: OpenAiCompatPreset) -> &'static str {
+pub(crate) fn bearer_env_var(preset: OpenAiCompatPreset) -> Option<&'static str> {
     match preset {
-        OpenAiCompatPreset::Ollama => "EMBRA_OLLAMA_BEARER",
-        OpenAiCompatPreset::LmStudio => "EMBRA_LM_STUDIO_BEARER",
+        OpenAiCompatPreset::Ollama => Some("EMBRA_OLLAMA_BEARER"),
+        OpenAiCompatPreset::LmStudio => Some("EMBRA_LM_STUDIO_BEARER"),
+        OpenAiCompatPreset::Native => None,
     }
+}
+
+/// The preset's bearer as the brain's environment has it now; none when the
+/// variable is unset or empty, and none for a preset that takes no token.
+pub(crate) fn bearer_from_env(preset: OpenAiCompatPreset) -> Option<String> {
+    bearer_env_var(preset).and_then(|name| std::env::var(name).ok()).filter(|token| !token.is_empty())
 }
 
 /// The Ollama Cloud models whose levels are `low|high|max` (ollama.com's
@@ -882,14 +913,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let provider = match preset {
-            OpenAiCompatPreset::Ollama => {
-                OpenAICompatProvider::ollama(server.uri(), None, "m1".to_string())
-            }
-            OpenAiCompatPreset::LmStudio => {
-                OpenAICompatProvider::lm_studio(server.uri(), None, "m1".to_string())
-            }
-        };
+        let provider = OpenAICompatProvider::new(preset, server.uri(), None, "m1".to_string());
         let result = provider.validate_key("").await;
         assert_eq!(result, ValidationResult::Valid);
     }
@@ -969,14 +993,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let provider = match preset {
-            OpenAiCompatPreset::Ollama => {
-                OpenAICompatProvider::ollama(server.uri(), None, "m".to_string())
-            }
-            OpenAiCompatPreset::LmStudio => {
-                OpenAICompatProvider::lm_studio(server.uri(), None, "m".to_string())
-            }
-        };
+        let provider = OpenAICompatProvider::new(preset, server.uri(), None, "m".to_string());
         let stream = provider
             .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
@@ -1011,14 +1028,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let provider = match preset {
-            OpenAiCompatPreset::Ollama => {
-                OpenAICompatProvider::ollama(server.uri(), None, "m".to_string())
-            }
-            OpenAiCompatPreset::LmStudio => {
-                OpenAICompatProvider::lm_studio(server.uri(), None, "m".to_string())
-            }
-        };
+        let provider = OpenAICompatProvider::new(preset, server.uri(), None, "m".to_string());
         let stream = provider
             .stream_turn(&[ApiMessage::user_text("status")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
@@ -1062,14 +1072,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let provider = match preset {
-            OpenAiCompatPreset::Ollama => {
-                OpenAICompatProvider::ollama(server.uri(), None, "m".to_string())
-            }
-            OpenAiCompatPreset::LmStudio => {
-                OpenAICompatProvider::lm_studio(server.uri(), None, "m".to_string())
-            }
-        };
+        let provider = OpenAICompatProvider::new(preset, server.uri(), None, "m".to_string());
         let stream = provider
             .stream_turn(&[ApiMessage::user_text("multi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
@@ -1108,14 +1111,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let provider = match preset {
-            OpenAiCompatPreset::Ollama => {
-                OpenAICompatProvider::ollama(server.uri(), None, "gpt-oss:120b".to_string())
-            }
-            OpenAiCompatPreset::LmStudio => {
-                OpenAICompatProvider::lm_studio(server.uri(), None, "gpt-oss:120b".to_string())
-            }
-        };
+        let provider = OpenAICompatProvider::new(preset, server.uri(), None, "gpt-oss:120b".to_string());
         let stream = provider
             .stream_turn(&[ApiMessage::user_text("x")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
@@ -1158,14 +1154,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let provider = match preset {
-            OpenAiCompatPreset::Ollama => {
-                OpenAICompatProvider::ollama(server.uri(), None, "gpt-oss:20b".to_string())
-            }
-            OpenAiCompatPreset::LmStudio => {
-                OpenAICompatProvider::lm_studio(server.uri(), None, "gpt-oss:20b".to_string())
-            }
-        };
+        let provider = OpenAICompatProvider::new(preset, server.uri(), None, "gpt-oss:20b".to_string());
         let stream = provider
             .stream_turn(&[ApiMessage::user_text("think")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
@@ -1211,14 +1200,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let provider = match preset {
-            OpenAiCompatPreset::Ollama => {
-                OpenAICompatProvider::ollama(server.uri(), None, "qwen3.6:35b".to_string())
-            }
-            OpenAiCompatPreset::LmStudio => {
-                OpenAICompatProvider::lm_studio(server.uri(), None, "qwen3.6:35b".to_string())
-            }
-        };
+        let provider = OpenAICompatProvider::new(preset, server.uri(), None, "qwen3.6:35b".to_string());
         let stream = provider
             .stream_turn(&[ApiMessage::user_text("think")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
@@ -1268,14 +1250,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let provider = match preset {
-            OpenAiCompatPreset::Ollama => {
-                OpenAICompatProvider::ollama(server.uri(), None, "m".to_string())
-            }
-            OpenAiCompatPreset::LmStudio => {
-                OpenAICompatProvider::lm_studio(server.uri(), None, "m".to_string())
-            }
-        };
+        let provider = OpenAICompatProvider::new(preset, server.uri(), None, "m".to_string());
         let stream = provider
             .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await

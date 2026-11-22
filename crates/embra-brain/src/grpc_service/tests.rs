@@ -606,6 +606,41 @@ mod native_loop_tests {
     }
 
     #[test]
+    fn a_native_models_provider_is_built_on_loopback_without_a_key() {
+        let base = embra_boot::native_model::BASE_URL;
+        let mut cfg = empty_config();
+        cfg.api_provider = "native".to_string();
+        let err = build_provider_from_config(&cfg, "", None).err().expect("no model is chosen");
+        assert_eq!(
+            err,
+            "Cannot start a turn — No native model is chosen. /native lists the models, and /native use <model> loads one (experimental)."
+        );
+        assert!(provider_probe_target(&cfg, "sk-boot").is_none(), "nothing to probe before a model is chosen");
+
+        cfg.openai_compat.native_model = "qwen3.5-4b".to_string();
+        cfg.provider_gateway = Some(config::ProviderGateway { url: "http://gw:4000".into(), enabled: true });
+        let provider = build_provider_from_config(&cfg, "sk-not-for-it", None).unwrap();
+        assert_eq!(provider.kind(), ProviderKind::Native);
+        assert_eq!(provider.base_url(), base, "never through the gateway");
+        assert_eq!(provider.display_name(), "qwen3.5-4b");
+        assert_eq!(display_model_for("native", &cfg), "qwen3.5-4b");
+        // The probe asks the same base, with no key.
+        let target = provider_probe_target(&cfg, "sk-boot").expect("a target");
+        assert_eq!(
+            (target.kind, target.model.as_str(), target.key.as_str(), target.endpoint.as_str()),
+            (ProviderKind::Native, "qwen3.5-4b", "", base)
+        );
+        // The level is the model's own, by the preset's rule.
+        assert_eq!(resolve_provider_effort(ProviderKind::Native, &cfg), None);
+        set_effort_field(&mut cfg, ProviderKind::Native, Some("low".into()));
+        assert_eq!(resolve_provider_effort(ProviderKind::Native, &cfg).as_deref(), Some("low"));
+        assert_eq!(cfg.openai_compat.native_effort_by_model.get("qwen3.5-4b").map(String::as_str), Some("low"));
+
+        cfg.openai_compat.native_model.clear();
+        assert_eq!(display_model_for("native", &cfg), "native");
+    }
+
+    #[test]
     fn a_switch_never_carries_a_level_and_says_what_the_new_model_runs_at() {
         use crate::provider::openai_compat::OpenAiCompatPreset::Ollama;
         // William, 2026-10-22: `/effort low` on Qwen3.8, then a switch to
@@ -912,24 +947,27 @@ mod setup_reconfigure_tests {
     fn bearer_state_path_mappings() {
         assert_eq!(
             bearer_state_path(OpenAiCompatPreset::Ollama),
-            "/embra/state/bearer_ollama"
+            Some("/embra/state/bearer_ollama")
         );
         assert_eq!(
             bearer_state_path(OpenAiCompatPreset::LmStudio),
-            "/embra/state/bearer_lm_studio"
+            Some("/embra/state/bearer_lm_studio")
         );
+        assert_eq!(bearer_state_path(OpenAiCompatPreset::Native), None, "a native model takes no token");
     }
 
     #[test]
     fn bearer_env_var_mappings() {
         assert_eq!(
             bearer_env_var(OpenAiCompatPreset::Ollama),
-            "EMBRA_OLLAMA_BEARER"
+            Some("EMBRA_OLLAMA_BEARER")
         );
         assert_eq!(
             bearer_env_var(OpenAiCompatPreset::LmStudio),
-            "EMBRA_LM_STUDIO_BEARER"
+            Some("EMBRA_LM_STUDIO_BEARER")
         );
+        assert_eq!(bearer_env_var(OpenAiCompatPreset::Native), None);
+        assert_eq!(crate::provider::openai_compat::bearer_from_env(OpenAiCompatPreset::Native), None);
     }
 
     #[test]
@@ -2504,6 +2542,46 @@ mod key_setup_model_step_tests {
             assert_eq!(p.field_type, SetupFieldType::Secret as i32);
             assert_eq!(*pending_key_setup.lock().await, Some(KeySetupStep::Key(target)));
         }
+    }
+
+    /// The provider flow asks for an endpoint, a bearer and a model the
+    /// server lists: a native model has none of the three to ask for, and is
+    /// not switched to before one is chosen.
+    #[tokio::test]
+    async fn a_native_model_is_not_set_up_by_the_provider_flow_nor_switched_to_without_one() {
+        let db_server = config_db("gemini").await;
+        let pending_key_setup = Arc::new(Mutex::new(None));
+        let pending_openai_compat_setup = Arc::new(Mutex::new(None));
+        let ctx = ServiceCtx {
+            db: Arc::new(WardsonDbClient::from_url(&db_server.uri())),
+            session_mgr: Arc::new(RwLock::new(SessionManager::new(WardsonDbClient::from_url(&db_server.uri())))),
+            in_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_provider: Arc::new(Mutex::new(None)),
+            pending_key_setup: pending_key_setup.clone(),
+            pending_openai_compat_setup: pending_openai_compat_setup.clone(),
+            pending_session_delete: Arc::new(Mutex::new(None)),
+            pending_backup_restore: Arc::new(Mutex::new(None)),
+        };
+        for (arg, expected) in [
+            ("--setup native", NATIVE_HAS_NO_SETUP),
+            ("native", "No native model is chosen. /native lists the models, and /native use <model> loads one (experimental)."),
+        ] {
+            let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+            handle_provider_command(arg, &tx, &ctx).await;
+            drop(tx);
+            let mut said = Vec::new();
+            while let Some(Ok(r)) = rx.recv().await {
+                match r.response_type {
+                    Some(conversation_response::ResponseType::System(m)) => said.push(m.content),
+                    other => panic!("{arg}: a response that is no message: {other:?}"),
+                }
+            }
+            assert_eq!(said.len(), 1, "{arg}: {said:?}");
+            assert!(said[0].ends_with(expected), "{arg}: {}", said[0]);
+            assert!(pending_key_setup.lock().await.is_none() && pending_openai_compat_setup.lock().await.is_none(), "{arg}: no flow began");
+        }
+        let writes = db_server.received_requests().await.unwrap().iter().filter(|r| r.method != wiremock::http::Method::GET).count();
+        assert_eq!(writes, 0, "nothing was stored");
     }
 
     #[tokio::test]

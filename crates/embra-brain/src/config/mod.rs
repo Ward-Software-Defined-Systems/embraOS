@@ -305,6 +305,19 @@ pub struct OpenAiCompatConfig {
     /// Serde-additive, absent when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_wait_minutes: Option<u64>,
+    /// The native model in use (experimental): an id of the catalogue
+    /// (`embra_boot::native_model`), empty while none is chosen. It has no
+    /// endpoint to store: its server is on loopback. Serde-additive, absent
+    /// when empty, as the two maps below are.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub native_model: String,
+    /// The `/effort` level per native model.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub native_effort_by_model: std::collections::BTreeMap<String, String>,
+    /// The context window per native model (`/native context`); a model
+    /// without an entry gets its default.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub native_context_by_model: std::collections::BTreeMap<String, u32>,
 }
 
 impl OpenAiCompatConfig {
@@ -330,6 +343,17 @@ impl OpenAiCompatConfig {
         match preset {
             OpenAiCompatPreset::Ollama => (&self.ollama_endpoint, &self.ollama_model),
             OpenAiCompatPreset::LmStudio => (&self.lm_studio_endpoint, &self.lm_studio_model),
+            OpenAiCompatPreset::Native => (embra_boot::native_model::BASE_URL, &self.native_model),
+        }
+    }
+
+    /// Store a preset's endpoint. A native model has none to store.
+    pub fn set_endpoint(&mut self, preset: crate::provider::openai_compat::OpenAiCompatPreset, endpoint: &str) {
+        use crate::provider::openai_compat::OpenAiCompatPreset;
+        match preset {
+            OpenAiCompatPreset::Ollama => self.ollama_endpoint = endpoint.to_string(),
+            OpenAiCompatPreset::LmStudio => self.lm_studio_endpoint = endpoint.to_string(),
+            OpenAiCompatPreset::Native => {}
         }
     }
 
@@ -380,13 +404,15 @@ impl OpenAiCompatConfig {
         use crate::provider::openai_compat::OpenAiCompatPreset;
         let (model, legacy, by_model) = match preset {
             OpenAiCompatPreset::Ollama => {
-                (&self.ollama_model, &self.ollama_effort, &self.ollama_effort_by_model)
+                (&self.ollama_model, self.ollama_effort.as_ref(), &self.ollama_effort_by_model)
             }
             OpenAiCompatPreset::LmStudio => {
-                (&self.lm_studio_model, &self.lm_studio_effort, &self.lm_studio_effort_by_model)
+                (&self.lm_studio_model, self.lm_studio_effort.as_ref(), &self.lm_studio_effort_by_model)
             }
+            // A native model never had a level stored the old way.
+            OpenAiCompatPreset::Native => (&self.native_model, None, &self.native_effort_by_model),
         };
-        by_model.get(model).or(legacy.as_ref()).map(String::as_str)
+        by_model.get(model).or(legacy).map(String::as_str)
     }
 
     /// Store (`Some`) or clear (`None`) the `/effort` level of the
@@ -400,10 +426,14 @@ impl OpenAiCompatConfig {
     ) {
         let (model, legacy, by_model) = self.effort_parts(preset);
         if model.is_empty() {
-            *legacy = level;
+            if let Some(legacy) = legacy {
+                *legacy = level;
+            }
             return;
         }
-        *legacy = None;
+        if let Some(legacy) = legacy {
+            *legacy = None;
+        }
         match level {
             Some(level) => {
                 by_model.insert(model.clone(), level);
@@ -424,28 +454,30 @@ impl OpenAiCompatConfig {
     ) {
         let (model, legacy, by_model) = self.effort_parts(preset);
         if !model.is_empty()
-            && let Some(level) = legacy.take()
+            && let Some(level) = legacy.and_then(Option::take)
         {
             by_model.entry(model.clone()).or_insert(level);
         }
         *model = new_model.to_string();
     }
 
-    /// The preset's model, its old single level and its per-model levels.
+    /// The preset's model, its old single level (the two server presets
+    /// have one) and its per-model levels.
     fn effort_parts(
         &mut self,
         preset: crate::provider::openai_compat::OpenAiCompatPreset,
-    ) -> (&mut String, &mut Option<String>, &mut std::collections::BTreeMap<String, String>) {
+    ) -> (&mut String, Option<&mut Option<String>>, &mut std::collections::BTreeMap<String, String>) {
         use crate::provider::openai_compat::OpenAiCompatPreset;
         match preset {
             OpenAiCompatPreset::Ollama => {
-                (&mut self.ollama_model, &mut self.ollama_effort, &mut self.ollama_effort_by_model)
+                (&mut self.ollama_model, Some(&mut self.ollama_effort), &mut self.ollama_effort_by_model)
             }
             OpenAiCompatPreset::LmStudio => (
                 &mut self.lm_studio_model,
-                &mut self.lm_studio_effort,
+                Some(&mut self.lm_studio_effort),
                 &mut self.lm_studio_effort_by_model,
             ),
+            OpenAiCompatPreset::Native => (&mut self.native_model, None, &mut self.native_effort_by_model),
         }
     }
 }
@@ -469,6 +501,10 @@ pub enum PresetNotReady {
 impl std::fmt::Display for PresetNotReady {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            PresetNotReady::NoModel(crate::provider::openai_compat::OpenAiCompatPreset::Native) => write!(
+                f,
+                "No native model is chosen. /native lists the models, and /native use <model> loads one (experimental)."
+            ),
             PresetNotReady::NoModel(preset) => write!(
                 f,
                 "{} is not configured. /provider --setup {} sets its endpoint and model.",
@@ -533,8 +569,9 @@ impl SystemConfig {
                 .filter(|s| !s.is_empty()),
             // OpenAI-compat presets keep their bearer in STATE files only
             // (Stage 5 wiring); never in SystemConfig. `key_for` returns
-            // None — callers fall through to env-var lookup.
-            ProviderKind::Ollama | ProviderKind::LmStudio => None,
+            // None — callers fall through to env-var lookup. A native model
+            // has neither a key nor a bearer.
+            ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => None,
         }
     }
 }
@@ -811,7 +848,7 @@ async fn validate_api_key_for(
         // wizard's Stage 4 flow, not via this api-key path. This arm is
         // unreachable from the current 2-way wizard but kept for
         // exhaustive-match completeness.
-        ProviderKind::Ollama | ProviderKind::LmStudio => {
+        ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => {
             return ApiKeyCheck::Invalid(
                 "OpenAI-compat providers use the endpoint+bearer wizard flow.".into(),
             );
@@ -825,7 +862,7 @@ async fn validate_api_key_for(
         (ValidationResult::InvalidKey, ProviderKind::Gemini) => ApiKeyCheck::Invalid(
             "Invalid Gemini API key — check the key and try again.".into(),
         ),
-        (ValidationResult::InvalidKey, ProviderKind::Ollama | ProviderKind::LmStudio) => {
+        (ValidationResult::InvalidKey, ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native) => {
             ApiKeyCheck::Invalid("OpenAI-compat bearer rejected.".into())
         }
         (ValidationResult::Forbidden, ProviderKind::Anthropic) => ApiKeyCheck::Invalid(
@@ -836,7 +873,7 @@ async fn validate_api_key_for(
              Verify at aistudio.google.com — Gemini 3.1 Pro and Gemini 4 Argon require a billed (paid-tier) account."
                 .into(),
         ),
-        (ValidationResult::Forbidden, ProviderKind::Ollama | ProviderKind::LmStudio) => {
+        (ValidationResult::Forbidden, ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native) => {
             ApiKeyCheck::Invalid("OpenAI-compat endpoint refused the bearer (403).".into())
         }
         (ValidationResult::NetworkError, _) => ApiKeyCheck::Invalid(
@@ -964,6 +1001,8 @@ pub async fn run_config_wizard_grpc(
         ProviderKind::Gemini => "GEMINI_API_KEY",
         ProviderKind::Ollama => "EMBRA_OLLAMA_BEARER",
         ProviderKind::LmStudio => "EMBRA_LM_STUDIO_BEARER",
+        // No key and no bearer; unused on this path, as the presets' are.
+        ProviderKind::Native => "",
     };
     let other_env_name = match provider_kind {
         ProviderKind::Anthropic => "GEMINI_API_KEY",
@@ -973,6 +1012,7 @@ pub async fn run_config_wizard_grpc(
         // Use the cross-preset alternative as the placeholder.
         ProviderKind::Ollama => "EMBRA_LM_STUDIO_BEARER",
         ProviderKind::LmStudio => "EMBRA_OLLAMA_BEARER",
+        ProviderKind::Native => "",
     };
     // Skip env-var "other" warning for OpenAI-compat — bearer flow
     // already gathered the relevant credential via prompts.
@@ -1010,7 +1050,7 @@ pub async fn run_config_wizard_grpc(
                         // OpenAI-compat presets are handled via the
                         // sub-flow above and never reach this prompt.
                         // Arms exist for exhaustive-match completeness.
-                        ProviderKind::Ollama | ProviderKind::LmStudio => {
+                        ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => {
                             unreachable!(
                                 "openai_compat presets bypass api_key loop via openai_compat_setup branch"
                             )
@@ -1156,20 +1196,12 @@ pub async fn run_config_wizard_grpc(
         ProviderKind::Gemini => (None, Some(api_key.clone())),
         // OpenAI-compat presets don't populate either api_key field;
         // bearer goes to STATE only (Stage 5 wiring).
-        ProviderKind::Ollama | ProviderKind::LmStudio => (None, None),
+        ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => (None, None),
     };
     // Populate OpenAI-compat fields per preset when the sub-flow ran.
     let mut openai_compat = OpenAiCompatConfig::default();
     if let Some(setup) = &openai_compat_setup {
-        use crate::provider::openai_compat::OpenAiCompatPreset;
-        match setup.preset {
-            OpenAiCompatPreset::Ollama => {
-                openai_compat.ollama_endpoint = setup.endpoint.clone();
-            }
-            OpenAiCompatPreset::LmStudio => {
-                openai_compat.lm_studio_endpoint = setup.endpoint.clone();
-            }
-        }
+        openai_compat.set_endpoint(setup.preset, &setup.endpoint);
         openai_compat.set_model(setup.preset, &setup.model_id);
     }
     let config = SystemConfig {
@@ -1242,15 +1274,9 @@ pub async fn run_config_wizard_grpc(
     // OpenAI-compat bearer write: STATE file at /embra/state/bearer_<preset>
     // with mode 0600 per Locked Decision #8. Empty bearer → no file
     // written; existing file removed if present.
-    if let Some(setup) = &openai_compat_setup {
-        let path = match setup.preset {
-            crate::provider::openai_compat::OpenAiCompatPreset::Ollama => {
-                "/embra/state/bearer_ollama"
-            }
-            crate::provider::openai_compat::OpenAiCompatPreset::LmStudio => {
-                "/embra/state/bearer_lm_studio"
-            }
-        };
+    if let Some(setup) = &openai_compat_setup
+        && let Some(path) = crate::provider::openai_compat::bearer_state_path(setup.preset)
+    {
         match &setup.bearer {
             Some(token) if !token.is_empty() => {
                 if let Err(e) = write_credential_state(path, token) {
@@ -1278,7 +1304,7 @@ pub async fn run_config_wizard_grpc(
             ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
             ProviderKind::Gemini => "/embra/state/api_key_gemini",
             // Unreachable: gated by `openai_compat_setup.is_none()`.
-            ProviderKind::Ollama | ProviderKind::LmStudio => unreachable!(
+            ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => unreachable!(
                 "openai_compat presets bypass legacy per-provider api_key path"
             ),
         };
@@ -2475,7 +2501,7 @@ mod wizard_channel_tests {
 #[cfg(test)]
 mod openai_compat_route_tests {
     use super::{OpenAiCompatConfig, PresetNotReady, ProviderGateway};
-    use crate::provider::openai_compat::OpenAiCompatPreset::{LmStudio, Ollama};
+    use crate::provider::openai_compat::OpenAiCompatPreset::{LmStudio, Native, Ollama};
 
     fn gw(enabled: bool) -> ProviderGateway {
         ProviderGateway { url: "http://gw:4000".into(), enabled }
@@ -2514,6 +2540,62 @@ mod openai_compat_route_tests {
         assert_eq!(oc.for_preset_routed(LmStudio, Some(&gw(true))), Ok(("http://gw:4000/lmstudio".to_string(), "qwen/qwen3.8-27b")));
         assert_eq!(oc.fields(LmStudio), ("http://mac:1234", "qwen/qwen3.8-27b"));
         assert!(oc.gateway_only_presets().is_empty());
+    }
+
+    #[test]
+    fn a_native_model_keeps_its_loopback_base_whatever_the_gateway_is() {
+        let base = embra_boot::native_model::BASE_URL;
+        let none = OpenAiCompatConfig::default();
+        assert_eq!(none.fields(Native), (base, ""));
+        let unset = none.for_preset_routed(Native, Some(&gw(true))).unwrap_err();
+        assert_eq!(unset, PresetNotReady::NoModel(Native));
+        assert_eq!(
+            unset.to_string(),
+            "No native model is chosen. /native lists the models, and /native use <model> loads one (experimental)."
+        );
+        let oc = OpenAiCompatConfig { native_model: "qwen3.5-4b".into(), ..Default::default() };
+        for gateway in [None, Some(gw(false)), Some(gw(true))] {
+            assert_eq!(oc.for_preset_routed(Native, gateway.as_ref()), Ok((base.to_string(), "qwen3.5-4b")), "{gateway:?}");
+        }
+        assert!(oc.gateway_only_presets().is_empty(), "a native model is never the gateway's alone");
+    }
+
+    #[test]
+    fn a_native_models_fields_are_absent_until_they_are_set() {
+        let json = serde_json::to_value(OpenAiCompatConfig::default()).unwrap();
+        for field in ["native_model", "native_effort_by_model", "native_context_by_model"] {
+            assert!(json.get(field).is_none(), "{field}: {json}");
+        }
+        // A document from before these fields reads as none chosen.
+        let old: OpenAiCompatConfig =
+            serde_json::from_value(serde_json::json!({"ollama_endpoint": "http://o:11434", "ollama_model": "m"})).unwrap();
+        assert_eq!((old.native_model.as_str(), old.native_effort_by_model.len(), old.native_context_by_model.len()), ("", 0, 0));
+
+        let mut oc = OpenAiCompatConfig::default();
+        oc.set_endpoint(Native, "http://elsewhere:1");
+        assert_eq!(oc.fields(Native).0, embra_boot::native_model::BASE_URL, "a native model has no endpoint to store");
+        oc.set_effort(Native, Some("low".into()));
+        assert_eq!(oc.effort_for_preset(Native), None, "no model chosen: nothing to file a level under");
+        oc.set_model(Native, "qwen3.5-4b");
+        oc.set_effort(Native, Some("low".into()));
+        oc.native_context_by_model.insert("qwen3.5-4b".into(), 32_768);
+        assert_eq!(oc.effort_for_preset(Native), Some("low"));
+        // Another model has its own level, and the first keeps its.
+        oc.set_model(Native, "qwen3.5-9b");
+        assert_eq!(oc.effort_for_preset(Native), None);
+        oc.set_model(Native, "qwen3.5-4b");
+        assert_eq!(oc.effort_for_preset(Native), Some("low"));
+        // The server presets are untouched by any of it.
+        assert_eq!((oc.fields(Ollama), oc.fields(LmStudio)), (("", ""), ("", "")));
+        assert_eq!((oc.effort_for_preset(Ollama), oc.effort_for_preset(LmStudio)), (None, None));
+
+        let json = serde_json::to_value(&oc).unwrap();
+        assert_eq!(json["native_model"], "qwen3.5-4b");
+        assert_eq!(json["native_effort_by_model"]["qwen3.5-4b"], "low");
+        assert_eq!(json["native_context_by_model"]["qwen3.5-4b"], 32_768);
+        let back: OpenAiCompatConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.native_context_by_model.get("qwen3.5-4b"), Some(&32_768));
+        assert_eq!(back.effort_for_preset(Native), Some("low"));
     }
 
     #[test]

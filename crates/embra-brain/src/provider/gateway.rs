@@ -52,13 +52,15 @@ pub(crate) const UNIFIED_PORT: &str = "4000";
 
 /// The gateway's own id for a provider, which is its forced-route path
 /// prefix. `ProviderKind::as_str` says `lm_studio`; the gateway's id has no
-/// underscore.
-pub(crate) fn prefix(kind: ProviderKind) -> &'static str {
+/// underscore. `None` for a native model: it runs on this machine, and
+/// nothing of it is routed anywhere.
+pub(crate) fn prefix(kind: ProviderKind) -> Option<&'static str> {
     match kind {
-        ProviderKind::Anthropic => "anthropic",
-        ProviderKind::Gemini => "gemini",
-        ProviderKind::Ollama => "ollama",
-        ProviderKind::LmStudio => "lmstudio",
+        ProviderKind::Anthropic => Some("anthropic"),
+        ProviderKind::Gemini => Some("gemini"),
+        ProviderKind::Ollama => Some("ollama"),
+        ProviderKind::LmStudio => Some("lmstudio"),
+        ProviderKind::Native => None,
     }
 }
 
@@ -70,9 +72,9 @@ pub(crate) fn base_for(
     kind: ProviderKind,
     direct: &str,
 ) -> String {
-    match gateway {
-        Some(g) if g.enabled && !g.url.trim().is_empty() => {
-            format!("{}/{}", g.url.trim().trim_end_matches('/'), prefix(kind))
+    match (gateway, prefix(kind)) {
+        (Some(g), Some(prefix)) if g.enabled && !g.url.trim().is_empty() => {
+            format!("{}/{}", g.url.trim().trim_end_matches('/'), prefix)
         }
         _ => direct.to_string(),
     }
@@ -743,10 +745,17 @@ mod tests {
 
     #[test]
     fn each_provider_has_the_gateways_own_prefix() {
-        assert_eq!(prefix(ProviderKind::Anthropic), "anthropic");
-        assert_eq!(prefix(ProviderKind::Gemini), "gemini");
-        assert_eq!(prefix(ProviderKind::Ollama), "ollama");
-        assert_eq!(prefix(ProviderKind::LmStudio), "lmstudio");
+        assert_eq!(prefix(ProviderKind::Anthropic), Some("anthropic"));
+        assert_eq!(prefix(ProviderKind::Gemini), Some("gemini"));
+        assert_eq!(prefix(ProviderKind::Ollama), Some("ollama"));
+        assert_eq!(prefix(ProviderKind::LmStudio), Some("lmstudio"));
+        assert_eq!(prefix(ProviderKind::Native), None);
+        // A native model keeps its loopback base whatever the gateway is.
+        let on = ProviderGateway { url: "http://gw:4000".into(), enabled: true };
+        let base = embra_boot::native_model::BASE_URL;
+        assert_eq!(base_for(Some(&on), ProviderKind::Native, base), base);
+        assert_eq!(base_for(None, ProviderKind::Native, base), base);
+        assert_eq!(base_for(Some(&on), ProviderKind::LmStudio, "http://studio:1234"), "http://gw:4000/lmstudio");
     }
 
     #[test]

@@ -3,6 +3,12 @@
 use super::*;
 use crate::provider::Wire;
 
+/// What `/provider --setup native` answers: the flow below asks for an
+/// endpoint, a bearer and a model the server lists, and a native model has
+/// the first two fixed and its models in a catalogue.
+pub(super) const NATIVE_HAS_NO_SETUP: &str = "A native model (experimental) has no endpoint and no key to set up. \
+     /native lists the models, and /native use <model> loads one.";
+
 /// Sprint 5 follow-up: post-wizard reconfigure for OpenAI-compat
 /// presets. Set by `/provider --setup <ollama|lm_studio>`; advanced
 /// one transition per intercepted UserMessage; cleared on completion
@@ -167,6 +173,10 @@ pub(super) async fn handle_provider_command(
         // Gemini take a key: the prompt goes out as a setup message, and
         // the next user input is intercepted (`pending_key_setup`).
         let prompt_text = match target.wire() {
+            Wire::OpenAiCompat(crate::provider::openai_compat::OpenAiCompatPreset::Native) => {
+                send_msg(NATIVE_HAS_NO_SETUP.to_string(), SystemMessageType::Info).await;
+                return;
+            }
             Wire::OpenAiCompat(preset) => {
                 // Clear any other pending state — only one --setup
                 // flow at a time.
@@ -554,7 +564,7 @@ pub(super) fn build_openai_compat_provider(
     preset: crate::provider::openai_compat::OpenAiCompatPreset,
     config: &config::SystemConfig,
 ) -> Result<Arc<dyn LlmProvider>, String> {
-    use crate::provider::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset};
+    use crate::provider::openai_compat::OpenAICompatProvider;
     // The base is the stored endpoint, or the provider gateway's `{url}/ollama`
     // or `{url}/lmstudio` while the gateway is on, when the gateway's own
     // upstream answers; a preset set up through the gateway with no direct
@@ -563,15 +573,8 @@ pub(super) fn build_openai_compat_provider(
         .openai_compat
         .for_preset_routed(preset, config.provider_gateway.as_ref())
         .map_err(|reason| format!("Cannot start a turn — {reason}"))?;
-    let bearer = std::env::var(bearer_env_var(preset))
-        .ok()
-        .filter(|s| !s.is_empty());
-    let provider = match preset {
-        OpenAiCompatPreset::Ollama => OpenAICompatProvider::ollama(base, bearer, model.to_string()),
-        OpenAiCompatPreset::LmStudio => {
-            OpenAICompatProvider::lm_studio(base, bearer, model.to_string())
-        }
-    };
+    let bearer = crate::provider::openai_compat::bearer_from_env(preset);
+    let provider = OpenAICompatProvider::new(preset, base, bearer, model.to_string());
     // `/effort` override for this preset, sent verbatim when set; `None`
     // keeps the per-model auto-map (byte-identical default). The model
     // wait is the operator's (`/model-wait`), else the default.
@@ -621,10 +624,7 @@ pub(crate) fn provider_probe_target(
                 .openai_compat
                 .for_preset_routed(preset, cfg.provider_gateway.as_ref())
                 .ok()?;
-            let bearer = std::env::var(bearer_env_var(preset))
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_default();
+            let bearer = crate::provider::openai_compat::bearer_from_env(preset).unwrap_or_default();
             Some(ProbeTarget {
                 kind,
                 model: model.to_string(),
@@ -734,9 +734,7 @@ pub(super) async fn enter_openai_compat_setup(
             (non_empty(endpoint), non_empty(model))
         })
         .unwrap_or((None, None));
-    let current_bearer = std::env::var(bearer_env_var(preset))
-        .ok()
-        .filter(|s| !s.is_empty());
+    let current_bearer = crate::provider::openai_compat::bearer_from_env(preset);
 
     // The gateway while it is on: the models are listed through it, and
     // the endpoint typed is the direct path for when it is off.
@@ -1074,7 +1072,7 @@ pub(super) async fn advance_to_probe(
                                     "Probe through the gateway at {probe_base} failed: {e}. Its \
                                      [backends.{}] upstream must answer, or /local-ai-gateway off sets \
                                      the preset up directly. Re-entering endpoint step.",
-                                    crate::provider::gateway::prefix(state.preset.as_kind())
+                                    crate::provider::gateway::prefix(state.preset.as_kind()).unwrap_or_default()
                                 )
                             } else {
                                 format!("Probe failed: {e}. Re-entering endpoint step.")
@@ -1144,8 +1142,6 @@ pub(super) async fn complete_openai_compat_setup(
     db: &Arc<WardsonDbClient>,
     pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) -> SetupStepOutcome {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-
     // 1. Persist endpoint + model on config; api_provider untouched.
     let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
@@ -1186,14 +1182,7 @@ pub(super) async fn complete_openai_compat_setup(
         *pending.lock().await = None;
         return outcome.2;
     }
-    match state.preset {
-        OpenAiCompatPreset::Ollama => {
-            cfg.openai_compat.ollama_endpoint = endpoint.clone();
-        }
-        OpenAiCompatPreset::LmStudio => {
-            cfg.openai_compat.lm_studio_endpoint = endpoint.clone();
-        }
-    }
+    cfg.openai_compat.set_endpoint(state.preset, &endpoint);
     set_local_model(&mut cfg, state.preset, &model);
     if let Err(e) = config::save_config(db, &cfg).await {
         let _ = tx
@@ -1209,16 +1198,18 @@ pub(super) async fn complete_openai_compat_setup(
     }
 
     // 2. Bearer STATE + env hot-reload.
-    let bearer_path = bearer_state_path(state.preset);
-    let env_var = bearer_env_var(state.preset);
     let bearer_change_label = match (&state.current_bearer, &bearer) {
         (Some(prev), Some(new)) if prev == new => "kept",
         (_, Some(_)) => "set",
         (Some(_), None) => "removed",
         (None, None) => "none",
     };
-    match &bearer {
-        Some(token) if !token.is_empty() => {
+    // Every preset this flow sets up has a bearer's file and variable; a
+    // native model has neither and never comes this way.
+    let stores = bearer_state_path(state.preset).zip(bearer_env_var(state.preset));
+    match (&bearer, stores) {
+        (_, None) => {}
+        (Some(token), Some((bearer_path, env_var))) if !token.is_empty() => {
             if let Err(e) = config::write_credential_state(bearer_path, token) {
                 let _ = tx
                     .send(Ok(ConversationResponse {
@@ -1239,7 +1230,7 @@ pub(super) async fn complete_openai_compat_setup(
                 std::env::set_var(env_var, token);
             }
         }
-        _ => {
+        (_, Some((bearer_path, env_var))) => {
             let _ = std::fs::remove_file(bearer_path);
             unsafe {
                 std::env::remove_var(env_var);
@@ -1353,7 +1344,7 @@ pub(super) async fn handle_pending_key_setup(
         // OpenAI-compat presets reach this site only if /provider --setup
         // accepted them above. Today's gating refuses them outright; this
         // arm exists for exhaustive-match completeness only.
-        ProviderKind::Ollama | ProviderKind::LmStudio => {
+        ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => {
             // No-op: Stage 5 will route the bearer to STATE files instead
             // of SystemConfig fields.
         }
@@ -1373,14 +1364,15 @@ pub(super) async fn handle_pending_key_setup(
     // Persist to per-provider STATE file with mode 0600 per Locked
     // Decision #8 (Sprint 5 retroactive fix to existing api_key_*
     // writes that previously used default umask).
-    let state_path = match target {
-        ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
-        ProviderKind::Gemini => "/embra/state/api_key_gemini",
+    let state_path = match target.wire() {
+        Wire::Anthropic => Some("/embra/state/api_key_anthropic"),
+        Wire::Gemini => Some("/embra/state/api_key_gemini"),
         // Stage 4/5: bearer file routing for OpenAI-compat presets.
-        ProviderKind::Ollama => "/embra/state/bearer_ollama",
-        ProviderKind::LmStudio => "/embra/state/bearer_lm_studio",
+        Wire::OpenAiCompat(preset) => bearer_state_path(preset),
     };
-    if let Err(e) = config::write_credential_state(state_path, &candidate) {
+    if let Some(state_path) = state_path
+        && let Err(e) = config::write_credential_state(state_path, &candidate)
+    {
         warn!(
             target: "config",
             "Could not write per-provider key to {}: {}",
@@ -1427,7 +1419,7 @@ pub(super) async fn handle_pending_key_setup(
 pub(super) fn step_after_saved_key(target: ProviderKind) -> Option<KeySetupStep> {
     match target {
         ProviderKind::Anthropic | ProviderKind::Gemini => Some(KeySetupStep::Model(target)),
-        ProviderKind::Ollama | ProviderKind::LmStudio => None,
+        ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => None,
     }
 }
 
@@ -1793,22 +1785,15 @@ pub(super) fn resolve_anthropic_effort_inner(env: Option<&str>, cfg_field: Optio
 /// Anthropic always resolves (default `max`). For the other providers
 /// `None` means "provider default" — Gemini `high`, OpenAI-compat the
 /// per-model auto-map — which keeps every request byte-identical to
-/// before the knob existed. Precedence env (`EMBRA_GEMINI_EFFORT` /
-/// `EMBRA_OLLAMA_EFFORT` / `EMBRA_LM_STUDIO_EFFORT`, dev-only: embrad
-/// plumbs none of them) > config; invalid values fall through.
+/// before the knob existed. Precedence env (`EMBRA_GEMINI_EFFORT`, or a
+/// preset's `effort_env_var`: `EMBRA_OLLAMA_EFFORT`, `EMBRA_LM_STUDIO_EFFORT`,
+/// `EMBRA_NATIVE_EFFORT`; dev-only: embrad plumbs none of them) > config;
+/// invalid values fall through.
 pub(super) fn resolve_provider_effort(kind: ProviderKind, cfg: &config::SystemConfig) -> Option<String> {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-    let (env_name, cfg_field) = match kind {
-        ProviderKind::Anthropic => return Some(resolve_anthropic_effort(cfg)),
-        ProviderKind::Gemini => ("EMBRA_GEMINI_EFFORT", cfg.gemini_effort.as_deref()),
-        ProviderKind::Ollama => (
-            "EMBRA_OLLAMA_EFFORT",
-            cfg.openai_compat.effort_for_preset(OpenAiCompatPreset::Ollama),
-        ),
-        ProviderKind::LmStudio => (
-            "EMBRA_LM_STUDIO_EFFORT",
-            cfg.openai_compat.effort_for_preset(OpenAiCompatPreset::LmStudio),
-        ),
+    let (env_name, cfg_field) = match kind.wire() {
+        Wire::Anthropic => return Some(resolve_anthropic_effort(cfg)),
+        Wire::Gemini => ("EMBRA_GEMINI_EFFORT", cfg.gemini_effort.as_deref()),
+        Wire::OpenAiCompat(preset) => (preset.effort_env_var(), cfg.openai_compat.effort_for_preset(preset)),
     };
     let env_override = std::env::var(env_name).ok();
     resolve_optional_effort_inner(env_override.as_deref(), cfg_field)
@@ -1825,12 +1810,10 @@ pub(super) fn resolve_optional_effort_inner(env: Option<&str>, cfg_field: Option
 /// Persist an effort level (or clear it) into the active provider's field;
 /// on Ollama and LM Studio, the active model's (`OpenAiCompatConfig::set_effort`).
 pub(super) fn set_effort_field(cfg: &mut config::SystemConfig, kind: ProviderKind, level: Option<String>) {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-    match kind {
-        ProviderKind::Anthropic => cfg.anthropic_effort = level,
-        ProviderKind::Gemini => cfg.gemini_effort = level,
-        ProviderKind::Ollama => cfg.openai_compat.set_effort(OpenAiCompatPreset::Ollama, level),
-        ProviderKind::LmStudio => cfg.openai_compat.set_effort(OpenAiCompatPreset::LmStudio, level),
+    match kind.wire() {
+        Wire::Anthropic => cfg.anthropic_effort = level,
+        Wire::Gemini => cfg.gemini_effort = level,
+        Wire::OpenAiCompat(preset) => cfg.openai_compat.set_effort(preset, level),
     }
 }
 
@@ -2055,7 +2038,7 @@ pub(super) async fn handle_local_model_command(
         let (endpoint, model) = cfg.openai_compat.fields(preset);
         (endpoint.to_string(), non_empty(model))
     };
-    let bearer = std::env::var(bearer_env_var(preset)).ok().filter(|s| !s.is_empty());
+    let bearer = crate::provider::openai_compat::bearer_from_env(preset);
     // The list comes from where the next turn goes: the stored endpoint, or
     // the provider gateway's prefixed base while it is on. The stored
     // endpoint itself, blank for a preset set up through the gateway, is
@@ -2166,12 +2149,7 @@ pub(super) fn local_model_set_message(
     preset: crate::provider::openai_compat::OpenAiCompatPreset,
     model: &str,
 ) -> String {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-    let kind = match preset {
-        OpenAiCompatPreset::Ollama => ProviderKind::Ollama,
-        OpenAiCompatPreset::LmStudio => ProviderKind::LmStudio,
-    };
-    let effort = match resolve_provider_effort(kind, cfg) {
+    let effort = match resolve_provider_effort(preset.as_kind(), cfg) {
         Some(level) => format!("{level}, set with /effort for this model"),
         None => format!("not set — {}", automatic_effort_phrase(model)),
     };

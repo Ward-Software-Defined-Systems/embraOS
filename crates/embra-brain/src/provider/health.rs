@@ -289,7 +289,7 @@ async fn probe_model_url(t: &ProbeTarget, url: &str, endpoint_label: &str) -> Pr
             .header("x-api-key", &t.key)
             .header("anthropic-version", ANTHROPIC_API_VERSION),
         ProviderKind::Gemini => req.header("x-goog-api-key", &t.key),
-        ProviderKind::Ollama | ProviderKind::LmStudio => req,
+        ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => req,
     };
     let started = Instant::now();
     match req.send().await {

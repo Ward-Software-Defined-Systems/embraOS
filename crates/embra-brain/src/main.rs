@@ -152,8 +152,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(provider::openai_compat::OpenAiCompatPreset::of);
     if api_key.is_empty() {
         if let Some(preset) = preset {
-            let bearer_env = provider::openai_compat::bearer_env_var(preset);
-            let bearer_present = std::env::var(bearer_env).map(|s| !s.is_empty()).unwrap_or(false);
+            let bearer_present = provider::openai_compat::bearer_from_env(preset).is_some();
             info!(
                 "OpenAI-compat provider '{}' configured (bearer {})",
                 active_provider,

@@ -35,6 +35,9 @@ pub enum ProviderKind {
     Gemini,
     Ollama,
     LmStudio,
+    /// A model that runs on this machine (experimental): the model server
+    /// embrad keeps on loopback (`embra_boot::native_model`).
+    Native,
 }
 
 impl ProviderKind {
@@ -44,6 +47,7 @@ impl ProviderKind {
             ProviderKind::Gemini => "gemini",
             ProviderKind::Ollama => "ollama",
             ProviderKind::LmStudio => "lm_studio",
+            ProviderKind::Native => "native",
         }
     }
 
@@ -53,6 +57,7 @@ impl ProviderKind {
             "gemini" => Some(Self::Gemini),
             "ollama" => Some(Self::Ollama),
             "lm_studio" => Some(Self::LmStudio),
+            "native" => Some(Self::Native),
             _ => None,
         }
     }
@@ -64,12 +69,18 @@ impl ProviderKind {
             ProviderKind::Gemini => "Gemini",
             ProviderKind::Ollama => "Ollama",
             ProviderKind::LmStudio => "LM Studio",
+            ProviderKind::Native => "Native (experimental)",
         }
     }
 
     /// Every provider, in the order the lists name them.
-    pub const ALL: [ProviderKind; 4] =
-        [ProviderKind::Anthropic, ProviderKind::Gemini, ProviderKind::Ollama, ProviderKind::LmStudio];
+    pub const ALL: [ProviderKind; 5] = [
+        ProviderKind::Anthropic,
+        ProviderKind::Gemini,
+        ProviderKind::Ollama,
+        ProviderKind::LmStudio,
+        ProviderKind::Native,
+    ];
 
     /// The wire this provider speaks. Every place that treats the providers
     /// by family matches on this and on nothing else (no wildcard arm, no
@@ -82,11 +93,12 @@ impl ProviderKind {
             ProviderKind::Gemini => Wire::Gemini,
             ProviderKind::Ollama => Wire::OpenAiCompat(openai_compat::OpenAiCompatPreset::Ollama),
             ProviderKind::LmStudio => Wire::OpenAiCompat(openai_compat::OpenAiCompatPreset::LmStudio),
+            ProviderKind::Native => Wire::OpenAiCompat(openai_compat::OpenAiCompatPreset::Native),
         }
     }
 
     /// The stored names as the end of a sentence: `'anthropic', 'gemini',
-    /// 'ollama', or 'lm_studio'`.
+    /// 'ollama', 'lm_studio', or 'native'`.
     pub fn named_list() -> String {
         let names: Vec<String> = Self::ALL.iter().map(|k| format!("'{}'", k.as_str())).collect();
         match names.split_last() {
@@ -293,8 +305,9 @@ mod tests {
             ProviderKind::Gemini => 1,
             ProviderKind::Ollama => 2,
             ProviderKind::LmStudio => 3,
+            ProviderKind::Native => 4,
         };
-        assert_eq!(ProviderKind::ALL.len(), 4, "as many as the match above has arms");
+        assert_eq!(ProviderKind::ALL.len(), 5, "as many as the match above has arms");
         let (mut names, mut labels) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
         for (at, kind) in ProviderKind::ALL.into_iter().enumerate() {
             assert_eq!(place(kind), at, "{kind:?}");
@@ -321,7 +334,26 @@ mod tests {
     /// The sentence a mistyped provider gets ends with this list.
     #[test]
     fn the_named_list_is_the_stored_names_in_order() {
-        assert_eq!(ProviderKind::named_list(), "'anthropic', 'gemini', 'ollama', or 'lm_studio'");
+        assert_eq!(ProviderKind::named_list(), "'anthropic', 'gemini', 'ollama', 'lm_studio', or 'native'");
+        // A native model is a preset, by its own stored name and label.
+        assert_eq!(ProviderKind::from_str("native"), Some(ProviderKind::Native));
+        assert_eq!(ProviderKind::Native.wire(), Wire::OpenAiCompat(OpenAiCompatPreset::Native));
+        assert_eq!(ProviderKind::Native.label(), "Native (experimental)");
+    }
+
+    /// embrad starts the brain with the stored provider's key, and with
+    /// none for a provider that has none: its list of those is the presets'
+    /// stored names. A preset missing from it is started with Anthropic's
+    /// key in its arguments.
+    #[test]
+    fn embrads_keyless_providers_are_the_presets() {
+        let supervisor = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../embrad/src/supervisor.rs");
+        let supervisor = std::fs::read_to_string(supervisor).expect("embrad's supervisor");
+        let line = supervisor.lines().find(|l| l.contains("const KEYLESS_PROVIDERS")).expect("embrad's list");
+        let listed: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+        let presets: Vec<&str> = OpenAiCompatPreset::ALL.iter().map(|preset| preset.as_kind().as_str()).collect();
+        assert_eq!(listed, presets, "{line}");
+        assert_eq!(presets, ["ollama", "lm_studio", "native"]);
     }
 
     fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {

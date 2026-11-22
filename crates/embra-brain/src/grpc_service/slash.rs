@@ -2054,7 +2054,7 @@ pub(super) async fn handle_effort_command(
                      `/effort reset` restores the default."
                 )
             }
-            ProviderKind::Ollama | ProviderKind::LmStudio => {
+            ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => {
                 // The level is the active model's: each model keeps its own.
                 let level = resolve_provider_effort(kind, &cfg);
                 let sent = match (&level, &local_model) {
@@ -2144,7 +2144,7 @@ pub(super) async fn handle_effort_command(
             )
             .await;
         }
-        ProviderKind::Ollama | ProviderKind::LmStudio => {
+        ProviderKind::Ollama | ProviderKind::LmStudio | ProviderKind::Native => {
             let whose = local_model
                 .as_deref()
                 .map(|m| format!(" for {m}"))

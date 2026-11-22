@@ -223,7 +223,9 @@ async fn probe_and_select(
             if gateway.is_some() {
                 SubflowError::ProbeThroughGatewayFailed {
                     base: probe_base.clone(),
-                    prefix: gateway_rules::prefix(preset.as_kind()),
+                    // Every preset this sub-flow sets up has a prefix; a
+                    // native model has none and never comes this way.
+                    prefix: gateway_rules::prefix(preset.as_kind()).unwrap_or_default(),
                     reason: e.to_string(),
                 }
             } else {
@@ -435,6 +437,8 @@ pub fn normalize_endpoint(input: &str, preset: OpenAiCompatPreset) -> String {
     let default_port = match preset {
         OpenAiCompatPreset::Ollama => "11434",
         OpenAiCompatPreset::LmStudio => "1234",
+        // Never typed: a native model's endpoint is the model server's own.
+        OpenAiCompatPreset::Native => "8091",
     };
 
     // IPv6 bracketed host (e.g. `[::1]`) — only treat ':' after the
