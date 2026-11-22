@@ -35,32 +35,32 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `vmware/embraos.vmdk` | | Fusion and VirtualBox; the aarch64 VMDK |
 | `hyper-v/embraos.vhdx` | Hyper-V | the aarch64 VHDX |
 | `parallels/embraos.vmx` with its VMDK | Parallels | Parallels on Apple Silicon |
-| A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early. The laptop: the installed disk boots from its SATA SSD, with its own panel, keyboard and pointer, and a lease on its wired port and over Wi-Fi. The stick: the installed disk boots from its eMMC, with the display on HDMI, a keyboard and a mouse, and a lease over Wi-Fi. The Beelink: the installed disk boots from its NVMe SSD, with the display on HDMI. The Pi: the installed card boots through its UEFI firmware, with the display on HDMI, a keyboard and a mouse, a lease over Wi-Fi on its USB adapter, and a session; under that firmware the board's own Ethernet port and Wi-Fi card do not come up, and its fan does not run | every other machine |
-| A core that is awake runs at the top of its frequency range (the `performance` governor and policy; before, a CPU without hardware P-states stayed at its lowest frequency) | Bare metal, a CPU with hardware P-states: every core's policy reads `performance`, and its energy preference with it. The stick, a CPU without them: every core's governor reads `performance` and its frequency 2.4 GHz, where it read 0.8 GHz, and the machine is fast again | |
+| A machine that is not a VM | Bare metal: the installed disk boots from eMMC, with the display on HDMI, a USB keyboard, a DHCP lease on the onboard port, and the CPU's microcode updated early. The laptop: the installed disk boots from its SATA SSD, with its own panel, keyboard and pointer, and a lease on its wired port and over Wi-Fi. The stick: the installed disk boots from its eMMC, with the display on HDMI, a keyboard and a mouse, and a lease over Wi-Fi. The Beelink: the installed disk boots from its NVMe SSD, with the display on HDMI, a keyboard and a mouse, and a lease on its wired port and over Wi-Fi at the same time. The Pi: the installed card boots through its UEFI firmware, with the display on HDMI, a keyboard and a mouse, a lease over Wi-Fi on its USB adapter, and a session; under that firmware the board's own Ethernet port and Wi-Fi card do not come up, and its fan does not run | every other machine |
+| A core that is awake runs at the top of its frequency range (the `performance` governor and policy; before, a CPU without hardware P-states stayed at its lowest frequency) | Bare metal, a CPU with hardware P-states: every core's policy reads `performance`, and its energy preference with it. The stick, a CPU without them: every core's governor reads `performance` and its frequency 2.4 GHz, where it read 0.8 GHz, and the machine is fast again. The laptop, another CPU without them: the governor reads `performance` and the frequency 2.9 GHz of its 3.0. The Beelink, an AMD CPU under AMD's own driver: the policy reads `performance`, and its energy preference with it | |
 | An Intel CPU's idle states come through Intel's idle driver: the kernel's own for a model the driver has a table for, the firmware's for any other (before, the firmware's on every machine) | The stick and the laptop, models the driver has a table for: the idle driver reads `intel_idle`, with the kernel's states for the model (eight on the stick, where it read `acpi_idle` and four; nine on the laptop). Bare metal, a model it has no table for: the idle driver reads `intel_idle`, with the states its firmware declares | |
 | aarch64: a machine the Raspberry Pi's frequency driver or ACPI's CPPC driver serves has a frequency policy (both are built in; before, modules that nothing loaded) | | A Raspberry Pi started with a device tree, or an Arm machine whose ACPI tables declare `_CPC`: a policy exists and reads `performance` |
 | An AMD machine's graphics are driven by the kernel's own driver (`amdgpu`, its firmware in the boot archive; before, the firmware's framebuffer alone) | The Beelink: the driver bound with its firmware loaded, a picture after boot, and the display console in its 1920x1080 mode at 60 Hz on HDMI (into a video switcher) | `nomodeset` back on the firmware's framebuffer |
 | A Radeon from before `amdgpu` is driven by the kernel's `radeon` driver (its firmware in the boot archive; before, no driver took such a card) | The laptop, on its second card: the driver bound, with the card's firmware loaded | A machine with the display on such a card: a picture after boot and the display console in its mode |
 | A laptop's second graphics card that drives no display is powered off by its driver (the kernel's `VGA_SWITCHEROO`; before, the `radeon` driver left such a card running) | The laptop, whose second card the `radeon` driver has: the kernel finds the firmware's switching method, the card's runtime status reads `suspended`, and the display console is on the panel | a laptop whose second card is `amdgpu`'s |
-| `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it) | a machine that cannot power itself off; aarch64 |
+| `/reboot halt`: the services stopped, STATE and DATA unmounted, the machine powered off; `/reboot now` unmounts both as well | QEMU; bare metal (the power-off, and the boot after it); the Pi (aarch64) | a machine that cannot power itself off |
 
 ## The installer (`embraos.iso`)
 
 | What | Validated on | TBD |
 |---|---|---|
-| A clean install | QEMU (a DVD onto a virtio disk, a USB stick onto an AHCI disk); ESXi (the installed disk also boots behind the LSI Logic SAS and Parallel controllers); Hyper-V; Parallels; bare metal (a USB stick onto the eMMC, the prompts answered at the display) | a disk with 4096-byte sectors |
+| A clean install | QEMU (a DVD onto a virtio disk, a USB stick onto an AHCI disk); ESXi (the installed disk also boots behind the LSI Logic SAS and Parallel controllers); Hyper-V; Parallels; bare metal (a USB stick onto the eMMC, the prompts answered at the display); the Beelink (a USB stick onto its NVMe disk) | a disk with 4096-byte sectors |
 | The aarch64 medium | QEMU on Apple Silicon (a DVD onto virtio-blk and virtio-scsi disks, a USB stick onto an NVMe disk); Fusion; Parallels on Apple Silicon | every other Arm hypervisor |
 | An unattended install | QEMU; QEMU on Apple Silicon | |
 | A second install over an installed disk | QEMU | |
 | A stick that attaches as UAS | QEMU, from the medium's kernel on (OVMF reads no such stick) | a UAS stick booted by a machine's firmware |
-| The upgrade in place | QEMU (at the prompt and unattended, into either slot; the trial boot, its snapshot and the confirmation; the slot before it booted again after three failed tries); bare metal; the stick (from a USB stick, a medium built on an Intel Mac) | |
+| The upgrade in place | QEMU (at the prompt and unattended, into either slot; the trial boot, its snapshot and the confirmation; the slot before it booted again after three failed tries); bare metal; the stick (from a USB stick, a medium built on an Intel Mac); the laptop and the Beelink (from a USB stick) | |
 | A medium of the other storage engine is refused | Bare metal | |
 
 ## The display console
 
 | What | Validated on | TBD |
 |---|---|---|
-| The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; Parallels; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the stick (HDMI: the page, a keyboard, a mouse and the 1920x1080 mode); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click); the Pi (HDMI: the page, a keyboard, a mouse and a click); the Beelink (HDMI, into a video switcher: the page and the 1920x1080 mode) | |
+| The page, the keyboard, the pointer, a click and the 1920x1080 mode | QEMU (standard VGA and virtio-gpu); ESXi; Hyper-V; Parallels; QEMU on an Intel Mac and on Apple Silicon (virtio-gpu); bare metal (HDMI); the stick (HDMI: the page, a keyboard, a mouse and the 1920x1080 mode); the laptop and Parallels on Apple Silicon (the page, the keyboard, the pointer and a click); the Pi (HDMI: the page, a keyboard, a mouse and a click); the Beelink (HDMI, into a video switcher: the page, a keyboard, a mouse and the 1920x1080 mode) | |
 | A key held down: a letter repeats, and a modifier is released with its key | QEMU (standard VGA); bare metal (a held modifier) | |
 | A firmware framebuffer (`ramfb`): 800x600, and 1024x768 on request | QEMU; QEMU on Apple Silicon | |
 | More than one graphics card: the page on the card that has a display connected | QEMU (the firmware's framebuffer beside a virtio-gpu card, each in turn without a display); the laptop (a second card with a driver and without a display: the page on the panel) | |
@@ -73,7 +73,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A DHCP lease on every card: one card, several, a USB card, a card or a link that comes late, no card | QEMU; bare metal (the onboard port); the laptop (its wired port) | on a machine: a USB Ethernet adapter, and a cable plugged in after the boot |
+| A DHCP lease on every card: one card, several, a USB card, a card or a link that comes late, no card | QEMU; bare metal (the onboard port); the laptop (its wired port); the Beelink (its wired port and its Wi-Fi card, each with a lease at the same time) | on a machine: a USB Ethernet adapter, and a cable plugged in after the boot |
 | `/network static` on a network without DHCP | QEMU; bare metal; the laptop (an address of its own on a card) | |
 | `/network hostname` | QEMU | the name in a router's list |
 | The web console's certificate and its CA | QEMU, with curl as the client: by address and by name, a name set with `/network hostname`, an address that changes, the CA of an earlier release issued again once | a browser with the CA imported; a name a DNS server serves |
@@ -84,8 +84,8 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot); the stick (a join with its lease, the join at the next boot); the Pi (a join with its lease) | |
-| A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan; the laptop: its built-in Intel Wireless-AC 7265 (`iwlwifi`); the stick: its built-in Intel Dual Band Wireless-AC 3165 (`iwlwifi`); the Pi: its USB adapter (`rt2800usb`) | on a machine, a USB adapter that arrives as a driver disk, which embrad itself switches; every other card family; `EMBRA_USB_HOST` on a Mac |
+| A scan, a join, a wrong passphrase, the join at the next boot, `embra.wifi=0` | QEMU, on the kernel's simulated radios with a stand-in access point; the laptop (a scan, a join with its lease, the join at the next boot); the stick (a join with its lease, the join at the next boot); the Pi (a join with its lease); the Beelink (a join with its lease) | |
+| A real card | QEMU: one USB adapter (Realtek RTL8852AU) handed to the VM with `EMBRA_USB_HOST`, as far as a scan; the laptop: its built-in Intel Wireless-AC 7265 (`iwlwifi`); the stick: its built-in Intel Dual Band Wireless-AC 3165 (`iwlwifi`); the Pi: its USB adapter (`rt2800usb`); the Beelink: its built-in Intel Wi-Fi 6 AX200 (`iwlwifi`) | on a machine, a USB adapter that arrives as a driver disk, which embrad itself switches; every other card family; `EMBRA_USB_HOST` on a Mac |
 
 ## The clock
 
@@ -111,7 +111,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | What | Validated on | TBD |
 |---|---|---|
 | Snapshots and restores: `/backup`, and the boot menu's Backup and restore | QEMU; the stick | |
-| A backup uploaded through the web console and restored | QEMU; bare metal; the stick (a backup taken on bare metal); the Pi (a backup taken on an x86_64 machine); one instance carried this way between bare metal, the stick and the Pi | |
+| A backup uploaded through the web console and restored | QEMU; bare metal; the stick (a backup taken on bare metal); the Pi (a backup taken on an x86_64 machine); one instance carried this way between bare metal, the stick, the Pi and the Beelink | |
 | `/backup` and `/reboot` before a session | QEMU (at the wizard and in Learning Mode); bare metal (at the wizard) | Learning Mode on bare metal |
 | `embraos-backup.sh` across image rebuilds, and its Mac wrapper | QEMU; QEMU on Apple Silicon | |
 | `embraos-backup.sh`: the web console's access token and the saved clock left out of a backup, and the image's own kept at a restore | the script's `self-test`, on scratch directories | a backup and a restore of an image |
@@ -180,7 +180,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | The x86_64 image | Ubuntu 24.04 and 26.04, the reference build; an Intel Mac, with Buildroot in Docker (with the wireless drivers in the image: its installer medium upgraded the stick, which joined its Wi-Fi network) | |
 | The aarch64 image | Apple Silicon, with Buildroot in Docker: both storage engines | |
 | The launchers under the bash 3.2 that macOS ships | An Intel Mac; Apple Silicon | |
-| A build leaves none of its host's directories in the programs, in the web console's bundle or in the root filesystem, and the kernel's banner names the image | Ubuntu 24.04: an image build with both read-backs, its slot image unpacked and searched, and the image booted under QEMU | a build on a Mac (the host pass under bash 3.2 with the BSD tools) |
+| A build leaves none of its host's directories in the programs, in the web console's bundle or in the root filesystem, and the kernel's banner names the image | Ubuntu 24.04: an image build with both read-backs, its slot image unpacked and searched, and the image booted under QEMU. A Mac: the aarch64 image built with the same checks, and booted on the Pi | |
 | `seed-state-mac.sh --update-key` | | on a Mac |
 
 Which models have been vetted with each provider is in [LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md](LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md).
