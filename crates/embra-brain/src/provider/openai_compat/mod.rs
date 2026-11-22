@@ -18,6 +18,7 @@
 //!   assembly and defensive multi-key reasoning accumulator.
 
 pub mod conv;
+pub(crate) mod native;
 pub mod sanitize;
 pub mod streaming;
 pub mod tool_schema;
@@ -31,7 +32,7 @@ use futures::stream::BoxStream;
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::provider::{
     ApiMessage, LlmProvider, LlmRequestOptions, ProviderError, ProviderKind, StreamEvent,
@@ -275,11 +276,20 @@ impl OpenAICompatProvider {
         body: &OpenAIChatRequest,
     ) -> Result<reqwest::Response, ProviderError> {
         let attempt = self.post_once(url, body).await;
-        if should_retry(&attempt) {
-            tokio::time::sleep(RETRY_DELAY).await;
-            return self.post_once(url, body).await;
+        match self.preset {
+            // A native model's server answers 503 while it reads the model's
+            // file: the request waits for it (`native::until_loaded`).
+            OpenAiCompatPreset::Native => native::until_loaded(self.model_wait, attempt, || self.post_once(url, body))
+                .await
+                .map_err(native::in_the_brains_words),
+            OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio => {
+                if should_retry(&attempt) {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                    return self.post_once(url, body).await;
+                }
+                attempt
+            }
         }
-        attempt
     }
 
     async fn post_once(
@@ -463,9 +473,15 @@ pub(crate) fn known_effort_ladder(model_id: &str) -> Option<&'static [&'static s
 /// second; everything else is said as it is. A request that got through
 /// and was lost is not sent again: the server may be working on it.
 fn should_retry(attempt: &Result<reqwest::Response, ProviderError>) -> bool {
-    match attempt {
-        Err(ProviderError::Http { status, .. }) => (500..600).contains(status),
-        Err(ProviderError::Connect(_)) => true,
+    matches!(attempt, Err(e) if retriable(e))
+}
+
+/// The failures a request is sent once more after: a server that could not
+/// be reached, and a 5xx answer.
+fn retriable(e: &ProviderError) -> bool {
+    match e {
+        ProviderError::Http { status, .. } => (500..600).contains(status),
+        ProviderError::Connect(_) => true,
         _ => false,
     }
 }
@@ -523,7 +539,11 @@ impl LlmProvider for OpenAICompatProvider {
         }];
         let body_messages = conv::ir_messages_to_wire(messages)
             .map_err(|e| ProviderError::Decode(e.to_string()))?;
-        wire_messages.extend(body_messages);
+        let native = match self.preset {
+            OpenAiCompatPreset::Native => true,
+            OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio => false,
+        };
+        wire_messages.extend(if native { native::messages(body_messages) } else { body_messages });
 
         // Tool manifest → Vec<OpenAITool>. Empty manifest → omit tools.
         let tools_vec: Vec<OpenAITool> = match &tools.wire_json {
@@ -533,7 +553,7 @@ impl LlmProvider for OpenAICompatProvider {
         };
         let has_tools = !tools_vec.is_empty();
 
-        let body = OpenAIChatRequest {
+        let mut body = OpenAIChatRequest {
             model: self.model_id.clone(),
             messages: wire_messages,
             // Always a stream: there is no code that reads a whole response.
@@ -565,7 +585,14 @@ impl LlmProvider for OpenAICompatProvider {
                 .clone()
                 .or_else(|| reasoning_effort_for_model(&self.model_id).map(String::from)),
             max_tokens: None,
+            chat_template_kwargs: None,
+            sampling: None,
         };
+        if native {
+            // Thinking switched on every request, the model card's sampling
+            // for it, and no `reasoning_effort` (`native.rs`).
+            native::shape(&mut body, native::thinks(self.reasoning_effort_override.as_deref()));
+        }
 
         let response = self.post_with_retry(&url, &body).await?;
 
@@ -574,20 +601,41 @@ impl LlmProvider for OpenAICompatProvider {
         let (tx, rx) = mpsc::channel::<StreamEvent>(256);
         let model_id = self.model_id.clone();
         let model_wait = self.model_wait;
+        let provider = self.preset.as_kind().as_str();
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = streaming::process_sse_stream(
+            match streaming::process_sse_stream(
                 response,
                 tx_clone.clone(),
-                model_id,
+                model_id.clone(),
                 options.include_reasoning,
                 model_wait,
             )
             .await
             {
-                let said = crate::provider::sse::stream_failure_text(&e);
-                error!(target: "provider::openai_compat", "SSE stream error: {said}");
-                let _ = tx_clone.send(StreamEvent::Error(said)).await;
+                // One line per model call, when the server says what the call
+                // cost (llama.cpp's does, which runs the native models): how
+                // much of the prompt its cache served, what it read and what
+                // it wrote, and how fast. `system_logs` reads it.
+                Ok(Some(timings)) => info!(
+                    target: "openai_compat::timings",
+                    provider,
+                    model = %model_id,
+                    cached_tokens = timings.cached_tokens,
+                    prompt_tokens = timings.prompt_tokens,
+                    prompt_ms = timings.prompt_ms,
+                    prompt_tokens_per_second = timings.prompt_tokens_per_second,
+                    output_tokens = timings.output_tokens,
+                    output_ms = timings.output_ms,
+                    output_tokens_per_second = timings.output_tokens_per_second,
+                    "the model server's timings of the call"
+                ),
+                Ok(None) => {}
+                Err(e) => {
+                    let said = crate::provider::sse::stream_failure_text(&e);
+                    error!(target: "provider::openai_compat", "SSE stream error: {said}");
+                    let _ = tx_clone.send(StreamEvent::Error(said)).await;
+                }
             }
         });
 
@@ -1552,6 +1600,86 @@ mod tests {
         );
     }
 
+    /// A native model's request as its server gets it: thinking switched,
+    /// the model card's sampling, no `reasoning_effort`, an earlier step's
+    /// reasoning as `reasoning_content`, an image as a line of text. The
+    /// same turn to LM Studio is the request it always was.
+    #[tokio::test]
+    async fn a_native_models_request_is_the_presets_with_its_own_five_differences() {
+        let server = MockServer::start().await;
+        let body = sse_body(&[
+            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}],"timings":{"cache_n":23398,"prompt_n":4,"prompt_per_second":8.4,"predicted_n":13,"predicted_per_second":4.5}}"#,
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body).insert_header("content-type", "text/event-stream"))
+            .mount(&server)
+            .await;
+        let manifest = ToolManifest {
+            wire_json: json!([{"type": "function", "function": {"name": "time", "description": "x", "parameters": {"type":"object","properties":{}}}}]),
+        };
+        let image = crate::provider::ir::ImageData {
+            media_type: "image/png".into(),
+            data_b64: "AAAA".into(),
+            width: 1,
+            height: 1,
+            name: "shot.png".into(),
+        };
+        let turn = [
+            ApiMessage::User { content: vec![Block::Image(image), Block::Text("what time is it?".into())] },
+            ApiMessage::Assistant {
+                content: vec![
+                    conv::reasoning_block("I need the time tool."),
+                    Block::ToolCall { id: "c1".into(), name: "time".into(), args: json!({}), provider_opaque: None },
+                ],
+            },
+            ApiMessage::User { content: vec![Block::ToolResult { call_id: "c1".into(), content: "12:34".into(), is_error: false, images: Vec::new() }] },
+        ];
+        let sent = |n: usize, requests: &[wiremock::Request]| -> JsonValue { serde_json::from_slice(&requests[n].body).unwrap() };
+
+        // Thinking is on unless the operator's level is `low`.
+        let native = OpenAICompatProvider::new(OpenAiCompatPreset::Native, server.uri(), None, "qwen3.5-4b".to_string());
+        let events = collect_events(native.stream_turn(&turn, &system_bundle(), &manifest, LlmRequestOptions { include_reasoning: true }).await.unwrap()).await;
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::ReasoningDelta(r) if r == "thinking")), "its reasoning is read: {events:?}");
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Complete(_))), "a chunk with timings is a chunk: {events:?}");
+        let direct = OpenAICompatProvider::new(OpenAiCompatPreset::Native, server.uri(), None, "qwen3.5-4b".to_string())
+            .with_reasoning_effort(Some("low".to_string()));
+        let _ = direct.stream_turn(&turn, &system_bundle(), &manifest, LlmRequestOptions::default()).await.unwrap();
+        let studio = OpenAICompatProvider::lm_studio(server.uri(), None, "qwen3.5-4b".to_string()).with_reasoning_effort(Some("low".to_string()));
+        let _ = studio.stream_turn(&turn, &system_bundle(), &manifest, LlmRequestOptions::default()).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let (thinking, direct, studio) = (sent(0, &requests), sent(1, &requests), sent(2, &requests));
+        assert_eq!(thinking["chat_template_kwargs"], json!({"enable_thinking": true}));
+        assert_eq!((thinking["temperature"].as_f64(), thinking["top_p"].as_f64(), thinking["top_k"].as_u64()), (Some(1.0), Some(0.95), Some(20)));
+        assert_eq!(direct["chat_template_kwargs"], json!({"enable_thinking": false}));
+        assert_eq!((direct["temperature"].as_f64(), direct["top_p"].as_f64(), direct["presence_penalty"].as_f64()), (Some(0.7), Some(0.8), Some(1.5)));
+        for native in [&thinking, &direct] {
+            assert!(native.get("reasoning_effort").is_none(), "no levels: {native}");
+            assert_eq!(native["model"], "qwen3.5-4b");
+            assert_eq!(native["tool_choice"], json!("auto"));
+            assert_eq!(native["stream"], json!(true));
+            let messages = native["messages"].as_array().unwrap();
+            assert_eq!(messages[1]["content"], format!("{}\nwhat time is it?", native::IMAGE_LINE), "the image is a line of text");
+            assert_eq!(messages[2]["reasoning_content"], "I need the time tool.");
+            assert!(messages[2].get("reasoning").is_none());
+            assert_eq!(messages[3]["role"], "tool");
+            assert!(!native.to_string().contains("base64"), "no image leaves");
+        }
+        // LM Studio's request for the same turn: its level as typed, the
+        // reasoning under the name it always had, the image as an image,
+        // and none of a native model's fields.
+        assert_eq!(studio["reasoning_effort"], "low");
+        let messages = studio["messages"].as_array().unwrap();
+        assert_eq!(messages[2]["reasoning"], "I need the time tool.");
+        assert!(messages[2].get("reasoning_content").is_none());
+        assert_eq!(messages[1]["content"][0]["type"], "image_url");
+        for field in ["chat_template_kwargs", "temperature", "top_p", "top_k", "min_p", "presence_penalty"] {
+            assert!(studio.get(field).is_none(), "{field}: {studio}");
+        }
+    }
+
     #[tokio::test]
     async fn stream_turn_sends_tool_choice_as_string_not_object() {
         // LM Studio rejects `tool_choice: {"type":"auto"}` with
@@ -2036,6 +2164,8 @@ mod tests {
             tool_choice: None,
             reasoning_effort: None,
             max_tokens: None,
+            chat_template_kwargs: None,
+            sampling: None,
         }
     }
 

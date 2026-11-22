@@ -91,9 +91,10 @@ pub enum OpenAIMessage {
         /// serialize when round-tripping reasoning blocks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
-        /// LM Studio newer-default alias. Deserialized for
-        /// compatibility but never emitted on serialize (we always
-        /// send the cookbook-recommended `reasoning` name).
+        /// LM Studio newer-default alias, and the one name llama.cpp's
+        /// server reads. Deserialized for compatibility; sent to a native
+        /// model alone (`native::messages`), every other preset gets the
+        /// cookbook-recommended `reasoning`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
     },
@@ -155,6 +156,26 @@ pub struct OpenAIChatRequest {
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// A native model's switch for thinking, `{"enable_thinking": <bool>}`,
+    /// on every request to one: the server's own default is on. No other
+    /// preset sends it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<JsonValue>,
+    /// The model card's sampling for that thinking state, a native model's
+    /// alone; its fields are the request's own.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<Sampling>,
+}
+
+/// The sampling a request names (`native::SAMPLING_THINKING`,
+/// `native::SAMPLING_DIRECT`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Sampling {
+    pub temperature: f64,
+    pub top_p: f64,
+    pub top_k: u32,
+    pub min_p: f64,
+    pub presence_penalty: f64,
 }
 
 // ============================================================
@@ -176,6 +197,45 @@ pub struct OpenAIChatChunk {
     /// is read before this parse and fails the call
     /// (`sse::in_stream_error`); it never reaches here.
     pub choices: Vec<OpenAIChoiceDelta>,
+    /// What the call cost, as llama.cpp's server says it in the chunk that
+    /// carries the finish reason; the other servers send none. Kept as raw
+    /// JSON and read by `Timings::from_json`: a typed field of another
+    /// shape would fail the parse of the very chunk that ends the turn.
+    #[serde(default)]
+    pub timings: Option<JsonValue>,
+}
+
+/// llama.cpp's `timings`: the tokens its server took from its cache
+/// (`cache_n`), the ones it read (`prompt_n`) and the ones it wrote
+/// (`predicted_n`), with the time and the speed of each.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Timings {
+    pub cached_tokens: Option<u64>,
+    pub prompt_tokens: Option<u64>,
+    pub prompt_ms: Option<f64>,
+    pub prompt_tokens_per_second: Option<f64>,
+    pub output_tokens: Option<u64>,
+    pub output_ms: Option<f64>,
+    pub output_tokens_per_second: Option<f64>,
+}
+
+impl Timings {
+    /// Read the block; `None` when it is not an object. A figure that is
+    /// missing, or of another type, is `None` and costs nothing else.
+    pub fn from_json(value: &JsonValue) -> Option<Self> {
+        let fields = value.as_object()?;
+        let count = |key: &str| fields.get(key).and_then(JsonValue::as_u64);
+        let figure = |key: &str| fields.get(key).and_then(JsonValue::as_f64);
+        Some(Self {
+            cached_tokens: count("cache_n"),
+            prompt_tokens: count("prompt_n"),
+            prompt_ms: figure("prompt_ms"),
+            prompt_tokens_per_second: figure("prompt_per_second"),
+            output_tokens: count("predicted_n"),
+            output_ms: figure("predicted_ms"),
+            output_tokens_per_second: figure("predicted_per_second"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -421,6 +481,60 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    /// The frame that ends a native model's answer, as its server sent it
+    /// (llama.cpp 1.0.0): the finish reason and the timings together.
+    #[test]
+    fn the_timings_are_read_from_the_frame_that_carries_the_finish_reason() {
+        let chunk: OpenAIChatChunk = serde_json::from_value(json!({
+            "choices": [{"finish_reason": "stop", "index": 0, "delta": {}}],
+            "created": 1795000000u64, "id": "chatcmpl-x", "model": "qwen3.5-4b",
+            "system_fingerprint": "b1-0000000", "object": "chat.completion.chunk",
+            "timings": {"cache_n": 0, "prompt_n": 15, "prompt_ms": 330.815, "prompt_per_token_ms": 22.054333333333332,
+                        "prompt_per_second": 45.34256306394813, "predicted_n": 11, "predicted_ms": 1144.662,
+                        "predicted_per_token_ms": 114.4662, "predicted_per_second": 8.736203350858156}
+        }))
+        .unwrap();
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
+        let timings = Timings::from_json(chunk.timings.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            timings,
+            Timings {
+                cached_tokens: Some(0),
+                prompt_tokens: Some(15),
+                prompt_ms: Some(330.815),
+                prompt_tokens_per_second: Some(45.34256306394813),
+                output_tokens: Some(11),
+                output_ms: Some(1144.662),
+                output_tokens_per_second: Some(8.736203350858156),
+            }
+        );
+    }
+
+    /// A block of another shape costs the chunk nothing: the finish reason
+    /// in it is read, and the figures that cannot be read are none.
+    #[test]
+    fn a_timings_block_that_does_not_parse_costs_the_chunk_nothing() {
+        for (block, expected) in [
+            (json!("fast"), None),
+            (json!(null), None),
+            (json!([1, 2]), None),
+            (json!({}), Some(Timings::default())),
+            (
+                json!({"cache_n": "many", "prompt_n": -4, "prompt_per_second": null, "predicted_n": 7.5, "predicted_ms": "1 s", "more": {"a": 1}}),
+                Some(Timings::default()),
+            ),
+            (json!({"cache_n": 23398, "predicted_n": 13}), Some(Timings { cached_tokens: Some(23398), output_tokens: Some(13), ..Timings::default() })),
+        ] {
+            let chunk: OpenAIChatChunk =
+                serde_json::from_value(json!({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}], "timings": block})).expect("the chunk parses");
+            assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"), "{block}");
+            assert_eq!(chunk.timings.as_ref().and_then(Timings::from_json), expected, "{block}");
+        }
+        // No block at all, as every other server's chunks.
+        let chunk: OpenAIChatChunk = serde_json::from_value(json!({"choices": []})).unwrap();
+        assert!(chunk.timings.is_none());
     }
 
     #[test]

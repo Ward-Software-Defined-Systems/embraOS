@@ -51,6 +51,9 @@
 //!   fails with its message (`sse::in_stream_error`) and no `Complete`
 //!   follows. LM Studio answers a prompt over its context length this way,
 //!   inside an open 200 stream, and closes.
+//! - A chunk's `timings` (llama.cpp's server, which runs the native models,
+//!   sends one with the finish reason) ends nothing. The latest block read
+//!   is what `pump` returns, for the call's one line in the log.
 
 use std::collections::BTreeMap;
 
@@ -62,7 +65,7 @@ use tokio::sync::mpsc;
 use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
 use crate::provider::openai_compat::conv::reasoning_block;
 use crate::provider::openai_compat::sanitize::sanitize_harmony_tokens;
-use crate::provider::openai_compat::wire::OpenAIChatChunk;
+use crate::provider::openai_compat::wire::{OpenAIChatChunk, Timings};
 use crate::provider::sse::{LineBuffer, Next, in_stream_error, next_chunk};
 use crate::provider::StreamEvent;
 
@@ -73,14 +76,15 @@ use crate::provider::StreamEvent;
 /// `delta.reasoning` / `delta.reasoning_content` shards. The reasoning
 /// buffer is always assembled regardless (so the terminal
 /// `Block::ProviderOpaque` round-trip stays intact); only the live
-/// delta emission is gated.
+/// delta emission is gated. Returns the server's `timings` of the call,
+/// when the stream carried any.
 pub async fn process_sse_stream(
     response: reqwest::Response,
     tx: mpsc::Sender<StreamEvent>,
     model_id: String,
     include_reasoning: bool,
     wait: std::time::Duration,
-) -> Result<()> {
+) -> Result<Option<Timings>> {
     pump(response.bytes_stream(), tx, model_id, include_reasoning, wait).await
 }
 
@@ -99,7 +103,7 @@ async fn pump<S, B, E>(
     model_id: String,
     include_reasoning: bool,
     wait: std::time::Duration,
-) -> Result<()>
+) -> Result<Option<Timings>>
 where
     S: Stream<Item = std::result::Result<B, E>> + Unpin,
     B: AsRef<[u8]>,
@@ -120,13 +124,13 @@ where
                 // operator's stop). Returning drops the response, which
                 // closes the connection and stops the server's reply.
                 tracing::debug!(target: "provider::openai_compat::streaming", "receiver dropped; the parser ends");
-                return Ok(());
+                return Ok(state.timings.take());
             }
         };
         lines.push(chunk.as_ref());
         consume_sse_lines(&mut lines, &mut state, &tx).await?;
         if state.completed {
-            return Ok(());
+            return Ok(state.timings.take());
         }
         if state.receiver_gone {
             // Nobody is listening (consumer dropped the stream — e.g. an
@@ -138,14 +142,14 @@ where
                 target: "provider::openai_compat::streaming",
                 "receiver dropped mid-stream; aborting SSE pump"
             );
-            return Ok(());
+            return Ok(state.timings.take());
         }
     }
 
     if !state.completed {
         state.emit_complete(&tx).await;
     }
-    Ok(())
+    Ok(state.timings.take())
 }
 
 /// Drain the complete lines into the parser. A line without its `\n`
@@ -232,6 +236,8 @@ pub(super) struct ParserState {
     /// purpose. Without it, a body that just ends with no finish reason
     /// is a server that closed mid-reply (`StreamEnded`).
     pub(super) saw_done: bool,
+    /// The latest `timings` read; returned by `pump`.
+    pub(super) timings: Option<Timings>,
 }
 
 #[derive(Default, Debug)]
@@ -253,6 +259,7 @@ impl ParserState {
             include_reasoning,
             receiver_gone: false,
             saw_done: false,
+            timings: None,
         }
     }
 
@@ -270,6 +277,11 @@ impl ParserState {
         chunk: OpenAIChatChunk,
         tx: &mpsc::Sender<StreamEvent>,
     ) {
+        // Read before the choices: the block comes in the chunk that
+        // carries the finish reason, and that chunk ends the call.
+        if let Some(timings) = chunk.timings.as_ref().and_then(Timings::from_json) {
+            self.timings = Some(timings);
+        }
         for choice in chunk.choices {
             // Text content — emit live + accumulate.
             if let Some(content) = choice.delta.content
@@ -1097,6 +1109,50 @@ mod tests {
             panic!("expected Text");
         };
         assert_eq!(t, "hi");
+    }
+
+    /// A native model's stream as its server sends it: reasoning, the
+    /// answer, the finish reason with the timings, then `[DONE]`. The
+    /// parser returns the block; a stream without one returns none, and a
+    /// block of another shape ends the turn as cleanly.
+    #[tokio::test]
+    async fn the_timings_of_a_call_are_returned_and_a_stream_without_any_returns_none() {
+        async fn run(frames: &[JsonValue]) -> (Vec<StreamEvent>, Option<Timings>) {
+            let mut sse: String = frames.iter().map(|f| data_frame(f.clone())).collect();
+            sse.push_str("data: [DONE]\n\n");
+            let (tx, mut rx) = mpsc::channel(64);
+            let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(sse.into_bytes())]);
+            let timings = pump(stream, tx, "qwen3.5-4b".to_string(), true, LONG).await.expect("the parser");
+            let mut events = Vec::new();
+            while let Some(e) = rx.recv().await {
+                events.push(e);
+            }
+            (events, timings)
+        }
+        let thinking = json!({"choices": [{"index": 0, "delta": {"reasoning_content": "The user greets me."}}]});
+        let answer = json!({"choices": [{"index": 0, "delta": {"content": "Hi."}}]});
+        let end = |timings: JsonValue| json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "timings": timings});
+
+        let (events, timings) = run(&[thinking.clone(), answer.clone(), end(json!({"cache_n": 23398, "prompt_n": 4, "prompt_ms": 480.2, "prompt_per_second": 8.3, "predicted_n": 13, "predicted_ms": 2900.0, "predicted_per_second": 4.5}))]).await;
+        let timings = timings.expect("the block was read");
+        assert_eq!((timings.cached_tokens, timings.prompt_tokens, timings.output_tokens), (Some(23398), Some(4), Some(13)));
+        assert_eq!((timings.prompt_ms, timings.output_tokens_per_second), (Some(480.2), Some(4.5)));
+        assert_eq!(text_deltas(&events), vec!["Hi."]);
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::ReasoningDelta(r) if r == "The user greets me.")));
+        let turn = complete_event(&events);
+        assert!(matches!(turn.outcome, TurnOutcome::EndTurn), "{:?}", turn.outcome);
+        assert_eq!(events.iter().filter(|e| matches!(e, StreamEvent::Complete(_))).count(), 1);
+
+        // No block: every other server.
+        let (events, timings) = run(&[answer.clone(), json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})]).await;
+        assert_eq!(timings, None);
+        assert!(matches!(complete_event(&events).outcome, TurnOutcome::EndTurn));
+
+        // A block that is no object: the turn ends as it would without one.
+        let (events, timings) = run(&[answer, end(json!("fast"))]).await;
+        assert_eq!(timings, None);
+        assert_eq!(text_deltas(&events), vec!["Hi."]);
+        assert!(matches!(complete_event(&events).outcome, TurnOutcome::EndTurn));
     }
 
     #[tokio::test]
