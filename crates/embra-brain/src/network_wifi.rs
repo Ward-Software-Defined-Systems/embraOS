@@ -1157,8 +1157,10 @@ mod tests {
         while !thread.is_finished() && Instant::now() < until {
             std::thread::sleep(gap);
             // SAFETY: the handle is held until the join below, so the id
-            // names this thread, running or ended.
-            if !thread.is_finished() && unsafe { libc::pthread_kill(thread.as_pthread_t(), signal) } == 0 {
+            // names this thread, running or ended. The cast is for musl,
+            // where libc's `pthread_t` is a pointer and std hands the id out
+            // as an integer; under glibc both are the same integer.
+            if !thread.is_finished() && unsafe { libc::pthread_kill(thread.as_pthread_t() as libc::pthread_t, signal) } == 0 {
                 sent.fetch_add(1, Ordering::SeqCst);
             }
         }
