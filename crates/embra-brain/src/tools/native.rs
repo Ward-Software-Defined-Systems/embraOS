@@ -1,5 +1,5 @@
-//! `native_ask`: one question to the native model (experimental), from a
-//! session that another provider leads.
+//! `native_ask`: one question to the native model (experimental), from any
+//! session.
 //!
 //! The call goes the way a native turn's request goes
 //! (`OpenAICompatProvider`'s native request path): the same body, the same
@@ -9,10 +9,17 @@
 //! tool's second purpose: the native model and its request path are tested
 //! from a session that does not depend on them.
 //!
-//! The model is another model. It sees what the call sends it and nothing
-//! else: no session, no memory, no soul. Tools can be offered to it, by
-//! name or the whole list as a turn sends it; the calls it asks for are
-//! reported and none is run.
+//! A session that the native model itself leads calls it too (William,
+//! 2026-11-22, to experiment with it): the model then asks itself, in a
+//! context of its own. The model server has one slot, so the call takes it
+//! between two steps of the turn. The server keeps the turn's prompt in its
+//! cache meanwhile and takes it back at the next step: embrad sizes that
+//! cache for a prompt that fills the window (`embrad/src/native_model.rs`).
+//!
+//! The model asked sees what the call sends it and nothing else: no
+//! session, no memory, no soul. Tools can be offered to it, by name or the
+//! whole list as a turn sends it; the calls it asks for are reported and
+//! none is run.
 
 use std::time::Duration;
 
@@ -36,8 +43,10 @@ const ASK_LIMIT: Duration = registry::MAX_TOOL_DURATION.saturating_sub(Duration:
 /// The word of `offer_tools` that offers the whole tool list.
 const ALL_TOOLS: &str = "all";
 
-/// What the tool says while a native model leads the session.
-const LEADS_THE_SESSION: &str = "native_ask is refused while a native model leads the session: the model server has one slot, and this call would replace the turn's own prompt in it. Use it from a session that another provider leads.";
+/// What an answer says of its text, by who leads the session: the leading
+/// model did not write it, or wrote it without anything of the session.
+const NOTE_ANOTHER: &str = "the native model's own text (experimental); another model wrote it";
+const NOTE_ITSELF: &str = "the native model's own text (experimental); the same model wrote it in a context of its own, with nothing of this session";
 
 /// What it says while no model is kept loaded.
 const NOT_LOADED: &str = "no native model is loaded (experimental): the operator loads one with /native use <model>, and /native shows the models.";
@@ -47,7 +56,7 @@ const NOT_LOADED: &str = "no native model is loaded (experimental): the operator
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "native_ask",
-    description = "Ask the native model (experimental) one question and get its answer. The native model runs on this machine's own processor (Qwen3.5 4B or 9B, loaded by the operator with /native use); nothing leaves the machine. It is another, smaller model: it sees only what this call sends it (no session, no memory, no identity), and what comes back is its text, to be judged like any other source. Use it when the operator asks for the native model's answer, to compare or test it, or for work that should stay on the machine. `offer_tools` offers it tools from this tool list; the calls it asks for are reported and never run. The result is JSON: `text`, `reasoning` when it thought first, `tool_calls` (name and arguments) when it asked for any, `ended` (end_turn, tool_use, max_tokens or why the answer was cut) and `timings` as its server reports them (prompt tokens taken from its cache, read and written, and how fast). A call takes seconds to minutes: the first one after a model was loaded reads its whole prompt, later ones reuse what the server has. Refused while the native model itself leads the session; an error says so when no model is loaded."
+    description = "Ask the native model (experimental) one question and get its answer. The native model runs on this machine's own processor (Qwen3.5 4B or 9B, loaded by the operator with /native use); nothing leaves the machine. It is a small model, and it sees only what this call sends it (no session, no memory, no identity): what comes back is its text, to be judged like any other source. Use it when the operator asks for the native model's answer, to compare or test it, or for work that should stay on the machine. `offer_tools` offers it tools from this tool list; the calls it asks for are reported and never run. The result is JSON: `text`, `reasoning` when it thought first, `tool_calls` (name and arguments) when it asked for any, `ended` (end_turn, tool_use, max_tokens or why the answer was cut) and `timings` as its server reports them (prompt tokens taken from its cache, read and written, and how fast). A call takes seconds to minutes: the first one after a model was loaded reads its whole prompt, later ones reuse what the server has. When the native model itself leads the session, the call asks the same model in a context of its own, between two steps of the turn. An error says so when no model is loaded."
 )]
 pub struct NativeAskArgs {
     /// The question or instruction for the native model.
@@ -69,9 +78,9 @@ pub struct NativeAskArgs {
 impl NativeAskArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         let cfg = ctx.config;
-        if ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native) {
-            return Err(DispatchError::Handler(LEADS_THE_SESSION.to_string()));
-        }
+        // The model asked is the one that leads the session: said in the
+        // answer, and nothing else differs.
+        let itself = ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native);
         let Some(model) = cfg.openai_compat.chosen_native_model() else {
             return Err(DispatchError::Handler(NOT_LOADED.to_string()));
         };
@@ -87,7 +96,7 @@ impl NativeAskArgs {
             model.id.to_string(),
         )
         .with_model_wait(cfg.openai_compat.model_wait());
-        let asked = Asked { prompt: &self.prompt, system: self.system.as_deref(), thinking, max_tokens: self.max_tokens, offered: &offered };
+        let asked = Asked { prompt: &self.prompt, system: self.system.as_deref(), thinking, max_tokens: self.max_tokens, offered: &offered, itself };
         let answer = ask(provider, &asked, ASK_LIMIT).await.map_err(DispatchError::Handler)?;
         Ok(serde_json::to_string_pretty(&answer).unwrap_or_default())
     }
@@ -124,6 +133,8 @@ struct Asked<'a> {
     thinking: bool,
     max_tokens: Option<u32>,
     offered: &'a [&'static ToolDescriptor],
+    /// Whether the native model leads the session the call comes from.
+    itself: bool,
 }
 
 /// How an answer ended, in the words the tool's description names.
@@ -209,7 +220,7 @@ async fn ask(provider: OpenAICompatProvider, asked: &Asked<'_>, limit: Duration)
             put("output_tokens_per_second", timings.output_tokens_per_second.map(JsonValue::from));
             answer.insert("timings".into(), JsonValue::Object(figures));
         }
-        answer.insert("note".into(), json!("the native model's own text (experimental); another model wrote it"));
+        answer.insert("note".into(), json!(if asked.itself { NOTE_ITSELF } else { NOTE_ANOTHER }));
         Ok(JsonValue::Object(answer))
     };
     match tokio::time::timeout(limit, call).await {
@@ -252,7 +263,7 @@ mod tests {
     }
 
     fn asked<'a>(prompt: &'a str, offered: &'a [&'static ToolDescriptor]) -> Asked<'a> {
-        Asked { prompt, system: None, thinking: true, max_tokens: None, offered }
+        Asked { prompt, system: None, thinking: true, max_tokens: None, offered, itself: false }
     }
 
     async fn bodies(server: &MockServer) -> Vec<JsonValue> {
@@ -275,7 +286,7 @@ mod tests {
 
         // Two tools by name, a system text, thinking off, a token limit.
         let two = offered_tools(Some(&["system_status".to_string(), "calculate".to_string(), "calculate".to_string()])).unwrap();
-        let direct = Asked { prompt: "What is 2+2?", system: Some("Answer briefly."), thinking: false, max_tokens: Some(64), offered: &two };
+        let direct = Asked { prompt: "What is 2+2?", system: Some("Answer briefly."), thinking: false, max_tokens: Some(64), offered: &two, itself: false };
         let answer = ask(provider(&server, "ask-named"), &direct, DAY).await.unwrap();
         assert_eq!((answer["tools_offered"].as_u64(), answer["thinking"].as_bool()), (Some(2), Some(false)));
 
@@ -340,11 +351,22 @@ mod tests {
                     "cached_tokens": 23398, "prompt_tokens": 4, "prompt_ms": 480.5, "prompt_tokens_per_second": 8.3,
                     "output_tokens": 61, "output_ms": 13555.0, "output_tokens_per_second": 4.5
                 },
-                "note": "the native model's own text (experimental); another model wrote it"
+                "note": NOTE_ANOTHER
             })
         );
         // One request went out, and nothing else: the call it asked for was not run.
         assert_eq!(bodies(&server).await.len(), 1);
+        // From a session the native model itself leads the request is the
+        // same, and the note says who wrote the text.
+        let itself = Asked { itself: true, ..asked("What time is it?", &time) };
+        let again = ask(provider(&server, "ask-itself"), &itself, DAY).await.unwrap();
+        assert_eq!(again["note"], json!(NOTE_ITSELF));
+        let mut same = again.clone();
+        same["note"] = json!(NOTE_ANOTHER);
+        assert_eq!(same, answer, "nothing but the note differs");
+        let sent = bodies(&server).await;
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0], sent[1], "the two requests are one request");
 
         // A server that sends no timings, and an answer cut by the token limit.
         let cut = model_server(sse(&[r#"{"choices":[{"index":0,"delta":{"content":"One, two"},"finish_reason":"length"}]}"#])).await;
@@ -380,11 +402,12 @@ mod tests {
         cfg
     }
 
-    /// Through the dispatcher, as the tool loop calls it: refused while a
-    /// native model leads the session, said when none is loaded, and
-    /// refused for a tool name that is none, each before any request.
+    /// Through the dispatcher, as the tool loop calls it: said when no
+    /// model is loaded, and refused for a tool name that is none, each
+    /// before any request. A native model that leads the session is no
+    /// reason to refuse: the call gets as far as its tool names.
     #[tokio::test]
-    async fn the_tool_is_refused_while_a_native_model_leads_and_says_when_none_is_loaded() {
+    async fn the_tool_says_when_no_model_is_loaded_and_is_open_to_a_session_a_native_model_leads() {
         let db = crate::db::WardsonDbClient::from_url("http://127.0.0.1:1");
         let trace = embra_tools_core::new_turn_trace_handle();
         let call = |cfg: crate::config::SystemConfig, input: JsonValue| {
@@ -394,10 +417,13 @@ mod tests {
                 dispatch("native_ask", input, ctx).await.map(|out| out.text).map_err(|e| e.to_string())
             }
         };
-        let said = call(config("native", "qwen3.5-4b"), json!({"prompt": "hi"})).await.unwrap_err();
-        assert!(said.ends_with(LEADS_THE_SESSION), "{said}");
         let said = call(config("anthropic", ""), json!({"prompt": "hi"})).await.unwrap_err();
         assert!(said.ends_with(NOT_LOADED), "{said}");
+        for leading in ["native", "anthropic", "lm_studio"] {
+            let said = call(config(leading, "qwen3.5-4b"), json!({"prompt": "hi", "offer_tools": ["frobnicate"]})).await.unwrap_err();
+            assert!(said.contains("not tools of the tool list: frobnicate."), "{leading}: {said}");
+            assert!(!said.contains("refused while"), "{leading}: {said}");
+        }
         let said = call(config("anthropic", "qwen3.5-4b"), json!({"prompt": "hi", "offer_tools": ["frobnicate"]})).await.unwrap_err();
         assert!(said.contains("not tools of the tool list: frobnicate."), "{said}");
         // The prompt is the one field a call needs.
@@ -480,7 +506,7 @@ mod tests {
         let provider = || OpenAICompatProvider::new(OpenAiCompatPreset::Native, base.clone(), None, model.clone()).with_native_env(env.clone());
         let two = offered_tools(Some(&["calculate".to_string(), "time".to_string()])).unwrap();
         let all = offered_tools(Some(&[ALL_TOOLS.to_string()])).unwrap();
-        let direct = Asked { prompt: "What is the capital of France? One word.", system: Some("Answer briefly."), thinking: false, max_tokens: Some(64), offered: &[] };
+        let direct = Asked { prompt: "What is the capital of France? One word.", system: Some("Answer briefly."), thinking: false, max_tokens: Some(64), offered: &[], itself: false };
         for (form, asked) in [
             ("no tools, thinking off", direct),
             ("two tools by name", asked("What is 17 times 23? Use a tool.", &two)),
