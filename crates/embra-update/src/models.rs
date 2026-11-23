@@ -510,7 +510,7 @@ pub fn verify_command(roots: &Roots, model: &NativeModel, out: &mut impl Write) 
                 let _ = writeln!(out, "{}: verified ({} MB, sha256 {}…)", target.tag(), mb(target.file.bytes), &sha256[..16]);
             }
             Ok(Checked::Removed(why)) => {
-                return Outcome::Failed(format!("{why}: it is not {}'s file and was removed. Install {} again", model.label, model.id));
+                return Outcome::Failed(format!("{why}: it is not this release's file of {} and was removed. Install {} again", model.label, model.id));
             }
             Err(reason) => return Outcome::Failed(reason),
         }
@@ -619,7 +619,9 @@ fn install_file(roots: &Roots, models: &Path, target: Target, url: &str, out: &m
                     return Outcome::Done;
                 }
                 Ok(Checked::Removed(why)) => {
-                    let _ = writeln!(out, "{tag}: {why}: it is not {}'s file and was removed", model.label);
+                    // Another file, or the file another release of embraOS
+                    // had for the model under the same name.
+                    let _ = writeln!(out, "{tag}: {why}: it is not this release's file of {} and was removed", model.label);
                 }
                 Err(reason) => return Outcome::Failed(reason),
             }
@@ -1031,7 +1033,7 @@ mod tests {
         let outcome = verify_command(&roots, &model, &mut Vec::new());
         let (kind, reason) = words(&outcome);
         assert_eq!(kind, "failed");
-        assert!(reason.starts_with("the sha256 of tiny.gguf is ") && reason.ends_with("it is not Tiny's file and was removed. Install tiny again"), "{reason}");
+        assert!(reason.starts_with("the sha256 of tiny.gguf is ") && reason.ends_with("it is not this release's file of Tiny and was removed. Install tiny again"), "{reason}");
         assert_eq!(names(&model, &models), Vec::<String>::new(), "the file and its record are gone");
 
         // Another size: no need to read it.
@@ -1106,10 +1108,11 @@ mod tests {
         assert_eq!(words(&list_command(&roots, &mut out)).0, "done");
         let said = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = said.lines().collect();
-        assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB and 641 MB for images, Apache-2.0): incomplete, 5 of 2613 MB are there");
-        assert_eq!(lines[1], "qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5417 MB and 875 MB for images, Apache-2.0): installed, not usable: the file was never checked");
-        assert!(lines[2].starts_with("DATA has ") && lines[2].ends_with(" MB free"), "{said}");
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2685 MB and 644 MB for images, Apache-2.0): incomplete, 5 of 2685 MB are there");
+        assert_eq!(lines[1], "qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5561 MB and 879 MB for images, Apache-2.0): installed, not usable: the file was never checked");
+        assert_eq!(lines[2], "qwen3.8-27b  Qwen3.8 27B (Q4_K_M, 16217 MB and 888 MB for images, Apache-2.0): not installed");
+        assert!(lines[3].starts_with("DATA has ") && lines[3].ends_with(" MB free"), "{said}");
+        assert_eq!(lines.len(), 4);
         assert_eq!(state_words(Target::of(&tiny("tiny", CONTENT), Part::Model), &models), "not installed");
         fs::remove_dir_all(&roots.parent).unwrap();
     }
@@ -1393,7 +1396,7 @@ mod tests {
         assert_eq!(asked(&heads), [None]);
         assert_eq!(fs::read(model.file_path(&models)).unwrap(), content);
         assert_eq!(native::installed(&model, &models), Installed::Verified);
-        assert!(String::from_utf8(out).unwrap().contains("it is not Tiny's file and was removed"));
+        assert!(String::from_utf8(out).unwrap().contains("it is not this release's file of Tiny and was removed"));
         fs::remove_dir_all(&roots.parent).unwrap();
     }
 
@@ -1646,7 +1649,7 @@ mod tests {
         let models = models_dir(&roots);
         assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &LIMITS)), ("done", ""));
         let dir = model.dir(&models);
-        fs::write(dir.join("mmproj-F16.gguf"), vec![0u8; 3 * 1024 * 1024]).unwrap();
+        fs::write(dir.join("mmproj-Qwen3.5-4B-BF16.gguf"), vec![0u8; 3 * 1024 * 1024]).unwrap();
         fs::write(dir.join("verified.tmp"), b"a record on its way").unwrap();
         fs::create_dir(dir.join("kept-directory")).unwrap();
         fs::write(model.partial_of(Part::Images, &models), &IMAGES[..10]).unwrap();
@@ -1659,7 +1662,7 @@ mod tests {
         assert_eq!(words(&install_from(&roots, &model, &both(&url), &mut out, &LIMITS)), ("done", ""));
         assert_eq!(paths(&heads), ["/images.gguf"]);
         let said = String::from_utf8(out).unwrap();
-        assert!(said.contains("tiny: removed mmproj-F16.gguf (3 MB), a file of another release of embraOS"), "{said}");
+        assert!(said.contains("tiny: removed mmproj-Qwen3.5-4B-BF16.gguf (3 MB), a file of another release of embraOS"), "{said}");
         assert_eq!(said.matches(": removed ").count(), 1, "{said}");
         assert_eq!(names(&model, &models), ["kept-directory", "tiny-images.gguf", "tiny.gguf", "verified", "verified-images", "verified.tmp"]);
         assert_eq!(own_names(&model, &models).len(), 6);

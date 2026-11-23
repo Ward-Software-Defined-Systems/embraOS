@@ -1765,6 +1765,31 @@ mod tests {
             assert_eq!(messages[3]["role"], "tool");
             assert!(!native.to_string().contains("base64"), "no image leaves");
         }
+        // A model whose family has levels (Qwen3.8 27B): a level of its own
+        // is in the request with its card's sampling for thinking, which
+        // has no presence penalty; a level of another provider is no word
+        // at all, since its template answers one with an error; and `off`
+        // is its switch, where `low` is a level.
+        let ask = |effort: Option<&str>| {
+            OpenAICompatProvider::new(OpenAiCompatPreset::Native, server.uri(), None, "qwen3.8-27b".to_string()).with_reasoning_effort(effort.map(str::to_string))
+        };
+        for effort in [Some("medium"), Some("low"), Some("high"), None, Some("off")] {
+            let _ = ask(effort).stream_turn(&turn, &system_bundle(), &manifest, LlmRequestOptions::default()).await.unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        let (medium, low, high, own, off) = (sent(3, &requests), sent(4, &requests), sent(5, &requests), sent(6, &requests), sent(7, &requests));
+        assert_eq!((medium["reasoning_effort"].as_str(), low["reasoning_effort"].as_str()), (Some("medium"), Some("low")));
+        for no_word in [&high, &own, &off] {
+            assert!(no_word.get("reasoning_effort").is_none(), "{no_word}");
+        }
+        for thinks in [&medium, &low, &high, &own] {
+            assert_eq!(thinks["chat_template_kwargs"], json!({"enable_thinking": true}));
+            assert_eq!((thinks["temperature"].as_f64(), thinks["top_p"].as_f64(), thinks["presence_penalty"].as_f64()), (Some(1.0), Some(0.95), Some(0.0)));
+            assert_eq!(thinks["model"], "qwen3.8-27b");
+        }
+        assert_eq!(off["chat_template_kwargs"], json!({"enable_thinking": false}));
+        assert_eq!((off["temperature"].as_f64(), off["presence_penalty"].as_f64()), (Some(0.7), Some(1.5)));
+
         // LM Studio's request for the same turn: its level as typed, the
         // reasoning under the name it always had, the image as an image,
         // and none of a native model's fields.

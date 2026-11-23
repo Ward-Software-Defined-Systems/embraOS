@@ -326,10 +326,10 @@ mod tests {
             &root,
             &format!(
                 "echo \"$1 $2\" > '{}'\n\
-                 echo 'qwen3.5-4b: downloading Qwen3.5-4B-Q4_K_M.gguf (2613 MB) from https://models.example/'\n\
-                 echo 'qwen3.5-4b: received 131 of 2613 MB (5%)'\n\
+                 echo 'qwen3.5-4b: downloading Qwen3.5-4B-Q4_K_M.gguf (2685 MB) from https://models.example/'\n\
+                 echo 'qwen3.5-4b: received 131 of 2685 MB (5%)'\n\
                  until [ -e '{}' ]; do sleep 0.02; done\n\
-                 echo 'qwen3.5-4b: installed and verified (2613 MB, sha256 00fe7986ff5f6b46…)'",
+                 echo 'qwen3.5-4b: installed and verified (2685 MB, sha256 d18d77c64865e930…)'",
                 args.display(),
                 gate.display()
             ),
@@ -339,11 +339,11 @@ mod tests {
 
         let mut first = jobs.start(&env, JobKind::Install, four()).expect("no job runs");
         assert!(matches!(next(&mut first).await, JobEvent::Line(l) if l.starts_with("qwen3.5-4b: downloading ")));
-        assert_eq!(next(&mut first).await, JobEvent::Line("qwen3.5-4b: received 131 of 2613 MB (5%)".into()));
+        assert_eq!(next(&mut first).await, JobEvent::Line("qwen3.5-4b: received 131 of 2685 MB (5%)".into()));
 
         // Another console asks: what runs, and how far it is.
         let seen = jobs.running().expect("the job runs");
-        assert_eq!((seen.kind, seen.model.id, seen.last_line.as_deref()), (JobKind::Install, "qwen3.5-4b", Some("qwen3.5-4b: received 131 of 2613 MB (5%)")));
+        assert_eq!((seen.kind, seen.model.id, seen.last_line.as_deref()), (JobKind::Install, "qwen3.5-4b", Some("qwen3.5-4b: received 131 of 2685 MB (5%)")));
         // It follows the job from here on.
         let mut second = jobs.follow().expect("a job to follow");
         // One job at a time: a second one is refused with the one that runs.
@@ -375,7 +375,7 @@ mod tests {
         let gate = root.join("go-on");
         env.updater = stand_in(
             &root,
-            &format!("echo 'qwen3.5-4b: received 131 of 2613 MB (5%)'\nuntil [ -e '{}' ]; do sleep 0.02; done\necho 'qwen3.5-4b: installed and verified'", gate.display()),
+            &format!("echo 'qwen3.5-4b: received 131 of 2685 MB (5%)'\nuntil [ -e '{}' ]; do sleep 0.02; done\necho 'qwen3.5-4b: installed and verified'", gate.display()),
         );
         let jobs = Jobs::default();
         let mut events = jobs.start(&env, JobKind::Install, four()).unwrap();
@@ -396,7 +396,7 @@ mod tests {
     async fn a_stopped_job_ends_the_updater_and_says_that_it_was_stopped() {
         let (root, mut env) = machine("job-stop");
         let pid_file = root.join("pid");
-        env.updater = stand_in(&root, &format!("echo $$ > '{}'\necho 'qwen3.5-4b: received 131 of 2613 MB (5%)'\nwhile :; do sleep 0.02; done", pid_file.display()));
+        env.updater = stand_in(&root, &format!("echo $$ > '{}'\necho 'qwen3.5-4b: received 131 of 2685 MB (5%)'\nwhile :; do sleep 0.02; done", pid_file.display()));
         let jobs = Jobs::default();
         let mut events = jobs.start(&env, JobKind::Install, four()).unwrap();
         assert!(matches!(next(&mut events).await, JobEvent::Line(_)));
@@ -416,7 +416,7 @@ mod tests {
         let (root, mut env) = machine("job-ends");
         let jobs = Jobs::default();
         for (body, expected) in [
-            ("echo 'qwen3.5-4b: removed, 2613 MB freed'", JobEnd::Done),
+            ("echo 'qwen3.5-4b: removed, 2685 MB freed'", JobEnd::Done),
             (
                 "echo 'refused: another model job is running (an install, an import, a check or a removal); it has to end first' >&2; exit 2",
                 JobEnd::Refused("another model job is running (an install, an import, a check or a removal); it has to end first".into()),
@@ -447,10 +447,10 @@ mod tests {
     #[tokio::test]
     async fn the_list_is_the_updaters_own() {
         let (root, mut env) = machine("job-list");
-        env.updater = stand_in(&root, "echo \"asked: $1\"\necho 'qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): installed'\necho 'DATA has 1840 MB free'");
+        env.updater = stand_in(&root, "echo \"asked: $1\"\necho 'qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2685 MB, Apache-2.0): installed'\necho 'DATA has 1840 MB free'");
         assert_eq!(
             list(&env).await.as_deref(),
-            Ok("asked: model-list\nqwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): installed\nDATA has 1840 MB free")
+            Ok("asked: model-list\nqwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2685 MB, Apache-2.0): installed\nDATA has 1840 MB free")
         );
         env.updater = stand_in(&root, "echo 'DATA could not be read' >&2; exit 1");
         assert_eq!(list(&env).await, Err("DATA could not be read".to_string()));

@@ -723,7 +723,7 @@ mod native_render_tests {
             SetupStep::Provider
         );
         assert_eq!(
-            AppState::infer_setup_step("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): not installed, downloaded first."),
+            AppState::infer_setup_step("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): not installed, downloaded first."),
             SetupStep::ModelSelect
         );
         assert_eq!(

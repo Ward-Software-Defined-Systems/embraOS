@@ -418,11 +418,14 @@ const NATIVE_PROGRESS: &str = "progress";
 pub fn native_notice() -> String {
     let models: Vec<&str> = native::CATALOGUE.iter().map(|m| m.label).collect();
     format!(
-        "A native model (experimental) runs on this machine's own processor: {}. They are small models: they answer slower than a hosted one and with less judgement. \
+        "A native model (experimental) runs on this machine's own processor: {}. They answer slower than a hosted model, and the smaller ones with less judgement. \
          The model you pick leads Learning Mode, where this intelligence's identity is written with you and sealed, and the seal is permanent. \
          An identity written beforehand can be imported instead: Learning Mode offers the graphs in Imported_Intelligence before it begins. \
          A provider can be added later with /provider --setup.",
-        models.join(" or ")
+        match models.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+            _ => models.join(""),
+        }
     )
 }
 
@@ -1273,7 +1276,7 @@ mod tests {
     fn gated_updater(root: &std::path::Path, gate: &std::path::Path) -> Vec<std::ffi::OsString> {
         stand_in(
             root,
-            &format!("echo \"$2: received 270 of 5417 MB (5%)\"\nuntil [ -e '{}' ]; do sleep 0.02; done\necho \"$2: installed and verified\"", gate.display()),
+            &format!("echo \"$2: received 270 of 5561 MB (5%)\"\nuntil [ -e '{}' ]; do sleep 0.02; done\necho \"$2: installed and verified\"", gate.display()),
         )
     }
 
@@ -1295,10 +1298,10 @@ mod tests {
             assert_eq!(said(&mut resp_rx).await, native_notice());
             let asked = question(&mut resp_rx).await;
             assert_eq!(asked.field_type, SetupFieldType::Selector as i32);
-            assert_eq!(asked.options, ["qwen3.5-4b", "qwen3.5-9b", NATIVE_BACK], "the catalogue, then the way back");
+            assert_eq!(asked.options, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b", NATIVE_BACK], "the catalogue, then the way back");
             assert_eq!(asked.default_value, "qwen3.5-4b");
             assert!(
-                asked.prompt.starts_with("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): not installed, downloaded first, about 5.3 GB of memory when loaded; "),
+                asked.prompt.starts_with("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): not installed, downloaded first, about 5.3 GB of memory when loaded; "),
                 "{}",
                 asked.prompt
             );
@@ -1312,24 +1315,24 @@ mod tests {
             user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
             assert_eq!(
                 said(&mut resp_rx).await,
-                "Installing qwen3.5-9b: its model file (5417 MB) and its image file (875 MB) are downloaded and checked, and the lines below follow the updater."
+                "Installing qwen3.5-9b: its model file (5561 MB) and its image file (879 MB) are downloaded and checked, and the lines below follow the updater."
             );
             let waiting = question(&mut resp_rx).await;
             assert_eq!(waiting.field_type, SetupFieldType::Text as i32);
             assert_eq!(waiting.prompt, "qwen3.5-9b is being installed. Press Enter for how far it is, or answer cancel to stop it and choose again:");
             assert_eq!(waiting.default_value, "progress", "Enter sends it: a console sends nothing for an empty line without a default");
-            assert_eq!(said(&mut resp_rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+            assert_eq!(said(&mut resp_rx).await, "qwen3.5-9b: received 270 of 5561 MB (5%)");
 
             // Enter: how far it is, and the question again.
             user_tx.send("progress".to_string()).await.unwrap();
-            assert_eq!(said(&mut resp_rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+            assert_eq!(said(&mut resp_rx).await, "qwen3.5-9b: received 270 of 5561 MB (5%)");
             assert_eq!(question(&mut resp_rx).await.prompt, waiting.prompt);
 
             // Stopped: the model question again, and nothing was asked of embrad.
             user_tx.send("cancel".to_string()).await.unwrap();
             assert_eq!(said(&mut resp_rx).await, "Stopping the install of qwen3.5-9b.");
             assert_eq!(said(&mut resp_rx).await, "The install of qwen3.5-9b was stopped. What arrived is kept, and the next install goes on from it.");
-            assert_eq!(question(&mut resp_rx).await.options.len(), 3);
+            assert_eq!(question(&mut resp_rx).await.options.len(), 4);
             assert_eq!(native::read_settings(&env.settings), Ok(None));
 
             // Picked again, and this time the file comes.
@@ -1373,7 +1376,7 @@ mod tests {
             let asked = question(&mut resp_rx).await;
             assert_eq!(
                 asked.prompt,
-                "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): installed, about 6.9 GB of memory when loaded. This machine has 7.5 GB of memory, 6.3 GB of it free for a model now."
+                "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): installed, about 6.9 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded. This machine has 7.5 GB of memory, 6.3 GB of it free for a model now."
             );
             // The 9B takes more at its load than the machine has free: said, and asked again.
             user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
@@ -1489,7 +1492,10 @@ mod tests {
     #[test]
     fn the_native_notice_says_what_the_model_leads_and_names_the_identity_import() {
         let notice = native_notice();
-        assert!(notice.starts_with("A native model (experimental) runs on this machine's own processor: Qwen3.5 4B or Qwen3.5 9B."), "{notice}");
+        assert!(
+            notice.starts_with("A native model (experimental) runs on this machine's own processor: Qwen3.5 4B, Qwen3.5 9B or Qwen3.8 27B. They answer slower than a hosted model, and the smaller ones with less judgement. "),
+            "{notice}"
+        );
         for must in ["leads Learning Mode", "the seal is permanent", "can be imported instead", "Imported_Intelligence", "/provider --setup"] {
             assert!(notice.contains(must), "{must}: {notice}");
         }

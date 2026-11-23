@@ -31,8 +31,8 @@
 //!     images=yes                            the server was started with the image file
 //! /embra/data/models/qwen3.5-4b/verified    the updater writes, embrad reads
 //!     file=Qwen3.5-4B-Q4_K_M.gguf
-//!     bytes=2740937888
-//!     sha256=00fe7986…
+//!     bytes=2815884544
+//!     sha256=d18d77c6…
 //!     mtime=1763829000.123456789
 //! /embra/data/models/qwen3.5-4b/verified-images    the same, of the image file
 //! ```
@@ -132,7 +132,7 @@ pub struct CatalogueFile {
 /// arguments on the build server. It is the server's own memory when it has
 /// loaded the model, and the part of the model's file it goes on reading
 /// from. The server's resident memory right after a load is more than that
-/// (6,098 MiB for the 4B at the default window, where 4,805 are in use): it
+/// (6,305 MiB for the 4B at the default window, where 4,805 are in use): it
 /// copies the larger part of the weights into a layout of its own, and the
 /// pages of the file it copied from stay until the kernel wants them. So
 /// the figure was read after the kernel had taken back every page of the
@@ -151,6 +151,16 @@ pub struct Memory {
     pub images: u32,
     /// What the first image the model reads adds, and the server keeps.
     pub first_image: u32,
+    /// One position the server keeps of a prompt to return to (a
+    /// checkpoint): the model's recurrent state, as the server says its
+    /// size when it loads the model (50.25 MiB for the 4B and the 9B,
+    /// 149.62 MiB for the 27B).
+    pub checkpoint: u32,
+    /// What a prompt the server keeps for later takes for every 1,024
+    /// tokens of it: the attention cache of that many tokens (32 MiB with
+    /// the eight attention layers of the 4B and the 9B, 64 MiB with the
+    /// 27B's sixteen).
+    pub state_per_1024: u32,
 }
 
 /// The family a model is of: how its server is told to think, and with
@@ -208,39 +218,25 @@ pub struct NativeModel {
     pub memory: Memory,
 }
 
-/// The server keeps the state of an earlier prompt in memory and takes it
-/// back when that prompt returns, which spares reading the tool list again
-/// after another prompt went between (the `native_ask` tool, a step of
-/// Learning Mode): 3 s in place of 266 s for the whole list on the build
-/// server. llama.cpp's own limit for that cache is 8 GiB whatever the
-/// window, and every short prompt that went between stays in it with its
-/// checkpoints (152 MiB for one of 28 tokens). Here the limit is what one
-/// prompt that fills the window comes to with all its checkpoints, so the
-/// prompt a session returns to always fits and the cache is a function of
-/// the window. Measured from the server's own lines, the same on both
-/// models: a saved state is 51.1 MiB and 32.02 MiB for every 1,024 tokens,
-/// a checkpoint 50.251 MiB.
-const STATE_MIB: u64 = 52;
-const STATE_MIB_PER_1024_TOKENS: u64 = 33;
-const CHECKPOINT_MIB: u64 = 51;
 /// The checkpoints a prompt keeps at most: positions the server can return
 /// to when a prompt comes back changed (the reasoning of the last answer is
 /// not sent again, so every turn returns to the end of its own prompt).
 /// llama.cpp's own number, named so that the cache's limit and it agree.
 pub const CHECKPOINTS_MAX: u64 = 32;
 
-/// The limit of the server's prompt cache for a window, in MiB: embrad
-/// starts the server with it.
-pub fn cache_mib(context: u32) -> u64 {
-    STATE_MIB + CHECKPOINTS_MAX * CHECKPOINT_MIB + u64::from(context).div_ceil(1024) * STATE_MIB_PER_1024_TOKENS
-}
-
 /// The maker of the Qwen models, as a model of theirs is told.
 const QWEN: &str = "Alibaba's Qwen family";
 
-/// The native models. Each file was downloaded whole and hashed before its
-/// values were written here (2026-11-22).
-pub const CATALOGUE: [NativeModel; 2] = [
+/// The native models: this project's own conversions of Qwen's weights
+/// (William, 2026-11-23: "converting Qwen's weights ourselves and
+/// uploading"), published under `William-WSDS`, each repository with a card
+/// that names the source revision, the commands and the hashes. Each is
+/// Qwen's own repository at one revision, converted to GGUF and quantised
+/// to Q4_K_M with llama.cpp 1.0.0, the version the image's model server is
+/// built from. Each file was hashed where it was made; the hub's own record
+/// of each published file says the same size and sha256, and a second
+/// conversion gave the same bytes.
+pub const CATALOGUE: [NativeModel; 3] = [
     NativeModel {
         id: "qwen3.5-4b",
         label: "Qwen3.5 4B",
@@ -248,20 +244,20 @@ pub const CATALOGUE: [NativeModel; 2] = [
         family: Family::Qwen35,
         file: "Qwen3.5-4B-Q4_K_M.gguf",
         quantisation: "Q4_K_M",
-        bytes: 2_740_937_888,
-        sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        bytes: 2_815_884_544,
+        sha256: "d18d77c64865e93083daecb5a65f9cd7dd535e859fbbc71d5fdfe49954089a2b",
         images: CatalogueFile {
-            file: "mmproj-F16.gguf",
-            bytes: 672_423_616,
-            sha256: "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+            file: "mmproj-Qwen3.5-4B-BF16.gguf",
+            bytes: 675_569_216,
+            sha256: "463f39bd1c291c1186c319a8c90ff8640aafa678b14cbee2232d695113dfbb66",
         },
         image_tokens: IMAGE_TOKENS,
-        repository: "unsloth/Qwen3.5-4B-GGUF",
-        revision: "e87f176479d0855a907a41277aca2f8ee7a09523",
+        repository: "William-WSDS/Qwen3.5-4B-GGUF",
+        revision: "a4d3a4d917bbbae2cf19f932cce4da64938117d2",
         licence: "Apache-2.0",
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
-        memory: Memory { at_32768: 3_780, per_32768: 1_025, images: 649, first_image: 348 },
+        memory: Memory { at_32768: 3_780, per_32768: 1_025, images: 649, first_image: 348, checkpoint: 51, state_per_1024: 33 },
     },
     NativeModel {
         id: "qwen3.5-9b",
@@ -270,20 +266,44 @@ pub const CATALOGUE: [NativeModel; 2] = [
         family: Family::Qwen35,
         file: "Qwen3.5-9B-Q4_K_M.gguf",
         quantisation: "Q4_K_M",
-        bytes: 5_680_522_464,
-        sha256: "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        bytes: 5_831_992_608,
+        sha256: "f16a85f201f87fa707f3fad681e381ed3dfb293b06064437a4246d160842bcc2",
         images: CatalogueFile {
-            file: "mmproj-F16.gguf",
-            bytes: 918_166_080,
-            sha256: "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f",
+            file: "mmproj-Qwen3.5-9B-BF16.gguf",
+            bytes: 921_704_896,
+            sha256: "d89c4bc142d02ed64aeed5c0a358bdead9109f21f4ada03a6b2df17a1aa94d9e",
         },
         image_tokens: IMAGE_TOKENS,
-        repository: "unsloth/Qwen3.5-9B-GGUF",
-        revision: "3885219b6810b007914f3a7950a8d1b469d598a5",
+        repository: "William-WSDS/Qwen3.5-9B-GGUF",
+        revision: "2d2c56225c331a43c09f12c7479557c9c6d0969b",
         licence: "Apache-2.0",
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
-        memory: Memory { at_32768: 6_039, per_32768: 1_026, images: 884, first_image: 386 },
+        memory: Memory { at_32768: 6_039, per_32768: 1_026, images: 884, first_image: 386, checkpoint: 51, state_per_1024: 33 },
+    },
+    NativeModel {
+        id: "qwen3.8-27b",
+        label: "Qwen3.8 27B",
+        maker: QWEN,
+        family: Family::Qwen38,
+        file: "Qwen3.8-27B-Q4_K_M.gguf",
+        quantisation: "Q4_K_M",
+        bytes: 17_005_351_136,
+        sha256: "4fc2219c0f0335e04b92ea446ce9f9cb6584370ac35cc751e340829bdebffa80",
+        images: CatalogueFile {
+            file: "mmproj-Qwen3.8-27B-BF16.gguf",
+            bytes: 931_145_952,
+            sha256: "e43a597863a21bfa48b0fbd4553a771ae4117e25bb172e66f1dbc3fc6d037131",
+        },
+        image_tokens: IMAGE_TOKENS,
+        repository: "William-WSDS/Qwen3.8-27B-GGUF",
+        revision: "930332595f8f72f27ce2bd9ae5dfc7aea4e877da",
+        licence: "Apache-2.0",
+        // The same window as the others (William, 2026-11-23: "keep the 27B
+        // default the same").
+        default_context: DEFAULT_CONTEXT,
+        largest_context: 262_144,
+        memory: Memory { at_32768: 17_586, per_32768: 2_050, images: 892, first_image: 622, checkpoint: 150, state_per_1024: 65 },
     },
 ];
 
@@ -310,12 +330,32 @@ impl NativeModel {
         loaded.max(0) as u64
     }
 
+    /// The limit of the server's prompt cache for a window, in MiB: embrad
+    /// starts the server with it. The server keeps the state of an earlier
+    /// prompt in memory and takes it back when that prompt returns, which
+    /// spares reading the tool list again after another prompt went
+    /// between (the `native_ask` tool, a step of Learning Mode): 3 s in
+    /// place of 266 s for the whole list with the 4B on the build server.
+    /// llama.cpp's own limit for that cache is 8 GiB whatever the window,
+    /// and every short prompt that went between stays in it with its
+    /// checkpoints (152 MiB for one of 28 tokens on the 4B). Here the limit
+    /// is what one prompt that fills the window comes to with all its
+    /// checkpoints, so the prompt a session returns to always fits and the
+    /// cache is a function of the model and the window. A kept prompt is
+    /// its recurrent state, a little under a MiB of its own, and its
+    /// attention cache (measured on the 4B from the server's lines: 51.1
+    /// MiB and 32.02 MiB for every 1,024 tokens, a checkpoint 50.251 MiB).
+    pub fn cache_mib(&self, context: u32) -> u64 {
+        let (checkpoint, per_1024) = (u64::from(self.memory.checkpoint), u64::from(self.memory.state_per_1024));
+        (checkpoint + 1) + CHECKPOINTS_MAX * checkpoint + u64::from(context).div_ceil(1024) * per_1024
+    }
+
     /// How far the model server's memory can grow from there as a session
     /// goes on, in MiB: the positions it keeps of the prompt it holds
     /// ([`CHECKPOINTS_MAX`] of them), what it may keep of earlier prompts
-    /// ([`cache_mib`], its limit), and what reading an image takes.
+    /// ([`Self::cache_mib`], its limit), and what reading an image takes.
     pub fn growth_mib(&self, context: u32, images: bool) -> u64 {
-        CHECKPOINTS_MAX * CHECKPOINT_MIB + cache_mib(context) + if images { u64::from(self.memory.first_image) } else { 0 }
+        CHECKPOINTS_MAX * u64::from(self.memory.checkpoint) + self.cache_mib(context) + if images { u64::from(self.memory.first_image) } else { 0 }
     }
 
     /// Which of the model's files has this size, when one has: how an
@@ -898,22 +938,34 @@ mod tests {
     /// were measured, and the growth is the server's own limits.
     #[test]
     fn a_models_memory_is_the_measured_line_and_its_growth_the_servers_limits() {
-        let (four, nine) = (by_id("qwen3.5-4b").unwrap(), by_id("qwen3.5-9b").unwrap());
+        let (four, nine, big) = (by_id("qwen3.5-4b").unwrap(), by_id("qwen3.5-9b").unwrap(), by_id("qwen3.8-27b").unwrap());
         // Measured in use: 3,780, 4,805 and 6,857 MiB; 6,039 (from the line), 7,065 and 9,116 MiB.
         assert_eq!([32_768, 65_536, 131_072].map(|window| four.loaded_mib(window, false)), [3_780, 4_805, 6_855]);
         assert_eq!([32_768, 65_536, 131_072].map(|window| nine.loaded_mib(window, false)), [6_039, 7_065, 9_117]);
-        // With the image file at the default window: 5,454 and 7,949 MiB, as measured.
-        assert_eq!((four.loaded_mib(DEFAULT_CONTEXT, true), nine.loaded_mib(DEFAULT_CONTEXT, true)), (5_454, 7_949));
+        // The 27B, measured in use: 17,586, 19,636 and 23,735 MiB; its attention cache is twice the others'.
+        assert_eq!([32_768, 65_536, 131_072].map(|window| big.loaded_mib(window, false)), [17_586, 19_636, 23_736]);
+        // With the image file at the default window: 5,454, 7,949 and 20,528 MiB, as measured.
+        assert_eq!([four, nine, big].map(|model| model.loaded_mib(DEFAULT_CONTEXT, true)), [5_454, 7_949, 20_528]);
         // A smaller window takes less, down to the smallest.
         assert_eq!((four.loaded_mib(4_096, false), four.loaded_mib(SMALLEST_CONTEXT, false)), (2_884, 2_788));
-        // The cache's limit follows the window, and a started 1,024 tokens count whole.
-        assert_eq!((cache_mib(4_096), cache_mib(65_536), cache_mib(262_144)), (1_816, 3_796, 10_132));
-        assert_eq!(cache_mib(1_025), cache_mib(2_048));
-        // The whole tool list, 23,402 tokens, as the server measured it: 783 MiB
-        // and the checkpoints it had. It fits beside nothing else, as it should.
-        assert!(52 + 23 * 33 + 4 * 51 < cache_mib(32_768));
+        // The cache's limit follows the window, and a started 1,024 tokens
+        // count whole; the two small models have one limit.
+        assert_eq!([4_096, 65_536, 262_144].map(|window| four.cache_mib(window)), [1_816, 3_796, 10_132]);
+        assert_eq!(four.cache_mib(1_025), four.cache_mib(2_048));
+        for window in [4_096, 65_536, 262_144] {
+            assert_eq!(nine.cache_mib(window), four.cache_mib(window));
+        }
+        // The 27B's is its own: a recurrent state of 150 MiB a checkpoint,
+        // and 64 MiB of attention cache for every 1,024 tokens.
+        assert_eq!(big.cache_mib(65_536), 151 + 32 * 150 + 64 * 65);
+        assert_eq!(big.cache_mib(65_536), 9_111);
+        // The whole tool list, 23,402 tokens, as the server measured it on
+        // the 4B: 783 MiB and the checkpoints it had. It fits beside
+        // nothing else, as it should.
+        assert!(52 + 23 * 33 + 4 * 51 < four.cache_mib(32_768));
         assert_eq!(four.growth_mib(DEFAULT_CONTEXT, false), 32 * 51 + 3_796);
         assert_eq!(four.growth_mib(DEFAULT_CONTEXT, true), 32 * 51 + 3_796 + 348);
+        assert_eq!(big.growth_mib(DEFAULT_CONTEXT, true), 32 * 150 + 9_111 + 622);
         for model in &CATALOGUE {
             assert!(model.memory.at_32768 as u64 > model.bytes / (1024 * 1024), "{}: more than its file", model.id);
             assert!(model.loaded_mib(model.largest_context, true) > model.loaded_mib(model.default_context, true));
@@ -935,7 +987,7 @@ mod tests {
     #[test]
     fn the_catalogue_pins_two_files_of_one_revision_per_model() {
         let ids: Vec<&str> = CATALOGUE.iter().map(|m| m.id).collect();
-        assert_eq!(ids, ["qwen3.5-4b", "qwen3.5-9b"]);
+        assert_eq!(ids, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b"]);
         for model in &CATALOGUE {
             assert_eq!(by_id(model.id), Some(model));
             // The id is a directory's name and the name the server answers to.
@@ -953,6 +1005,12 @@ mod tests {
             );
             assert!(!model.label.is_empty() && !model.licence.is_empty() && !model.quantisation.is_empty());
             assert_eq!(model.maker, "Alibaba's Qwen family");
+            // Our own conversion, in a repository of the model's own, and
+            // each file named after the model: no two files of the
+            // catalogue have one name.
+            let name = model.label.replace(' ', "-");
+            assert_eq!(model.repository, format!("William-WSDS/{name}-GGUF"));
+            assert_eq!((model.file, model.images.file), (format!("{name}-Q4_K_M.gguf").as_str(), format!("mmproj-{name}-BF16.gguf").as_str()));
             // Its image file: another file of the same revision, with a name
             // and a size of its own, so that a size alone says which of the
             // two an upload brings.
@@ -969,8 +1027,9 @@ mod tests {
             );
             assert_eq!(model.image_tokens, IMAGE_TOKENS);
         }
-        assert_eq!((CATALOGUE[0].bytes, CATALOGUE[1].bytes), (2_740_937_888, 5_680_522_464));
-        assert_eq!((CATALOGUE[0].images.bytes, CATALOGUE[1].images.bytes), (672_423_616, 918_166_080));
+        assert_eq!(CATALOGUE.map(|m| m.bytes), [2_815_884_544, 5_831_992_608, 17_005_351_136]);
+        assert_eq!(CATALOGUE.map(|m| m.images.bytes), [675_569_216, 921_704_896, 931_145_952]);
+        assert_eq!(CATALOGUE.map(|m| m.family), [Family::Qwen35, Family::Qwen35, Family::Qwen38]);
         // No two files of the catalogue have one size: an upload that names
         // no model is told apart by its size as well.
         let mut sizes: Vec<u64> = CATALOGUE.iter().flat_map(|m| Part::ALL.map(|part| m.part(part).bytes)).collect();
@@ -993,8 +1052,8 @@ mod tests {
         assert_eq!(model.partial_path(models), Path::new("/embra/data/models/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf.partial"));
         assert_eq!(model.verified_path(models), Path::new("/embra/data/models/qwen3.5-4b/verified"));
         // The image file stands beside it, with a download and a record of its own.
-        assert_eq!(model.path_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-F16.gguf"));
-        assert_eq!(model.partial_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-F16.gguf.partial"));
+        assert_eq!(model.path_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-Qwen3.5-4B-BF16.gguf"));
+        assert_eq!(model.partial_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-Qwen3.5-4B-BF16.gguf.partial"));
         assert_eq!(model.verified_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/verified-images"));
         assert_eq!((model.path_of(Part::Model, models), model.verified_of(Part::Model, models)), (model.file_path(models), model.verified_path(models)));
     }
@@ -1157,7 +1216,7 @@ mod tests {
     fn the_verification_record_reads_back() {
         let record = Verified {
             file: "Qwen3.5-4B-Q4_K_M.gguf".to_string(),
-            bytes: 2_740_937_888,
+            bytes: 2_815_884_544,
             sha256: CATALOGUE[0].sha256.to_string(),
             mtime: (1_763_829_000, 5),
         };

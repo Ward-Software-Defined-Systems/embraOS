@@ -155,7 +155,7 @@ pub(crate) fn server_args(wanted: &Wanted, paths: &Paths, images: bool) -> Vec<S
         "--cache-ram",
         // What it may keep of earlier prompts: a function of the window,
         // which the brain reads too when it says what a model takes.
-        &native::cache_mib(wanted.context).to_string(),
+        &wanted.model.cache_mib(wanted.context).to_string(),
         // The build has no web page; the switch says so to the server too.
         // `--no-webui` is the name llama.cpp 1.0.0 calls deprecated.
         "--no-ui",
@@ -615,7 +615,7 @@ mod tests {
         assert_eq!(seeing[..args.len()], args[..]);
         assert_eq!(
             seeing[args.len()..],
-            ["--mmproj", "/embra/data/models/qwen3.5-4b/mmproj-F16.gguf", "--image-min-tokens", "1024", "--image-max-tokens", "1024"]
+            ["--mmproj", "/embra/data/models/qwen3.5-4b/mmproj-Qwen3.5-4B-BF16.gguf", "--image-min-tokens", "1024", "--image-max-tokens", "1024"]
         );
         // No flag that reaches outside the machine or loads a file that is
         // not the model's own: an image reaches the server in the request
@@ -630,7 +630,7 @@ mod tests {
         // prompt that fills it, with every checkpoint it can have), and the
         // checkpoints are the number the limit counts with.
         let small = server_args(&Wanted { model: MODEL, context: 4_096 }, &paths, false);
-        assert_eq!(small[small.iter().position(|a| a == "--cache-ram").unwrap() + 1], native::cache_mib(4_096).to_string());
+        assert_eq!(small[small.iter().position(|a| a == "--cache-ram").unwrap() + 1], MODEL.cache_mib(4_096).to_string());
         assert_eq!(small[small.iter().position(|a| a == "--cache-ram").unwrap() + 1], "1816");
         assert_eq!(small[small.iter().position(|a| a == "--ctx-checkpoints").unwrap() + 1], native::CHECKPOINTS_MAX.to_string());
     }
@@ -755,7 +755,7 @@ mod tests {
         assert!(!Path::new(&format!("/proc/{first}")).exists(), "the server without the file is gone");
         let args = read_args();
         assert_eq!(args, server_args(&wanted, &rig.paths, true));
-        assert!(args.windows(2).any(|pair| pair[0] == "--mmproj" && pair[1].ends_with("/qwen3.5-4b/mmproj-F16.gguf")), "{args:?}");
+        assert!(args.windows(2).any(|pair| pair[0] == "--mmproj" && pair[1].ends_with("/qwen3.5-4b/mmproj-Qwen3.5-4B-BF16.gguf")), "{args:?}");
         let status = rig.status();
         assert!(status.images && status.exits == 0, "a start for other settings is no exit: {status:?}");
         assert_eq!(native::read_status(&rig.paths.status).unwrap().unwrap().to_text().lines().filter(|line| *line == "images=yes").count(), 1);

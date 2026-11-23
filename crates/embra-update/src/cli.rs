@@ -289,13 +289,13 @@ mod tests {
         assert_eq!(p("model-install qwen3.5-4b"), Ok(Command::ModelInstall { model: four }));
         assert_eq!(p("model-import qwen3.5-4b"), Ok(Command::ModelImport { model: four, part: Part::Model }));
         assert_eq!(p("model-import qwen3.5-4b images"), Ok(Command::ModelImport { model: four, part: Part::Images }));
-        assert_eq!(p("model-import images").unwrap_err(), "not a native model: \"images\" (qwen3.5-4b, qwen3.5-9b)");
-        assert_eq!(p("model-import qwen3.5-4b weights").unwrap_err(), "model-import takes one native model: qwen3.5-4b, qwen3.5-9b");
-        assert_eq!(p("model-install qwen3.5-4b images").unwrap_err(), "model-install takes one native model: qwen3.5-4b, qwen3.5-9b", "an install brings both files");
+        assert_eq!(p("model-import images").unwrap_err(), "not a native model: \"images\" (qwen3.5-4b, qwen3.5-9b, qwen3.8-27b)");
+        assert_eq!(p("model-import qwen3.5-4b weights").unwrap_err(), "model-import takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b");
+        assert_eq!(p("model-install qwen3.5-4b images").unwrap_err(), "model-install takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b", "an install brings both files");
         assert_eq!(p("model-verify qwen3.5-4b"), Ok(Command::ModelVerify { model: four }));
         assert_eq!(p("model-remove qwen3.5-9b"), Ok(Command::ModelRemove { model: native_model::by_id("qwen3.5-9b").unwrap() }));
-        assert_eq!(p("model-import").unwrap_err(), "model-import needs a native model: qwen3.5-4b, qwen3.5-9b");
-        assert_eq!(p("model-verify qwen3.5-4b qwen3.5-9b").unwrap_err(), "model-verify takes one native model: qwen3.5-4b, qwen3.5-9b");
+        assert_eq!(p("model-import").unwrap_err(), "model-import needs a native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b");
+        assert_eq!(p("model-verify qwen3.5-4b qwen3.5-9b").unwrap_err(), "model-verify takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b");
         for not_one in ["../etc", "qwen3.5-4b/..", "Qwen3.5-4B", "qwen3.5-27b", "Qwen3.5-4B-Q4_K_M.gguf"] {
             assert!(p(&format!("model-remove {not_one}")).unwrap_err().starts_with("not a native model: "), "{not_one}");
         }

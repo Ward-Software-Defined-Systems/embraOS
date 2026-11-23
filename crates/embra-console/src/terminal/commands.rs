@@ -46,16 +46,16 @@ Model:
   /model <name>                          Switch the model (next message): opus-5.5|opus-5|opus-4.8|
                                          fable-5.1|fable-5, gemini-3.1-pro|gemini-4-argon,
                                          a model the Ollama / LM Studio server lists,
-                                         or a native model (experimental): qwen3.5-4b|qwen3.5-9b
+                                         or a native model (experimental): qwen3.5-4b|qwen3.5-9b|qwen3.8-27b
   /effort                                Show the active provider's effort level and what is sent
   /effort <low|medium|high|xhigh|max>    Set effort for the active provider (Anthropic default max; Gemini high; local presets verbatim, model-validated)
-  /effort <on|off>                       A native model (experimental) has no levels: think first, or answer without thinking
+  /effort <on|off>                       A native model (experimental): think first, or answer without thinking; Qwen3.8 27B also takes low|medium|xhigh
   /effort reset                          Clear the active provider's stored level
   /model-wait                            Show how long embraOS waits while Ollama, LM Studio or a native model sends nothing (default 120 minutes)
   /model-wait <minutes>|reset            Set that wait for the three of them, or go back to the default; Esc ends a wait
   /native                                Native models (experimental): the models' files, what is kept loaded, the model server, the job that runs
-  /native install <model>                Download a model's file and check it (qwen3.5-4b|qwen3.5-9b); /native cancel stops the job that runs
-  /native import                         How a model's file comes in through the web console, for a machine that cannot reach the source
+  /native install <model>                Download a model's two files and check them (qwen3.5-4b|qwen3.5-9b|qwen3.8-27b); /native cancel stops the job that runs
+  /native import                         How a model's files come in through the web console, for a machine that cannot reach the source
   /native use <model> | off              Keep a model loaded, installing it first when needed, or free its memory; whichever provider leads
   /native context [<tokens>|reset]       The context window the loaded model is given
   /native remove <model>                 Delete a model's file

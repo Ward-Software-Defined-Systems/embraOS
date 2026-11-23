@@ -906,13 +906,13 @@ mod tests {
         let oc = config_of("anthropic", serde_json::json!({})).openai_compat;
         let (prompt, state) = native_model_selection(Some("qwen3.5-9b"), &oc, hands(&env));
         assert_eq!(prompt.field_type, SetupFieldType::Selector as i32);
-        assert_eq!(prompt.options, ["qwen3.5-9b", "qwen3.5-4b"], "the model kept loaded first");
+        assert_eq!(prompt.options, ["qwen3.5-9b", "qwen3.5-4b", "qwen3.8-27b"], "the model kept loaded first");
         assert_eq!(prompt.default_value, "qwen3.5-9b");
         // Each model with what it takes when it is loaded: the 4B as it
         // stands here, without its image file; the 9B as an install brings it.
         assert_eq!(
             prompt.prompt,
-            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): not installed, downloaded first, about 7.8 GB of memory when loaded."
+            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): not installed, downloaded first, about 7.8 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded."
         );
         // The machine's memory beside them, when the kernel says it; and a
         // window stored for a model is the one its figure is for.
@@ -921,7 +921,7 @@ mod tests {
         let (with_machine, _) = native_model_selection(None, &narrowed, hands(&env));
         assert_eq!(
             with_machine.prompt,
-            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed, about 3.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): not installed, downloaded first, about 7.8 GB of memory when loaded. This machine has 12.6 GB of memory, 11.5 GB of it free for a model now."
+            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 3.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): not installed, downloaded first, about 7.8 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded. This machine has 12.6 GB of memory, 11.5 GB of it free for a model now."
         );
         std::fs::remove_dir_all(&env.proc).unwrap();
         assert!(matches!(state.preset, OpenAiCompatPreset::Native) && state.model_only && state.native.is_some());
@@ -929,7 +929,7 @@ mod tests {
 
         // None kept loaded: the catalogue's own order.
         let (prompt, _) = native_model_selection(None, &oc, hands(&env));
-        assert_eq!(prompt.options, ["qwen3.5-4b", "qwen3.5-9b"]);
+        assert_eq!(prompt.options, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b"]);
         // Every model of the catalogue is offered, and each is a name `/model` takes.
         for model in &contract::CATALOGUE {
             assert!(prompt.options.iter().any(|id| id == model.id), "{}", model.id);
@@ -938,13 +938,13 @@ mod tests {
         }
         assert_eq!(
             native_model_choice("qwen3.5-27b").unwrap_err(),
-            "'qwen3.5-27b' is not a native model. The catalogue (experimental): qwen3.5-4b, qwen3.5-9b. /model alone picks from the list."
+            "'qwen3.5-27b' is not a native model. The catalogue (experimental): qwen3.5-4b, qwen3.5-9b, qwen3.8-27b. /model alone picks from the list."
         );
 
         // A download that stopped, and a file nobody checked.
         std::fs::create_dir_all(nine().dir(&env.models)).unwrap();
         std::fs::File::create(nine().partial_path(&env.models)).unwrap().set_len(1024 * 1024 * 1024).unwrap();
-        assert_eq!(native_model::file_words(nine(), &env), "1024 of 5417 MB downloaded, the rest is downloaded first");
+        assert_eq!(native_model::file_words(nine(), &env), "1024 of 5561 MB downloaded, the rest is downloaded first");
         std::fs::remove_file(four().verified_path(&env.models)).unwrap();
         assert!(native_model::file_words(four(), &env).starts_with("its file is checked first ("), "{}", native_model::file_words(four(), &env));
     }
@@ -1052,7 +1052,7 @@ mod tests {
         env.updater = stand_in(
             &root,
             &format!(
-                "echo \"$2: downloading its file\"\necho \"$2: received 270 of 5417 MB (5%)\"\nuntil [ -e '{}' ]; do sleep 0.02; done\necho \"$2: installed and verified\"",
+                "echo \"$2: downloading its file\"\necho \"$2: received 270 of 5561 MB (5%)\"\nuntil [ -e '{}' ]; do sleep 0.02; done\necho \"$2: installed and verified\"",
                 gate.display()
             ),
         );
@@ -1063,10 +1063,10 @@ mod tests {
         pick_native_model(nine(), &tx, &db, &hands).await;
         assert_eq!(
             told(&mut rx).await,
-            "qwen3.5-9b is not ready on this machine: its files (5417 MB, and 875 MB to read images) are installed and checked first, and the lines below follow the updater. The session stays usable; the model is loaded when the job is done."
+            "qwen3.5-9b is not ready on this machine: its files (5561 MB, and 879 MB to read images) are installed and checked first, and the lines below follow the updater. The session stays usable; the model is loaded when the job is done."
         );
         assert_eq!(told(&mut rx).await, "qwen3.5-9b: downloading its file");
-        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5561 MB (5%)");
         assert!(saved_models(&db_server).await.is_empty(), "the model in use stays until the file is there");
         assert_eq!(contract::read_settings(&env.settings), Ok(None));
 
@@ -1075,7 +1075,7 @@ mod tests {
         pick_native_model(nine(), &other, &db, &hands).await;
         assert_eq!(
             told(&mut other_rx).await,
-            "qwen3.5-9b was not installed: the download of qwen3.5-9b runs (qwen3.5-9b: received 270 of 5417 MB (5%)), and one job runs at a time. Pick again when it is done."
+            "qwen3.5-9b was not installed: the download of qwen3.5-9b runs (qwen3.5-9b: received 270 of 5561 MB (5%)), and one job runs at a time. Pick again when it is done."
         );
 
         std::fs::write(&gate, "").unwrap();
@@ -1124,11 +1124,11 @@ mod tests {
 
         // The operator stopped it.
         let pid_file = root.join("pid");
-        env.updater = stand_in(&root, &format!("echo $$ > '{}'\necho \"$2: received 270 of 5417 MB (5%)\"\nwhile :; do sleep 0.02; done", pid_file.display()));
+        env.updater = stand_in(&root, &format!("echo $$ > '{}'\necho \"$2: received 270 of 5561 MB (5%)\"\nwhile :; do sleep 0.02; done", pid_file.display()));
         let stopping = NativeHands { env: env.clone(), ..hands.clone() };
         pick_native_model(nine(), &tx, &db, &stopping).await;
         assert!(told(&mut rx).await.starts_with("qwen3.5-9b is not ready on this machine:"));
-        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5561 MB (5%)");
         assert!(stopping.jobs.stop().is_some());
         assert_eq!(
             told(&mut rx).await,
@@ -1255,6 +1255,12 @@ mod tests {
         let (changed, said, kind) = run("sometimes", &mut oc);
         assert_eq!((changed, kind), (false, SystemMessageType::Error));
         assert!(said.starts_with("'sometimes' is not on, off or a level. "), "{said}");
+        // The command finds the family by the model the configuration names.
+        let (changed, said, _) = apply_native_effort("medium", &mut oc);
+        assert!(changed && said == "Thinking is on for qwen3.8-27b at medium. Takes effect on your next message.", "{said}");
+        oc.set_model(OpenAiCompatPreset::Native, "qwen3.5-4b");
+        let (_, said, _) = apply_native_effort("medium", &mut oc);
+        assert!(said.starts_with("Thinking is on for qwen3.5-4b. A native model has no levels (experimental)"), "{said}");
     }
 
     #[test]
@@ -1278,9 +1284,9 @@ mod tests {
         assert_eq!(parse_native("context 65,536"), stored(S::Context(ContextAction::Set(65_536))));
         assert_eq!(parse_native("Context Reset"), stored(S::Context(ContextAction::Reset)));
         for (bad, why) in [
-            ("install", "/native install takes one model: qwen3.5-4b, qwen3.5-9b."),
-            ("use qwen3.5-4b qwen3.5-9b", "/native use takes one model: qwen3.5-4b, qwen3.5-9b."),
-            ("remove qwen3.5-27b", "'qwen3.5-27b' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b."),
+            ("install", "/native install takes one model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b."),
+            ("use qwen3.5-4b qwen3.5-9b", "/native use takes one model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b."),
+            ("remove qwen3.5-27b", "'qwen3.5-27b' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b."),
             ("off now", "/native off takes nothing after it."),
             ("list all", "/native list takes nothing after it."),
             ("context many", "'many' is not a number of tokens."),
@@ -1334,8 +1340,8 @@ mod tests {
             root,
             &format!(
                 "case \"$1\" in\n\
-                 model-list)\n  echo 'qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): installed'\n  echo 'qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5417 MB, Apache-2.0): not installed'\n  echo 'DATA has 1840 MB free' ;;\n\
-                 model-install)\n  echo \"$2: received 270 of 5417 MB (5%)\"\n  until [ -e '{}' ]; do sleep 0.02; done\n  echo \"$2: installed and verified\" ;;\n\
+                 model-list)\n  echo 'qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2685 MB, Apache-2.0): installed'\n  echo 'qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5561 MB, Apache-2.0): not installed'\n  echo 'DATA has 1840 MB free' ;;\n\
+                 model-install)\n  echo \"$2: received 270 of 5561 MB (5%)\"\n  until [ -e '{}' ]; do sleep 0.02; done\n  echo \"$2: installed and verified\" ;;\n\
                  model-remove)\n  echo \"refused: the settings ask for $2 to be kept loaded; free it first (/native off)\" >&2\n  exit 2 ;;\n\
                  esac",
                 gate.display()
@@ -1364,8 +1370,8 @@ mod tests {
         assert_eq!(
             show_native(&env, &jobs, None).await,
             "Native models (experimental): a model that runs on this machine.\n  \
-             qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): installed\n  \
-             qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5417 MB, Apache-2.0): not installed\n  \
+             qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2685 MB, Apache-2.0): installed\n  \
+             qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5561 MB, Apache-2.0): not installed\n  \
              DATA has 1840 MB free\n  \
              Kept loaded: none. /native use <model> loads one.\n  \
              /native help shows the forms."
@@ -1391,17 +1397,17 @@ mod tests {
         machine_action(MachineAction::Install(nine()), &tx, &env, &jobs, None).await;
         assert_eq!(
             told(&mut rx).await,
-            "Installing qwen3.5-9b: its model file (5417 MB) and its image file (875 MB) are downloaded and checked, a file that is there already is left alone, and the lines below follow the updater. The session stays usable; /native cancel stops it."
+            "Installing qwen3.5-9b: its model file (5561 MB) and its image file (879 MB) are downloaded and checked, a file that is there already is left alone, and the lines below follow the updater. The session stays usable; /native cancel stops it."
         );
-        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5561 MB (5%)");
         assert!(show_native(&env, &jobs, None)
             .await
-            .contains("\n  The download of qwen3.5-9b runs: qwen3.5-9b: received 270 of 5417 MB (5%). /native cancel stops it.\n"));
+            .contains("\n  The download of qwen3.5-9b runs: qwen3.5-9b: received 270 of 5561 MB (5%). /native cancel stops it.\n"));
         // One job at a time.
         machine_action(MachineAction::Remove(four()), &tx, &env, &jobs, None).await;
         assert_eq!(
             told(&mut rx).await,
-            "Not started: the download of qwen3.5-9b runs (qwen3.5-9b: received 270 of 5417 MB (5%)), and one job runs at a time. /native cancel stops it."
+            "Not started: the download of qwen3.5-9b runs (qwen3.5-9b: received 270 of 5561 MB (5%)), and one job runs at a time. /native cancel stops it."
         );
         std::fs::write(&gate, "").unwrap();
         assert_eq!(told(&mut rx).await, "qwen3.5-9b: installed and verified");
@@ -1437,7 +1443,7 @@ mod tests {
 
         machine_action(MachineAction::Install(nine()), &tx, &env, &jobs, None).await;
         assert!(told(&mut rx).await.starts_with("Installing qwen3.5-9b: "));
-        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
+        assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5561 MB (5%)");
         machine_action(MachineAction::Cancel, &tx, &env, &jobs, None).await;
         assert_eq!(told(&mut rx).await, "Stopping the download of qwen3.5-9b.");
         assert_eq!(told(&mut rx).await, "The download of qwen3.5-9b was stopped. What arrived is kept, and the next install goes on from it.");
