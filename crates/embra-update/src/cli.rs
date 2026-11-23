@@ -2,7 +2,7 @@
 //! needs a value and has none is an error naming it, like
 //! `embra_common::args::Flags` for the services (this binary is not one).
 
-use embra_boot::native_model::{self, NativeModel};
+use embra_boot::native_model::{self, NativeModel, Part};
 
 pub const USAGE: &str = "usage: embra-update <command> [flags]
   snapshot [--label <l>] [--taken-by <who>] [--once] [--force] [--console]   a tar.gz of STATE and DATA under /embra/data/backups
@@ -19,11 +19,13 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
                                                                  and the installer's own question) into the other slot of the installation
                                                                  the disk holds, STATE and DATA kept
   grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it
-  model-list                                                     the native models (experimental) and how each one's file stands on DATA
-  model-install <model>                                          download a model's file from the catalogue's source, check it and install it; a stopped download is resumed
-  model-import <model>                                           check a model's file read from standard input against the catalogue and install it (the web console's upload)
-  model-verify <model>                                           hash an installed model's file again: the catalogue's file gets its record, any other is removed
-  model-remove <model>                                           remove a model's file from DATA";
+  model-list                                                     the native models (experimental) and how each one's files stand on DATA
+  model-install <model>                                          download a model's two files from the catalogue's source, the model file and the file it reads images through, check
+                                                                 each and install it; a stopped download is resumed, and a file that is installed is left alone
+  model-import <model> [images]                                  check one of a model's files read from standard input against the catalogue and install it: the model file, or
+                                                                 with the word images the file it reads images through (the web console's upload)
+  model-verify <model>                                           hash an installed model's files again: the catalogue's file gets its record, any other is removed
+  model-remove <model>                                           remove a model's files from DATA";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -40,7 +42,7 @@ pub enum Command {
     GrowData { console: bool },
     ModelList,
     ModelInstall { model: &'static NativeModel },
-    ModelImport { model: &'static NativeModel },
+    ModelImport { model: &'static NativeModel, part: Part },
     ModelVerify { model: &'static NativeModel },
     ModelRemove { model: &'static NativeModel },
 }
@@ -205,7 +207,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Ok(Command::ModelList)
         }
         "model-install" => Ok(Command::ModelInstall { model: named_model("model-install", &mut positionals)? }),
-        "model-import" => Ok(Command::ModelImport { model: named_model("model-import", &mut positionals)? }),
+        "model-import" => {
+            // The word after the model says that the file is its image file.
+            let part = if positionals.len() == 2 && positionals.last().is_some_and(|word| word == "images") {
+                positionals.pop();
+                Part::Images
+            } else {
+                Part::Model
+            };
+            Ok(Command::ModelImport { model: named_model("model-import", &mut positionals)?, part })
+        }
         "model-verify" => Ok(Command::ModelVerify { model: named_model("model-verify", &mut positionals)? }),
         "model-remove" => Ok(Command::ModelRemove { model: named_model("model-remove", &mut positionals)? }),
         other => Err(format!("unknown command {other:?}")),
@@ -276,7 +287,11 @@ mod tests {
         let four = native_model::by_id("qwen3.5-4b").unwrap();
         assert_eq!(p("model-list"), Ok(Command::ModelList));
         assert_eq!(p("model-install qwen3.5-4b"), Ok(Command::ModelInstall { model: four }));
-        assert_eq!(p("model-import qwen3.5-4b"), Ok(Command::ModelImport { model: four }));
+        assert_eq!(p("model-import qwen3.5-4b"), Ok(Command::ModelImport { model: four, part: Part::Model }));
+        assert_eq!(p("model-import qwen3.5-4b images"), Ok(Command::ModelImport { model: four, part: Part::Images }));
+        assert_eq!(p("model-import images").unwrap_err(), "not a native model: \"images\" (qwen3.5-4b, qwen3.5-9b)");
+        assert_eq!(p("model-import qwen3.5-4b weights").unwrap_err(), "model-import takes one native model: qwen3.5-4b, qwen3.5-9b");
+        assert_eq!(p("model-install qwen3.5-4b images").unwrap_err(), "model-install takes one native model: qwen3.5-4b, qwen3.5-9b", "an install brings both files");
         assert_eq!(p("model-verify qwen3.5-4b"), Ok(Command::ModelVerify { model: four }));
         assert_eq!(p("model-remove qwen3.5-9b"), Ok(Command::ModelRemove { model: native_model::by_id("qwen3.5-9b").unwrap() }));
         assert_eq!(p("model-import").unwrap_err(), "model-import needs a native model: qwen3.5-4b, qwen3.5-9b");
@@ -287,7 +302,7 @@ mod tests {
         assert!(p("model-list all").unwrap_err().contains("no positional"));
         assert!(p("model-import qwen3.5-4b --console").is_ok_and(|c| !c.console()), "a model job speaks on stdio");
         // Every model command is in the usage.
-        for command in ["model-list", "model-install <model>", "model-import <model>", "model-verify <model>", "model-remove <model>"] {
+        for command in ["model-list", "model-install <model>", "model-import <model> [images]", "model-verify <model>", "model-remove <model>"] {
             assert!(USAGE.contains(&format!("\n  {command} ")), "{command}");
         }
     }

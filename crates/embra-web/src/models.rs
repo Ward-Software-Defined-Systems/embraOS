@@ -508,7 +508,7 @@ mod tests {
         let cli = read("embra-update/src/cli.rs");
         assert!(cli.contains("\"model-import\" =>"), "the updater has its model-import command");
         let models = read("embra-update/src/models.rs");
-        assert!(models.contains("enough_space(free, model.bytes, RESERVE_BYTES)"), "the updater holds the same reserve for a model's file");
+        assert!(models.contains("enough_space(free, file.bytes, RESERVE_BYTES)"), "the updater holds the same reserve for a model's file");
         assert!(models.contains("is installed and verified; nothing to do"), "the updater takes no second file for an installed model");
         assert_eq!(MODELS_ROOT, "/embra/data/models");
     }

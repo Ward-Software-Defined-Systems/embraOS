@@ -1,6 +1,8 @@
 //! Native models (experimental): the files of the catalogue's models on
-//! DATA (`embra_boot::native_model`). A model's file is the catalogue's
-//! bytes or it is not kept. A file read from standard input (the web
+//! DATA (`embra_boot::native_model`). A model has two, the model file and
+//! the file it reads images through, and each is handled alone: a model
+//! whose image file is not there runs and reads text. A file is the
+//! catalogue's bytes or it is not kept. A file read from standard input (the web
 //! console's upload) is hashed while it is written under a `.partial` name;
 //! it gets its final name, and the verification record embrad starts a
 //! model by, only when its size and its sha256 are the catalogue's. A
@@ -21,7 +23,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use embra_boot::native_model::{self as native, Installed, NativeModel, Verified};
+use embra_boot::native_model::{self as native, CatalogueFile, Installed, NativeModel, Part, Verified};
 use sha2::{Digest, Sha256};
 
 use crate::fetch::{self, Opened};
@@ -80,23 +82,72 @@ pub fn job_lock(models: &Path) -> Result<JobLock, Outcome> {
     }
 }
 
+/// One file of a model: what a job reads, writes, hashes and records.
+#[derive(Clone, Copy)]
+struct Target<'a> {
+    model: &'a NativeModel,
+    part: Part,
+    /// The file as the catalogue names it.
+    file: CatalogueFile,
+}
+
+impl<'a> Target<'a> {
+    fn of(model: &'a NativeModel, part: Part) -> Self {
+        Target { model, part, file: model.part(part) }
+    }
+
+    /// What a line about this file begins with: the model's id, and for the
+    /// image file that it is that one. The model file's lines are as they
+    /// were before a model had two files.
+    fn tag(&self) -> String {
+        match self.part {
+            Part::Model => self.model.id.to_string(),
+            Part::Images => format!("{} image file", self.model.id),
+        }
+    }
+
+    /// What the file is called in a sentence.
+    fn name(&self) -> String {
+        match self.part {
+            Part::Model => self.model.label.to_string(),
+            Part::Images => format!("the image file of {}", self.model.label),
+        }
+    }
+
+    fn path(&self, models: &Path) -> PathBuf {
+        self.model.path_of(self.part, models)
+    }
+
+    fn partial(&self, models: &Path) -> PathBuf {
+        self.model.partial_of(self.part, models)
+    }
+
+    fn verified(&self, models: &Path) -> PathBuf {
+        self.model.verified_of(self.part, models)
+    }
+
+    fn installed(&self, models: &Path) -> Installed {
+        native::installed_part(self.model, self.part, models)
+    }
+}
+
 /// A progress line each [`PROGRESS_STEP`] percent of a file: twenty a file
 /// at most, whatever its size and the speed.
 struct Progress<'a> {
-    model: &'a NativeModel,
+    target: Target<'a>,
     verb: &'static str,
     next: u64,
 }
 
 impl<'a> Progress<'a> {
-    fn new(model: &'a NativeModel, verb: &'static str, done: u64) -> Self {
-        let mut progress = Progress { model, verb, next: 0 };
+    fn new(target: Target<'a>, verb: &'static str, done: u64) -> Self {
+        let mut progress = Progress { target, verb, next: 0 };
         progress.next = progress.step_after(done);
         progress
     }
 
     fn percent(&self, done: u64) -> u64 {
-        (u128::from(done) * 100 / u128::from(self.model.bytes.max(1))) as u64
+        (u128::from(done) * 100 / u128::from(self.target.file.bytes.max(1))) as u64
     }
 
     fn step_after(&self, done: u64) -> u64 {
@@ -104,14 +155,14 @@ impl<'a> Progress<'a> {
     }
 
     fn at(&mut self, done: u64, out: &mut dyn Write) {
-        if self.percent(done) >= self.next && done < self.model.bytes {
+        if self.percent(done) >= self.next && done < self.target.file.bytes {
             let _ = writeln!(
                 out,
                 "{}: {} {} of {} MB ({}%)",
-                self.model.id,
+                self.target.tag(),
                 self.verb,
                 mb(done),
-                mb(self.model.bytes),
+                mb(self.target.file.bytes),
                 self.percent(done)
             );
             self.next = self.step_after(done);
@@ -135,10 +186,10 @@ enum Copied {
     Disk(io::Error),
 }
 
-/// What a copy into a model's file is for: the model, DATA and how its
+/// What a copy into a model's file is for: the file, DATA and how its
 /// reserve is watched, and the word a progress line says the bytes were.
 struct CopyJob<'a> {
-    model: &'a NativeModel,
+    target: Target<'a>,
     limits: &'a Limits<'a>,
     data: &'a Path,
     verb: &'static str,
@@ -148,9 +199,9 @@ struct CopyJob<'a> {
 /// `hasher` has seen: no more than the catalogue's size, hashed as written,
 /// DATA's reserve looked at as it goes.
 fn copy_hashed(job: &CopyJob, source: &mut dyn Read, dest: &mut File, hasher: &mut Sha256, mut done: u64, out: &mut dyn Write) -> Copied {
-    let (model, limits) = (job.model, job.limits);
+    let (bytes, limits) = (job.target.file.bytes, job.limits);
     let mut buf = vec![0u8; CHUNK];
-    let mut progress = Progress::new(model, job.verb, done);
+    let mut progress = Progress::new(job.target, job.verb, done);
     let mut next_check = done.saturating_add(limits.check_every);
     loop {
         let n = match source.read(&mut buf) {
@@ -159,7 +210,7 @@ fn copy_hashed(job: &CopyJob, source: &mut dyn Read, dest: &mut File, hasher: &m
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Copied::Source(done, e),
         };
-        if done + n as u64 > model.bytes {
+        if done + n as u64 > bytes {
             return Copied::Long;
         }
         if let Err(e) = dest.write_all(&buf[..n]) {
@@ -177,14 +228,14 @@ fn copy_hashed(job: &CopyJob, source: &mut dyn Read, dest: &mut File, hasher: &m
             }
         }
     }
-    if done < model.bytes { Copied::Short(done) } else { Copied::Whole }
+    if done < bytes { Copied::Short(done) } else { Copied::Whole }
 }
 
 /// Feed `hasher` the first `len` bytes of `path`, with progress lines.
-fn hash_into(hasher: &mut Sha256, path: &Path, len: u64, model: &NativeModel, out: &mut dyn Write) -> io::Result<()> {
+fn hash_into(hasher: &mut Sha256, path: &Path, len: u64, target: Target, out: &mut dyn Write) -> io::Result<()> {
     let mut file = File::open(path)?;
     let mut buf = vec![0u8; CHUNK];
-    let mut progress = Progress::new(model, "checked", 0);
+    let mut progress = Progress::new(target, "checked", 0);
     let mut done: u64 = 0;
     while done < len {
         let want = (len - done).min(buf.len() as u64) as usize;
@@ -213,25 +264,25 @@ enum Checked {
 
 /// Hash the installed file. The catalogue's gets its record; any other is
 /// removed.
-fn check_file(model: &NativeModel, models: &Path, out: &mut dyn Write) -> Result<Checked, String> {
-    let path = model.file_path(models);
+fn check_file(target: Target, models: &Path, out: &mut dyn Write) -> Result<Checked, String> {
+    let (path, file) = (target.path(models), target.file);
     let len = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?.len();
     let removed = |why: String| {
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(model.verified_path(models));
+        let _ = fs::remove_file(target.verified(models));
         Ok(Checked::Removed(why))
     };
-    if len != model.bytes {
-        return removed(format!("{} is {len} bytes and the catalogue's file is {}", model.file, model.bytes));
+    if len != file.bytes {
+        return removed(format!("{} is {len} bytes and the catalogue's file is {}", file.file, file.bytes));
     }
-    let _ = writeln!(out, "{}: checking {} ({} MB)", model.id, model.file, mb(model.bytes));
+    let _ = writeln!(out, "{}: checking {} ({} MB)", target.tag(), file.file, mb(file.bytes));
     let mut hasher = Sha256::new();
-    hash_into(&mut hasher, &path, len, model, out).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    hash_into(&mut hasher, &path, len, target, out).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let sha256 = hex::encode(hasher.finalize());
-    if sha256 != model.sha256 {
-        return removed(format!("the sha256 of {} is {}…, not {}…", model.file, &sha256[..16], &model.sha256[..16]));
+    if sha256 != file.sha256 {
+        return removed(format!("the sha256 of {} is {}…, not {}…", file.file, &sha256[..16], &file.sha256[..16]));
     }
-    record(model, models)?;
+    record(target, models)?;
     Ok(Checked::Catalogue(sha256))
 }
 
@@ -239,21 +290,21 @@ fn check_file(model: &NativeModel, models: &Path, out: &mut dyn Write) -> Result
 /// vouches for it: synced, renamed, the directory synced, then the record.
 /// A crash between the two leaves a file without a record, which reads as
 /// never checked.
-fn adopt(model: &NativeModel, models: &Path, partial: File) -> Result<(), String> {
-    let (from, to, dir) = (model.partial_path(models), model.file_path(models), model.dir(models));
+fn adopt(target: Target, models: &Path, partial: File) -> Result<(), String> {
+    let (from, to, dir) = (target.partial(models), target.path(models), target.model.dir(models));
     partial.sync_all().map_err(|e| format!("sync {}: {e}", from.display()))?;
     drop(partial);
     fs::rename(&from, &to).map_err(|e| format!("rename {} to {}: {e}", from.display(), to.display()))?;
     sync_dir(&dir).map_err(|e| format!("sync {}: {e}", dir.display()))?;
-    record(model, models)
+    record(target, models)
 }
 
 /// Write the verification record of the file as it stands now.
-fn record(model: &NativeModel, models: &Path) -> Result<(), String> {
-    let (path, dir) = (model.file_path(models), model.dir(models));
+fn record(target: Target, models: &Path) -> Result<(), String> {
+    let (path, dir) = (target.path(models), target.model.dir(models));
     let meta = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    native::write_verified(&model.verified_path(models), &Verified::of(model, &meta))
-        .map_err(|e| format!("write {}: {e}", model.verified_path(models).display()))?;
+    native::write_verified(&target.verified(models), &Verified::of_part(target.model, target.part, &meta))
+        .map_err(|e| format!("write {}: {e}", target.verified(models).display()))?;
     sync_dir(&dir).map_err(|e| format!("sync {}: {e}", dir.display()))
 }
 
@@ -277,16 +328,39 @@ fn space_note(roots: &Roots, limits: &Limits) -> Option<String> {
     Some(note)
 }
 
-/// The state of a model's file as the listing says it. A file that is not
-/// whole is called that and no more: a job may be writing it at this moment
-/// (the list takes no lock), and whoever shows the list says which job runs.
-fn state_words(model: &NativeModel, models: &Path) -> String {
-    match native::installed(model, models) {
+/// The state of one of a model's files as the listing says it. A file that
+/// is not whole is called that and no more: a job may be writing it at this
+/// moment (the list takes no lock), and whoever shows the list says which
+/// job runs.
+fn state_words(target: Target, models: &Path) -> String {
+    match target.installed(models) {
         Installed::No => "not installed".to_string(),
-        Installed::Partial(bytes) => format!("incomplete, {} of {} MB are there", mb(bytes), mb(model.bytes)),
+        Installed::Partial(bytes) => format!("incomplete, {} of {} MB are there", mb(bytes), mb(target.file.bytes)),
         Installed::Unverified(reason) => format!("installed, not usable: {reason}"),
         Installed::Verified => "installed".to_string(),
     }
+}
+
+/// What the listing says of a model: how its model file stands, and its
+/// image file when that is another matter. A model that is installed with
+/// its image file is "installed", as before a model had two files.
+fn model_words(model: &NativeModel, models: &Path) -> String {
+    let (file, images) = (Target::of(model, Part::Model), Target::of(model, Part::Images));
+    let mut words = state_words(file, models);
+    match (file.installed(models), images.installed(models)) {
+        // Both, or a model file that says it all by itself.
+        (Installed::Verified, Installed::Verified) | (Installed::No | Installed::Partial(_) | Installed::Unverified(_), Installed::No) => {}
+        (Installed::Verified, Installed::No) => {
+            words.push_str(&format!(
+                ", text only: its image file ({} MB) is not installed (installing the model again fetches it)",
+                mb(images.file.bytes)
+            ));
+        }
+        (_, Installed::Partial(_) | Installed::Unverified(_) | Installed::Verified) => {
+            words.push_str(&format!("; its image file: {}", state_words(images, models)));
+        }
+    }
+    words
 }
 
 /// `model-list`: a line a model of the catalogue, then DATA's free space.
@@ -295,13 +369,14 @@ pub fn list_command(roots: &Roots, out: &mut impl Write) -> Outcome {
     for model in &native::CATALOGUE {
         let _ = writeln!(
             out,
-            "{}  {} ({}, {} MB, {}): {}",
+            "{}  {} ({}, {} MB and {} MB for images, {}): {}",
             model.id,
             model.label,
             model.quantisation,
             mb(model.bytes),
+            mb(model.images.bytes),
             model.licence,
-            state_words(model, &models)
+            model_words(model, &models)
         );
     }
     if let Ok(free) = free_bytes(&roots.data()) {
@@ -310,22 +385,24 @@ pub fn list_command(roots: &Roots, out: &mut impl Write) -> Outcome {
     Outcome::Done
 }
 
-/// `model-import <id>`: the model's file read from `source` (standard
-/// input: the web console's upload).
-pub fn import_command(roots: &Roots, model: &NativeModel, source: impl Read, out: &mut impl Write) -> Outcome {
-    import_with(roots, model, source, out, &Limits { check_every: RESERVE_CHECK_EVERY, free: &free_bytes })
+/// `model-import <id> [images]`: one of the model's files read from `source`
+/// (standard input: the web console's upload).
+pub fn import_command(roots: &Roots, model: &NativeModel, part: Part, source: impl Read, out: &mut impl Write) -> Outcome {
+    import_with(roots, model, part, source, out, &Limits { check_every: RESERVE_CHECK_EVERY, free: &free_bytes })
 }
 
-pub fn import_with(roots: &Roots, model: &NativeModel, mut source: impl Read, out: &mut impl Write, limits: &Limits) -> Outcome {
+pub fn import_with(roots: &Roots, model: &NativeModel, part: Part, mut source: impl Read, out: &mut impl Write, limits: &Limits) -> Outcome {
     let models = models_dir(roots);
     let _lock = match job_lock(&models) {
         Ok(lock) => lock,
         Err(outcome) => return outcome,
     };
-    if native::installed(model, &models) == Installed::Verified {
-        return Outcome::Nothing(format!("{} is installed and verified; nothing to do", model.id));
+    let target = Target::of(model, part);
+    let file = target.file;
+    if target.installed(&models) == Installed::Verified {
+        return Outcome::Nothing(format!("{} is installed and verified; nothing to do", target.tag()));
     }
-    let partial_path = model.partial_path(&models);
+    let partial_path = target.partial(&models);
     if let Err(e) = fs::create_dir_all(model.dir(&models)) {
         return Outcome::Failed(format!("create {}: {e}", model.dir(&models).display()));
     }
@@ -335,12 +412,12 @@ pub fn import_with(roots: &Roots, model: &NativeModel, mut source: impl Read, ou
         Ok(free) => free,
         Err(e) => return Outcome::Failed(format!("free space of {}: {e}", roots.data().display())),
     };
-    if !enough_space(free, model.bytes, RESERVE_BYTES) {
+    if !enough_space(free, file.bytes, RESERVE_BYTES) {
         return Outcome::Refused(format!(
             "refused: DATA has {} MB free; {} needs {} MB plus a reserve of {} MB",
             mb(free),
-            model.label,
-            mb(model.bytes),
+            target.name(),
+            mb(file.bytes),
             mb(RESERVE_BYTES)
         ));
     }
@@ -348,10 +425,10 @@ pub fn import_with(roots: &Roots, model: &NativeModel, mut source: impl Read, ou
         Ok(file) => file,
         Err(e) => return Outcome::Failed(format!("create {}: {e}", partial_path.display())),
     };
-    let _ = writeln!(out, "{}: reading {} ({} MB)", model.id, model.file, mb(model.bytes));
+    let _ = writeln!(out, "{}: reading {} ({} MB)", target.tag(), file.file, mb(file.bytes));
     let mut hasher = Sha256::new();
     let data = roots.data();
-    let job = CopyJob { model, limits, data: &data, verb: "read" };
+    let job = CopyJob { target, limits, data: &data, verb: "read" };
     let copied = copy_hashed(&job, &mut source, &mut partial, &mut hasher, 0, out);
     let nothing_kept = |outcome: Outcome| {
         let _ = fs::remove_file(&partial_path);
@@ -362,13 +439,13 @@ pub fn import_with(roots: &Roots, model: &NativeModel, mut source: impl Read, ou
         Copied::Short(got) => {
             return nothing_kept(Outcome::Refused(format!(
                 "refused: the file ended after {got} of {} bytes; nothing of it is kept",
-                model.bytes
+                file.bytes
             )));
         }
         Copied::Long => {
             return nothing_kept(Outcome::Refused(format!(
                 "refused: the file runs past {} bytes, the size of {}; nothing of it is kept",
-                model.bytes, model.file
+                file.bytes, file.file
             )));
         }
         Copied::Reserve(free) => {
@@ -384,25 +461,34 @@ pub fn import_with(roots: &Roots, model: &NativeModel, mut source: impl Read, ou
         Copied::Disk(e) => return nothing_kept(Outcome::Failed(format!("writing {}: {e}", partial_path.display()))),
     }
     let sha256 = hex::encode(hasher.finalize());
-    if sha256 != model.sha256 {
+    if sha256 != file.sha256 {
         return nothing_kept(Outcome::Refused(format!(
             "refused: the file has the size of {} and its sha256 is {}…, not {}…; nothing of it is kept",
-            model.file,
+            file.file,
             &sha256[..16],
-            &model.sha256[..16]
+            &file.sha256[..16]
         )));
     }
-    if let Err(reason) = adopt(model, &models, partial) {
+    if let Err(reason) = adopt(target, &models, partial) {
         return Outcome::Failed(reason);
     }
-    let _ = writeln!(out, "{}: installed and verified ({} MB, sha256 {}…)", model.id, mb(model.bytes), &sha256[..16]);
+    let _ = writeln!(out, "{}: installed and verified ({} MB, sha256 {}…)", target.tag(), mb(file.bytes), &sha256[..16]);
+    if part == Part::Model && Target::of(model, Part::Images).installed(&models) != Installed::Verified {
+        let _ = writeln!(
+            out,
+            "{}: it reads text alone until its image file is there too ({}, {} MB)",
+            model.id,
+            model.images.file,
+            mb(model.images.bytes)
+        );
+    }
     if let Some(note) = space_note(roots, limits) {
         let _ = writeln!(out, "{note}");
     }
     Outcome::Done
 }
 
-/// `model-verify <id>`: the installed file hashed again. The catalogue's
+/// `model-verify <id>`: the installed files hashed again. The catalogue's
 /// file gets its record; any other is removed.
 pub fn verify_command(roots: &Roots, model: &NativeModel, out: &mut impl Write) -> Outcome {
     let models = models_dir(roots);
@@ -413,57 +499,136 @@ pub fn verify_command(roots: &Roots, model: &NativeModel, out: &mut impl Write) 
     if !model.file_path(&models).is_file() {
         return Outcome::Refused(format!("refused: {} is not installed", model.id));
     }
-    match check_file(model, &models, out) {
-        Ok(Checked::Catalogue(sha256)) => {
-            let _ = writeln!(out, "{}: verified ({} MB, sha256 {}…)", model.id, mb(model.bytes), &sha256[..16]);
-            Outcome::Done
+    for part in Part::ALL {
+        let target = Target::of(model, part);
+        if !target.path(&models).is_file() {
+            // The image file is not there: nothing of it to check.
+            continue;
         }
-        Ok(Checked::Removed(why)) => {
-            Outcome::Failed(format!("{why}: it is not {}'s file and was removed. Install {} again", model.label, model.id))
+        match check_file(target, &models, out) {
+            Ok(Checked::Catalogue(sha256)) => {
+                let _ = writeln!(out, "{}: verified ({} MB, sha256 {}…)", target.tag(), mb(target.file.bytes), &sha256[..16]);
+            }
+            Ok(Checked::Removed(why)) => {
+                return Outcome::Failed(format!("{why}: it is not {}'s file and was removed. Install {} again", model.label, model.id));
+            }
+            Err(reason) => return Outcome::Failed(reason),
         }
-        Err(reason) => Outcome::Failed(reason),
+    }
+    Outcome::Done
+}
+
+/// The names a model's directory may hold: its two files, what a download
+/// of each is called until it is whole, and their two records.
+fn own_names(model: &NativeModel, models: &Path) -> Vec<std::ffi::OsString> {
+    Part::ALL
+        .into_iter()
+        .flat_map(|part| [model.path_of(part, models), model.partial_of(part, models), model.verified_of(part, models)])
+        .filter_map(|path| path.file_name().map(|name| name.to_os_string()))
+        .collect()
+}
+
+/// Remove what stands in a model's directory under another name: a file of
+/// a release whose catalogue named the model's files otherwise. Such a file
+/// is nothing this release loads, and a model file is gigabytes. A record
+/// that was being written (`.tmp`) is left to its writer.
+fn remove_other_releases_files(model: &NativeModel, models: &Path, out: &mut dyn Write) {
+    let own = own_names(model, models);
+    let Ok(entries) = fs::read_dir(model.dir(models)) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if !is_file || own.contains(&name) || name.to_string_lossy().ends_with(".tmp") {
+            continue;
+        }
+        let bytes = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        if fs::remove_file(entry.path()).is_ok() {
+            let _ = writeln!(
+                out,
+                "{}: removed {} ({} MB), a file of another release of embraOS",
+                model.id,
+                name.to_string_lossy(),
+                mb(bytes)
+            );
+        }
     }
 }
 
-/// `model-install <id>`: the model's file downloaded from the catalogue's
-/// URL.
+/// `model-install <id>`: the model's two files downloaded from the
+/// catalogue's URLs, the model file first.
 pub fn install_command(roots: &Roots, model: &NativeModel, out: &mut impl Write) -> Outcome {
-    install_with(roots, model, &model.url(), out, &Limits { check_every: RESERVE_CHECK_EVERY, free: &free_bytes })
+    install_from(roots, model, &|part| model.url_of(part), out, &Limits { check_every: RESERVE_CHECK_EVERY, free: &free_bytes })
 }
 
-/// The download. A file that is there is checked first and nothing is asked
-/// for when it is the catalogue's. What an earlier download left under the
-/// `.partial` name is hashed again and the rest asked for with a range; a
-/// source that takes no range sends the whole again, once. A connection that
-/// ends early is followed by a request for the rest as long as it brought
-/// bytes, [`REQUESTS_MAX`] requests at most; what arrived stays for the next
-/// run. The whole file's sha256 decides: the catalogue's, or nothing is kept.
-pub fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut impl Write, limits: &Limits) -> Outcome {
+/// The install, from wherever `url_of` says each file is. A file that is
+/// installed is left alone; nothing at all to do is said as that. The model
+/// file comes first and decides: without it nothing is installed. An image
+/// file that does not come leaves the model installed, and the failure says
+/// that it reads text alone until an install brings it.
+pub fn install_from(roots: &Roots, model: &NativeModel, url_of: &dyn Fn(Part) -> String, out: &mut impl Write, limits: &Limits) -> Outcome {
     let models = models_dir(roots);
     let _lock = match job_lock(&models) {
         Ok(lock) => lock,
         Err(outcome) => return outcome,
     };
-    match native::installed(model, &models) {
-        Installed::Verified => return Outcome::Nothing(format!("{} is installed and verified; nothing to do", model.id)),
+    remove_other_releases_files(model, &models, out);
+    let mut brought = false;
+    for part in Part::ALL {
+        let target = Target::of(model, part);
+        match install_file(roots, &models, target, &url_of(part), out, limits) {
+            Outcome::Done => brought = true,
+            Outcome::Nothing(_) => {}
+            Outcome::Refused(reason) if part == Part::Images => {
+                return Outcome::Refused(format!("{reason}. {} is installed and reads text alone until its image file is", model.label));
+            }
+            Outcome::Failed(reason) if part == Part::Images => {
+                return Outcome::Failed(format!(
+                    "{reason}. {} is installed and reads text alone until its image file is: installing it again fetches the file",
+                    model.label
+                ));
+            }
+            other => return other,
+        }
+    }
+    if !brought {
+        return Outcome::Nothing(format!("{} is installed and verified; nothing to do", model.id));
+    }
+    if let Some(note) = space_note(roots, limits) {
+        let _ = writeln!(out, "{note}");
+    }
+    Outcome::Done
+}
+
+/// One file's download, under the job's lock. A file that is there is
+/// checked first and nothing is asked for when it is the catalogue's. What
+/// an earlier download left under the `.partial` name is hashed again and
+/// the rest asked for with a range; a source that takes no range sends the
+/// whole again, once. A connection that ends early is followed by a request
+/// for the rest as long as it brought bytes, [`REQUESTS_MAX`] requests at
+/// most; what arrived stays for the next run. The whole file's sha256
+/// decides: the catalogue's, or nothing is kept.
+fn install_file(roots: &Roots, models: &Path, target: Target, url: &str, out: &mut dyn Write, limits: &Limits) -> Outcome {
+    let (model, file, tag) = (target.model, target.file, target.tag());
+    match target.installed(models) {
+        Installed::Verified => return Outcome::Nothing(format!("{tag} is installed and verified; nothing to do")),
         Installed::Unverified(reason) => {
-            let _ = writeln!(out, "{}: a file is there ({reason})", model.id);
-            match check_file(model, &models, out) {
+            let _ = writeln!(out, "{tag}: a file is there ({reason})");
+            match check_file(target, models, out) {
                 Ok(Checked::Catalogue(sha256)) => {
-                    let _ = writeln!(out, "{}: it is the catalogue's file; verified ({} MB, sha256 {}…)", model.id, mb(model.bytes), &sha256[..16]);
+                    let _ = writeln!(out, "{tag}: it is the catalogue's file; verified ({} MB, sha256 {}…)", mb(file.bytes), &sha256[..16]);
                     return Outcome::Done;
                 }
                 Ok(Checked::Removed(why)) => {
-                    let _ = writeln!(out, "{}: {why}: it is not {}'s file and was removed", model.id, model.label);
+                    let _ = writeln!(out, "{tag}: {why}: it is not {}'s file and was removed", model.label);
                 }
                 Err(reason) => return Outcome::Failed(reason),
             }
         }
         Installed::Partial(_) | Installed::No => {}
     }
-    let partial_path = model.partial_path(&models);
-    if let Err(e) = fs::create_dir_all(model.dir(&models)) {
-        return Outcome::Failed(format!("create {}: {e}", model.dir(&models).display()));
+    let partial_path = target.partial(models);
+    if let Err(e) = fs::create_dir_all(model.dir(models)) {
+        return Outcome::Failed(format!("create {}: {e}", model.dir(models).display()));
     }
     let mut partial = match OpenOptions::new().create(true).append(true).open(&partial_path) {
         Ok(file) => file,
@@ -475,15 +640,15 @@ pub fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut imp
         Err(e) => return io_failed("read", e),
     };
     let mut hasher = Sha256::new();
-    if done > model.bytes {
-        let _ = writeln!(out, "{}: what an earlier download left is larger than the file; starting again", model.id);
+    if done > file.bytes {
+        let _ = writeln!(out, "{tag}: what an earlier download left is larger than the file; starting again");
         if let Err(e) = partial.set_len(0) {
             return io_failed("empty", e);
         }
         done = 0;
     } else if done > 0 {
-        let _ = writeln!(out, "{}: {} of {} MB are there from an earlier download; checking them", model.id, mb(done), mb(model.bytes));
-        if let Err(e) = hash_into(&mut hasher, &partial_path, done, model, out) {
+        let _ = writeln!(out, "{tag}: {} of {} MB are there from an earlier download; checking them", mb(done), mb(file.bytes));
+        if let Err(e) = hash_into(&mut hasher, &partial_path, done, target, out) {
             return io_failed("read", e);
         }
     }
@@ -499,14 +664,14 @@ pub fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut imp
         Ok(free) => free,
         Err(e) => return ended(done, Outcome::Failed(format!("free space of {}: {e}", data.display()))),
     };
-    if !enough_space(free, model.bytes - done, RESERVE_BYTES) {
-        let what = if done > 0 { format!("the rest of {}", model.label) } else { model.label.to_string() };
+    if !enough_space(free, file.bytes - done, RESERVE_BYTES) {
+        let what = if done > 0 { format!("the rest of {}", target.name()) } else { target.name() };
         return ended(
             done,
             Outcome::Refused(format!(
                 "refused: DATA has {} MB free; {what} needs {} MB plus a reserve of {} MB",
                 mb(free),
-                mb(model.bytes - done),
+                mb(file.bytes - done),
                 mb(RESERVE_BYTES)
             )),
         );
@@ -514,39 +679,39 @@ pub fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut imp
     let another_size = |size: u64| {
         Outcome::Failed(format!(
             "the source's file is {size} bytes and the catalogue's {} is {}; nothing was downloaded",
-            model.file, model.bytes
+            file.file, file.bytes
         ))
     };
-    if done < model.bytes {
-        let _ = writeln!(out, "{}: downloading {} ({} MB) from {url}", model.id, model.file, mb(model.bytes));
+    if done < file.bytes {
+        let _ = writeln!(out, "{tag}: downloading {} ({} MB) from {url}", file.file, mb(file.bytes));
     }
     let client = match fetch::client() {
         Ok(client) => client,
         Err(reason) => return ended(done, Outcome::Failed(reason)),
     };
     let (mut requests, mut sent_whole_again) = (0u32, false);
-    while done < model.bytes {
+    while done < file.bytes {
         requests += 1;
         let mut before = done;
         let mut body = match fetch::open_from(&client, url, done) {
             Ok(Opened::Rest { body, total }) => {
-                if total != model.bytes {
+                if total != file.bytes {
                     return ended(done, another_size(total));
                 }
                 body
             }
             Ok(Opened::Whole { body, length }) => {
-                if let Some(length) = length.filter(|length| *length != model.bytes) {
+                if let Some(length) = length.filter(|length| *length != file.bytes) {
                     return ended(done, another_size(length));
                 }
                 if done > 0 {
                     if sent_whole_again {
                         return Outcome::Failed(format!(
                             "the source takes no ranges and the download stopped again, after {done} of {} bytes; what arrived is kept",
-                            model.bytes
+                            file.bytes
                         ));
                     }
-                    let _ = writeln!(out, "{}: the source takes no ranges; the file comes again from its first byte", model.id);
+                    let _ = writeln!(out, "{tag}: the source takes no ranges; the file comes again from its first byte");
                     if let Err(e) = partial.set_len(0) {
                         return io_failed("empty", e);
                     }
@@ -556,10 +721,10 @@ pub fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut imp
             }
             Err(reason) => return ended(done, Outcome::Failed(reason)),
         };
-        let job = CopyJob { model, limits, data: &data, verb: "downloaded" };
+        let job = CopyJob { target, limits, data: &data, verb: "downloaded" };
         let (got, why) = match copy_hashed(&job, &mut body, &mut partial, &mut hasher, done, out) {
             Copied::Whole => {
-                done = model.bytes;
+                done = file.bytes;
                 continue;
             }
             Copied::Short(got) => (got, "the connection ended".to_string()),
@@ -568,7 +733,7 @@ pub fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut imp
                 let _ = fs::remove_file(&partial_path);
                 return Outcome::Failed(format!(
                     "the source sent more than {} bytes, the size of {}; nothing of it is kept",
-                    model.bytes, model.file
+                    file.bytes, file.file
                 ));
             }
             Copied::Reserve(free) => {
@@ -586,30 +751,27 @@ pub fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut imp
                 done,
                 Outcome::Failed(format!(
                     "the download stopped after {got} of {} bytes: {why}. What arrived is kept, and installing again resumes it",
-                    model.bytes
+                    file.bytes
                 )),
             );
         }
-        let _ = writeln!(out, "{}: {why} after {} of {} MB; asking for the rest", model.id, mb(got), mb(model.bytes));
+        let _ = writeln!(out, "{tag}: {why} after {} of {} MB; asking for the rest", mb(got), mb(file.bytes));
     }
     let sha256 = hex::encode(hasher.finalize());
-    if sha256 != model.sha256 {
+    if sha256 != file.sha256 {
         let _ = fs::remove_file(&partial_path);
         return Outcome::Failed(format!(
             "the download has the size of {} and its sha256 is {}…, not {}…; nothing of it is kept. Install {} again",
-            model.file,
+            file.file,
             &sha256[..16],
-            &model.sha256[..16],
+            &file.sha256[..16],
             model.id
         ));
     }
-    if let Err(reason) = adopt(model, &models, partial) {
+    if let Err(reason) = adopt(target, models, partial) {
         return Outcome::Failed(reason);
     }
-    let _ = writeln!(out, "{}: installed and verified ({} MB, sha256 {}…)", model.id, mb(model.bytes), &sha256[..16]);
-    if let Some(note) = space_note(roots, limits) {
-        let _ = writeln!(out, "{note}");
-    }
+    let _ = writeln!(out, "{tag}: installed and verified ({} MB, sha256 {}…)", mb(file.bytes), &sha256[..16]);
     Outcome::Done
 }
 
@@ -646,9 +808,20 @@ pub mod test_support {
     /// A stand-in for a catalogue model whose file is `content`: a test
     /// cannot afford the real ones.
     pub fn tiny(id: &'static str, content: &[u8]) -> NativeModel {
-        let sha256: &'static str = Box::leak(hex::encode(Sha256::digest(content)).into_boxed_str());
-        NativeModel { id, label: "Tiny", file: "tiny.gguf", bytes: content.len() as u64, sha256, ..native::CATALOGUE[0] }
+        let leaked = |bytes: &[u8]| -> &'static str { Box::leak(hex::encode(Sha256::digest(bytes)).into_boxed_str()) };
+        NativeModel {
+            id,
+            label: "Tiny",
+            file: "tiny.gguf",
+            bytes: content.len() as u64,
+            sha256: leaked(content),
+            images: CatalogueFile { file: "tiny-images.gguf", bytes: IMAGES.len() as u64, sha256: leaked(IMAGES) },
+            ..native::CATALOGUE[0]
+        }
     }
+
+    /// The file a stand-in model reads images through.
+    pub const IMAGES: &[u8] = b"MMPROJ: what a tiny model reads images through";
 
     /// Room for anything.
     pub fn roomy(_: &Path) -> io::Result<u64> {
@@ -683,6 +856,18 @@ mod tests {
     const CONTENT: &[u8] = b"GGUF: sixteen bytes and some more, enough for a few reads";
     const LIMITS: Limits = Limits { check_every: 8, free: &roomy };
 
+    /// The model file alone, from one URL, under the job's lock: what the
+    /// tests of a download's own course ask for. It is the function an
+    /// install runs for each of a model's files.
+    fn install_with(roots: &Roots, model: &NativeModel, url: &str, out: &mut impl Write, limits: &Limits) -> Outcome {
+        let models = models_dir(roots);
+        let _lock = match job_lock(&models) {
+            Ok(lock) => lock,
+            Err(outcome) => return outcome,
+        };
+        install_file(roots, &models, Target::of(model, Part::Model), url, out, limits)
+    }
+
     #[test]
     fn the_directories_are_the_contracts() {
         let os = Roots::os();
@@ -698,7 +883,7 @@ mod tests {
         let models = models_dir(&roots);
         assert_eq!(native::installed(&model, &models), Installed::No);
         let mut out = Vec::new();
-        let outcome = import_with(&roots, &model, CONTENT, &mut out, &LIMITS);
+        let outcome = import_with(&roots, &model, Part::Model, CONTENT, &mut out, &LIMITS);
         assert_eq!(words(&outcome), ("done", ""));
         assert_eq!(fs::read(model.file_path(&models)).unwrap(), CONTENT);
         assert_eq!(native::installed(&model, &models), Installed::Verified);
@@ -709,7 +894,7 @@ mod tests {
         assert!(!said.contains("WARNING"), "{said}");
 
         // The same file again: nothing to do, and the source is not read.
-        let outcome = import_with(&roots, &model, &b"anything"[..], &mut Vec::new(), &LIMITS);
+        let outcome = import_with(&roots, &model, Part::Model, &b"anything"[..], &mut Vec::new(), &LIMITS);
         assert_eq!(words(&outcome), ("nothing", "tiny is installed and verified; nothing to do"));
         fs::remove_dir_all(&roots.parent).unwrap();
     }
@@ -732,7 +917,7 @@ mod tests {
             // What a download left before is gone as well: the import replaced it.
             fs::create_dir_all(model.dir(&models)).unwrap();
             fs::write(model.partial_path(&models), b"an earlier download").unwrap();
-            let outcome = import_with(&roots, &model, source, &mut Vec::new(), &LIMITS);
+            let outcome = import_with(&roots, &model, Part::Model, source, &mut Vec::new(), &LIMITS);
             let (kind, reason) = words(&outcome);
             assert_eq!(kind, "refused", "{what}: {reason}");
             assert!(reason.contains(part) && reason.contains("nothing of it is kept"), "{what}: {reason}");
@@ -760,7 +945,7 @@ mod tests {
     fn a_source_that_fails_is_a_failure_and_nothing_is_kept() {
         let roots = temp_roots("model-cut");
         let model = tiny("tiny", CONTENT);
-        let outcome = import_with(&roots, &model, Cut(10), &mut Vec::new(), &LIMITS);
+        let outcome = import_with(&roots, &model, Part::Model, Cut(10), &mut Vec::new(), &LIMITS);
         let (kind, reason) = words(&outcome);
         assert_eq!(kind, "failed");
         assert!(reason.contains("failed after 10 bytes") && reason.contains("the upload was cut"), "{reason}");
@@ -775,14 +960,14 @@ mod tests {
         let models = models_dir(&roots);
         // Before: the file and the reserve do not both fit.
         let tight = |_: &Path| Ok(RESERVE_BYTES + 56);
-        let outcome = import_with(&roots, &model, CONTENT, &mut Vec::new(), &Limits { check_every: 8, free: &tight });
+        let outcome = import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &Limits { check_every: 8, free: &tight });
         let (kind, reason) = words(&outcome);
         assert_eq!(kind, "refused");
         assert_eq!(reason, "refused: DATA has 256 MB free; Tiny needs 0 MB plus a reserve of 256 MB");
         assert_eq!(names(&model, &models), Vec::<String>::new());
         // One byte more and it fits.
         let fits = |_: &Path| Ok(RESERVE_BYTES + 57);
-        assert_eq!(words(&import_with(&roots, &model, CONTENT, &mut Vec::new(), &Limits { check_every: 8, free: &fits })).0, "done");
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &Limits { check_every: 8, free: &fits })).0, "done");
         fs::remove_dir_all(model.dir(&models)).unwrap();
 
         // During: something else fills DATA while the file is written.
@@ -791,7 +976,7 @@ mod tests {
             calls.set(calls.get() + 1);
             Ok(if calls.get() == 1 { RESERVE_BYTES + 1_000 } else { RESERVE_BYTES - 1 })
         };
-        let outcome = import_with(&roots, &model, CONTENT, &mut Vec::new(), &Limits { check_every: 8, free: &filling });
+        let outcome = import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &Limits { check_every: 8, free: &filling });
         let (kind, reason) = words(&outcome);
         assert_eq!(kind, "refused");
         assert!(reason.contains("DATA is down to 255 MB free and its reserve of 256 MB stays"), "{reason}");
@@ -812,7 +997,7 @@ mod tests {
             Ok(if calls.get() == 1 { RESERVE_BYTES + 1_000 } else { RESERVE_BYTES })
         };
         let mut out = Vec::new();
-        let outcome = import_with(&roots, &model, CONTENT, &mut out, &Limits { check_every: 1 << 20, free: &free });
+        let outcome = import_with(&roots, &model, Part::Model, CONTENT, &mut out, &Limits { check_every: 1 << 20, free: &free });
         assert_eq!(words(&outcome).0, "done");
         let said = String::from_utf8(out).unwrap();
         assert!(said.contains("WARNING: the snapshot an update takes before a new release first runs would be refused"), "{said}");
@@ -891,7 +1076,7 @@ mod tests {
         let models = models_dir(&roots);
         let held = job_lock(&models).ok().expect("the first job takes the lock");
         for outcome in [
-            import_with(&roots, &model, CONTENT, &mut Vec::new(), &LIMITS),
+            import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &LIMITS),
             verify_command(&roots, &model, &mut Vec::new()),
             remove_command(&roots, &model, &mut Vec::new()),
         ] {
@@ -903,7 +1088,7 @@ mod tests {
         assert!(native::job_running(&models), "a reader sees the job");
         drop(held);
         assert!(!native::job_running(&models));
-        assert_eq!(words(&import_with(&roots, &model, CONTENT, &mut Vec::new(), &LIMITS)).0, "done");
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &LIMITS)).0, "done");
         fs::remove_dir_all(&roots.parent).unwrap();
     }
 
@@ -921,18 +1106,18 @@ mod tests {
         assert_eq!(words(&list_command(&roots, &mut out)).0, "done");
         let said = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = said.lines().collect();
-        assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB, Apache-2.0): incomplete, 5 of 2613 MB are there");
-        assert_eq!(lines[1], "qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5417 MB, Apache-2.0): installed, not usable: the file was never checked");
+        assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2613 MB and 641 MB for images, Apache-2.0): incomplete, 5 of 2613 MB are there");
+        assert_eq!(lines[1], "qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5417 MB and 875 MB for images, Apache-2.0): installed, not usable: the file was never checked");
         assert!(lines[2].starts_with("DATA has ") && lines[2].ends_with(" MB free"), "{said}");
         assert_eq!(lines.len(), 3);
-        assert_eq!(state_words(&tiny("tiny", CONTENT), &models), "not installed");
+        assert_eq!(state_words(Target::of(&tiny("tiny", CONTENT), Part::Model), &models), "not installed");
         fs::remove_dir_all(&roots.parent).unwrap();
     }
 
     #[test]
     fn progress_is_a_line_every_five_percent_and_none_at_the_end() {
         let model = NativeModel { bytes: 1_000, ..tiny("tiny", CONTENT) };
-        let mut progress = Progress::new(&model, "read", 0);
+        let mut progress = Progress::new(Target::of(&model, Part::Model), "read", 0);
         let mut out = Vec::new();
         for done in [10, 49, 50, 51, 99, 100, 149, 400, 999, 1_000] {
             progress.at(done, &mut out);
@@ -942,7 +1127,7 @@ mod tests {
         assert_eq!(percents, ["5%)", "10%)", "40%)", "99%)"], "{said}");
         assert!(said.starts_with("tiny: read 0 of 0 MB (5%)\n"), "{said}");
         // A resumed copy starts counting from what is there.
-        let mut resumed = Progress::new(&model, "read", 620);
+        let mut resumed = Progress::new(Target::of(&model, Part::Model), "read", 620);
         let mut out = Vec::new();
         for done in [630, 649, 650] {
             resumed.at(done, &mut out);
@@ -1251,13 +1436,243 @@ mod tests {
     /// them, and a restore leaves them as they are. `snapshot` names the two
     /// directories of DATA it archives and replaces; this pins that the
     /// models' directory is neither.
+    /// Which file each request of a script asked for, in the order they came.
+    fn paths(heads: &std::sync::mpsc::Receiver<String>) -> Vec<String> {
+        heads.try_iter().map(|head| head.split_whitespace().nth(1).unwrap_or_default().to_string()).collect()
+    }
+
+    /// Where an install finds each of a stand-in model's files on a script's
+    /// server.
+    fn both(url: &str) -> impl Fn(Part) -> String + '_ {
+        move |part| match part {
+            Part::Model => url.to_string(),
+            Part::Images => url.replace("model.gguf", "images.gguf"),
+        }
+    }
+
+    /// An install brings a model's two files, the model file first, each
+    /// with a record of its own. A second install asks nobody.
+    #[test]
+    fn a_model_is_installed_with_its_image_file_the_model_file_first() {
+        let roots = temp_roots("model-both");
+        populate(&roots);
+        let content = file();
+        let model = tiny("tiny", &content);
+        let models = models_dir(&roots);
+        let whole = content.clone();
+        let (url, heads) = serve(vec![
+            step(move |_| Answer::new("HTTP/1.1 200 OK", &whole)),
+            step(|_| Answer::new("HTTP/1.1 200 OK", IMAGES)),
+        ]);
+        let mut out = Vec::new();
+        assert_eq!(words(&install_from(&roots, &model, &both(&url), &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(paths(&heads), ["/model.gguf", "/images.gguf"]);
+        assert_eq!(fs::read(model.file_path(&models)).unwrap(), content);
+        assert_eq!(fs::read(model.path_of(Part::Images, &models)).unwrap(), IMAGES);
+        assert_eq!(
+            (native::installed(&model, &models), native::installed_part(&model, Part::Images, &models)),
+            (Installed::Verified, Installed::Verified)
+        );
+        assert_eq!(names(&model, &models), ["tiny-images.gguf", "tiny.gguf", "verified", "verified-images"]);
+        let said = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = said.lines().collect();
+        let at = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap_or_else(|| panic!("{needle}: {said}"));
+        assert!(at("tiny: installed and verified") < at("tiny image file: downloading tiny-images.gguf (0 MB) from "), "{said}");
+        assert!(at("tiny image file: downloading") < at("tiny image file: installed and verified"), "{said}");
+        assert_eq!(said.matches("a snapshot of STATE and DATA needs").count(), 1, "said once, at the end: {said}");
+        assert_eq!(model_words(&model, &models), "installed");
+
+        // Again: nothing to do, and nobody is asked.
+        let nobody = |_: Part| NOBODY.to_string();
+        assert_eq!(
+            words(&install_from(&roots, &model, &nobody, &mut Vec::new(), &LIMITS)),
+            ("nothing", "tiny is installed and verified; nothing to do")
+        );
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    /// A model that was installed before a model had an image file gets the
+    /// file at its next install, and the model file is not asked for again.
+    #[test]
+    fn a_model_without_its_image_file_gets_it_and_nothing_else_is_asked_for() {
+        let roots = temp_roots("model-images-only");
+        populate(&roots);
+        let model = tiny("tiny", CONTENT);
+        let models = models_dir(&roots);
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &LIMITS)), ("done", ""));
+        assert_eq!(
+            model_words(&model, &models),
+            "installed, text only: its image file (0 MB) is not installed (installing the model again fetches it)"
+        );
+        let (url, heads) = serve(vec![step(|_| Answer::new("HTTP/1.1 200 OK", IMAGES))]);
+        let mut out = Vec::new();
+        assert_eq!(words(&install_from(&roots, &model, &both(&url), &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(paths(&heads), ["/images.gguf"], "the one file that was missing");
+        assert_eq!(native::installed_part(&model, Part::Images, &models), Installed::Verified);
+        assert_eq!(model_words(&model, &models), "installed");
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    /// An image file that does not come leaves the model as it is, and the
+    /// failure says what the model can do meanwhile. A model file that does
+    /// not come ends the install there: its image file is not asked for.
+    #[test]
+    fn an_image_file_that_does_not_come_leaves_the_model_installed_and_says_so() {
+        let roots = temp_roots("model-images-fail");
+        populate(&roots);
+        let model = tiny("tiny", CONTENT);
+        let models = models_dir(&roots);
+        let (url, heads) = serve(vec![
+            step(|_| Answer::new("HTTP/1.1 200 OK", CONTENT)),
+            step(|_| Answer::new("HTTP/1.1 502 Bad Gateway", b"")),
+        ]);
+        let outcome = install_from(&roots, &model, &both(&url), &mut Vec::new(), &LIMITS);
+        let (kind, said) = words(&outcome);
+        assert_eq!(kind, "failed");
+        assert!(said.contains("502"), "{said}");
+        assert!(said.ends_with(". Tiny is installed and reads text alone until its image file is: installing it again fetches the file"), "{said}");
+        assert_eq!(paths(&heads), ["/model.gguf", "/images.gguf"]);
+        assert_eq!(
+            (native::installed(&model, &models), native::installed_part(&model, Part::Images, &models)),
+            (Installed::Verified, Installed::No)
+        );
+        assert_eq!(names(&model, &models), ["tiny.gguf", "verified"], "no empty download of the image file is left");
+
+        // No room for the image file: refused, and the model stays.
+        let tight = |_: &Path| -> io::Result<u64> { Ok(RESERVE_BYTES + 10) };
+        let outcome = install_from(&roots, &model, &|_| NOBODY.to_string(), &mut Vec::new(), &Limits { check_every: 8, free: &tight });
+        let (kind, said) = words(&outcome);
+        assert_eq!(kind, "refused");
+        assert!(said.contains("the image file of Tiny needs 0 MB plus a reserve of"), "{said}");
+        assert!(said.ends_with(". Tiny is installed and reads text alone until its image file is"), "{said}");
+
+        // The model file does not come: the install ends there.
+        let other = tiny("other", CONTENT);
+        let (url, heads) = serve(vec![step(|_| Answer::new("HTTP/1.1 502 Bad Gateway", b""))]);
+        let outcome = install_from(&roots, &other, &both(&url), &mut Vec::new(), &LIMITS);
+        assert_eq!(words(&outcome).0, "failed");
+        assert!(!words(&outcome).1.contains("reads text alone"), "nothing is installed: {}", words(&outcome).1);
+        assert_eq!(paths(&heads), ["/model.gguf"]);
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    /// The image file by upload: read whole, checked against its own size
+    /// and sha256, with a record of its own; the model file is not touched,
+    /// and a model file sent under its name is refused.
+    #[test]
+    fn the_image_file_read_whole_is_installed_with_a_record_of_its_own() {
+        let roots = temp_roots("model-import-images");
+        populate(&roots);
+        let model = tiny("tiny", CONTENT);
+        let models = models_dir(&roots);
+        // The image file first, on a machine that has nothing of the model yet.
+        let mut out = Vec::new();
+        assert_eq!(words(&import_with(&roots, &model, Part::Images, IMAGES, &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(names(&model, &models), ["tiny-images.gguf", "verified-images"]);
+        assert_eq!(
+            (native::installed(&model, &models), native::installed_part(&model, Part::Images, &models)),
+            (Installed::No, Installed::Verified)
+        );
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("tiny image file: reading tiny-images.gguf") && said.contains("tiny image file: installed and verified"), "{said}");
+        assert_eq!(model_words(&model, &models), "not installed; its image file: installed");
+        assert_eq!(
+            words(&import_with(&roots, &model, Part::Images, &b"x"[..], &mut Vec::new(), &LIMITS)),
+            ("nothing", "tiny image file is installed and verified; nothing to do")
+        );
+
+        // The model file sent as the image file is another size: refused, nothing kept.
+        let other = tiny("other", CONTENT);
+        let outcome = import_with(&roots, &other, Part::Images, CONTENT, &mut Vec::new(), &LIMITS);
+        let (kind, said) = words(&outcome);
+        assert_eq!(kind, "refused");
+        assert!(said.contains("the file runs past") && said.contains("the size of tiny-images.gguf"), "{said}");
+        assert_eq!(names(&other, &models), Vec::<String>::new());
+
+        // The model file then: it says nothing of text alone, since the image file is there.
+        let mut out = Vec::new();
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut out, &LIMITS)), ("done", ""));
+        assert!(!String::from_utf8(out).unwrap().contains("reads text alone"));
+        // And on a machine without the image file it does.
+        let mut out = Vec::new();
+        assert_eq!(words(&import_with(&roots, &other, Part::Model, CONTENT, &mut out, &LIMITS)), ("done", ""));
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("other: it reads text alone until its image file is there too (tiny-images.gguf, 0 MB)"), "{said}");
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    /// A check hashes both files, each against its own figures; an image
+    /// file that is not there is nothing to check.
+    #[test]
+    fn a_check_hashes_the_image_file_as_well() {
+        let roots = temp_roots("model-verify-images");
+        populate(&roots);
+        let model = tiny("tiny", CONTENT);
+        let models = models_dir(&roots);
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &LIMITS)), ("done", ""));
+        let mut out = Vec::new();
+        assert_eq!(words(&verify_command(&roots, &model, &mut out)), ("done", ""));
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("tiny: verified") && !said.contains("image file"), "{said}");
+
+        assert_eq!(words(&import_with(&roots, &model, Part::Images, IMAGES, &mut Vec::new(), &LIMITS)), ("done", ""));
+        let mut out = Vec::new();
+        assert_eq!(words(&verify_command(&roots, &model, &mut out)), ("done", ""));
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("tiny: verified") && said.contains("tiny image file: verified"), "{said}");
+
+        // An image file that is not the catalogue's goes, with its record; the model file stays.
+        let mut changed = IMAGES.to_vec();
+        changed[0] ^= 1;
+        fs::write(model.path_of(Part::Images, &models), &changed).unwrap();
+        let outcome = verify_command(&roots, &model, &mut Vec::new());
+        let (kind, said) = words(&outcome);
+        assert_eq!(kind, "failed");
+        assert!(said.contains("the sha256 of tiny-images.gguf is "), "{said}");
+        assert_eq!(names(&model, &models), ["tiny.gguf", "verified"]);
+        assert_eq!(native::installed(&model, &models), Installed::Verified);
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
+    /// A file a release with another catalogue left in a model's directory
+    /// is removed at the model's next install, and said: nothing loads it.
+    /// The model's own files, what a download of them is called and their
+    /// records stay.
+    #[test]
+    fn a_file_of_another_release_is_removed_at_an_install() {
+        let roots = temp_roots("model-strangers");
+        populate(&roots);
+        let model = tiny("tiny", CONTENT);
+        let models = models_dir(&roots);
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &LIMITS)), ("done", ""));
+        let dir = model.dir(&models);
+        fs::write(dir.join("mmproj-F16.gguf"), vec![0u8; 3 * 1024 * 1024]).unwrap();
+        fs::write(dir.join("verified.tmp"), b"a record on its way").unwrap();
+        fs::create_dir(dir.join("kept-directory")).unwrap();
+        fs::write(model.partial_of(Part::Images, &models), &IMAGES[..10]).unwrap();
+        let rest = IMAGES[10..].to_vec();
+        let (url, heads) = serve(vec![step(move |head| {
+            assert_eq!(range_start(head), Some(10), "the image file's download goes on from what was there");
+            Answer::new("HTTP/1.1 206 Partial Content", &rest).header(format!("content-range: bytes 10-{}/{}", IMAGES.len() - 1, IMAGES.len()))
+        })]);
+        let mut out = Vec::new();
+        assert_eq!(words(&install_from(&roots, &model, &both(&url), &mut out, &LIMITS)), ("done", ""));
+        assert_eq!(paths(&heads), ["/images.gguf"]);
+        let said = String::from_utf8(out).unwrap();
+        assert!(said.contains("tiny: removed mmproj-F16.gguf (3 MB), a file of another release of embraOS"), "{said}");
+        assert_eq!(said.matches(": removed ").count(), 1, "{said}");
+        assert_eq!(names(&model, &models), ["kept-directory", "tiny-images.gguf", "tiny.gguf", "verified", "verified-images", "verified.tmp"]);
+        assert_eq!(own_names(&model, &models).len(), 6);
+        fs::remove_dir_all(&roots.parent).unwrap();
+    }
+
     #[test]
     fn the_models_are_in_no_snapshot_and_a_restore_leaves_them() {
         let roots = temp_roots("model-snapshot");
         populate(&roots);
         let model = tiny("tiny", CONTENT);
         let models = models_dir(&roots);
-        assert_eq!(words(&import_with(&roots, &model, CONTENT, &mut Vec::new(), &LIMITS)).0, "done");
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &LIMITS)).0, "done");
         assert_ne!(MODELS_SUBDIR, crate::paths::DATABASE_DIR);
         assert_ne!(MODELS_SUBDIR, crate::paths::WORKSPACE_DIR);
 

@@ -191,7 +191,7 @@ fn run(cmd: Command, op: &mut console::Operator) -> anyhow::Result<Outcome> {
         Command::ModelList => Ok(models::list_command(&roots, op)),
         Command::ModelInstall { model } => Ok(models::install_command(&roots, model, op)),
         // The file comes on standard input, as a backup's archive does.
-        Command::ModelImport { model } => Ok(models::import_command(&roots, model, std::io::stdin().lock(), op)),
+        Command::ModelImport { model, part } => Ok(models::import_command(&roots, model, part, std::io::stdin().lock(), op)),
         Command::ModelVerify { model } => Ok(models::verify_command(&roots, model, op)),
         Command::ModelRemove { model } => Ok(models::remove_command(&roots, model, op)),
     }
