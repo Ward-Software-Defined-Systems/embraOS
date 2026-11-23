@@ -164,6 +164,12 @@ pub struct OpenAIChatRequest {
     /// preset sends it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<JsonValue>,
+    /// A native model's server is asked to say how far it has read the
+    /// prompt (llama.cpp's `return_progress`): while it reads, its stream
+    /// carries a `prompt_progress` block with every piece. No other preset
+    /// sends it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_progress: Option<bool>,
     /// The model card's sampling for that thinking state, a native model's
     /// alone; its fields are the request's own.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
@@ -206,6 +212,11 @@ pub struct OpenAIChatChunk {
     /// shape would fail the parse of the very chunk that ends the turn.
     #[serde(default)]
     pub timings: Option<JsonValue>,
+    /// How far the server has read the prompt, in the chunks llama.cpp's
+    /// server sends while it reads (a native request asks for them). Raw
+    /// JSON like the timings, read by `ReadProgress::from_json`.
+    #[serde(default)]
+    pub prompt_progress: Option<JsonValue>,
 }
 
 /// llama.cpp's `timings`: the tokens its server took from its cache
@@ -240,6 +251,38 @@ impl Timings {
         })
     }
 }
+
+/// llama.cpp's `prompt_progress`: how many tokens the request's prompt has
+/// (`total`), how many of them the server took from its cache (`cache`),
+/// how many it has behind it by now, the cached ones included
+/// (`processed`), and for how long it has been reading (`time_ms`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadProgress {
+    pub total: u64,
+    pub cached: u64,
+    pub read: u64,
+    pub ms: u64,
+}
+
+impl ReadProgress {
+    /// Read the block; `None` when it is not an object or names no total.
+    /// A figure that is missing, or of another type, counts as nought.
+    pub fn from_json(value: &JsonValue) -> Option<Self> {
+        let fields = value.as_object()?;
+        let count = |key: &str| fields.get(key).and_then(JsonValue::as_u64);
+        Some(Self { total: count("total")?, cached: count("cache").unwrap_or(0), read: count("processed").unwrap_or(0), ms: count("time_ms").unwrap_or(0) })
+    }
+
+    /// Whether the whole prompt is behind the server.
+    pub fn whole(&self) -> bool {
+        self.read >= self.total
+    }
+}
+
+/// Where a call's latest [`ReadProgress`] is kept for whoever opened it: a
+/// call that is ended from outside (`native_ask` at its limit) reads it
+/// after the stream is gone.
+pub type ProgressSink = std::sync::Arc<std::sync::Mutex<Option<ReadProgress>>>;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAIChoiceDelta {

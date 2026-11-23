@@ -19,6 +19,11 @@
 //!   read images through a second file that is not installed in this step.
 //! - While the server reads the model's file it answers 503: the request
 //!   waits and is sent again, as long as the model wait allows.
+//! - The server is asked how far it has read the prompt (`return_progress`):
+//!   while it reads, every piece of the prompt is a frame of the stream
+//!   with the count so far. A call that is ended from outside knows what
+//!   was read (`native_ask` at its limit); a read that takes minutes is no
+//!   silence either.
 //! - A request longer than the context window the model was loaded with is
 //!   answered 400, with both figures: the operator reads them in a sentence.
 
@@ -57,6 +62,7 @@ pub(crate) fn thinks(effort: Option<&str>) -> bool {
 /// Give a request a native model's shape.
 pub(super) fn shape(body: &mut OpenAIChatRequest, thinking: bool) {
     body.reasoning_effort = None;
+    body.return_progress = Some(true);
     body.chat_template_kwargs = Some(json!({ "enable_thinking": thinking }));
     body.sampling = Some(if thinking { SAMPLING_THINKING } else { SAMPLING_DIRECT });
 }
@@ -197,6 +203,7 @@ mod tests {
             reasoning_effort: Some("high".into()),
             max_tokens: None,
             chat_template_kwargs: None,
+            return_progress: None,
             sampling: None,
         }
     }
@@ -212,6 +219,7 @@ mod tests {
             (Some(1.0), Some(0.95), Some(20), Some(0.0), Some(1.5))
         );
         assert!(body.get("reasoning_effort").is_none(), "the model has no levels: {body}");
+        assert_eq!(body["return_progress"], json!(true), "the server is asked how far it has read: {body}");
         assert!(body.get("sampling").is_none(), "the sampling's fields are the request's own: {body}");
 
         let mut direct = request();

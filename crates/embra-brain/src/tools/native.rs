@@ -33,6 +33,7 @@ use serde_json::{Value as JsonValue, json};
 use super::registry::{self, DispatchContext, ToolDescriptor};
 use crate::provider::ir::{ApiMessage, Block, EarlyStopReason, TurnOutcome};
 use crate::provider::openai_compat::native::{EFFORT_OFF, thinks};
+use crate::provider::openai_compat::wire::{ProgressSink, ReadProgress};
 use crate::provider::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset, span_words};
 use crate::provider::{LlmProvider, LlmRequestOptions, ProviderKind, StreamEvent, SystemPromptBundle};
 
@@ -150,13 +151,46 @@ fn ended_words(outcome: TurnOutcome) -> &'static str {
     }
 }
 
+/// What a call says when its limit ended it: what ran out and, when the
+/// model server said how far it had read, how far that was. What the server
+/// read stays in its cache, so the sentence says that the same call again
+/// goes on from there: on a slow processor a long prompt is read over two
+/// calls, and nothing else tells the caller so.
+fn out_of_time(limit: Duration, read: Option<ReadProgress>) -> String {
+    let head = format!(
+        "the native model did not finish within {}, and the call was ended: one tool call runs {} at most.",
+        span_words(limit),
+        span_words(registry::MAX_TOOL_DURATION)
+    );
+    let came_to = match read {
+        Some(read) if !read.whole() => {
+            let cached = if read.cached > 0 { format!(" ({} of them from its cache)", read.cached) } else { String::new() };
+            format!(
+                " It had read {} of the request's {} tokens{cached}. What it read is kept: the same call again goes on from there.",
+                read.read, read.total
+            )
+        }
+        Some(read) => format!(" It had read the whole request ({} tokens) and was writing its answer.", read.total),
+        None => " The first call after a model was loaded reads its whole prompt, and a later one reuses what the server has.".to_string(),
+    };
+    format!("{head}{came_to} A shorter prompt, fewer offered tools, thinking off or max_tokens make a call shorter.")
+}
+
 /// Ask the model through `provider` and gather its answer. A call that
 /// outlasts `limit` is ended: dropping it drops the request, and the server
 /// stops its work for it.
 async fn ask(provider: OpenAICompatProvider, asked: &Asked<'_>, limit: Duration) -> Result<JsonValue, String> {
+    ask_into(provider, asked, limit, ProgressSink::default()).await
+}
+
+/// [`ask`], with the place the call's reading progress is kept: outside the
+/// call, since the limit drops the call and its stream with it.
+async fn ask_into(provider: OpenAICompatProvider, asked: &Asked<'_>, limit: Duration, progress: ProgressSink) -> Result<JsonValue, String> {
     let provider = provider
         .with_reasoning_effort((!asked.thinking).then(|| EFFORT_OFF.to_string()))
-        .with_max_tokens(asked.max_tokens);
+        .with_max_tokens(asked.max_tokens)
+        .with_read_progress(progress.clone());
+    let model = provider.display_name().to_string();
     let manifest = provider.build_tool_manifest(asked.offered);
     let system = SystemPromptBundle { text: asked.system.unwrap_or_default().to_string(), session_name: String::new() };
     let messages = [ApiMessage::user_text(asked.prompt)];
@@ -225,11 +259,23 @@ async fn ask(provider: OpenAICompatProvider, asked: &Asked<'_>, limit: Duration)
     };
     match tokio::time::timeout(limit, call).await {
         Ok(answer) => answer,
-        Err(_) => Err(format!(
-            "the native model did not finish within {}, and the call was ended: one tool call runs {} at most. The first call after a model was loaded reads its whole prompt, and a later one reuses what the server has. A shorter prompt, fewer offered tools, thinking off or max_tokens make a call shorter.",
-            span_words(limit),
-            span_words(registry::MAX_TOOL_DURATION)
-        )),
+        Err(_) => {
+            let read = progress.lock().ok().and_then(|latest| *latest);
+            // A call that ends here has no timings of the server's: this is
+            // its one line, beside the lines of the calls that completed.
+            tracing::info!(
+                target: "openai_compat::timings",
+                provider = "native",
+                model = %model,
+                limit_seconds = limit.as_secs(),
+                prompt_tokens = read.map(|r| r.total),
+                cached_tokens = read.map(|r| r.cached),
+                tokens_behind = read.map(|r| r.read),
+                read_ms = read.map(|r| r.ms),
+                "a native_ask call was ended at its limit"
+            );
+            Err(out_of_time(limit, read))
+        }
     }
 }
 
@@ -490,6 +536,86 @@ mod tests {
             "the native model did not finish within 570 seconds, and the call was ended: one tool call runs 10 minutes at most. The first call after a model was loaded reads its whole prompt, and a later one reuses what the server has. A shorter prompt, fewer offered tools, thinking off or max_tokens make a call shorter."
         );
         assert_eq!(ASK_LIMIT, Duration::from_secs(570), "under the dispatcher's limit, with room to say so");
+    }
+
+    /// A server that takes the request, answers with the head of a stream
+    /// and `frames`, and then says nothing more, as a model server that is
+    /// still reading its prompt.
+    async fn reading_server(frames: Vec<String>) -> Silent {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a listener");
+        let base = format!("http://{}", listener.local_addr().expect("its address"));
+        let (asked, gone) = (std::sync::Arc::new(tokio::sync::Notify::new()), std::sync::Arc::new(tokio::sync::Notify::new()));
+        let (said, left) = (asked.clone(), gone.clone());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let mut buf = vec![0u8; 64 * 1024];
+            let _ = socket.read(&mut buf).await;
+            let mut answer = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n".to_string();
+            for frame in &frames {
+                let data = format!("data: {frame}\n\n");
+                answer.push_str(&format!("{:x}\r\n{data}\r\n", data.len()));
+            }
+            let _ = socket.write_all(answer.as_bytes()).await;
+            said.notify_one();
+            while matches!(socket.read(&mut buf).await, Ok(n) if n > 0) {}
+            left.notify_one();
+        });
+        Silent { base, asked, gone }
+    }
+
+    /// A call that its limit ends while the model server reads says how far
+    /// the server had come and that the same call again goes on from there.
+    #[tokio::test]
+    async fn a_call_ended_while_the_server_reads_says_how_far_it_came() {
+        let frame = |processed: u64| {
+            json!({"choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": null}}],
+                   "prompt_progress": {"total": 23941, "cache": 4096, "processed": processed, "time_ms": 1000}})
+            .to_string()
+        };
+        let server = reading_server(vec![frame(4096), frame(4608), frame(15360)]).await;
+        let (_root, env) = machine("ask-limit-reading");
+        let provider = OpenAICompatProvider::new(OpenAiCompatPreset::Native, server.base.clone(), None, "qwen3.5-4b".to_string()).with_native_env(env);
+        let progress = ProgressSink::default();
+        let seen = progress.clone();
+        let call = async { ask_into(provider, &asked("Which tools do you have?", &[]), Duration::from_secs(570), progress).await };
+        let clock = async {
+            // The clock stops once the last frame has been read: from there
+            // the server is silent, and only the call's limit can end it.
+            // A deadline no loaded machine reaches when the frames are kept:
+            // a parser that keeps none fails here and does not hang.
+            let last_frame = async {
+                while seen.lock().unwrap().map(|read| read.read) != Some(15360) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(120), last_frame).await.expect("the last frame is kept for the caller");
+            tokio::time::pause();
+        };
+        let (answer, ()) = tokio::time::timeout(DAY, async { tokio::join!(call, clock) }).await.expect("the call ends at its limit");
+        assert_eq!(
+            answer.unwrap_err(),
+            "the native model did not finish within 570 seconds, and the call was ended: one tool call runs 10 minutes at most. It had read 15360 of the request's 23941 tokens (4096 of them from its cache). What it read is kept: the same call again goes on from there. A shorter prompt, fewer offered tools, thinking off or max_tokens make a call shorter."
+        );
+    }
+
+    /// The sentence of a call that ran out of time, by what the server had
+    /// said of its reading: nothing, a part of the prompt, all of it.
+    #[test]
+    fn a_call_out_of_time_says_what_the_server_had_read() {
+        let limit = Duration::from_secs(570);
+        let silent = out_of_time(limit, None);
+        assert!(silent.contains("The first call after a model was loaded reads its whole prompt") && !silent.contains("It had read"), "{silent}");
+        let part = out_of_time(limit, Some(ReadProgress { total: 23402, cached: 0, read: 10240, ms: 558_000 }));
+        assert!(part.contains(" It had read 10240 of the request's 23402 tokens. What it read is kept: the same call again goes on from there."), "{part}");
+        assert!(!part.contains("from its cache"), "nothing came from the cache: {part}");
+        let whole = out_of_time(limit, Some(ReadProgress { total: 300, cached: 0, read: 300, ms: 8_000 }));
+        assert!(whole.contains(" It had read the whole request (300 tokens) and was writing its answer."), "{whole}");
+        assert!(!whole.contains("goes on from there"), "there is nothing left to read: {whole}");
+        for said in [&silent, &part, &whole] {
+            assert!(said.starts_with("the native model did not finish within 570 seconds, and the call was ended: one tool call runs 10 minutes at most."), "{said}");
+            assert!(said.ends_with(" A shorter prompt, fewer offered tools, thinking off or max_tokens make a call shorter."), "{said}");
+        }
     }
 
     /// The three forms against a model server that is really there, printed:

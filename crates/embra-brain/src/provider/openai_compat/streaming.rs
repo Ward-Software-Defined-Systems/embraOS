@@ -65,7 +65,7 @@ use tokio::sync::mpsc;
 use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
 use crate::provider::openai_compat::conv::reasoning_block;
 use crate::provider::openai_compat::sanitize::sanitize_harmony_tokens;
-use crate::provider::openai_compat::wire::{OpenAIChatChunk, Timings};
+use crate::provider::openai_compat::wire::{OpenAIChatChunk, ProgressSink, ReadProgress, Timings};
 use crate::provider::sse::{LineBuffer, Next, in_stream_error, next_chunk};
 use crate::provider::StreamEvent;
 
@@ -77,15 +77,17 @@ use crate::provider::StreamEvent;
 /// buffer is always assembled regardless (so the terminal
 /// `Block::ProviderOpaque` round-trip stays intact); only the live
 /// delta emission is gated. Returns the server's `timings` of the call,
-/// when the stream carried any.
+/// when the stream carried any. `progress`, when a caller gave one, holds
+/// the latest `prompt_progress` the stream carried.
 pub async fn process_sse_stream(
     response: reqwest::Response,
     tx: mpsc::Sender<StreamEvent>,
     model_id: String,
     include_reasoning: bool,
     wait: std::time::Duration,
+    progress: Option<ProgressSink>,
 ) -> Result<Option<Timings>> {
-    pump(response.bytes_stream(), tx, model_id, include_reasoning, wait).await
+    pump_into(response.bytes_stream(), tx, model_id, include_reasoning, wait, progress).await
 }
 
 /// The parser, over any stream of byte chunks: the response body in
@@ -97,8 +99,9 @@ pub async fn process_sse_stream(
 /// starts again at every chunk, whatever the chunk carries. A server that
 /// sends nothing for the whole of it fails the call; the client these
 /// presets use has no read bound of its own.
+#[cfg(test)]
 async fn pump<S, B, E>(
-    mut stream: S,
+    stream: S,
     tx: mpsc::Sender<StreamEvent>,
     model_id: String,
     include_reasoning: bool,
@@ -109,8 +112,27 @@ where
     B: AsRef<[u8]>,
     E: Into<anyhow::Error>,
 {
+    pump_into(stream, tx, model_id, include_reasoning, wait, None).await
+}
+
+/// [`pump`] with the place the stream's reading progress is kept for the
+/// caller, when it has one. The one loop: `pump` is this without a place.
+async fn pump_into<S, B, E>(
+    mut stream: S,
+    tx: mpsc::Sender<StreamEvent>,
+    model_id: String,
+    include_reasoning: bool,
+    wait: std::time::Duration,
+    progress: Option<ProgressSink>,
+) -> Result<Option<Timings>>
+where
+    S: Stream<Item = std::result::Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: Into<anyhow::Error>,
+{
     let mut lines = LineBuffer::default();
     let mut state = ParserState::new(model_id, include_reasoning);
+    state.progress = progress;
 
     loop {
         let Ok(next) = tokio::time::timeout(wait, next_chunk(&mut stream, &tx)).await else {
@@ -238,6 +260,8 @@ pub(super) struct ParserState {
     pub(super) saw_done: bool,
     /// The latest `timings` read; returned by `pump`.
     pub(super) timings: Option<Timings>,
+    /// Where the latest `prompt_progress` goes, when the caller wants it.
+    pub(super) progress: Option<ProgressSink>,
 }
 
 #[derive(Default, Debug)]
@@ -260,6 +284,7 @@ impl ParserState {
             receiver_gone: false,
             saw_done: false,
             timings: None,
+            progress: None,
         }
     }
 
@@ -279,6 +304,13 @@ impl ParserState {
     ) {
         // Read before the choices: the block comes in the chunk that
         // carries the finish reason, and that chunk ends the call.
+        if let (Some(sink), Some(read)) = (self.progress.as_ref(), chunk.prompt_progress.as_ref().and_then(ReadProgress::from_json)) {
+            // The latest wins. A lock nobody else can hold for long: the
+            // other side reads it once, after the call has ended.
+            if let Ok(mut latest) = sink.lock() {
+                *latest = Some(read);
+            }
+        }
         if let Some(timings) = chunk.timings.as_ref().and_then(Timings::from_json) {
             self.timings = Some(timings);
         }
@@ -1109,6 +1141,60 @@ mod tests {
             panic!("expected Text");
         };
         assert_eq!(t, "hi");
+    }
+
+    /// While llama.cpp's server reads a prompt it says how far it is, a
+    /// frame for every piece (the frames below are its own, as captured from
+    /// 1.0.0). The latest count is kept where the caller asked for it; such
+    /// a frame is no text and no end, and a stream whose caller asked for
+    /// nothing is read as before.
+    #[tokio::test]
+    async fn the_reading_progress_is_kept_for_the_caller_and_is_no_event() {
+        let reading = |processed: u64| {
+            json!({"choices": [{"finish_reason": null, "index": 0, "delta": {"role": "assistant", "content": null}}],
+                   "created": 1795457534u64, "id": "chatcmpl-x", "model": "qwen3.5-4b", "object": "chat.completion.chunk",
+                   "prompt_progress": {"total": 2440, "cache": 0, "processed": processed, "time_ms": processed * 8}})
+        };
+        let frames = [
+            reading(0),
+            reading(512),
+            reading(2440),
+            json!({"choices": [{"index": 0, "delta": {"content": "628"}}]}),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        ];
+        let body = || -> Vec<u8> {
+            let mut sse: String = frames.iter().map(|f| data_frame(f.clone())).collect();
+            sse.push_str("data: [DONE]\n\n");
+            sse.into_bytes()
+        };
+        let sink = ProgressSink::default();
+        let (tx, mut rx) = mpsc::channel(64);
+        let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(body())]);
+        pump_into(stream, tx, "qwen3.5-4b".to_string(), true, LONG, Some(sink.clone())).await.expect("the parser");
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+        assert_eq!(*sink.lock().unwrap(), Some(ReadProgress { total: 2440, cached: 0, read: 2440, ms: 19_520 }), "the latest frame");
+        assert_eq!(text_deltas(&events), vec!["628"]);
+        assert_eq!(events.len(), 2, "one text delta and the end, nothing for the three frames: {events:?}");
+        assert!(matches!(complete_event(&events).outcome, TurnOutcome::EndTurn));
+
+        // No caller asked: the same stream, the same events.
+        let (tx, mut rx) = mpsc::channel(64);
+        let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(body())]);
+        pump(stream, tx, "qwen3.5-4b".to_string(), true, LONG).await.expect("the parser");
+        let mut plain = Vec::new();
+        while let Some(e) = rx.recv().await {
+            plain.push(e);
+        }
+        assert_eq!((text_deltas(&plain), plain.len()), (vec!["628"], 2));
+
+        // A block of another shape is no progress and costs the chunk nothing.
+        assert_eq!(ReadProgress::from_json(&json!("soon")), None);
+        assert_eq!(ReadProgress::from_json(&json!({"processed": 5})), None, "no total, no progress");
+        assert_eq!(ReadProgress::from_json(&json!({"total": 9, "cache": "x"})), Some(ReadProgress { total: 9, cached: 0, read: 0, ms: 0 }));
+        assert!(ReadProgress { total: 9, cached: 0, read: 9, ms: 1 }.whole() && !ReadProgress { total: 9, cached: 4, read: 8, ms: 1 }.whole());
     }
 
     /// A native model's stream as its server sends it: reasoning, the

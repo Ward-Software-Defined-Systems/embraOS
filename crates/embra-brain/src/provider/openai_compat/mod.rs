@@ -46,7 +46,7 @@ use crate::provider::{
 };
 use crate::tools::registry::ToolDescriptor;
 
-use self::wire::{ModelsResponse, OpenAIChatRequest, OpenAIMessage, OpenAITool, Timings};
+use self::wire::{ModelsResponse, OpenAIChatRequest, OpenAIMessage, OpenAITool, ProgressSink, Timings};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -190,6 +190,10 @@ pub struct OpenAICompatProvider {
     /// The most tokens an answer may take. No turn sets one: an answer ends
     /// by itself, or at the context window. `native_ask` passes its own.
     max_tokens: Option<u32>,
+    /// Where a call's reading progress is kept for the caller, when it
+    /// wants it: `native_ask` reads it when its limit ends the call. A
+    /// turn keeps none.
+    read_progress: Option<ProgressSink>,
 }
 
 impl OpenAICompatProvider {
@@ -222,7 +226,15 @@ impl OpenAICompatProvider {
             model_wait: Duration::from_secs(DEFAULT_MODEL_WAIT_MINUTES * 60),
             native_env: crate::native_model::Env::in_force(),
             max_tokens: None,
+            read_progress: None,
         }
+    }
+
+    /// The place this provider's calls keep how far the model server has
+    /// read their prompt (a native model's server says so while it reads).
+    pub(crate) fn with_read_progress(mut self, sink: ProgressSink) -> Self {
+        self.read_progress = Some(sink);
+        self
     }
 
     /// A limit on the tokens of this provider's answers; `None` is none.
@@ -604,11 +616,13 @@ impl OpenAICompatProvider {
                 .or_else(|| reasoning_effort_for_model(&self.model_id).map(String::from)),
             max_tokens: self.max_tokens,
             chat_template_kwargs: None,
+            return_progress: None,
             sampling: None,
         };
         if native {
             // Thinking switched on every request, the model card's sampling
-            // for it, and no `reasoning_effort` (`native.rs`).
+            // for it, the reading progress asked for, and no
+            // `reasoning_effort` (`native.rs`).
             native::shape(&mut body, native::thinks(self.reasoning_effort_override.as_deref()));
         }
 
@@ -623,6 +637,7 @@ impl OpenAICompatProvider {
         let tx_clone = tx.clone();
         // The timings to whoever opened the call; a turn drops its end.
         let (timings_tx, timings_rx) = tokio::sync::oneshot::channel();
+        let read_progress = self.read_progress.clone();
         tokio::spawn(async move {
             let ended = streaming::process_sse_stream(
                 response,
@@ -630,6 +645,7 @@ impl OpenAICompatProvider {
                 model_id.clone(),
                 options.include_reasoning,
                 model_wait,
+                read_progress,
             )
             .await;
             let _ = timings_tx.send(ended.as_ref().ok().copied().flatten());
@@ -2288,6 +2304,7 @@ mod tests {
             reasoning_effort: None,
             max_tokens: None,
             chat_template_kwargs: None,
+            return_progress: None,
             sampling: None,
         }
     }
