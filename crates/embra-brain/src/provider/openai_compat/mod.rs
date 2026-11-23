@@ -635,9 +635,10 @@ impl OpenAICompatProvider {
         };
         if native {
             // Thinking switched on every request, the model card's sampling
-            // for it, the reading progress asked for, and no
-            // `reasoning_effort` (`native.rs`).
-            native::shape(&mut body, native::thinks(self.reasoning_effort_override.as_deref()));
+            // for it, the reading progress asked for, and a
+            // `reasoning_effort` only when the model's family has levels
+            // and the operator named one of them (`native.rs`).
+            native::shape(&mut body, native::family_of(&self.model_id), self.reasoning_effort_override.as_deref());
         }
 
         let response = self.post_with_retry(&url, &body).await?;

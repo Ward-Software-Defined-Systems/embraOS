@@ -39,7 +39,7 @@ use serde_json::{Value as JsonValue, json};
 use super::registry::{self, DispatchContext, ToolDescriptor};
 use crate::media::{MEDIA_MAX_PER_MESSAGE, MEDIA_UPLOAD_MAX};
 use crate::provider::ir::{ApiMessage, Block, EarlyStopReason, ImageData, TurnOutcome};
-use crate::provider::openai_compat::native::{EFFORT_OFF, thinks};
+use crate::provider::openai_compat::native::{Thinks, dialect, thinking as how_it_thinks, thinks};
 use crate::provider::openai_compat::wire::{ProgressSink, ReadProgress};
 use crate::provider::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset, span_words};
 use crate::provider::{LlmProvider, LlmRequestOptions, ProviderKind, StreamEvent, SystemPromptBundle};
@@ -104,10 +104,12 @@ impl NativeAskArgs {
                 paths.len()
             )));
         }
-        // The operator's own setting for the model, unless the call says.
-        let thinking = self
-            .thinking
-            .unwrap_or_else(|| thinks(cfg.openai_compat.native_effort_by_model.get(model.id).map(String::as_str)));
+        // The operator's own setting for the model, unless the call says;
+        // and the operator's level of effort, when the model's family has
+        // levels and the call thinks.
+        let stored = cfg.openai_compat.native_effort_by_model.get(model.id).map(String::as_str);
+        let thinking = self.thinking.unwrap_or_else(|| thinks(model.family, stored));
+        let level = level_of(model.family, stored, thinking);
         let provider = OpenAICompatProvider::new(
             OpenAiCompatPreset::Native,
             embra_boot::native_model::BASE_URL.to_string(),
@@ -130,7 +132,7 @@ impl NativeAskArgs {
             }
         }
         let asked =
-            Asked { model, prompt: &self.prompt, system: self.system.as_deref(), images: &images, thinking, max_tokens: self.max_tokens, offered: &offered, itself };
+            Asked { model, prompt: &self.prompt, system: self.system.as_deref(), images: &images, thinking, level, max_tokens: self.max_tokens, offered: &offered, itself };
         let answer = ask(provider, &asked, ASK_LIMIT).await.map_err(DispatchError::Handler)?;
         Ok(serde_json::to_string_pretty(&answer).unwrap_or_default())
     }
@@ -219,6 +221,16 @@ async fn image_of(path: &str) -> Result<ImageData, String> {
     })
 }
 
+/// The level of effort a call thinks at: the operator's for the model, when
+/// the model's family has levels and the call thinks. None is the model's
+/// own level, and no word is sent.
+fn level_of(family: embra_boot::native_model::Family, stored: Option<&str>, thinking: bool) -> Option<&'static str> {
+    match how_it_thinks(family, stored) {
+        Thinks::On(level) if thinking => level,
+        Thinks::On(_) | Thinks::Off => None,
+    }
+}
+
 /// One call, as it is asked.
 struct Asked<'a> {
     /// The model that is asked: what it is told of itself names it.
@@ -227,6 +239,9 @@ struct Asked<'a> {
     system: Option<&'a str>,
     /// The images the call names, already read.
     images: &'a [ImageData],
+    /// The level of effort it thinks at, for a model whose family has
+    /// levels: the operator's for the model. None is the model's own.
+    level: Option<&'static str>,
     thinking: bool,
     max_tokens: Option<u32>,
     offered: &'a [&'static ToolDescriptor],
@@ -283,7 +298,9 @@ async fn ask(provider: OpenAICompatProvider, asked: &Asked<'_>, limit: Duration)
 /// call, since the limit drops the call and its stream with it.
 async fn ask_into(provider: OpenAICompatProvider, asked: &Asked<'_>, limit: Duration, progress: ProgressSink) -> Result<JsonValue, String> {
     let provider = provider
-        .with_reasoning_effort((!asked.thinking).then(|| EFFORT_OFF.to_string()))
+        // The stored word that switches thinking off for the model's
+        // family, or the level it thinks at; no word is the model's own.
+        .with_reasoning_effort(if asked.thinking { asked.level.map(str::to_string) } else { Some(dialect(asked.model.family).off.to_string()) })
         .with_max_tokens(asked.max_tokens)
         .with_read_progress(progress.clone());
     let model = provider.display_name().to_string();
@@ -325,6 +342,9 @@ async fn ask_into(provider: OpenAICompatProvider, asked: &Asked<'_>, limit: Dura
         let mut answer = serde_json::Map::new();
         answer.insert("model".into(), json!(provider.display_name()));
         answer.insert("thinking".into(), json!(asked.thinking));
+        if let Some(level) = asked.level.filter(|_| asked.thinking) {
+            answer.insert("effort".into(), json!(level));
+        }
         answer.insert("text".into(), json!(text.join("\n")));
         if !reasoning.is_empty() {
             answer.insert("reasoning".into(), json!(reasoning));
@@ -416,7 +436,7 @@ mod tests {
     }
 
     fn asked<'a>(prompt: &'a str, offered: &'a [&'static ToolDescriptor]) -> Asked<'a> {
-        Asked { model: four(), prompt, system: None, images: &[], thinking: true, max_tokens: None, offered, itself: false }
+        Asked { model: four(), prompt, system: None, images: &[], thinking: true, level: None, max_tokens: None, offered, itself: false }
     }
 
     async fn bodies(server: &MockServer) -> Vec<JsonValue> {
@@ -498,6 +518,25 @@ mod tests {
             assert_eq!(system_of(model, Some("  \n ")), told);
             assert_eq!(system_of(model, Some(" Answer in French. ")), format!("{told}\n\nAnswer in French."));
         }
+    }
+
+    /// A call thinks at the operator's level for the model when the model's
+    /// family has levels; a family without them, a call that does not
+    /// think, and a stored word that is no level send none.
+    #[test]
+    fn a_call_thinks_at_the_operators_level_when_the_models_family_has_levels() {
+        use embra_boot::native_model::Family;
+        assert_eq!(level_of(Family::Qwen38, Some("medium"), true), Some("medium"));
+        assert_eq!(level_of(Family::Qwen38, Some("low"), true), Some("low"));
+        assert_eq!(level_of(Family::Qwen38, Some("medium"), false), None, "a call that does not think has no level");
+        for no_level in [None, Some("high"), Some("max"), Some("off")] {
+            assert_eq!(level_of(Family::Qwen38, no_level, true), None, "{no_level:?}");
+        }
+        for stored in [None, Some("medium"), Some("xhigh"), Some("low")] {
+            assert_eq!(level_of(Family::Qwen35, stored, true), None, "{stored:?}: the family has no levels");
+        }
+        // The word that switches thinking off is the family's.
+        assert_eq!((dialect(Family::Qwen35).off, dialect(Family::Qwen38).off), ("low", "off"));
     }
 
     /// A PNG of one colour, as a file a call can name.

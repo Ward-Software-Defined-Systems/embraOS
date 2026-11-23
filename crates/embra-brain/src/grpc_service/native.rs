@@ -314,43 +314,88 @@ pub(super) async fn handle_native_model_command(
 
 /// What `/effort` does while a native model leads the session, and says:
 /// the change, if any, is made in `oc`; `true` when there is one to save.
-/// The models think or they do not: there are no levels to send. The
-/// stored word for "off" is the level `low`, so that the one set of levels
-/// stays the configuration's.
+/// The words are the model's family's (`native::Dialect`): a family
+/// without levels thinks or does not, and its stored word for "off" is the
+/// level `low`, so that the one set of levels stays the configuration's; a
+/// family with levels takes its own, and no other word reaches the server.
 pub(super) fn apply_native_effort(args: &str, oc: &mut config::OpenAiCompatConfig) -> (bool, String, SystemMessageType) {
-    use crate::provider::openai_compat::native::{EFFORT_OFF, thinks};
     let Some(model) = non_empty(&oc.native_model) else {
         return (false, config::PresetNotReady::NoModel(OpenAiCompatPreset::Native).to_string(), SystemMessageType::Error);
     };
-    let thinking = thinks(oc.effort_for_preset(OpenAiCompatPreset::Native));
-    let how = "A native model has no levels (experimental): /effort off answers without thinking first, /effort on thinks first.";
+    native_effort(crate::provider::openai_compat::native::family_of(&model), &model, args, oc)
+}
+
+/// [`apply_native_effort`] for a model of `family`.
+fn native_effort(family: contract::Family, model: &str, args: &str, oc: &mut config::OpenAiCompatConfig) -> (bool, String, SystemMessageType) {
+    use crate::provider::openai_compat::native::{Thinks, dialect, thinking};
+    let dialect = dialect(family);
     let word = args.trim().to_ascii_lowercase();
+    let next = "Takes effect on your next message.";
+    let Some(own) = dialect.own_level else {
+        // On or off, and nothing between.
+        let how = "A native model has no levels (experimental): /effort off answers without thinking first, /effort on thinks first.";
+        return match word.as_str() {
+            "" => {
+                let now = if thinking(family, oc.effort_for_preset(OpenAiCompatPreset::Native)) == Thinks::Off { "off" } else { "on (the default)" };
+                (false, format!("Thinking is {now} for {model}. {how} A change takes effect on your next message."), SystemMessageType::Info)
+            }
+            "off" | "low" => {
+                oc.set_effort(OpenAiCompatPreset::Native, Some(dialect.off.to_string()));
+                (
+                    true,
+                    format!("Thinking is off for {model}: it answers without thinking first. /effort on brings it back. {next}"),
+                    SystemMessageType::Info,
+                )
+            }
+            "on" | "reset" => {
+                oc.set_effort(OpenAiCompatPreset::Native, None);
+                (true, format!("Thinking is on for {model} (the default). {next}"), SystemMessageType::Info)
+            }
+            level if parse_effort_choice(level).is_some() => {
+                oc.set_effort(OpenAiCompatPreset::Native, None);
+                (
+                    true,
+                    format!("Thinking is on for {model}. A native model has no levels (experimental): any level but low is on, and low is off. {next}"),
+                    SystemMessageType::Info,
+                )
+            }
+            other => (false, format!("'{other}' is not on or off. {how}"), SystemMessageType::Error),
+        };
+    };
+    // Levels of its own: the template refuses any other word, so none is stored.
+    let levels = dialect.levels.join(", ");
+    let how = format!(
+        "This native model (experimental) thinks at one of its levels ({levels}): /effort <level> sets one, /effort on is its own ({own}), and /effort off answers without thinking first."
+    );
     match word.as_str() {
         "" => {
-            let now = if thinking { "on (the default)" } else { "off" };
+            let now = match thinking(family, oc.effort_for_preset(OpenAiCompatPreset::Native)) {
+                Thinks::Off => "off".to_string(),
+                Thinks::On(None) => format!("on at the model's own level, {own} (the default)"),
+                Thinks::On(Some(level)) => format!("on at {level}"),
+            };
             (false, format!("Thinking is {now} for {model}. {how} A change takes effect on your next message."), SystemMessageType::Info)
         }
-        "off" | "low" => {
-            oc.set_effort(OpenAiCompatPreset::Native, Some(EFFORT_OFF.to_string()));
+        "off" => {
+            oc.set_effort(OpenAiCompatPreset::Native, Some(dialect.off.to_string()));
             (
                 true,
-                format!("Thinking is off for {model}: it answers without thinking first. /effort on brings it back. Takes effect on your next message."),
+                format!("Thinking is off for {model}: it answers without thinking first. /effort on brings it back. {next}"),
                 SystemMessageType::Info,
             )
         }
         "on" | "reset" => {
             oc.set_effort(OpenAiCompatPreset::Native, None);
-            (true, format!("Thinking is on for {model} (the default). Takes effect on your next message."), SystemMessageType::Info)
+            (true, format!("Thinking is on for {model} at its own level, {own} (the default). {next}"), SystemMessageType::Info)
+        }
+        level if dialect.levels.contains(&level) => {
+            oc.set_effort(OpenAiCompatPreset::Native, Some(level.to_string()));
+            (true, format!("Thinking is on for {model} at {level}. {next}"), SystemMessageType::Info)
         }
         level if parse_effort_choice(level).is_some() => {
-            oc.set_effort(OpenAiCompatPreset::Native, None);
-            (
-                true,
-                format!("Thinking is on for {model}. A native model has no levels (experimental): any level but low is on, and low is off. Takes effect on your next message."),
-                SystemMessageType::Info,
-            )
+            (false, format!("'{level}' is no level of {model}: it takes {levels}. Nothing was changed."), SystemMessageType::Error)
         }
-        other => (false, format!("'{other}' is not on or off. {how}"), SystemMessageType::Error),
+        other => (false, format!("'{other}' is not on, off or a level. {how}"), SystemMessageType::Error),
     }
 }
 
@@ -511,8 +556,12 @@ pub(super) async fn show_native(env: &Env, jobs: &Jobs, cfg: Option<&config::Sys
     lines.push(match wanted {
         Ok(Some(wanted)) => {
             let thinking = cfg.map(|cfg| {
-                let on = crate::provider::openai_compat::native::thinks(cfg.openai_compat.native_effort_by_model.get(wanted.model.id).map(String::as_str));
-                if on { ", thinking on" } else { ", thinking off" }
+                use crate::provider::openai_compat::native::{Thinks, thinking};
+                match thinking(wanted.model.family, cfg.openai_compat.native_effort_by_model.get(wanted.model.id).map(String::as_str)) {
+                    Thinks::Off => ", thinking off".to_string(),
+                    Thinks::On(None) => ", thinking on".to_string(),
+                    Thinks::On(Some(level)) => format!(", thinking on at {level}"),
+                }
             });
             let leads = cfg.is_some_and(|cfg| ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native));
             format!(
@@ -1116,7 +1165,7 @@ mod tests {
         assert_eq!(said, "No native model is chosen. /native lists the models, and /native use <model> loads one (experimental).");
 
         oc.set_model(OpenAiCompatPreset::Native, "qwen3.5-4b");
-        let thinking = |oc: &config::OpenAiCompatConfig| crate::provider::openai_compat::native::thinks(oc.effort_for_preset(OpenAiCompatPreset::Native));
+        let thinking = |oc: &config::OpenAiCompatConfig| crate::provider::openai_compat::native::thinks(contract::Family::Qwen35, oc.effort_for_preset(OpenAiCompatPreset::Native));
         assert!(thinking(&oc), "on by default");
         let (changed, said, kind) = apply_native_effort("", &mut oc);
         assert_eq!((changed, kind), (false, SystemMessageType::Info));
@@ -1162,6 +1211,51 @@ mod tests {
     }
 
     // ── /native ──────────────────────────────────────────────────────────
+
+    /// A model whose family has levels: `/effort` shows the level, takes
+    /// each of the family's and no other, and `off` is its own word, since
+    /// `low` is a level here. Nothing but the family's own words is stored.
+    #[test]
+    fn effort_on_a_native_model_with_levels_takes_its_own_levels_and_no_other() {
+        let mut oc = config::OpenAiCompatConfig::default();
+        oc.set_model(OpenAiCompatPreset::Native, "qwen3.8-27b");
+        let stored = |oc: &config::OpenAiCompatConfig| oc.effort_for_preset(OpenAiCompatPreset::Native).map(str::to_string);
+        let run = |args: &str, oc: &mut config::OpenAiCompatConfig| native_effort(contract::Family::Qwen38, "qwen3.8-27b", args, oc);
+
+        let (changed, said, kind) = run("", &mut oc);
+        assert_eq!((changed, kind), (false, SystemMessageType::Info));
+        assert_eq!(
+            said,
+            "Thinking is on at the model's own level, xhigh (the default) for qwen3.8-27b. This native model (experimental) thinks at one of its levels (low, medium, xhigh): /effort <level> sets one, /effort on is its own (xhigh), and /effort off answers without thinking first. A change takes effect on your next message."
+        );
+        for level in ["low", "medium", "xhigh"] {
+            let (changed, said, kind) = run(level, &mut oc);
+            assert_eq!((changed, kind), (true, SystemMessageType::Info));
+            assert_eq!(said, format!("Thinking is on for qwen3.8-27b at {level}. Takes effect on your next message."));
+            assert_eq!(stored(&oc).as_deref(), Some(level));
+        }
+        assert!(run("", &mut oc).1.starts_with("Thinking is on at xhigh for qwen3.8-27b. "));
+        // A level of other providers is none of this model's: refused, and what was stored stays.
+        for no_level in ["high", "max", "HIGH"] {
+            let (changed, said, kind) = run(no_level, &mut oc);
+            assert_eq!((changed, kind), (false, SystemMessageType::Error), "{no_level}");
+            assert_eq!(said, format!("'{}' is no level of qwen3.8-27b: it takes low, medium, xhigh. Nothing was changed.", no_level.to_ascii_lowercase()));
+            assert_eq!(stored(&oc).as_deref(), Some("xhigh"));
+        }
+        let (changed, said, _) = run("off", &mut oc);
+        assert!(changed && said.starts_with("Thinking is off for qwen3.8-27b: it answers without thinking first."), "{said}");
+        assert_eq!(stored(&oc).as_deref(), Some("off"));
+        assert!(run("", &mut oc).1.starts_with("Thinking is off for qwen3.8-27b. "));
+        for back in ["on", "reset"] {
+            let (changed, said, _) = run(back, &mut oc);
+            assert!(changed);
+            assert_eq!(said, "Thinking is on for qwen3.8-27b at its own level, xhigh (the default). Takes effect on your next message.");
+            assert_eq!(stored(&oc), None);
+        }
+        let (changed, said, kind) = run("sometimes", &mut oc);
+        assert_eq!((changed, kind), (false, SystemMessageType::Error));
+        assert!(said.starts_with("'sometimes' is not on, off or a level. "), "{said}");
+    }
 
     #[test]
     fn native_is_read_into_its_forms() {

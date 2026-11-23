@@ -153,6 +153,18 @@ pub struct Memory {
     pub first_image: u32,
 }
 
+/// The family a model is of: how its server is told to think, and with
+/// which sampling. What each family takes is the brain's to know
+/// (`provider/openai_compat/native.rs`, from the models' own cards).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Family {
+    /// Thinking is on or off, and nothing between.
+    Qwen35,
+    /// Thinking is on or off, and when on at one of the levels of effort
+    /// the model's chat template names; it refuses any other word.
+    Qwen38,
+}
+
 /// A model of the catalogue: two files of one revision of a repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeModel {
@@ -165,6 +177,8 @@ pub struct NativeModel {
     /// "a model of". A small model asked who made it otherwise names
     /// another maker as often as its own.
     pub maker: &'static str,
+    /// Its family: how a request to it is shaped.
+    pub family: Family,
     /// The file's name, in the repository and on DATA.
     pub file: &'static str,
     /// How the weights were quantised, for the listing.
@@ -231,6 +245,7 @@ pub const CATALOGUE: [NativeModel; 2] = [
         id: "qwen3.5-4b",
         label: "Qwen3.5 4B",
         maker: QWEN,
+        family: Family::Qwen35,
         file: "Qwen3.5-4B-Q4_K_M.gguf",
         quantisation: "Q4_K_M",
         bytes: 2_740_937_888,
@@ -252,6 +267,7 @@ pub const CATALOGUE: [NativeModel; 2] = [
         id: "qwen3.5-9b",
         label: "Qwen3.5 9B",
         maker: QWEN,
+        family: Family::Qwen35,
         file: "Qwen3.5-9B-Q4_K_M.gguf",
         quantisation: "Q4_K_M",
         bytes: 5_680_522_464,

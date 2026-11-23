@@ -33,21 +33,75 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use embra_boot::native_model::{self as contract, Family};
+
 use super::wire::{OpenAIChatRequest, OpenAIMessage, Sampling, UserContent, UserPart};
 use crate::provider::ProviderError;
 
-/// Qwen3.5's model card, "thinking mode for general tasks" (read
-/// 2026-11-22, the same for the 4B and the 9B; `repetition_penalty=1.0` is
-/// the server's default and is not sent).
-pub(super) const SAMPLING_THINKING: Sampling =
-    Sampling { temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 1.5 };
-/// The card's "instruct (or non-thinking) mode for general tasks".
-pub(super) const SAMPLING_DIRECT: Sampling =
-    Sampling { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0, presence_penalty: 1.5 };
+/// What a family of models takes in a request, from its own model card.
+pub(crate) struct Dialect {
+    /// The card's sampling for "thinking mode".
+    pub(crate) thinking: Sampling,
+    /// The card's sampling for "instruct (or non-thinking) mode".
+    pub(crate) direct: Sampling,
+    /// The levels of effort the family's chat template takes when it
+    /// thinks, least first; none when thinking is on or off and nothing
+    /// between. A word that is no level is answered HTTP 500 by the server
+    /// (the template raises "Unexpected reasoning effort"), so no other
+    /// word is ever sent.
+    pub(crate) levels: &'static [&'static str],
+    /// The level the template takes when none is named.
+    pub(crate) own_level: Option<&'static str>,
+    /// The stored `/effort` word that switches thinking off. Any other, and
+    /// none, leaves it on (William, 2026-11-22: on by default).
+    pub(crate) off: &'static str,
+}
 
-/// The `/effort` level that switches thinking off. Any other level, and
-/// none, leaves it on (William, 2026-11-22: on by default).
-pub(crate) const EFFORT_OFF: &str = "low";
+/// Qwen3.5's model card (read 2026-11-22, the same for the 4B and the 9B;
+/// `repetition_penalty=1.0` is the server's default and is not sent). The
+/// word for off is the level `low`: the family has no levels, and the one
+/// set of levels stays the configuration's.
+const QWEN35: Dialect = Dialect {
+    thinking: Sampling { temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 1.5 },
+    direct: Sampling { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0, presence_penalty: 1.5 },
+    levels: &[],
+    own_level: None,
+    off: "low",
+};
+
+/// Qwen3.8's model card and chat template (read 2026-11-23): thinking is
+/// sampled without a presence penalty, and its depth is one of three
+/// levels, `xhigh` when none is named.
+const QWEN38: Dialect = Dialect {
+    thinking: Sampling { temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 0.0 },
+    direct: Sampling { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0, presence_penalty: 1.5 },
+    levels: &["low", "medium", "xhigh"],
+    own_level: Some("xhigh"),
+    off: "off",
+};
+
+/// What a family takes.
+pub(crate) fn dialect(family: Family) -> &'static Dialect {
+    match family {
+        Family::Qwen35 => &QWEN35,
+        Family::Qwen38 => &QWEN38,
+    }
+}
+
+/// The family of the catalogue's model of this name. A name that is none
+/// of the catalogue's is shaped as the first family was: no request is
+/// lost to a name.
+pub(crate) fn family_of(model_id: &str) -> Family {
+    contract::by_id(model_id).map(|model| model.family).unwrap_or(Family::Qwen35)
+}
+
+/// How a request thinks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Thinks {
+    Off,
+    /// On, at a level of the family when the operator set one of them.
+    On(Option<&'static str>),
+}
 
 /// What stands where an image was, for a model server that was started
 /// without the model's image file.
@@ -57,17 +111,36 @@ pub(super) const IMAGE_LINE: &str =
 /// How often a request is sent again while the server loads its model.
 pub(super) const LOADING_POLL: Duration = Duration::from_secs(1);
 
-/// Whether a native model thinks, by the operator's `/effort` for it.
-pub(crate) fn thinks(effort: Option<&str>) -> bool {
-    effort.map(str::trim) != Some(EFFORT_OFF)
+/// How a model of `family` thinks, by the operator's `/effort` for it: off
+/// by the family's word for it (and by `off` in every family), at a level
+/// when the word is one of the family's, and on without one otherwise.
+pub(crate) fn thinking(family: Family, effort: Option<&str>) -> Thinks {
+    let dialect = dialect(family);
+    match effort.map(str::trim) {
+        Some(word) if word == dialect.off || word == "off" => Thinks::Off,
+        Some(word) => Thinks::On(dialect.levels.iter().copied().find(|level| *level == word)),
+        None => Thinks::On(None),
+    }
 }
 
-/// Give a request a native model's shape.
-pub(super) fn shape(body: &mut OpenAIChatRequest, thinking: bool) {
-    body.reasoning_effort = None;
+/// Whether a native model thinks, by the operator's `/effort` for it.
+pub(crate) fn thinks(family: Family, effort: Option<&str>) -> bool {
+    thinking(family, effort) != Thinks::Off
+}
+
+/// Give a request a native model's shape: the thinking switch, the card's
+/// sampling for it, the level of effort when the family has levels and the
+/// operator named one, and the reading progress asked for.
+pub(super) fn shape(body: &mut OpenAIChatRequest, family: Family, effort: Option<&str>) {
+    let dialect = dialect(family);
+    let thinks = thinking(family, effort);
+    body.reasoning_effort = match thinks {
+        Thinks::On(Some(level)) => Some(level.to_string()),
+        Thinks::On(None) | Thinks::Off => None,
+    };
     body.return_progress = Some(true);
-    body.chat_template_kwargs = Some(json!({ "enable_thinking": thinking }));
-    body.sampling = Some(if thinking { SAMPLING_THINKING } else { SAMPLING_DIRECT });
+    body.chat_template_kwargs = Some(json!({ "enable_thinking": thinks != Thinks::Off }));
+    body.sampling = Some(if thinks == Thinks::Off { dialect.direct } else { dialect.thinking });
 }
 
 /// The messages as a native model's server takes them: an earlier step's
@@ -188,13 +261,61 @@ mod tests {
     use super::*;
     use crate::provider::openai_compat::wire::{ImageUrlRef, OpenAIToolCall, OpenAIToolCallFunction};
 
+    /// The first family thinks or it does not: the level `low` is its
+    /// stored word for off, and no level is ever sent.
     #[test]
     fn thinking_is_on_unless_the_effort_is_low() {
-        for on in [None, Some("medium"), Some("high"), Some("xhigh"), Some("max"), Some(""), Some("off")] {
-            assert!(thinks(on), "{on:?}");
+        for on in [None, Some("medium"), Some("high"), Some("xhigh"), Some("max"), Some("")] {
+            assert_eq!(thinking(Family::Qwen35, on), Thinks::On(None), "{on:?}");
+            assert!(thinks(Family::Qwen35, on));
         }
-        assert!(!thinks(Some("low")));
-        assert!(!thinks(Some(" low ")));
+        for off in ["low", " low ", "off"] {
+            assert_eq!(thinking(Family::Qwen35, Some(off)), Thinks::Off, "{off:?}");
+        }
+        // Every model of the catalogue has a family the brain knows.
+        for model in &contract::CATALOGUE {
+            assert_eq!(family_of(model.id), model.family);
+        }
+        assert_eq!(family_of("not-a-model"), Family::Qwen35);
+    }
+
+    /// The second family has three levels: one of them is sent as it is,
+    /// any other word is none (the template would refuse the request), and
+    /// `off` alone switches thinking off, since `low` is a level here.
+    #[test]
+    fn a_family_with_levels_sends_its_own_and_no_other_word() {
+        let d = dialect(Family::Qwen38);
+        assert_eq!((d.levels, d.own_level, d.off), (&["low", "medium", "xhigh"][..], Some("xhigh"), "off"));
+        for level in ["low", "medium", "xhigh"] {
+            assert_eq!(thinking(Family::Qwen38, Some(level)), Thinks::On(Some(level)));
+        }
+        for no_level in [None, Some("high"), Some("max"), Some(""), Some("XHIGH")] {
+            assert_eq!(thinking(Family::Qwen38, no_level), Thinks::On(None), "{no_level:?}");
+        }
+        assert_eq!(thinking(Family::Qwen38, Some("off")), Thinks::Off);
+
+        let shaped = |effort: Option<&str>| {
+            let mut body = request();
+            body.reasoning_effort = Some("max".to_string());
+            shape(&mut body, Family::Qwen38, effort);
+            serde_json::to_value(&body).unwrap()
+        };
+        // A level: sent, with the card's sampling for thinking (no presence penalty).
+        let medium = shaped(Some("medium"));
+        assert_eq!(medium["reasoning_effort"], "medium");
+        assert_eq!(medium["chat_template_kwargs"], json!({"enable_thinking": true}));
+        assert_eq!((medium["temperature"].as_f64(), medium["top_p"].as_f64(), medium["presence_penalty"].as_f64()), (Some(1.0), Some(0.95), Some(0.0)));
+        // No level, and a word that is none: thinking on, and no word in the request.
+        for effort in [None, Some("high"), Some("max")] {
+            let body = shaped(effort);
+            assert!(body.get("reasoning_effort").is_none(), "{effort:?}: {body}");
+            assert_eq!(body["chat_template_kwargs"], json!({"enable_thinking": true}));
+        }
+        // Off: the direct sampling, and no level.
+        let off = shaped(Some("off"));
+        assert!(off.get("reasoning_effort").is_none());
+        assert_eq!(off["chat_template_kwargs"], json!({"enable_thinking": false}));
+        assert_eq!((off["temperature"].as_f64(), off["presence_penalty"].as_f64()), (Some(0.7), Some(1.5)));
     }
 
     fn request() -> OpenAIChatRequest {
@@ -215,7 +336,7 @@ mod tests {
     #[test]
     fn a_request_says_whether_to_think_and_carries_the_cards_sampling_for_it() {
         let mut thinking = request();
-        shape(&mut thinking, true);
+        shape(&mut thinking, Family::Qwen35, Some("high"));
         let body = serde_json::to_value(&thinking).unwrap();
         assert_eq!(body["chat_template_kwargs"], json!({"enable_thinking": true}));
         assert_eq!(
@@ -227,7 +348,7 @@ mod tests {
         assert!(body.get("sampling").is_none(), "the sampling's fields are the request's own: {body}");
 
         let mut direct = request();
-        shape(&mut direct, false);
+        shape(&mut direct, Family::Qwen35, Some("low"));
         let body = serde_json::to_value(&direct).unwrap();
         assert_eq!(body["chat_template_kwargs"], json!({"enable_thinking": false}));
         assert_eq!((body["temperature"].as_f64(), body["top_p"].as_f64(), body["presence_penalty"].as_f64()), (Some(0.7), Some(0.8), Some(1.5)));

@@ -176,8 +176,7 @@ pub struct OpenAIChatRequest {
     pub sampling: Option<Sampling>,
 }
 
-/// The sampling a request names (`native::SAMPLING_THINKING`,
-/// `native::SAMPLING_DIRECT`).
+/// The sampling a request names (`native::Dialect`: a family's model card).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Sampling {
     pub temperature: f64,
