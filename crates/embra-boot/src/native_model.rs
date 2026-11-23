@@ -3,9 +3,11 @@
 //! llama.cpp's server runs on this machine, on loopback alone; the brain
 //! reaches it as one more OpenAI-compatible endpoint.
 //!
-//! The catalogue names the models: each is one file of one revision of a
-//! repository, with its size and its sha256, so what runs is what was
-//! tested.
+//! The catalogue names the models: each is two files of one revision of a
+//! repository, the model itself and the file it reads images through (its
+//! projector), each with its size and its sha256, so what runs is what was
+//! tested. A model whose image file is not on the machine runs and reads
+//! text alone.
 //!
 //! One job at a time changes the models' directory (an install, an import,
 //! a check, a removal): a lock on a file in it, which the updater takes and
@@ -26,11 +28,13 @@
 //!     pid=412
 //!     since=96
 //!     exits=0
+//!     images=yes                            the server was started with the image file
 //! /embra/data/models/qwen3.5-4b/verified    the updater writes, embrad reads
 //!     file=Qwen3.5-4B-Q4_K_M.gguf
 //!     bytes=2740937888
 //!     sha256=00fe7986…
 //!     mtime=1763829000.123456789
+//! /embra/data/models/qwen3.5-4b/verified-images    the same, of the image file
 //! ```
 
 use std::os::unix::fs::MetadataExt;
@@ -72,9 +76,16 @@ pub const DEFAULT_CONTEXT: u32 = 65_536;
 /// The smallest window a model can be given. The server runs with less, and
 /// nothing embraOS sends fits under it; 0 would mean the model's own largest.
 pub const SMALLEST_CONTEXT: u32 = 1_024;
+/// The tokens of an image for the catalogue's models: what their server asks
+/// for at least ("Qwen-VL models require at minimum 1024 image tokens"), and
+/// at most as well. Measured with the 4B: small text misread at the
+/// server's own default, read right at this.
+pub const IMAGE_TOKENS: u32 = 1_024;
 
 /// The name of a model's verification record, in the model's directory.
 const VERIFIED_FILE: &str = "verified";
+/// The record of its image file, beside it.
+const VERIFIED_IMAGES_FILE: &str = "verified-images";
 /// The file a model job locks, in the models' directory.
 const JOB_LOCK_FILE: &str = ".lock";
 /// What a download is called until it is whole: the file's name and this.
@@ -84,7 +95,39 @@ const SHOWN: usize = 120;
 /// How long a status's reason is at most.
 const REASON_MAX: usize = 300;
 
-/// A model of the catalogue: one file of one revision of a repository.
+/// One of a model's two files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    /// The model itself.
+    Model,
+    /// What the model reads images through (its projector). Without it the
+    /// model runs and reads text alone.
+    Images,
+}
+
+impl Part {
+    /// Both, the model first: it is what a machine needs to run one at all.
+    pub const ALL: [Part; 2] = [Part::Model, Part::Images];
+
+    /// What the operator reads.
+    pub fn words(self) -> &'static str {
+        match self {
+            Part::Model => "model file",
+            Part::Images => "image file",
+        }
+    }
+}
+
+/// A file of the catalogue: its name, in the repository and on DATA, its
+/// size and its sha256, lower-case hex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CatalogueFile {
+    pub file: &'static str,
+    pub bytes: u64,
+    pub sha256: &'static str,
+}
+
+/// A model of the catalogue: two files of one revision of a repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeModel {
     /// The name the operator types, the model's directory, and the name the
@@ -100,6 +143,13 @@ pub struct NativeModel {
     pub bytes: u64,
     /// The file's sha256, lower-case hex.
     pub sha256: &'static str,
+    /// The file the model reads images through, of the same revision.
+    pub images: CatalogueFile,
+    /// How many tokens the model server makes of an image, whatever its
+    /// size: the server's own figure for these models is too few for small
+    /// text (it says so when it loads one), and without a ceiling a large
+    /// image is four times the tokens and six times the wait.
+    pub image_tokens: u32,
     /// The repository under [`DOWNLOAD_BASE`].
     pub repository: &'static str,
     /// The repository's revision the file is taken from.
@@ -122,6 +172,12 @@ pub const CATALOGUE: [NativeModel; 2] = [
         quantisation: "Q4_K_M",
         bytes: 2_740_937_888,
         sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        images: CatalogueFile {
+            file: "mmproj-F16.gguf",
+            bytes: 672_423_616,
+            sha256: "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+        },
+        image_tokens: IMAGE_TOKENS,
         repository: "unsloth/Qwen3.5-4B-GGUF",
         revision: "e87f176479d0855a907a41277aca2f8ee7a09523",
         licence: "Apache-2.0",
@@ -135,6 +191,12 @@ pub const CATALOGUE: [NativeModel; 2] = [
         quantisation: "Q4_K_M",
         bytes: 5_680_522_464,
         sha256: "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+        images: CatalogueFile {
+            file: "mmproj-F16.gguf",
+            bytes: 918_166_080,
+            sha256: "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f",
+        },
+        image_tokens: IMAGE_TOKENS,
         repository: "unsloth/Qwen3.5-9B-GGUF",
         revision: "3885219b6810b007914f3a7950a8d1b469d598a5",
         licence: "Apache-2.0",
@@ -149,10 +211,29 @@ pub fn by_id(id: &str) -> Option<&'static NativeModel> {
 }
 
 impl NativeModel {
-    /// Where the file is downloaded from: the pinned revision, never a
+    /// One of the model's two files, as the catalogue names it.
+    pub fn part(&self, part: Part) -> CatalogueFile {
+        match part {
+            Part::Model => CatalogueFile { file: self.file, bytes: self.bytes, sha256: self.sha256 },
+            Part::Images => self.images,
+        }
+    }
+
+    /// Which of the model's files has this size, when one has: how an
+    /// upload that names the model says which file it brings.
+    pub fn part_of_size(&self, bytes: u64) -> Option<Part> {
+        Part::ALL.into_iter().find(|part| self.part(*part).bytes == bytes)
+    }
+
+    /// Where a file is downloaded from: the pinned revision, never a
     /// branch.
+    pub fn url_of(&self, part: Part) -> String {
+        format!("{DOWNLOAD_BASE}/{}/resolve/{}/{}", self.repository, self.revision, self.part(part).file)
+    }
+
+    /// Where the model file is downloaded from.
     pub fn url(&self) -> String {
-        format!("{DOWNLOAD_BASE}/{}/resolve/{}/{}", self.repository, self.revision, self.file)
+        self.url_of(Part::Model)
     }
 
     /// The model's directory under `models` ([`MODELS_DIR`] on a machine).
@@ -160,19 +241,37 @@ impl NativeModel {
         models.join(self.id)
     }
 
+    /// One of the model's files.
+    pub fn path_of(&self, part: Part, models: &Path) -> PathBuf {
+        self.dir(models).join(self.part(part).file)
+    }
+
+    /// Its download until it is whole.
+    pub fn partial_of(&self, part: Part, models: &Path) -> PathBuf {
+        self.dir(models).join(format!("{}{PARTIAL_SUFFIX}", self.part(part).file))
+    }
+
+    /// Its verification record.
+    pub fn verified_of(&self, part: Part, models: &Path) -> PathBuf {
+        self.dir(models).join(match part {
+            Part::Model => VERIFIED_FILE,
+            Part::Images => VERIFIED_IMAGES_FILE,
+        })
+    }
+
     /// The model file.
     pub fn file_path(&self, models: &Path) -> PathBuf {
-        self.dir(models).join(self.file)
+        self.path_of(Part::Model, models)
     }
 
-    /// The download until it is whole.
+    /// The model file's download until it is whole.
     pub fn partial_path(&self, models: &Path) -> PathBuf {
-        self.dir(models).join(format!("{}{PARTIAL_SUFFIX}", self.file))
+        self.partial_of(Part::Model, models)
     }
 
-    /// The verification record.
+    /// The model file's verification record.
     pub fn verified_path(&self, models: &Path) -> PathBuf {
-        self.dir(models).join(VERIFIED_FILE)
+        self.verified_of(Part::Model, models)
     }
 
     /// A window this model can be given. The error is a sentence for the
@@ -425,6 +524,9 @@ pub struct Status {
     pub since: u64,
     /// How often the server ended since the settings last changed.
     pub exits: u32,
+    /// Whether the server was started with the model's image file: with it
+    /// the model reads images, without it text alone.
+    pub images: bool,
     /// One line for the operator: why the model cannot be run, or how the
     /// server's last run ended. Empty when there is nothing to say.
     pub reason: String,
@@ -433,7 +535,7 @@ pub struct Status {
 impl Status {
     /// A state with nothing else to say about it.
     pub fn of(state: ServiceState, since: u64) -> Self {
-        Status { state, model: None, context: None, pid: None, since, exits: 0, reason: String::new() }
+        Status { state, model: None, context: None, pid: None, since, exits: 0, images: false, reason: String::new() }
     }
 
     /// The record's text. The reason is kept to one line.
@@ -449,6 +551,9 @@ impl Status {
             text.push_str(&format!("pid={pid}\n"));
         }
         text.push_str(&format!("since={}\nexits={}\n", self.since, self.exits));
+        if self.images {
+            text.push_str("images=yes\n");
+        }
         let reason = one_line(&self.reason);
         if !reason.is_empty() {
             text.push_str(&format!("reason={reason}\n"));
@@ -468,9 +573,18 @@ pub fn one_line(reason: &str) -> String {
 /// window and its process.
 pub fn parse_status(text: &str) -> Result<Status, String> {
     let (mut state, mut model, mut context, mut pid) = (None, None, None, None);
-    let (mut since, mut exits, mut reason) = (None, None, None);
+    let (mut since, mut exits, mut reason, mut images) = (None, None, None, None);
     for (key, value, shown) in fields(text)? {
         match key {
+            "images" => once(
+                &mut images,
+                match value {
+                    "yes" => true,
+                    "no" => false,
+                    _ => return Err(format!("{shown}: yes or no")),
+                },
+                &shown,
+            )?,
             "state" => once(&mut state, ServiceState::parse(value).ok_or_else(|| format!("{shown}: not a state"))?, &shown)?,
             "model" => once(&mut model, by_id(value).ok_or_else(|| format!("{shown}: not a native model this release knows"))?, &shown)?,
             "context" => once(&mut context, value.parse::<u32>().map_err(|_| format!("{shown}: not a number of tokens"))?, &shown)?,
@@ -496,6 +610,7 @@ pub fn parse_status(text: &str) -> Result<Status, String> {
         pid,
         since: since.unwrap_or(0),
         exits: exits.unwrap_or(0),
+        images: images.unwrap_or(false),
         reason: reason.unwrap_or_default(),
     })
 }
@@ -556,13 +671,19 @@ fn file_name_ok(name: &str) -> bool {
 impl Verified {
     /// The record of a catalogue file whose hash was just found right:
     /// `meta` is the file's own.
-    pub fn of(model: &NativeModel, meta: &std::fs::Metadata) -> Self {
+    pub fn of_part(model: &NativeModel, part: Part, meta: &std::fs::Metadata) -> Self {
+        let file = model.part(part);
         Verified {
-            file: model.file.to_string(),
+            file: file.file.to_string(),
             bytes: meta.len(),
-            sha256: model.sha256.to_string(),
+            sha256: file.sha256.to_string(),
             mtime: (meta.mtime(), meta.mtime_nsec()),
         }
+    }
+
+    /// The record of the model file.
+    pub fn of(model: &NativeModel, meta: &std::fs::Metadata) -> Self {
+        Self::of_part(model, Part::Model, meta)
     }
 
     /// The record's text.
@@ -573,9 +694,9 @@ impl Verified {
         )
     }
 
-    /// Whether the record is of this catalogue model's file.
-    fn names(&self, model: &NativeModel) -> bool {
-        self.file == model.file && self.bytes == model.bytes && self.sha256 == model.sha256
+    /// Whether the record is of this catalogue file.
+    fn names(&self, file: &CatalogueFile) -> bool {
+        self.file == file.file && self.bytes == file.bytes && self.sha256 == file.sha256
     }
 }
 
@@ -630,10 +751,15 @@ pub enum Installed {
 /// How `model`'s file stands under `models`: what is there, and whether the
 /// record beside it still describes it. Nothing is hashed.
 pub fn installed(model: &NativeModel, models: &Path) -> Installed {
-    let meta = match std::fs::metadata(model.file_path(models)) {
+    installed_part(model, Part::Model, models)
+}
+
+/// The same of either of the model's files.
+pub fn installed_part(model: &NativeModel, part: Part, models: &Path) -> Installed {
+    let meta = match std::fs::metadata(model.path_of(part, models)) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return match std::fs::metadata(model.partial_path(models)) {
+            return match std::fs::metadata(model.partial_of(part, models)) {
                 Ok(partial) if partial.is_file() => Installed::Partial(partial.len()),
                 _ => Installed::No,
             };
@@ -643,7 +769,7 @@ pub fn installed(model: &NativeModel, models: &Path) -> Installed {
     if !meta.is_file() {
         return Installed::Unverified("what stands in the file's place is not a file".to_string());
     }
-    let record = match read_record(&model.verified_path(models), "the verification record") {
+    let record = match read_record(&model.verified_of(part, models), "the verification record") {
         Ok(Some(text)) => parse_verified(&text),
         Ok(None) => return Installed::Unverified("the file was never checked".to_string()),
         Err(reason) => Err(reason),
@@ -652,7 +778,7 @@ pub fn installed(model: &NativeModel, models: &Path) -> Installed {
         Ok(record) => record,
         Err(reason) => return Installed::Unverified(format!("the verification record is not valid ({reason})")),
     };
-    if !record.names(model) {
+    if !record.names(&model.part(part)) {
         return Installed::Unverified("the file was checked as another release's file".to_string());
     }
     if meta.len() != record.bytes || (meta.mtime(), meta.mtime_nsec()) != record.mtime {
@@ -670,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn the_catalogue_pins_one_file_of_one_revision_per_model() {
+    fn the_catalogue_pins_two_files_of_one_revision_per_model() {
         let ids: Vec<&str> = CATALOGUE.iter().map(|m| m.id).collect();
         assert_eq!(ids, ["qwen3.5-4b", "qwen3.5-9b"]);
         for model in &CATALOGUE {
@@ -689,8 +815,31 @@ mod tests {
                 format!("https://huggingface.co/{}/resolve/{}/{}", model.repository, model.revision, model.file)
             );
             assert!(!model.label.is_empty() && !model.licence.is_empty() && !model.quantisation.is_empty());
+            // Its image file: another file of the same revision, with a name
+            // and a size of its own, so that a size alone says which of the
+            // two an upload brings.
+            let images = model.part(Part::Images);
+            assert_eq!(images, model.images);
+            assert_eq!(model.part(Part::Model), CatalogueFile { file: model.file, bytes: model.bytes, sha256: model.sha256 });
+            assert!(file_name_ok(images.file) && images.file.ends_with(".gguf") && images.file != model.file, "{}", images.file);
+            assert!(hex(images.sha256, 64) && images.sha256 != model.sha256, "{}: the image file's sha256", model.id);
+            assert!(images.bytes > 100 << 20 && images.bytes < model.bytes, "{}", model.id);
+            assert_eq!((model.part_of_size(model.bytes), model.part_of_size(images.bytes), model.part_of_size(1)), (Some(Part::Model), Some(Part::Images), None));
+            assert_eq!(
+                model.url_of(Part::Images),
+                format!("https://huggingface.co/{}/resolve/{}/{}", model.repository, model.revision, images.file)
+            );
+            assert_eq!(model.image_tokens, IMAGE_TOKENS);
         }
         assert_eq!((CATALOGUE[0].bytes, CATALOGUE[1].bytes), (2_740_937_888, 5_680_522_464));
+        assert_eq!((CATALOGUE[0].images.bytes, CATALOGUE[1].images.bytes), (672_423_616, 918_166_080));
+        // No two files of the catalogue have one size: an upload that names
+        // no model is told apart by its size as well.
+        let mut sizes: Vec<u64> = CATALOGUE.iter().flat_map(|m| Part::ALL.map(|part| m.part(part).bytes)).collect();
+        sizes.sort_unstable();
+        sizes.dedup();
+        assert_eq!(sizes.len(), CATALOGUE.len() * 2);
+        assert_eq!((Part::Model.words(), Part::Images.words()), ("model file", "image file"));
         assert_eq!(by_id("qwen3.5-27b"), None);
         assert_eq!(by_id(""), None);
         assert_eq!(BASE_URL, format!("http://{HOST}:{PORT}"));
@@ -705,6 +854,11 @@ mod tests {
         assert_eq!(model.file_path(models), Path::new("/embra/data/models/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf"));
         assert_eq!(model.partial_path(models), Path::new("/embra/data/models/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf.partial"));
         assert_eq!(model.verified_path(models), Path::new("/embra/data/models/qwen3.5-4b/verified"));
+        // The image file stands beside it, with a download and a record of its own.
+        assert_eq!(model.path_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-F16.gguf"));
+        assert_eq!(model.partial_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-F16.gguf.partial"));
+        assert_eq!(model.verified_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/verified-images"));
+        assert_eq!((model.path_of(Part::Model, models), model.verified_of(Part::Model, models)), (model.file_path(models), model.verified_path(models)));
     }
 
     #[test]
@@ -793,10 +947,20 @@ mod tests {
             pid: Some(412),
             since: 96,
             exits: 0,
+            images: false,
             reason: String::new(),
         };
         assert_eq!(ready.to_text(), "state=ready\nmodel=qwen3.5-4b\ncontext=65536\npid=412\nsince=96\nexits=0\n");
-        assert_eq!(parse_status(&ready.to_text()), Ok(ready));
+        assert_eq!(parse_status(&ready.to_text()), Ok(ready.clone()));
+
+        // A server that was started with the model's image file says so, in
+        // one more line; a record without the line is a server without it.
+        let seeing = Status { images: true, ..ready };
+        assert_eq!(seeing.to_text(), "state=ready\nmodel=qwen3.5-4b\ncontext=65536\npid=412\nsince=96\nexits=0\nimages=yes\n");
+        assert_eq!(parse_status(&seeing.to_text()), Ok(seeing));
+        assert_eq!(parse_status("state=off\nimages=no\n").map(|s| s.images), Ok(false));
+        assert_eq!(parse_status("state=off\nimages=maybe\n"), Err("images=maybe: yes or no".to_string()));
+        assert_eq!(parse_status("state=off\nimages=yes\nimages=yes\n"), Err("images=yes: named twice".to_string()));
 
         let off = Status::of(ServiceState::Off, 7);
         assert_eq!(off.to_text(), "state=off\nsince=7\nexits=0\n");
@@ -862,7 +1026,8 @@ mod tests {
         let text = record.to_text();
         assert!(text.ends_with("mtime=1763829000.000000005\n"), "{text}");
         assert_eq!(parse_verified(&text), Ok(record.clone()));
-        assert!(record.names(&CATALOGUE[0]) && !record.names(&CATALOGUE[1]));
+        assert!(record.names(&CATALOGUE[0].part(Part::Model)) && !record.names(&CATALOGUE[1].part(Part::Model)));
+        assert!(!record.names(&CATALOGUE[0].part(Part::Images)), "a record of the model file says nothing for the image file");
         // A time before the epoch is a time.
         let old = Verified { mtime: (-3, 999_999_999), ..record };
         assert_eq!(parse_verified(&old.to_text()), Ok(old));
@@ -895,9 +1060,48 @@ mod tests {
         }
     }
 
-    /// A stand-in catalogue entry whose file a test can afford to write.
+    /// A stand-in catalogue entry whose files a test can afford to write.
     fn small() -> NativeModel {
-        NativeModel { id: "small", file: "small.gguf", bytes: 5, ..CATALOGUE[0] }
+        NativeModel {
+            id: "small",
+            file: "small.gguf",
+            bytes: 5,
+            images: CatalogueFile { file: "small-images.gguf", bytes: 3, sha256: CATALOGUE[0].images.sha256 },
+            ..CATALOGUE[0]
+        }
+    }
+
+    /// Each of a model's two files stands by itself: the image file can be
+    /// there or not, checked or not, whatever the model file is.
+    #[test]
+    fn the_image_file_is_installed_by_a_record_of_its_own() {
+        let models = crate::net::tests::scratch("native-installed-images");
+        let model = small();
+        std::fs::create_dir_all(model.dir(&models)).unwrap();
+        std::fs::write(model.file_path(&models), b"gguf!").unwrap();
+        write_verified(&model.verified_path(&models), &Verified::of(&model, &std::fs::metadata(model.file_path(&models)).unwrap())).unwrap();
+        assert_eq!((installed(&model, &models), installed_part(&model, Part::Images, &models)), (Installed::Verified, Installed::No));
+
+        std::fs::write(model.partial_of(Part::Images, &models), b"mm").unwrap();
+        assert_eq!(installed_part(&model, Part::Images, &models), Installed::Partial(2));
+        std::fs::rename(model.partial_of(Part::Images, &models), model.path_of(Part::Images, &models)).unwrap();
+        std::fs::write(model.path_of(Part::Images, &models), b"mmp").unwrap();
+        assert_eq!(installed_part(&model, Part::Images, &models), Installed::Unverified("the file was never checked".to_string()));
+
+        // The model file's record says nothing for the image file.
+        let wrong = Verified::of(&model, &std::fs::metadata(model.path_of(Part::Images, &models)).unwrap());
+        write_verified(&model.verified_of(Part::Images, &models), &wrong).unwrap();
+        assert_eq!(installed_part(&model, Part::Images, &models), Installed::Unverified("the file was checked as another release's file".to_string()));
+
+        let record = Verified::of_part(&model, Part::Images, &std::fs::metadata(model.path_of(Part::Images, &models)).unwrap());
+        assert_eq!((record.file.as_str(), record.bytes, record.sha256.as_str()), ("small-images.gguf", 3, model.images.sha256));
+        write_verified(&model.verified_of(Part::Images, &models), &record).unwrap();
+        assert_eq!((installed(&model, &models), installed_part(&model, Part::Images, &models)), (Installed::Verified, Installed::Verified));
+
+        // And the other way round: the model file gone, the image file as it was.
+        std::fs::remove_file(model.file_path(&models)).unwrap();
+        assert_eq!((installed(&model, &models), installed_part(&model, Part::Images, &models)), (Installed::No, Installed::Verified));
+        std::fs::remove_dir_all(&models).unwrap();
     }
 
     #[test]
