@@ -135,6 +135,10 @@ pub struct NativeModel {
     pub id: &'static str,
     /// The name the operator reads.
     pub label: &'static str,
+    /// Whose model it is, as the model itself is told: what stands after
+    /// "a model of". A small model asked who made it otherwise names
+    /// another maker as often as its own.
+    pub maker: &'static str,
     /// The file's name, in the repository and on DATA.
     pub file: &'static str,
     /// How the weights were quantised, for the listing.
@@ -162,12 +166,16 @@ pub struct NativeModel {
     pub largest_context: u32,
 }
 
+/// The maker of the Qwen models, as a model of theirs is told.
+const QWEN: &str = "Alibaba's Qwen family";
+
 /// The native models. Each file was downloaded whole and hashed before its
 /// values were written here (2026-11-22).
 pub const CATALOGUE: [NativeModel; 2] = [
     NativeModel {
         id: "qwen3.5-4b",
         label: "Qwen3.5 4B",
+        maker: QWEN,
         file: "Qwen3.5-4B-Q4_K_M.gguf",
         quantisation: "Q4_K_M",
         bytes: 2_740_937_888,
@@ -187,6 +195,7 @@ pub const CATALOGUE: [NativeModel; 2] = [
     NativeModel {
         id: "qwen3.5-9b",
         label: "Qwen3.5 9B",
+        maker: QWEN,
         file: "Qwen3.5-9B-Q4_K_M.gguf",
         quantisation: "Q4_K_M",
         bytes: 5_680_522_464,
@@ -815,6 +824,7 @@ mod tests {
                 format!("https://huggingface.co/{}/resolve/{}/{}", model.repository, model.revision, model.file)
             );
             assert!(!model.label.is_empty() && !model.licence.is_empty() && !model.quantisation.is_empty());
+            assert_eq!(model.maker, "Alibaba's Qwen family");
             // Its image file: another file of the same revision, with a name
             // and a size of its own, so that a size alone says which of the
             // two an upload brings.
