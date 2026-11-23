@@ -443,8 +443,11 @@ pub async fn run_native_subflow(
     jobs: &Jobs,
 ) -> Result<Option<&'static NativeModel>> {
     send_system(tx, native_notice(), SystemMessageType::Info).await;
+    // The model a machine that is short of memory for it was told about:
+    // the same pick again keeps it.
+    let mut told_of: Option<&'static str> = None;
     let model = loop {
-        let (prompt, mut options) = crate::native_model::catalogue_question(None, env);
+        let (prompt, mut options) = crate::native_model::catalogue_question(None, env, &|model| model.default_context);
         let default_value = options.first().cloned().unwrap_or_default();
         options.push(NATIVE_BACK.to_string());
         let _ = tx
@@ -474,6 +477,24 @@ pub async fn run_native_subflow(
             send_system(tx, format!("'{answer}' is not a native model."), SystemMessageType::Error).await;
             continue;
         };
+        // A machine that is short of memory for the model is told before
+        // anything is downloaded or loaded. The window cannot be made
+        // smaller before a session, and this model leads Learning Mode: when
+        // what it takes at its load is itself more than the machine has
+        // free, the question is asked once more, and the same pick keeps
+        // the model. Nothing is refused on a figure.
+        if told_of != Some(model.id) {
+            let machine = crate::native_model::machine_memory(env);
+            let images = crate::native_model::would_read_images(model, env);
+            if let Some(note) = crate::native_model::memory_note(model, model.default_context, images, machine, false) {
+                told_of = Some(model.id);
+                if note.at_the_load {
+                    send_system(tx, format!("{} Pick {} again to keep it, or pick another model.", note.text, model.id), SystemMessageType::Warning).await;
+                    continue;
+                }
+                send_system(tx, note.text, SystemMessageType::Warning).await;
+            }
+        }
         if native::installed(model, &env.models) == native::Installed::Verified {
             break model;
         }
@@ -1276,7 +1297,11 @@ mod tests {
             assert_eq!(asked.field_type, SetupFieldType::Selector as i32);
             assert_eq!(asked.options, ["qwen3.5-4b", "qwen3.5-9b", NATIVE_BACK], "the catalogue, then the way back");
             assert_eq!(asked.default_value, "qwen3.5-4b");
-            assert!(asked.prompt.starts_with("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): not installed, downloaded first; "), "{}", asked.prompt);
+            assert!(
+                asked.prompt.starts_with("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): not installed, downloaded first, about 5.3 GB of memory when loaded; "),
+                "{}",
+                asked.prompt
+            );
 
             // A word that is no model: said, and asked again.
             user_tx.send("qwen3.5-27b".to_string()).await.unwrap();
@@ -1325,6 +1350,68 @@ mod tests {
         let (picked, ()) = tokio::join!(run_native_subflow(&resp_tx, &mut user_rx, &env, &jobs), operator);
         assert_eq!(picked.unwrap().map(|m| m.id), Some("qwen3.5-9b"));
         assert_eq!(native::read_settings(&env.settings), Ok(Some(native::Wanted::new(nine))), "embrad loads it while the setup goes on");
+    }
+
+    /// On a machine that is short of memory the question says what each
+    /// model takes and what the machine has. A model that fits at its load
+    /// and may outgrow the machine is picked with a warning. One whose load
+    /// is itself more than is free is told so and the question is asked
+    /// again: the same pick keeps it, another model is another pick, and
+    /// nothing is refused.
+    #[tokio::test]
+    async fn the_native_answer_tells_a_machine_that_is_short_of_memory_and_asks_once_more() {
+        let (_root, env) = machine("wizard-memory");
+        let (four, nine) = (native::by_id("qwen3.5-4b").unwrap(), native::by_id("qwen3.5-9b").unwrap());
+        install(four, &env);
+        install(nine, &env);
+        crate::native_model::test_support::memory(&env, 7_700, 6_500);
+        let jobs = Jobs::default();
+        let (resp_tx, mut resp_rx) = mpsc::channel(64);
+        let (user_tx, mut user_rx) = mpsc::channel(8);
+        let operator = async {
+            said(&mut resp_rx).await;
+            let asked = question(&mut resp_rx).await;
+            assert_eq!(
+                asked.prompt,
+                "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): installed, about 6.9 GB of memory when loaded. This machine has 7.5 GB of memory, 6.3 GB of it free for a model now."
+            );
+            // The 9B takes more at its load than the machine has free: said, and asked again.
+            user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
+            assert_eq!(
+                said(&mut resp_rx).await,
+                "Memory: Qwen3.5 9B with a context window of 65536 tokens takes about 6.9 GB when it is loaded, as measured, and this machine has 6.3 GB free for it (7.5 GB in all). Without the room its answers come very slowly, or the kernel ends the model server. A smaller window takes less, about 32 MB for every 1,024 tokens (/native context <tokens>, once the setup is done). Pick qwen3.5-9b again to keep it, or pick another model."
+            );
+            assert_eq!(question(&mut resp_rx).await.prompt, asked.prompt);
+            assert_eq!(native::read_settings(&env.settings), Ok(None), "nothing is asked of embrad yet");
+            // The 4B instead: it fits at its load and may outgrow the machine. Told, and taken.
+            user_tx.send("qwen3.5-4b".to_string()).await.unwrap();
+            let warned = said(&mut resp_rx).await;
+            assert!(warned.starts_with("Memory: Qwen3.5 4B with a context window of 65536 tokens takes about 4.7 GB when it is loaded, as measured, and its model server can grow by up to 5.3 GB"), "{warned}");
+            assert!(!warned.contains("Pick ") && !warned.contains("/native off"), "{warned}");
+            assert_eq!(said(&mut resp_rx).await, "qwen3.5-4b is installed. embrad loads it now, while the setup goes on.");
+        };
+        let (picked, ()) = tokio::join!(run_native_subflow(&resp_tx, &mut user_rx, &env, &jobs), operator);
+        assert_eq!(picked.unwrap().map(|m| m.id), Some("qwen3.5-4b"));
+        assert_eq!(native::read_settings(&env.settings), Ok(Some(native::Wanted::new(four))));
+
+        // The same pick twice keeps the model the machine is short for.
+        let (_root, env) = machine("wizard-memory-kept");
+        install(nine, &env);
+        crate::native_model::test_support::memory(&env, 7_700, 6_500);
+        let (resp_tx, mut resp_rx) = mpsc::channel(64);
+        let (user_tx, mut user_rx) = mpsc::channel(8);
+        let operator = async {
+            said(&mut resp_rx).await;
+            question(&mut resp_rx).await;
+            user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
+            assert!(said(&mut resp_rx).await.ends_with("Pick qwen3.5-9b again to keep it, or pick another model."));
+            question(&mut resp_rx).await;
+            user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
+            assert_eq!(said(&mut resp_rx).await, "qwen3.5-9b is installed. embrad loads it now, while the setup goes on.");
+        };
+        let (picked, ()) = tokio::join!(run_native_subflow(&resp_tx, &mut user_rx, &env, &jobs), operator);
+        assert_eq!(picked.unwrap().map(|m| m.id), Some("qwen3.5-9b"));
+        assert_eq!(native::read_settings(&env.settings), Ok(Some(native::Wanted::new(nine))));
     }
 
     /// The way back writes nothing. A console that leaves ends the step by

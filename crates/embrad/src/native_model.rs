@@ -51,31 +51,6 @@ pub(crate) const UNREADY_EXITS_MAX: u32 = 3;
 /// took 14 s to be noticed while a long prompt was read on the build
 /// server, with 512 it took 5 s, at the same reading speed.
 const BATCH: u32 = 512;
-/// The server keeps the state of an earlier prompt in memory and takes it
-/// back when that prompt returns, which spares reading the tool list again
-/// after another prompt went between (the `native_ask` tool, a step of
-/// Learning Mode): 3 s in place of 266 s for the whole list on the build
-/// server. llama.cpp's own limit for that cache is 8 GiB whatever the
-/// window, and every short prompt that went between stays in it with its
-/// checkpoints (152 MiB for one of 28 tokens). Here the limit is what one
-/// prompt that fills the window comes to with all its checkpoints, so the
-/// prompt a session returns to always fits and the cache is a function of
-/// the window. Measured from the server's own lines, the same on both
-/// models: a saved state is 51.1 MiB and 32.02 MiB for every 1,024 tokens,
-/// a checkpoint 50.251 MiB.
-const STATE_MIB: u64 = 52;
-const STATE_MIB_PER_1024_TOKENS: u64 = 33;
-const CHECKPOINT_MIB: u64 = 51;
-/// The checkpoints a prompt keeps at most: positions the server can return
-/// to when a prompt comes back changed (the reasoning of the last answer is
-/// not sent again, so every turn returns to the end of its own prompt).
-/// llama.cpp's own number, named so that the cache's limit and it agree.
-const CHECKPOINTS_MAX: u64 = 32;
-
-/// The limit of the server's prompt cache for a window, in MiB.
-fn cache_mib(context: u32) -> u64 {
-    STATE_MIB + CHECKPOINTS_MAX * CHECKPOINT_MIB + u64::from(context).div_ceil(1024) * STATE_MIB_PER_1024_TOKENS
-}
 /// How long a probe waits for the server's answer. The server answers its
 /// health at once, loading or not; a probe that gets none is "not yet".
 const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -176,9 +151,11 @@ pub(crate) fn server_args(wanted: &Wanted, paths: &Paths, images: bool) -> Vec<S
         "-b",
         &BATCH.to_string(),
         "--ctx-checkpoints",
-        &CHECKPOINTS_MAX.to_string(),
+        &native::CHECKPOINTS_MAX.to_string(),
         "--cache-ram",
-        &cache_mib(wanted.context).to_string(),
+        // What it may keep of earlier prompts: a function of the window,
+        // which the brain reads too when it says what a model takes.
+        &native::cache_mib(wanted.context).to_string(),
         // The build has no web page; the switch says so to the server too.
         // `--no-webui` is the name llama.cpp 1.0.0 calls deprecated.
         "--no-ui",
@@ -649,15 +626,13 @@ mod tests {
         ] {
             assert!(!args.iter().any(|a| a == flag) && !seeing.iter().any(|a| a == flag), "{flag}");
         }
-        // The prompt cache follows the window: one prompt that fills it,
-        // with every checkpoint it can have.
-        assert_eq!((cache_mib(4_096), cache_mib(65_536), cache_mib(262_144)), (1_816, 3_796, 10_132));
-        assert_eq!(cache_mib(1_025), cache_mib(2_048), "a started 1,024 tokens count whole");
+        // The prompt cache follows the window (`native::cache_mib`: one
+        // prompt that fills it, with every checkpoint it can have), and the
+        // checkpoints are the number the limit counts with.
         let small = server_args(&Wanted { model: MODEL, context: 4_096 }, &paths, false);
+        assert_eq!(small[small.iter().position(|a| a == "--cache-ram").unwrap() + 1], native::cache_mib(4_096).to_string());
         assert_eq!(small[small.iter().position(|a| a == "--cache-ram").unwrap() + 1], "1816");
-        // The whole tool list, 23,402 tokens, as the server measured it: 783 MiB
-        // and the checkpoints it had. It fits beside nothing else, as it should.
-        assert!(52 + 23 * 33 + 4 * 51 < cache_mib(32_768));
+        assert_eq!(small[small.iter().position(|a| a == "--ctx-checkpoints").unwrap() + 1], native::CHECKPOINTS_MAX.to_string());
     }
 
     #[test]

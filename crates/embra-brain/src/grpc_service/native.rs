@@ -60,8 +60,8 @@ pub(super) fn native_model_choice(wanted: &str) -> Result<&'static NativeModel, 
 /// pick at the reconfigure flow's model step. The model kept loaded is the
 /// first option as well as the default: the console's selector starts on
 /// the first option whatever the default, so Enter keeps the model.
-pub(super) fn native_model_selection(current: Option<&str>, hands: NativeHands) -> (SetupPrompt, OpenAiCompatSetupState) {
-    let (question, ids) = native_model::catalogue_question(current, &hands.env);
+pub(super) fn native_model_selection(current: Option<&str>, oc: &config::OpenAiCompatConfig, hands: NativeHands) -> (SetupPrompt, OpenAiCompatSetupState) {
+    let (question, ids) = native_model::catalogue_question(current, &hands.env, &|model| oc.native_context(model));
     let prompt = SetupPrompt {
         field_type: SetupFieldType::Selector as i32,
         prompt: question,
@@ -149,12 +149,40 @@ fn loaded_words(cfg: &config::SystemConfig, model: &NativeModel, loaded: Loaded)
     }
 }
 
+/// What is said of memory when `model` is asked for with a window, on a
+/// machine that is short for it (`native_model::memory_note`), as a warning.
+async fn say_of_memory(
+    model: &NativeModel,
+    context: u32,
+    machine: Option<native_model::MachineMemory>,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    env: &Env,
+) {
+    if let Some(note) = native_model::memory_note(model, context, native_model::would_read_images(model, env), machine, true) {
+        say(tx, note.text, SystemMessageType::Warning).await;
+    }
+}
+
 /// Load, and say it; the status bar gets the new Brain when a native model
-/// leads the session.
-async fn load_and_say(model: &'static NativeModel, tx: &mpsc::Sender<Result<ConversationResponse, Status>>, db: &Arc<WardsonDbClient>, hands: &NativeHands) {
+/// leads the session. With `of_memory` a machine that is short for the
+/// model is told so; a load that follows an install was told when the
+/// install began.
+async fn load_and_say(
+    model: &'static NativeModel,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    hands: &NativeHands,
+    of_memory: bool,
+) {
+    // Read before the load is asked for: the model server that runs now
+    // still holds what the next one gets.
+    let machine = native_model::machine_memory(&hands.env);
     match load_native_model(model, db, &hands.env).await {
         Ok((cfg, loaded)) => {
             say(tx, loaded_words(&cfg, model, loaded), SystemMessageType::Info).await;
+            if of_memory {
+                say_of_memory(model, cfg.openai_compat.native_context(model), machine, tx, &hands.env).await;
+            }
             if loaded == Loaded::Changed && ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native) {
                 send_brain_status(tx, &cfg, &hands.session_mgr, model.id).await;
             }
@@ -183,7 +211,7 @@ pub(super) async fn pick_native_model(
     hands: &NativeHands,
 ) {
     if contract::installed(model, &hands.env.models) == Installed::Verified {
-        load_and_say(model, tx, db, hands).await;
+        load_and_say(model, tx, db, hands, true).await;
         return;
     }
     let events = match hands.jobs.start(&hands.env, JobKind::Install, model) {
@@ -215,6 +243,10 @@ pub(super) async fn pick_native_model(
         SystemMessageType::Info,
     )
     .await;
+    // Said now, while the download can still be stopped (/native cancel),
+    // and not again when it is done.
+    let context = config::load_config(db).await.map(|cfg| cfg.openai_compat.native_context(model)).unwrap_or(model.default_context);
+    say_of_memory(model, context, native_model::machine_memory(&hands.env), tx, &hands.env).await;
     let (tx, db, hands) = (tx.clone(), db.clone(), hands.clone());
     tokio::spawn(async move { after_install(model, events, &tx, &db, &hands).await });
 }
@@ -241,7 +273,7 @@ async fn after_install(
     match end {
         JobEnd::Done | JobEnd::Nothing(_) => {
             until_no_turn(hands.in_turn.clone()).await;
-            load_and_say(model, tx, db, hands).await;
+            load_and_say(model, tx, db, hands, false).await;
         }
         JobEnd::Refused(why) | JobEnd::Failed(why) => {
             say(tx, format!("{} was not installed: {why}. The model in use is unchanged.", model.id), SystemMessageType::Error).await
@@ -269,7 +301,7 @@ pub(super) async fn handle_native_model_command(
     hands: NativeHands,
 ) {
     if wanted.is_empty() {
-        let (prompt, state) = native_model_selection(non_empty(&cfg.openai_compat.native_model).as_deref(), hands);
+        let (prompt, state) = native_model_selection(non_empty(&cfg.openai_compat.native_model).as_deref(), &cfg.openai_compat, hands);
         *pending.lock().await = Some(state);
         let _ = tx.send(Ok(ConversationResponse { response_type: Some(conversation_response::ResponseType::Setup(prompt)) })).await;
         return;
@@ -693,6 +725,9 @@ async fn native_context(action: ContextAction, tx: &mpsc::Sender<Result<Conversa
     if keep == stored {
         return say(tx, format!("{} is kept loaded with a context window of {current} tokens already.", model.id), SystemMessageType::Info).await;
     }
+    // Read before the record changes: the model server that runs now still
+    // holds what the next one gets.
+    let machine = native_model::machine_memory(env);
     match keep {
         Some(tokens) => cfg.openai_compat.native_context_by_model.insert(model.id.to_string(), tokens),
         None => cfg.openai_compat.native_context_by_model.remove(model.id),
@@ -714,6 +749,9 @@ async fn native_context(action: ContextAction, tx: &mpsc::Sender<Result<Conversa
         )
     };
     say(tx, said, SystemMessageType::Info).await;
+    if wanted != current {
+        say_of_memory(model, wanted, machine, tx, env).await;
+    }
 }
 
 /// `/native` in a session.
@@ -816,19 +854,32 @@ mod tests {
     async fn the_selector_offers_the_whole_catalogue_with_the_model_kept_loaded_first() {
         let (_root, env) = machine("pick-selector");
         install(four(), &env);
-        let (prompt, state) = native_model_selection(Some("qwen3.5-9b"), hands(&env));
+        let oc = config_of("anthropic", serde_json::json!({})).openai_compat;
+        let (prompt, state) = native_model_selection(Some("qwen3.5-9b"), &oc, hands(&env));
         assert_eq!(prompt.field_type, SetupFieldType::Selector as i32);
         assert_eq!(prompt.options, ["qwen3.5-9b", "qwen3.5-4b"], "the model kept loaded first");
         assert_eq!(prompt.default_value, "qwen3.5-9b");
+        // Each model with what it takes when it is loaded: the 4B as it
+        // stands here, without its image file; the 9B as an install brings it.
         assert_eq!(
             prompt.prompt,
-            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): not installed, downloaded first."
+            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): not installed, downloaded first, about 7.8 GB of memory when loaded."
         );
+        // The machine's memory beside them, when the kernel says it; and a
+        // window stored for a model is the one its figure is for.
+        native_model::test_support::memory(&env, 12_900, 11_800);
+        let narrowed = config_of("anthropic", serde_json::json!({"native_context_by_model": {"qwen3.5-4b": 32768}})).openai_compat;
+        let (with_machine, _) = native_model_selection(None, &narrowed, hands(&env));
+        assert_eq!(
+            with_machine.prompt,
+            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2613 MB): installed, about 3.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5417 MB): not installed, downloaded first, about 7.8 GB of memory when loaded. This machine has 12.6 GB of memory, 11.5 GB of it free for a model now."
+        );
+        std::fs::remove_dir_all(&env.proc).unwrap();
         assert!(matches!(state.preset, OpenAiCompatPreset::Native) && state.model_only && state.native.is_some());
         assert!(matches!(&state.step, OpenAiCompatSetupStep::AwaitingModelSelection { models, .. } if models == &prompt.options));
 
         // None kept loaded: the catalogue's own order.
-        let (prompt, _) = native_model_selection(None, hands(&env));
+        let (prompt, _) = native_model_selection(None, &oc, hands(&env));
         assert_eq!(prompt.options, ["qwen3.5-4b", "qwen3.5-9b"]);
         // Every model of the catalogue is offered, and each is a name `/model` takes.
         for model in &contract::CATALOGUE {
@@ -882,6 +933,64 @@ mod tests {
         assert_eq!(told(&mut rx).await, "qwen3.5-4b is the native model already.");
         assert_eq!(saved_models(&db_server).await, ["qwen3.5-9b"], "no second save");
         assert_eq!(contract::read_settings(&env.settings), Ok(Some(Wanted::new(four()))));
+    }
+
+    /// On a machine that is short of memory for a model, a load and a
+    /// change of its window say so after their own sentence, as a warning,
+    /// and are done all the same; with the room nothing is said.
+    #[tokio::test]
+    async fn a_load_and_a_window_say_when_the_machine_is_short_of_memory_and_are_done_all_the_same() {
+        let (_root, env) = machine("pick-memory");
+        install(four(), &env);
+        let (tx, mut rx) = mpsc::channel(16);
+        let heard = |rx: &mut mpsc::Receiver<Result<ConversationResponse, Status>>| {
+            let frame = rx.try_recv().expect("something was said").unwrap();
+            match frame.response_type {
+                Some(conversation_response::ResponseType::System(m)) => (m.msg_type, m.content),
+                other => panic!("not a message: {other:?}"),
+            }
+        };
+        // 8 GB: the 4B fits at its load (4.7 GB of 7.1 free) and may outgrow it.
+        native_model::test_support::memory(&env, 7_700, 7_300);
+        let db_server = config_db("anthropic", "").await;
+        let db = Arc::new(WardsonDbClient::from_url(&db_server.uri()));
+        pick_native_model(four(), &tx, &db, &hands(&env)).await;
+        assert_eq!(heard(&mut rx).0, SystemMessageType::Info as i32);
+        let (kind, said) = heard(&mut rx);
+        assert_eq!(kind, SystemMessageType::Warning as i32);
+        assert_eq!(
+            said,
+            "Memory: Qwen3.5 4B with a context window of 65536 tokens takes about 4.7 GB when it is loaded, as measured, and its model server can grow by up to 5.3 GB as a session goes on: it keeps what it read of earlier prompts. For both this machine has 7.1 GB free for it (7.5 GB in all). When memory runs short the answers come slowly, or the kernel ends the model server and embrad starts it again. /native off and /native use free what it kept. A smaller window lowers both figures (/native context <tokens>)."
+        );
+        assert_eq!(saved_models(&db_server).await, ["qwen3.5-4b"], "it is asked for all the same");
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(Wanted::new(four()))));
+        assert!(rx.try_recv().is_err());
+
+        // 4 GB: what it takes at its load is itself more than is free.
+        native_model::test_support::memory(&env, 3_900, 3_400);
+        let cfg = config_of("anthropic", serde_json::json!({"native_model": "qwen3.5-4b"}));
+        let server = db_with(&cfg).await;
+        native_context(ContextAction::Set(32_768), &tx, &Arc::new(WardsonDbClient::from_url(&server.uri())), &env).await;
+        assert!(heard(&mut rx).1.starts_with("qwen3.5-4b gets a context window of 32768 tokens (experimental): "));
+        let (kind, said) = heard(&mut rx);
+        assert_eq!(kind, SystemMessageType::Warning as i32);
+        assert_eq!(
+            said,
+            "Memory: Qwen3.5 4B with a context window of 32768 tokens takes about 3.7 GB when it is loaded, as measured, and this machine has 3.3 GB free for it (3.8 GB in all). Without the room its answers come very slowly, or the kernel ends the model server. A smaller window takes less, about 32 MB for every 1,024 tokens (/native context <tokens>)."
+        );
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(Wanted { context: 32_768, ..Wanted::new(four()) })), "the window is set all the same");
+
+        // A machine with the room, and one whose memory the kernel does not say: the sentence alone.
+        for roomy in [true, false] {
+            match roomy {
+                true => native_model::test_support::memory(&env, 64_000, 60_000),
+                false => std::fs::remove_dir_all(&env.proc).unwrap(),
+            }
+            let db_server = config_db("anthropic", "").await;
+            pick_native_model(four(), &tx, &Arc::new(WardsonDbClient::from_url(&db_server.uri())), &hands(&env)).await;
+            assert_eq!(heard(&mut rx).0, SystemMessageType::Info as i32);
+            assert!(rx.try_recv().is_err(), "nothing of memory: roomy {roomy}");
+        }
     }
 
     /// A model whose file is not on the machine is installed first: the

@@ -22,16 +22,18 @@ Both are Apache-2.0. The catalogue is compiled into the image (`embra_boot::nati
 
 ## What a model needs
 
-**Memory.** The model server's memory with a model loaded and a prompt read, as measured:
+**Memory.** What the model server keeps in use when it has loaded a model, as measured with the image's own build of the server: its own memory, and the part of the model's file it goes on reading from. A gigabyte here is 1,024 MiB, as in the console's lines:
 
 | Context window | Qwen3.5 4B | Qwen3.5 9B |
 |---|---|---|
-| 32,768 tokens | 5.2 GB | 9.4 GB |
-| 65,536 tokens (the default) | 6.3 GB | 10.5 GB |
+| 32,768 tokens | 3.7 GB | 5.9 GB |
+| 65,536 tokens (the default) | 4.7 GB | 6.9 GB |
 
-Each further 32,768 tokens of window take about 1.05 GB. The server's memory grows from there as a session goes on: it keeps positions of the prompt it holds to return to (32 at most, about 50 MiB each), and it keeps the state of earlier prompts, so that a session's prompt is not read again after another prompt went between. That cache has a limit that follows the window: 3,796 MiB at the default window.
+Every 1,024 tokens of window are about 32 MB. A model's image file adds 0.6 GB for the 4B and 0.9 GB for the 9B, and the first image the model reads about 0.4 GB more. Right after a load the server holds more for a while (6.0 GB for the 4B at the default window): it copies the larger part of the weights into a layout of its own, and the pages of the file it copied from stay until the kernel wants them. The server's memory grows as a session goes on: it keeps positions of the prompt it holds to return to (32 at most, about 50 MiB each), and it keeps the state of earlier prompts, so that a session's prompt is not read again after another prompt went between. That cache has a limit that follows the window: 3,796 MiB at the default window.
 
-Nothing checks the machine's memory before a model is loaded: the 4B at the default window loads in 5 GiB and does not in 3. embrad marks the model server as the process the kernel ends first when memory runs out (`oom_score_adj` 1000), so the database, the brain and the web console stay up. A model server the kernel ended is started again, and a turn in flight on it is cut. One that is ended at every load is left alone after the third, and the turn, `/native` and the provider pill say why: `signal 9: killed, by the kernel when memory ran out or by hand`. `/native context <tokens>` loads the model with a smaller window, and `/native off` frees all of it.
+**A machine that is short of memory for a model is told so, and nothing is refused on a figure.** The question that offers the models (`/model`, `/provider --setup native`, the first-boot wizard) says what each takes when it is loaded, and what the machine has in all and free for a model now. When a model is asked for (`/native use`, a pick, `/native context`), a warning follows in two cases: what the model takes when it is loaded is more than the machine has free, or it fits and what its server can grow to does not. It names the figures and says that a smaller window lowers them. The model is loaded all the same. At the first boot the window cannot be changed before a session, so the wizard asks its question once more when the load itself is more than the machine has free: the same pick keeps the model, and another model is another pick. What counts as free is what the kernel calls available, with what a model server that runs now holds of its own, since it ends when another model or window is asked for.
+
+The 4B at the default window loads in a machine of 5 GiB and does not in one of 3. embrad marks the model server as the process the kernel ends first when memory runs out (`oom_score_adj` 1000), so the database, the brain and the web console stay up. A model server the kernel ended is started again, and a turn in flight on it is cut. One that is ended at every load is left alone after the third, and the turn, `/native` and the provider pill say why: `signal 9: killed, by the kernel when memory ran out or by hand`. `/native context <tokens>` loads the model with a smaller window, and `/native off` frees all of it.
 
 **The processor.** The server loads the backend that fits the processor it finds (`/usr/lib/llama-cpp/libggml-cpu-*.so`, one for each family of instruction sets). A processor without AVX runs a model as well: on the same hardware a prompt was read about seven times slower without it.
 

@@ -127,6 +127,32 @@ pub struct CatalogueFile {
     pub sha256: &'static str,
 }
 
+/// What the model server keeps in use with a model, in MiB, as measured:
+/// llama.cpp 1.0.0 as the image builds it for x86-64, started with embrad's
+/// arguments on the build server. It is the server's own memory when it has
+/// loaded the model, and the part of the model's file it goes on reading
+/// from. The server's resident memory right after a load is more than that
+/// (6,098 MiB for the 4B at the default window, where 4,805 are in use): it
+/// copies the larger part of the weights into a layout of its own, and the
+/// pages of the file it copied from stay until the kernel wants them. So
+/// the figure was read after the kernel had taken back every page of the
+/// server it could (a memory group's reclaim, without swap) and two more
+/// answers had been asked for. It came out the same to 2 MiB for two files
+/// of one model that are quantised differently. The window's part lies on
+/// one line to 2 MiB over 32,768, 65,536 and 131,072 tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// In use when the model is loaded with a window of 32,768 tokens,
+    /// without its image file.
+    pub at_32768: u32,
+    /// What 32,768 tokens of window more add, and as many fewer take away.
+    pub per_32768: u32,
+    /// What the image file adds when the server is started with it.
+    pub images: u32,
+    /// What the first image the model reads adds, and the server keeps.
+    pub first_image: u32,
+}
+
 /// A model of the catalogue: two files of one revision of a repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeModel {
@@ -164,6 +190,35 @@ pub struct NativeModel {
     pub default_context: u32,
     /// The largest window the model was trained for.
     pub largest_context: u32,
+    /// What the model server takes with it, as measured.
+    pub memory: Memory,
+}
+
+/// The server keeps the state of an earlier prompt in memory and takes it
+/// back when that prompt returns, which spares reading the tool list again
+/// after another prompt went between (the `native_ask` tool, a step of
+/// Learning Mode): 3 s in place of 266 s for the whole list on the build
+/// server. llama.cpp's own limit for that cache is 8 GiB whatever the
+/// window, and every short prompt that went between stays in it with its
+/// checkpoints (152 MiB for one of 28 tokens). Here the limit is what one
+/// prompt that fills the window comes to with all its checkpoints, so the
+/// prompt a session returns to always fits and the cache is a function of
+/// the window. Measured from the server's own lines, the same on both
+/// models: a saved state is 51.1 MiB and 32.02 MiB for every 1,024 tokens,
+/// a checkpoint 50.251 MiB.
+const STATE_MIB: u64 = 52;
+const STATE_MIB_PER_1024_TOKENS: u64 = 33;
+const CHECKPOINT_MIB: u64 = 51;
+/// The checkpoints a prompt keeps at most: positions the server can return
+/// to when a prompt comes back changed (the reasoning of the last answer is
+/// not sent again, so every turn returns to the end of its own prompt).
+/// llama.cpp's own number, named so that the cache's limit and it agree.
+pub const CHECKPOINTS_MAX: u64 = 32;
+
+/// The limit of the server's prompt cache for a window, in MiB: embrad
+/// starts the server with it.
+pub fn cache_mib(context: u32) -> u64 {
+    STATE_MIB + CHECKPOINTS_MAX * CHECKPOINT_MIB + u64::from(context).div_ceil(1024) * STATE_MIB_PER_1024_TOKENS
 }
 
 /// The maker of the Qwen models, as a model of theirs is told.
@@ -191,6 +246,7 @@ pub const CATALOGUE: [NativeModel; 2] = [
         licence: "Apache-2.0",
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
+        memory: Memory { at_32768: 3_780, per_32768: 1_025, images: 649, first_image: 348 },
     },
     NativeModel {
         id: "qwen3.5-9b",
@@ -211,6 +267,7 @@ pub const CATALOGUE: [NativeModel; 2] = [
         licence: "Apache-2.0",
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
+        memory: Memory { at_32768: 6_039, per_32768: 1_026, images: 884, first_image: 386 },
     },
 ];
 
@@ -226,6 +283,23 @@ impl NativeModel {
             Part::Model => CatalogueFile { file: self.file, bytes: self.bytes, sha256: self.sha256 },
             Part::Images => self.images,
         }
+    }
+
+    /// What the model server keeps in use when it has loaded the model with
+    /// this window, in MiB: the measured line, with the image file's part
+    /// when the server is started with it.
+    pub fn loaded_mib(&self, context: u32, images: bool) -> u64 {
+        let window = (i64::from(context) - 32_768) * i64::from(self.memory.per_32768) / 32_768;
+        let loaded = i64::from(self.memory.at_32768) + window + if images { i64::from(self.memory.images) } else { 0 };
+        loaded.max(0) as u64
+    }
+
+    /// How far the model server's memory can grow from there as a session
+    /// goes on, in MiB: the positions it keeps of the prompt it holds
+    /// ([`CHECKPOINTS_MAX`] of them), what it may keep of earlier prompts
+    /// ([`cache_mib`], its limit), and what reading an image takes.
+    pub fn growth_mib(&self, context: u32, images: bool) -> u64 {
+        CHECKPOINTS_MAX * CHECKPOINT_MIB + cache_mib(context) + if images { u64::from(self.memory.first_image) } else { 0 }
     }
 
     /// Which of the model's files has this size, when one has: how an
@@ -802,6 +876,32 @@ mod tests {
 
     fn hex(text: &str, len: usize) -> bool {
         text.len() == len && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    /// The memory figures are the measured ones at the three windows that
+    /// were measured, and the growth is the server's own limits.
+    #[test]
+    fn a_models_memory_is_the_measured_line_and_its_growth_the_servers_limits() {
+        let (four, nine) = (by_id("qwen3.5-4b").unwrap(), by_id("qwen3.5-9b").unwrap());
+        // Measured in use: 3,780, 4,805 and 6,857 MiB; 6,039 (from the line), 7,065 and 9,116 MiB.
+        assert_eq!([32_768, 65_536, 131_072].map(|window| four.loaded_mib(window, false)), [3_780, 4_805, 6_855]);
+        assert_eq!([32_768, 65_536, 131_072].map(|window| nine.loaded_mib(window, false)), [6_039, 7_065, 9_117]);
+        // With the image file at the default window: 5,454 and 7,949 MiB, as measured.
+        assert_eq!((four.loaded_mib(DEFAULT_CONTEXT, true), nine.loaded_mib(DEFAULT_CONTEXT, true)), (5_454, 7_949));
+        // A smaller window takes less, down to the smallest.
+        assert_eq!((four.loaded_mib(4_096, false), four.loaded_mib(SMALLEST_CONTEXT, false)), (2_884, 2_788));
+        // The cache's limit follows the window, and a started 1,024 tokens count whole.
+        assert_eq!((cache_mib(4_096), cache_mib(65_536), cache_mib(262_144)), (1_816, 3_796, 10_132));
+        assert_eq!(cache_mib(1_025), cache_mib(2_048));
+        // The whole tool list, 23,402 tokens, as the server measured it: 783 MiB
+        // and the checkpoints it had. It fits beside nothing else, as it should.
+        assert!(52 + 23 * 33 + 4 * 51 < cache_mib(32_768));
+        assert_eq!(four.growth_mib(DEFAULT_CONTEXT, false), 32 * 51 + 3_796);
+        assert_eq!(four.growth_mib(DEFAULT_CONTEXT, true), 32 * 51 + 3_796 + 348);
+        for model in &CATALOGUE {
+            assert!(model.memory.at_32768 as u64 > model.bytes / (1024 * 1024), "{}: more than its file", model.id);
+            assert!(model.loaded_mib(model.largest_context, true) > model.loaded_mib(model.default_context, true));
+        }
     }
 
     /// The web console tells which model's which file an upload is by its

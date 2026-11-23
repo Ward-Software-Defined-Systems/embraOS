@@ -49,6 +49,9 @@ pub(crate) struct Env {
     /// The updater's command line: the program, and in a test the arguments
     /// a stand-in needs before a command's own.
     pub(crate) updater: Vec<OsString>,
+    /// The kernel's records of the machine and its processes: the brain
+    /// reads the machine's memory there, and what the model server holds.
+    pub(crate) proc: PathBuf,
 }
 
 impl Env {
@@ -58,6 +61,7 @@ impl Env {
             status: PathBuf::from(contract::STATUS_PATH),
             models: PathBuf::from(contract::MODELS_DIR),
             updater: vec![OsString::from(crate::grpc_service::UPDATER)],
+            proc: PathBuf::from("/proc"),
         }
     }
 
@@ -99,11 +103,118 @@ pub(crate) fn file_words(model: &contract::NativeModel, env: &Env) -> String {
     }
 }
 
+/// The machine's memory in MiB, as the kernel says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MachineMemory {
+    /// All of it.
+    pub(crate) total: u64,
+    /// What a model server could take now: what the kernel calls available,
+    /// and what the model server that runs now holds of its own, since it
+    /// ends when another model or another window is asked for.
+    pub(crate) free: u64,
+}
+
+/// The figure of a line `<key>:  <n> kB` of a kernel record, in MiB.
+fn mib_of(record: &str, key: &str) -> Option<u64> {
+    record
+        .lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix(':')?.trim().strip_suffix("kB")?.trim().parse::<u64>().ok())
+        .map(|kib| kib / 1024)
+}
+
+/// The machine's memory now. A machine whose records cannot be read has
+/// none to say, and nothing is said of memory there.
+pub(crate) fn machine_memory(env: &Env) -> Option<MachineMemory> {
+    let meminfo = std::fs::read_to_string(env.proc.join("meminfo")).ok()?;
+    let total = mib_of(&meminfo, "MemTotal")?;
+    let available = mib_of(&meminfo, "MemAvailable")?;
+    // Of the model server that runs, its own memory: the pages of the
+    // model's file it has mapped are in the kernel's figure already.
+    let held = env
+        .records()
+        .1
+        .filter(|status| status.state.runs())
+        .and_then(|status| status.pid)
+        .and_then(|pid| std::fs::read_to_string(env.proc.join(pid.to_string()).join("status")).ok())
+        .and_then(|status| mib_of(&status, "RssAnon"))
+        .unwrap_or(0);
+    Some(MachineMemory { total, free: (available + held).min(total) })
+}
+
+/// A figure in MiB as it is said: gigabytes of 1,024 MiB with one decimal,
+/// as the sizes of the files are said in megabytes of 1,024 KiB.
+pub(crate) fn gb(mib: u64) -> String {
+    format!("{:.1}", mib as f64 / 1024.0)
+}
+
+/// Whether the model server would be started with the model's image file:
+/// when the file is there and checked, and when the model is not, since an
+/// install brings both.
+pub(crate) fn would_read_images(model: &contract::NativeModel, env: &Env) -> bool {
+    contract::installed_part(model, contract::Part::Images, &env.models) == contract::Installed::Verified
+        || contract::installed(model, &env.models) != contract::Installed::Verified
+}
+
+/// What is said of memory when a model is asked for on a machine that is
+/// short of it, by the measured figures (`NativeModel::loaded_mib`,
+/// `growth_mib`) against what the kernel says is free. Nothing is refused
+/// on a figure: the model is loaded, and the operator knows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryNote {
+    /// Whether what the model takes when it is loaded is itself more than
+    /// the machine has free; else it is what its server may grow to.
+    pub(crate) at_the_load: bool,
+    pub(crate) text: String,
+}
+
+/// The note for `model` with a window of `context` tokens, when the machine
+/// is short for it. `in_session` says whether the commands that change what
+/// is loaded are answered now: before a session they are not.
+pub(crate) fn memory_note(model: &contract::NativeModel, context: u32, images: bool, machine: Option<MachineMemory>, in_session: bool) -> Option<MemoryNote> {
+    let machine = machine?;
+    let loaded = model.loaded_mib(context, images);
+    let growth = model.growth_mib(context, images);
+    let with_images = if images { ", its image file included" } else { "" };
+    let has = format!("this machine has {} GB free for it ({} GB in all)", gb(machine.free), gb(machine.total));
+    let window = if in_session { "/native context <tokens>" } else { "/native context <tokens>, once the setup is done" };
+    if loaded > machine.free {
+        let smaller = if context > contract::SMALLEST_CONTEXT {
+            format!(" A smaller window takes less, about {} MB for every 1,024 tokens ({window}).", model.memory.per_32768 / 32)
+        } else {
+            String::new()
+        };
+        return Some(MemoryNote {
+            at_the_load: true,
+            text: format!(
+                "Memory: {} with a context window of {context} tokens takes about {} GB when it is loaded{with_images}, as measured, and {has}. Without the room its answers come very slowly, or the kernel ends the model server.{smaller}",
+                model.label,
+                gb(loaded)
+            ),
+        });
+    }
+    if loaded + growth > machine.free {
+        let frees = if in_session { " /native off and /native use free what it kept." } else { "" };
+        return Some(MemoryNote {
+            at_the_load: false,
+            text: format!(
+                "Memory: {} with a context window of {context} tokens takes about {} GB when it is loaded{with_images}, as measured, and its model server can grow by up to {} GB as a session goes on: it keeps what it read of earlier prompts. For both {has}. When memory runs short the answers come slowly, or the kernel ends the model server and embrad starts it again.{frees} A smaller window lowers both figures ({window}).",
+                model.label,
+                gb(loaded),
+                gb(growth)
+            ),
+        });
+    }
+    None
+}
+
 /// The question that offers the catalogue's models, and its options: the
 /// ids, with `current` (the model kept loaded) first, since a console's
 /// selector starts on the first option whatever the default. `/model`,
-/// `/provider --setup native` and the wizard ask it.
-pub(crate) fn catalogue_question(current: Option<&str>, env: &Env) -> (String, Vec<String>) {
+/// `/provider --setup native` and the wizard ask it. Each model is said
+/// with what it takes when it is loaded with the window `window_of` gives
+/// it, and the machine with what it has: the choice is made here, and at
+/// the first boot it is not taken back before Learning Mode is over.
+pub(crate) fn catalogue_question(current: Option<&str>, env: &Env, window_of: &dyn Fn(&contract::NativeModel) -> u32) -> (String, Vec<String>) {
     let mut ids: Vec<String> = contract::CATALOGUE.iter().map(|m| m.id.to_string()).collect();
     if let Some(at) = current.and_then(|current| ids.iter().position(|id| id == current)) {
         let kept = ids.remove(at);
@@ -111,9 +222,22 @@ pub(crate) fn catalogue_question(current: Option<&str>, env: &Env) -> (String, V
     }
     let stands: Vec<String> = contract::CATALOGUE
         .iter()
-        .map(|m| format!("{} is {} ({}, {} MB): {}", m.id, m.label, m.quantisation, mb(m.bytes), file_words(m, env)))
+        .map(|m| {
+            format!(
+                "{} is {} ({}, {} MB): {}, about {} GB of memory when loaded",
+                m.id,
+                m.label,
+                m.quantisation,
+                mb(m.bytes),
+                file_words(m, env),
+                gb(m.loaded_mib(window_of(m), would_read_images(m, env)))
+            )
+        })
         .collect();
-    (format!("Select a native model (experimental). {}.", stands.join("; ")), ids)
+    let machine = machine_memory(env)
+        .map(|machine| format!(" This machine has {} GB of memory, {} GB of it free for a model now.", gb(machine.total), gb(machine.free)))
+        .unwrap_or_default();
+    (format!("Select a native model (experimental). {}.{machine}", stands.join("; ")), ids)
 }
 
 /// Ask for no model, when the record asks for one: the wizard's way back
@@ -353,8 +477,21 @@ pub(crate) mod test_support {
             status: root.join("run").join("native-model-status"),
             models: root.join("data").join("models"),
             updater: vec![OsString::from("/nonexistent/embra-update")],
+            // No record of the machine's memory: nothing is said of it
+            // unless a test writes one (`memory`).
+            proc: root.join("proc"),
         };
         (root, env)
+    }
+
+    /// The machine's memory as the kernel would say it, in MiB.
+    pub(crate) fn memory(env: &Env, total_mib: u64, available_mib: u64) {
+        std::fs::create_dir_all(&env.proc).unwrap();
+        std::fs::write(
+            env.proc.join("meminfo"),
+            format!("MemTotal:       {} kB\nMemFree:          1024 kB\nMemAvailable:   {} kB\nBuffers:            0 kB\n", total_mib * 1024, available_mib * 1024),
+        )
+        .unwrap();
     }
 
     /// A model's file as the updater leaves it: of the catalogue's size
@@ -389,7 +526,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{machine, status};
+    use super::test_support::{install, machine, memory, status};
     use super::*;
     use embra_boot::native_model::by_id;
 
@@ -642,6 +779,94 @@ mod tests {
         );
         assert_eq!(start.elapsed(), Duration::from_secs(20));
         assert_eq!(contract::read_settings(&env.settings), Ok(Some(four())));
+    }
+
+    /// The machine's memory is the kernel's two figures, and what the model
+    /// server that runs holds of its own counts as free for the next one.
+    #[test]
+    fn the_machines_memory_is_the_kernels_with_what_the_running_model_server_holds() {
+        let (_root, env) = machine("memory-read");
+        assert_eq!(machine_memory(&env), None, "no record, nothing to say");
+        memory(&env, 7_700, 3_000);
+        assert_eq!(machine_memory(&env), Some(MachineMemory { total: 7_700, free: 3_000 }));
+        // A model server runs: its own memory is the next one's.
+        let mut ready = status(ServiceState::Ready, Some(four()), "");
+        ready.pid = Some(4_242);
+        contract::write_status(&env.status, &ready).unwrap();
+        assert_eq!(machine_memory(&env), Some(MachineMemory { total: 7_700, free: 3_000 }), "a process the kernel does not show adds nothing");
+        std::fs::create_dir_all(env.proc.join("4242")).unwrap();
+        std::fs::write(env.proc.join("4242").join("status"), "Name:\tllama-server\nVmRSS:\t 6258688 kB\nRssAnon:\t 3575808 kB\nRssFile:\t 2681856 kB\n").unwrap();
+        assert_eq!(machine_memory(&env), Some(MachineMemory { total: 7_700, free: 3_000 + 3_492 }));
+        // Never more than the machine has.
+        memory(&env, 7_700, 7_000);
+        assert_eq!(machine_memory(&env), Some(MachineMemory { total: 7_700, free: 7_700 }));
+        // A server embrad no longer runs holds nothing, whatever pid its record still names.
+        let mut halted = status(ServiceState::Halted, Some(four()), "ended three times");
+        halted.pid = Some(4_242);
+        contract::write_status(&env.status, &halted).unwrap();
+        assert_eq!(machine_memory(&env), Some(MachineMemory { total: 7_700, free: 7_000 }));
+        // A record that is not the kernel's says nothing.
+        for broken in ["", "MemTotal: many kB\nMemAvailable: 12 kB\n", "MemTotal:  8000000 kB\n", "MemAvailable:  8000000 kB\n"] {
+            std::fs::write(env.proc.join("meminfo"), broken).unwrap();
+            assert_eq!(machine_memory(&env), None, "{broken:?}");
+        }
+        assert_eq!((gb(6_112), gb(1_024), gb(51)), ("6.0".to_string(), "1.0".to_string(), "0.0".to_string()));
+    }
+
+    /// The note of memory: at the load when the model itself does not fit
+    /// what is free, of its growth when it fits and what its server may
+    /// grow to does not, and none with the room or without the kernel's
+    /// figures. Before a session it names no command that is not answered
+    /// there.
+    #[test]
+    fn a_machine_short_of_memory_for_a_model_is_told_at_its_load_or_of_its_growth() {
+        let (four, nine) = (contract::by_id("qwen3.5-4b").unwrap(), contract::by_id("qwen3.5-9b").unwrap());
+        let machine = |total, free| Some(MachineMemory { total, free });
+        // The 9B on 12.6 GB, as it was run: it loads, and its server may grow past what is free.
+        let note = memory_note(nine, 65_536, true, machine(12_900, 11_800), true).expect("a note");
+        assert!(!note.at_the_load);
+        assert_eq!(
+            note.text,
+            "Memory: Qwen3.5 9B with a context window of 65536 tokens takes about 7.8 GB when it is loaded, its image file included, as measured, and its model server can grow by up to 5.7 GB as a session goes on: it keeps what it read of earlier prompts. For both this machine has 11.5 GB free for it (12.6 GB in all). When memory runs short the answers come slowly, or the kernel ends the model server and embrad starts it again. /native off and /native use free what it kept. A smaller window lowers both figures (/native context <tokens>)."
+        );
+        // The same on 8 GB: the load itself is more than is free.
+        let note = memory_note(nine, 65_536, true, machine(7_700, 7_000), true).expect("a note");
+        assert!(note.at_the_load);
+        assert_eq!(
+            note.text,
+            "Memory: Qwen3.5 9B with a context window of 65536 tokens takes about 7.8 GB when it is loaded, its image file included, as measured, and this machine has 6.8 GB free for it (7.5 GB in all). Without the room its answers come very slowly, or the kernel ends the model server. A smaller window takes less, about 32 MB for every 1,024 tokens (/native context <tokens>)."
+        );
+        // Before a session the window's command is for later, and off and use are not named.
+        let early = memory_note(nine, 65_536, true, machine(7_700, 7_000), false).unwrap().text;
+        assert!(early.ends_with("about 32 MB for every 1,024 tokens (/native context <tokens>, once the setup is done)."), "{early}");
+        let early = memory_note(four, 65_536, false, machine(7_700, 7_000), false).unwrap().text;
+        assert!(!early.contains("/native off") && early.ends_with("A smaller window lowers both figures (/native context <tokens>, once the setup is done)."), "{early}");
+        // The smallest window has no smaller one to name.
+        let smallest = memory_note(four, contract::SMALLEST_CONTEXT, false, machine(3_900, 2_500), true).unwrap();
+        assert!(smallest.at_the_load && smallest.text.ends_with("or the kernel ends the model server."), "{}", smallest.text);
+        // The edges: what is free is exactly the load, then exactly the load and its growth.
+        let (loaded, growth) = (four.loaded_mib(65_536, false), four.growth_mib(65_536, false));
+        assert!(memory_note(four, 65_536, false, machine(64_000, loaded - 1), true).unwrap().at_the_load);
+        assert!(!memory_note(four, 65_536, false, machine(64_000, loaded), true).unwrap().at_the_load);
+        assert!(memory_note(four, 65_536, false, machine(64_000, loaded + growth - 1), true).is_some());
+        assert_eq!(memory_note(four, 65_536, false, machine(64_000, loaded + growth), true), None);
+        // No figures of the machine, nothing said.
+        assert_eq!(memory_note(nine, 65_536, true, None, true), None);
+    }
+
+    /// An install brings both files, so a model that is not installed is
+    /// counted with its image file, and one that stands without it is not.
+    #[test]
+    fn a_model_is_counted_with_its_image_file_when_it_has_it_or_an_install_brings_it() {
+        let (_root, env) = machine("memory-images");
+        let model = contract::by_id("qwen3.5-4b").unwrap();
+        assert!(would_read_images(model, &env), "not installed: the install brings both");
+        install(model, &env);
+        assert!(!would_read_images(model, &env), "the model file alone");
+        std::fs::File::create(model.path_of(contract::Part::Images, &env.models)).unwrap().set_len(model.images.bytes).unwrap();
+        let meta = std::fs::metadata(model.path_of(contract::Part::Images, &env.models)).unwrap();
+        contract::write_verified(&model.verified_of(contract::Part::Images, &env.models), &contract::Verified::of_part(model, contract::Part::Images, &meta)).unwrap();
+        assert!(would_read_images(model, &env));
     }
 
     #[test]
