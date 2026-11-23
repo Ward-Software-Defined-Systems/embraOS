@@ -1,11 +1,13 @@
 //! OpenAI Chat Completions-compatible provider.
 //!
-//! Single module covering both Ollama and LM Studio backends. The
+//! Single module covering the Ollama, LM Studio and Native presets. The
 //! presets share an HTTP client surface and wire format; the discriminator
 //! is [`OpenAiCompatPreset`] which selects defaults and labels. Any other
 //! OpenAI-compatible server (vLLM, Together, Fireworks, OpenRouter) is
-//! reached through one of the two, with its endpoint entered in
-//! `/provider --setup`; further named presets are not planned.
+//! reached through Ollama's or LM Studio's, with its endpoint entered in
+//! `/provider --setup`; further named presets for a server on another host
+//! are not planned. The Native preset is the model server on the machine
+//! itself (native models, experimental).
 //!
 //! Module layout:
 //! - [`wire`] — request/response/streaming types (snake_case JSON).
@@ -16,6 +18,10 @@
 //!   names per Locked Decision #11.
 //! - [`streaming`] — SSE parser with `delta.tool_calls[]` argument-shard
 //!   assembly and defensive multi-key reasoning accumulator.
+//! - `native` — what a native model's request carries beyond the two
+//!   servers' (the thinking switch, the model card's sampling, the earlier
+//!   steps' reasoning, an image as a line of text), the wait while its model
+//!   loads, and a request over its context window said in a sentence.
 
 pub mod conv;
 pub(crate) mod native;

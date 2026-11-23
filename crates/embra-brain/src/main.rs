@@ -1,7 +1,8 @@
 //! embra-brain — Headless AI runtime service.
 //!
-//! - The providers: Anthropic, Gemini, and Ollama and LM Studio over the
-//!   OpenAI-compatible wire (`provider/`)
+//! - The providers: Anthropic, Gemini, and Ollama, LM Studio and the native
+//!   models (experimental) over the OpenAI-compatible wire (`provider/`)
+//! - The native models' record, gate and jobs (`native_model/`)
 //! - The tool registry and its dispatcher (`tools/registry.rs`)
 //! - Session manager
 //! - Proactive engine

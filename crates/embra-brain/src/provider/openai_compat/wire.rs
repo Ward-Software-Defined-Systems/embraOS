@@ -1,6 +1,7 @@
 //! OpenAI Chat Completions wire types (`/v1/chat/completions`).
 //!
-//! Shared shape across Ollama and LM Studio OpenAI-compat backends.
+//! Shared shape across the OpenAI-compat backends: Ollama, LM Studio and
+//! the native models' server (llama.cpp's).
 //! These types are private to the OpenAI-compat provider; the loop
 //! driver works exclusively with `crate::provider::ir`.
 //!
@@ -13,7 +14,9 @@
 //!   (cookbook-recommended primary, used by Ollama and older LM Studio)
 //!   and `reasoning_content` (LM Studio newer default per 0.3.23+
 //!   changelog). Both are deserialized; serialization emits
-//!   `reasoning` (cookbook primary). See conv.rs for IR ↔ wire mapping.
+//!   `reasoning` (cookbook primary), and `reasoning_content` to a native
+//!   model, the name llama.cpp's server reads (`native.rs`). See conv.rs
+//!   for IR ↔ wire mapping.
 //! - `finish_reason` enum values from SDK source: `stop`, `length`,
 //!   `tool_calls`, `content_filter`, `function_call` (deprecated path).
 
