@@ -128,6 +128,15 @@ box(200, 308, 520, 56, "embra-apid", [
     "gateway: every brain RPC proxied · REST /health, /version, /status (the provider probe)",
     "streams WatchActivity (names and numbers) and WatchToolCalls (content, 64 KiB per side)",
 ], APID, order=3, port="gRPC :50000 · REST :8443")
+# the model server of the native models: no service of the supervisor's, kept
+# by embrad's loop while a model is kept loaded; the brain is its one client
+box(60, 294, 128, 90, "llama-server", [
+    "native models",
+    "(experimental) · one",
+    "model, one request",
+    "at a time · kept by",
+    "embrad, no service",
+], SLAB, dash="5 3", size=9.4, lead=11.0)
 # row C
 box(60, 400, 680, 124, "embra-brain", [
     "headless AI runtime: providers (Anthropic, Gemini, Ollama,",
@@ -151,10 +160,11 @@ box(880, 400, 280, 148, "Outside the OS", [
     "Brave Search (web_search)",
     "GitHub · GitLab (gh_*, gl_*, git)",
     "GitHub Releases · the signed OS update",
+    "Hugging Face · a native model's file",
     "a time server · SNTP, asked by embrad",
     "Guardian egress: https and wss only,",
     "address classes, egress allow <host>",
-], DIM, dash="3 3", size=9.8, lead=12)
+], DIM, dash="3 3", size=9.8, lead=11.6)
 # row D
 box(60, 560, 320, 98, "wardsondb", [
     "JSON document database · a vendored fork",
@@ -180,20 +190,20 @@ box(880, 200, 280, 188, "Also in the workspace", [
     "embra-init · the initramfs /init (below)",
     "embra-boot · the boot contract: the kernel line,",
     "partitions by GPT name, grubenv, the release stamp,",
-    "the network's and clock's records, the web token",
-    "embra-update · backups, restores, the signed release",
-    "into the other slot, the installer, DATA's growth",
-    "wardsondb · vendored fork, reached over REST,",
-    "never a library dependency of a crate here",
+    "the network's and clock's records, the web token,",
+    "the native models' catalogue and records",
+    "embra-update · backups, restores, signed releases,",
+    "the installer, DATA's growth, a native model's file",
+    "wardsondb · vendored fork, reached over REST only",
 ], KERNEL, size=9.6, lead=11.0)
 box(880, 560, 280, 110, "Writable mounts", [
     "the root filesystem is a slot's read-only SquashFS",
     "/embra/state ← STATE: soul.sha256, keys (0600), CA",
     "drop-ins, imported-intelligence/, update-source,",
-    "network/, web-console/ (the token), last-known-time",
+    "network/, native-model/, web-console/ (the token),",
+    "last-known-time",
     "/embra/data ← DATA: WardSONDB, backups, models",
-    "/embra/workspace: a bind mount by embrad,",
-    "the one place the tools write",
+    "/embra/workspace: the one place the tools write",
 ], SLAB, size=9.6, lead=11.2)
 
 # ------------------------------------------------------------------ arrows --
@@ -209,6 +219,8 @@ arrow([(300, 272), (300, 307)], "gRPC :50000 · chat, sessions, stop, media, the
 arrow([(690, 272), (690, 307)], "gRPC :50000 · Converse", (702, 293))
 # apid → brain
 arrow([(300, 364), (300, 399)], "gRPC :50002 · every brain RPC", (312, 385))
+# brain → the model server, on loopback
+arrow([(124, 399), (124, 385)], "HTTP :8091", (132, 396), label_dy=0)
 # apid → trustd, routed right of the brain
 arrow([(720, 336), (800, 336), (800, 609), (741, 609)], "gRPC :50001", (806, 548), anchor="start", label_dy=0)
 # brain → wardsondb

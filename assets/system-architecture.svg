@@ -60,6 +60,13 @@
 <text x="708" y="327" font-family="DejaVu Sans Mono, monospace" font-size="10.4" font-weight="normal" fill="#d4a056" text-anchor="end">gRPC :50000 · REST :8443</text>
 <text x="212" y="343.0" font-family="DejaVu Sans, sans-serif" font-size="10.2" font-weight="normal" fill="#aaa8b3" text-anchor="start">gateway: every brain RPC proxied · REST /health, /version, /status (the provider probe)</text>
 <text x="212" y="355.2" font-family="DejaVu Sans, sans-serif" font-size="10.2" font-weight="normal" fill="#aaa8b3" text-anchor="start">streams WatchActivity (names and numbers) and WatchToolCalls (content, 64 KiB per side)</text>
+<rect x="60" y="294" width="128" height="90" rx="8" fill="#14131a" stroke="#9a7a5a" stroke-width="1.2" stroke-dasharray="5 3"/>
+<text x="72" y="313" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">llama-server</text>
+<text x="72" y="329.0" font-family="DejaVu Sans, sans-serif" font-size="9.4" font-weight="normal" fill="#aaa8b3" text-anchor="start">native models</text>
+<text x="72" y="340.0" font-family="DejaVu Sans, sans-serif" font-size="9.4" font-weight="normal" fill="#aaa8b3" text-anchor="start">(experimental) · one</text>
+<text x="72" y="351.0" font-family="DejaVu Sans, sans-serif" font-size="9.4" font-weight="normal" fill="#aaa8b3" text-anchor="start">model, one request</text>
+<text x="72" y="362.0" font-family="DejaVu Sans, sans-serif" font-size="9.4" font-weight="normal" fill="#aaa8b3" text-anchor="start">at a time · kept by</text>
+<text x="72" y="373.0" font-family="DejaVu Sans, sans-serif" font-size="9.4" font-weight="normal" fill="#aaa8b3" text-anchor="start">embrad, no service</text>
 <rect x="60" y="400" width="680" height="124" rx="8" fill="#14131a" stroke="#ef4444" stroke-width="1.2"/>
 <circle cx="74" cy="415" r="7.5" fill="#0a0a0f" stroke="#ef4444" stroke-width="1.2"/>
 <text x="74" y="418.4" font-family="DejaVu Sans, sans-serif" font-size="9" font-weight="bold" fill="#ef4444" text-anchor="middle">4</text>
@@ -80,15 +87,16 @@
 <text x="432" y="497.8" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">operator approval · built by the in-OS Rust toolchain</text>
 <rect x="880" y="400" width="280" height="148" rx="8" fill="#14131a" stroke="#6a6a7a" stroke-width="1.2" stroke-dasharray="3 3"/>
 <text x="892" y="419" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">Outside the OS</text>
-<text x="892" y="435" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">reached through any card, wired or Wi-Fi:</text>
-<text x="892" y="447" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">AI providers · Anthropic, Gemini,</text>
-<text x="892" y="459" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Ollama, LM Studio (local or remote)</text>
-<text x="892" y="471" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Brave Search (web_search)</text>
-<text x="892" y="483" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">GitHub · GitLab (gh_*, gl_*, git)</text>
-<text x="892" y="495" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">GitHub Releases · the signed OS update</text>
-<text x="892" y="507" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">a time server · SNTP, asked by embrad</text>
-<text x="892" y="519" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Guardian egress: https and wss only,</text>
-<text x="892" y="531" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">address classes, egress allow &lt;host&gt;</text>
+<text x="892" y="435.0" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">reached through any card, wired or Wi-Fi:</text>
+<text x="892" y="446.6" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">AI providers · Anthropic, Gemini,</text>
+<text x="892" y="458.2" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Ollama, LM Studio (local or remote)</text>
+<text x="892" y="469.8" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Brave Search (web_search)</text>
+<text x="892" y="481.4" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">GitHub · GitLab (gh_*, gl_*, git)</text>
+<text x="892" y="493.0" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">GitHub Releases · the signed OS update</text>
+<text x="892" y="504.6" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Hugging Face · a native model's file</text>
+<text x="892" y="516.2" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">a time server · SNTP, asked by embrad</text>
+<text x="892" y="527.8" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Guardian egress: https and wss only,</text>
+<text x="892" y="539.4" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">address classes, egress allow &lt;host&gt;</text>
 <rect x="60" y="560" width="320" height="98" rx="8" fill="#14131a" stroke="#b8860b" stroke-width="1.2"/>
 <circle cx="74" cy="575" r="7.5" fill="#0a0a0f" stroke="#b8860b" stroke-width="1.2"/>
 <text x="74" y="578.4" font-family="DejaVu Sans, sans-serif" font-size="9" font-weight="bold" fill="#b8860b" text-anchor="middle">1</text>
@@ -119,20 +127,20 @@
 <text x="892" y="301.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">embra-init · the initramfs /init (below)</text>
 <text x="892" y="312.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">embra-boot · the boot contract: the kernel line,</text>
 <text x="892" y="323.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">partitions by GPT name, grubenv, the release stamp,</text>
-<text x="892" y="334.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the network's and clock's records, the web token</text>
-<text x="892" y="345.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">embra-update · backups, restores, the signed release</text>
-<text x="892" y="356.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">into the other slot, the installer, DATA's growth</text>
-<text x="892" y="367.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">wardsondb · vendored fork, reached over REST,</text>
-<text x="892" y="378.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">never a library dependency of a crate here</text>
+<text x="892" y="334.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the network's and clock's records, the web token,</text>
+<text x="892" y="345.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the native models' catalogue and records</text>
+<text x="892" y="356.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">embra-update · backups, restores, signed releases,</text>
+<text x="892" y="367.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the installer, DATA's growth, a native model's file</text>
+<text x="892" y="378.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">wardsondb · vendored fork, reached over REST only</text>
 <rect x="880" y="560" width="280" height="110" rx="8" fill="#14131a" stroke="#9a7a5a" stroke-width="1.2"/>
 <text x="892" y="579" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">Writable mounts</text>
 <text x="892" y="595.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the root filesystem is a slot's read-only SquashFS</text>
 <text x="892" y="606.2" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">/embra/state ← STATE: soul.sha256, keys (0600), CA</text>
 <text x="892" y="617.4" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">drop-ins, imported-intelligence/, update-source,</text>
-<text x="892" y="628.6" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">network/, web-console/ (the token), last-known-time</text>
-<text x="892" y="639.8" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">/embra/data ← DATA: WardSONDB, backups, models</text>
-<text x="892" y="651.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">/embra/workspace: a bind mount by embrad,</text>
-<text x="892" y="662.2" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the one place the tools write</text>
+<text x="892" y="628.6" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">network/, native-model/, web-console/ (the token),</text>
+<text x="892" y="639.8" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">last-known-time</text>
+<text x="892" y="651.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">/embra/data ← DATA: WardSONDB, backups, models</text>
+<text x="892" y="662.2" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">/embra/workspace: the one place the tools write</text>
 <polyline points="150,142 150,199" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
 <text x="158" y="168" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="start">HTTPS + WS :3345 · the access token</text>
 <polyline points="350,142 350,199" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
@@ -149,6 +157,8 @@
 <text x="702" y="289" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="start">gRPC :50000 · Converse</text>
 <polyline points="300,364 300,399" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
 <text x="312" y="381" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="start">gRPC :50002 · every brain RPC</text>
+<polyline points="124,399 124,385" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
+<text x="132" y="396" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="start">HTTP :8091</text>
 <polyline points="720,336 800,336 800,609 741,609" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
 <text x="806" y="548" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="start">gRPC :50001</text>
 <polyline points="230,524 230,559" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
