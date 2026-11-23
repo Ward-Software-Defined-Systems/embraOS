@@ -48,9 +48,10 @@ extern "C" {
     #[wasm_bindgen(js_name = embraModelUploadAllowed)]
     pub fn model_upload_allowed() -> bool;
 
-    /// Stream a native model's file to `PUT /api/models/<id>` (experimental).
-    /// The page asks the machine's catalogue which model the file is, by its
-    /// name and size, and shows the progress and the answer on its card.
+    /// Stream one of a native model's two files to `PUT /api/models/<id>`
+    /// (experimental). The page asks the machine's catalogue which model's
+    /// which file it is, by its size or else its name, and shows the
+    /// progress and the answer on its card.
     #[wasm_bindgen(js_name = embraUploadModel)]
     pub fn upload_model(file: &web_sys::File);
 }

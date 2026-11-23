@@ -164,10 +164,11 @@ const BACKUP_UPLOAD: &str = "upload";
 /// is `<name>.tar.gz`.
 const BACKUP_ACCEPT: &str = ".gz,.tgz,application/gzip,application/x-gzip";
 /// The `/native` form's action that is the page's own (experimental): it
-/// opens the file picker and streams a model's file to `PUT
-/// /api/models/<id>`, for a machine that cannot reach the catalogue's
-/// source. Nothing is typed into the console, so it works whatever stage the
-/// machine is in, the first-boot wizard among them.
+/// opens the file picker and streams one of a model's two files (the model,
+/// or what it reads images through) to `PUT /api/models/<id>`, for a machine
+/// that cannot reach the catalogue's source. Nothing is typed into the
+/// console, so it works whatever stage the machine is in, the first-boot
+/// wizard among them.
 const NATIVE_IMPORT: &str = "import";
 /// What the model picker offers: the catalogue's files are GGUF.
 const MODEL_ACCEPT: &str = ".gguf";
@@ -322,7 +323,7 @@ const SPECS: &[Spec] = &[
         join: " ", guided: false,
         fields: &[t("Minutes / reset", "blank = show current", false)] },
     Spec { cmd: "/native", title: "Native models (experimental)",
-        note: "A model that runs on this machine. Blank = the models' files, what is kept loaded, the model server and the job that runs. install downloads a model's file and checks it; import uploads one from this browser, for a machine that cannot reach the source (the machine tells which model the file is and checks it); use loads a model (installing it first when needed) and off frees its memory, whichever provider leads the session; context is the loaded model's window, a number of tokens or reset; remove deletes a model's file; cancel stops the job that runs.",
+        note: "A model that runs on this machine. Blank = the models' files, what is kept loaded, the model server and the job that runs. install downloads a model's two files (the model, and what it reads images through) and checks them; import uploads one of them from this browser, for a machine that cannot reach the source (the machine tells which model's which file it is and checks it); use loads a model (installing it first when needed) and off frees its memory, whichever provider leads the session; context is the loaded model's window, a number of tokens or reset; remove deletes a model's files; cancel stops the job that runs.",
         join: " ", guided: false,
         fields: &[sel("Action", &["(show)", "install", NATIVE_IMPORT, "use", "off", "context", "remove", "cancel"], false),
             t("Model (install, use, remove) or tokens (context)", "qwen3.5-4b · qwen3.5-9b · 32768 · reset", false)] },
@@ -1304,7 +1305,8 @@ mod tests {
         let spec = SPECS.iter().find(|s| s.cmd == "/native").expect("the /native form");
         assert!(spec.fields[0].choices.contains(&NATIVE_IMPORT));
         assert_eq!(spec.fields[0].choices[0], "(show)", "the form opens on the status, not on the upload");
-        assert!(spec.note.contains("import uploads one from this browser"), "{}", spec.note);
+        assert!(spec.note.contains("import uploads one of them from this browser"), "{}", spec.note);
+        assert!(spec.note.contains("a model's two files (the model, and what it reads images through)"), "{}", spec.note);
         assert!(spec.title.contains("experimental"));
     }
 

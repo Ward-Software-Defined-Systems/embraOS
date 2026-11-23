@@ -804,6 +804,18 @@ mod tests {
         text.len() == len && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
 
+    /// The web console tells which model's which file an upload is by its
+    /// size alone (two image files may have one name), so no two files of
+    /// the catalogue have one size.
+    #[test]
+    fn no_two_files_of_the_catalogue_have_one_size() {
+        let mut sizes: Vec<u64> = CATALOGUE.iter().flat_map(|model| Part::ALL.into_iter().map(|part| model.part(part).bytes)).collect();
+        assert_eq!(sizes.len(), CATALOGUE.len() * 2);
+        sizes.sort_unstable();
+        sizes.dedup();
+        assert_eq!(sizes.len(), CATALOGUE.len() * 2, "two files of the catalogue have one size");
+    }
+
     #[test]
     fn the_catalogue_pins_two_files_of_one_revision_per_model() {
         let ids: Vec<&str> = CATALOGUE.iter().map(|m| m.id).collect();

@@ -207,7 +207,7 @@
     backup: ["Upload a backup from a browser on another machine",
       "The display console has no file picker and no files of its own. Open this console in a browser on another machine and upload the backup there: the /backup form, action upload."],
     model: ["Upload a model's file from a browser on another machine",
-      "The display console has no file picker and no files of its own. Open this console in a browser on another machine and upload the model's file there: the /native form, action import."],
+      "The display console has no file picker and no files of its own. Open this console in a browser on another machine and upload the model's files there, one at a time: the /native form, action import."],
   };
   function embraKioskNeedsBrowser(kind, route) {
     const [title, ...text] = KIOSK_NEEDS_BROWSER[kind];
@@ -874,11 +874,13 @@
     xhr.send(file);
   };
 
-  // A native model's file (experimental; `PUT /api/models/<id>`, embra-web's
-  // models.rs), for a machine that cannot reach the catalogue's source. The
-  // shell's /native form picks the file; the machine's catalogue says which
-  // model a file is, by its name or else its size, and the same card shows
-  // the progress and the answer. One upload at a time, a backup's included.
+  // One of a native model's two files (experimental; `PUT /api/models/<id>`,
+  // embra-web's models.rs), for a machine that cannot reach the catalogue's
+  // source: the model's file, or what it reads images through. The shell's
+  // /native form picks the file; the machine's catalogue says which model's
+  // which file it is, by its size (no two of the catalogue's files have
+  // one), or else by a name one file alone has, and the same card shows the
+  // progress and the answer. One upload at a time, a backup's included.
   window.embraModelUploadAllowed = function () {
     if (window.embraKiosk) {
       embraKioskNeedsBrowser("model");
@@ -901,14 +903,23 @@
       card.end("Not uploaded: the machine's catalogue could not be read (" + err + ")", false);
       return;
     }
-    const model = models.find((m) => m.file === file.name) || models.find((m) => m.bytes === file.size);
+    const files = [];
+    for (const m of models) {
+      files.push({ id: m.id, images: false, file: m.file, bytes: m.bytes });
+      if (m.images) files.push({ id: m.id, images: true, file: m.images.file, bytes: m.images.bytes });
+    }
+    // The size first: the machine decides by it. A name that one file alone
+    // has finds a file of another size, which the machine then refuses with
+    // the sizes it takes.
+    const named = files.filter((f) => f.file === file.name);
+    const model = files.find((f) => f.bytes === file.size) || (named.length === 1 ? named[0] : null);
     if (!model) {
-      card.end("Not uploaded: " + file.name + " (" + embraMb(file.size) + ") is no file of the catalogue. The catalogue: " +
-        models.map((m) => m.file + " (" + embraMb(m.bytes) + ")").join(", ") + ".", false);
+      card.end("Not uploaded: " + file.name + " (" + file.size + " bytes) is no file of the catalogue. The catalogue: " +
+        files.map((f) => f.id + (f.images ? ", its image file: " : ": ") + f.file + " (" + f.bytes + " bytes)").join("; ") + ".", false);
       return;
     }
     const route = "/api/models/" + encodeURIComponent(model.id);
-    card.open(model.id, "Model upload (experimental)");
+    card.open(model.id + (model.images ? ", its image file" : ""), "Model upload (experimental)");
     card.say("Asking the machine whether " + embraMb(file.size) + " fits\u2026");
     const first = await embraBackupAsk(route, file.size);
     if (!first.ok) { card.end("Not uploaded: " + first.error, false); return; }
@@ -933,7 +944,9 @@
     xhr.onload = () => {
       const body = xhr.response || {};
       if (xhr.status === 201) {
-        over("Checked against the catalogue and installed: " + model.id + ". Load it with /native use " + model.id + ".", true);
+        over(model.images
+          ? "Checked against the catalogue and installed: the image file of " + model.id + ". With it the model reads images; when that model is loaded, the model server starts again with the file, and a call that runs on it is cut."
+          : "Checked against the catalogue and installed: " + model.id + ". Load it with /native use " + model.id + ".", true);
       } else {
         over("Not uploaded: " + (body.error || ("the machine answered " + xhr.status)), false);
       }
