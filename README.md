@@ -49,9 +49,9 @@ Phase 2–5 add a full TUI rewrite, an image factory for other hypervisors and b
 > your request or uploaded through the web console. Nothing leaves the machine and there
 > is no key. It is a first step: the models are small (they answer slower than a hosted
 > model and with less judgement, and they are not vetted for the full toolset), no
-> graphics card is used, the input is text only, and the Guardian's replicant check is not
-> run while one leads. A session on any provider can ask the native model through the
-> `native_ask` tool.
+> graphics card is used, and the Guardian's replicant check is not run while one leads. A
+> model reads images through a second file that an install brings. A session on any
+> provider can ask the native model through the `native_ask` tool.
 > **[Native models →](docs/OPERATIONS/NATIVE-MODELS.md)**
 
 > **Pair it with WSDS Local AI Gateway — under evaluation.** embraOS can route every

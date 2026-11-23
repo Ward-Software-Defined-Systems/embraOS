@@ -93,7 +93,7 @@
 <text x="892" y="469.8" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Brave Search (web_search)</text>
 <text x="892" y="481.4" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">GitHub · GitLab (gh_*, gl_*, git)</text>
 <text x="892" y="493.0" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">GitHub Releases · the signed OS update</text>
-<text x="892" y="504.6" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Hugging Face · a native model's file</text>
+<text x="892" y="504.6" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Hugging Face · a native model's files</text>
 <text x="892" y="516.2" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">a time server · SNTP, asked by embrad</text>
 <text x="892" y="527.8" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Guardian egress: https and wss only,</text>
 <text x="892" y="539.4" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">address classes, egress allow &lt;host&gt;</text>
@@ -130,7 +130,7 @@
 <text x="892" y="334.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the network's and clock's records, the web token,</text>
 <text x="892" y="345.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the native models' catalogue and records</text>
 <text x="892" y="356.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">embra-update · backups, restores, signed releases,</text>
-<text x="892" y="367.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the installer, DATA's growth, a native model's file</text>
+<text x="892" y="367.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the installer, DATA's growth, a native model's files</text>
 <text x="892" y="378.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">wardsondb · vendored fork, reached over REST only</text>
 <rect x="880" y="560" width="280" height="110" rx="8" fill="#14131a" stroke="#9a7a5a" stroke-width="1.2"/>
 <text x="892" y="579" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">Writable mounts</text>

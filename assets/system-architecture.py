@@ -160,7 +160,7 @@ box(880, 400, 280, 148, "Outside the OS", [
     "Brave Search (web_search)",
     "GitHub · GitLab (gh_*, gl_*, git)",
     "GitHub Releases · the signed OS update",
-    "Hugging Face · a native model's file",
+    "Hugging Face · a native model's files",
     "a time server · SNTP, asked by embrad",
     "Guardian egress: https and wss only,",
     "address classes, egress allow <host>",
@@ -193,7 +193,7 @@ box(880, 200, 280, 188, "Also in the workspace", [
     "the network's and clock's records, the web token,",
     "the native models' catalogue and records",
     "embra-update · backups, restores, signed releases,",
-    "the installer, DATA's growth, a native model's file",
+    "the installer, DATA's growth, a native model's files",
     "wardsondb · vendored fork, reached over REST only",
 ], KERNEL, size=9.6, lead=11.0)
 box(880, 560, 280, 110, "Writable mounts", [
