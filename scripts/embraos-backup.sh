@@ -39,10 +39,13 @@
 #       The storage engine's own directory, copied whole; its `.engine` marker
 #       names the engine (fjall: one directory per collection under partitions/;
 #       rocksdb: the column families inside one directory of .sst files)
-#     - workspace/, and everything else on it but backups/ (the OS's own
-#       snapshots) and models/ (the files of the native models, experimental:
+#     - workspace/, and everything else on it but two directories at DATA's
+#       root: backups/ (the OS's own snapshots, each a copy of STATE and DATA
+#       already) and models/ (the files of the native models, experimental:
 #       gigabytes each and installed again when wanted). A restore leaves the
-#       image's own models where they are (DATA_MACHINE_OWN below).
+#       image's own of both where they are (DATA_MACHINE_OWN below). A
+#       directory of either name inside the workspace is copied like any
+#       other.
 #
 # Ordering: WardSONDB does NOT need to be running. This is a file-level backup.
 # The engine picks up the data directory on next start. The files are crash-consistent
@@ -219,15 +222,22 @@ copy_state_in() {
 }
 
 # --- What of DATA belongs to the machine and to no backup -----------------
-# models/ holds the files of the native models (experimental): each is the
-# catalogue's bytes, gigabytes of them, and is installed again when wanted.
-# The OS's own snapshot holds none and its restore leaves them where they are
-# (it names the two directories of DATA it archives and replaces:
-# crates/embra-update/src/snapshot.rs). This script does the same: a backup
-# carries no model, and a restore leaves the image's own in place. A backup
-# made before this rule carries the models its image had; none is copied
-# back. `self-test` runs the three steps on scratch directories.
-DATA_MACHINE_OWN=(models)
+# backups/ holds the snapshots the OS takes itself (embra-update): each is a
+# copy of STATE and DATA already. models/ holds the files of the native
+# models (experimental): each is the catalogue's bytes, gigabytes of them,
+# and is installed again when wanted. The OS's own snapshot holds neither and
+# its restore leaves both where they are (it names the two directories of
+# DATA it archives and replaces: crates/embra-update/src/snapshot.rs). This
+# script does the same: a backup carries neither, and a restore leaves the
+# image's own of both in place, so a restore from the host does not take the
+# machine's snapshots with it. Both are names at DATA's root: a directory
+# called backups or models inside the workspace is the operator's and is
+# copied. (Until this rule the snapshots were left out by a pattern that
+# matched the name at any depth, so a workspace directory called backups was
+# in no backup, and a restore removed the snapshots on the image.) A backup
+# made before the rule for models/ carries the models its image had; none is
+# copied back. `self-test` runs the three steps on scratch directories.
+DATA_MACHINE_OWN=(backups models)
 
 # rsync's exclusions for those names, at DATA's root and nowhere deeper.
 data_excludes() {
@@ -235,12 +245,10 @@ data_excludes() {
     for name in "${DATA_MACHINE_OWN[@]}"; do printf -- '--exclude=/%s\n' "$name"; done
 }
 
-# <mounted DATA> <a backup's data directory> [rsync option]. backups/ holds
-# the snapshots the OS takes itself (embra-update): each is a copy of STATE
-# and DATA already, so they stay out of a host backup.
+# <mounted DATA> <a backup's data directory> [rsync option]
 copy_data_out() {
     local excludes; mapfile -t excludes < <(data_excludes)
-    rsync -a ${3:+"$3"} --exclude 'backups/' "${excludes[@]}" "$1/" "$2/"
+    rsync -a ${3:+"$3"} "${excludes[@]}" "$1/" "$2/"
 }
 
 # <mounted DATA>: everything on it goes but what is the machine's own.
@@ -409,7 +417,7 @@ do_backup() {
     # The OS's own snapshots and the native models stay out (copy_data_out).
     log_step "Backing up DATA partition..."
     copy_data_out "$MOUNT_DATA" "${backup_path}/data" --info=progress2
-    log_info "Left out: the OS's own snapshots (backups/), and the machine's own: ${DATA_MACHINE_OWN[*]}"
+    log_info "Left out, the machine's own at DATA's root: ${DATA_MACHINE_OWN[*]}"
 
     local data_files=$(find "${backup_path}/data" -type f | wc -l)
     local data_size=$(du -sh "${backup_path}/data" | cut -f1)
@@ -539,7 +547,8 @@ do_restore() {
 
         # Clear existing data
         # IMPORTANT: This removes any seed data from a fresh image build.
-        # The native models stay: they are the machine's, and no backup's.
+        # The OS's own snapshots and the native models stay: they are the
+        # machine's, and no backup's.
         clear_data "$MOUNT_DATA"
 
         copy_data_in "${backup_path}/data" "$MOUNT_DATA" --info=progress2
@@ -742,21 +751,27 @@ do_self_test() {
 
     # A machine's DATA: the database, the workspace, the OS's own snapshots
     # and a native model.
-    mkdir -p "$t/data/wardsondb" "$t/data/workspace/project/models" "$t/data/backups/2026-01-01_manual" "$t/data/models/qwen3.5-4b" "$t/backup/data"
+    mkdir -p "$t/data/wardsondb" "$t/data/workspace/project/models" "$t/data/workspace/project/backups" "$t/data/workspace/notes-on" "$t/data/backups/2026-01-01_manual" "$t/data/models/qwen3.5-4b" "$t/backup/data"
     echo segment > "$t/data/wardsondb/seg"; echo notes > "$t/data/workspace/notes"; echo mine > "$t/data/workspace/project/models/file"
+    echo theirs > "$t/data/workspace/project/backups/dump.sql"; echo list > "$t/data/workspace/notes-on/backups"
     echo snapshot > "$t/data/backups/2026-01-01_manual/backup.tar.gz"; echo weights > "$t/data/models/qwen3.5-4b/model.gguf"
     copy_data_out "$t/data" "$t/backup/data"
     check "a backup holds the database and the workspace" test -f "$t/backup/data/wardsondb/seg" -a -f "$t/backup/data/workspace/notes"
     check "a backup holds no native model" absent "$t/backup/data/models"
     check "a backup does not hold the OS's own snapshots" absent "$t/backup/data/backups"
     check "a directory called models inside the workspace is no exclusion" holds "$t/backup/data/workspace/project/models/file" mine
+    check "a directory called backups inside the workspace is no exclusion" holds "$t/backup/data/workspace/project/backups/dump.sql" theirs
+    check "a file called backups inside the workspace is no exclusion" holds "$t/backup/data/workspace/notes-on/backups" list
 
-    # A backup of before the rule, which carries a model, onto an image with
-    # a model of its own.
-    mkdir -p "$t/olddata/models/qwen3.5-9b" "$t/imgdata/models/qwen3.5-4b" "$t/imgdata/wardsondb" "$t/imgdata/stale/dir"
+    # A backup of before the rule, which carries a model, and one made by
+    # hand that carries a snapshot, onto an image with a model and snapshots
+    # of its own.
+    mkdir -p "$t/olddata/models/qwen3.5-9b" "$t/olddata/backups/2025-12-31_other" "$t/imgdata/models/qwen3.5-4b" "$t/imgdata/backups/2026-02-02_manual" "$t/imgdata/wardsondb" "$t/imgdata/stale/dir"
     cp -a "$t/backup/data/." "$t/olddata/"
     echo weights-of-the-backup > "$t/olddata/models/qwen3.5-9b/model.gguf"
+    echo snapshot-of-the-backup > "$t/olddata/backups/2025-12-31_other/backup.tar.gz"
     echo weights-of-the-image > "$t/imgdata/models/qwen3.5-4b/model.gguf"
+    echo snapshot-of-the-image > "$t/imgdata/backups/2026-02-02_manual/backup.tar.gz"
     echo seed > "$t/imgdata/wardsondb/seed"; echo gone > "$t/imgdata/stale/dir/file"; echo gone > "$t/imgdata/.hidden"
     clear_data "$t/imgdata"
     check "a restore removes the image's database" absent "$t/imgdata/wardsondb"
@@ -765,11 +780,15 @@ do_self_test() {
     check "a restore brings the backup's database and workspace" test -f "$t/imgdata/wardsondb/seg" -a -f "$t/imgdata/workspace/notes" -a ! -e "$t/imgdata/wardsondb/seed"
     check "a restore keeps the image's own native model" holds "$t/imgdata/models/qwen3.5-4b/model.gguf" weights-of-the-image
     check "a restore copies no native model from an older backup" absent "$t/imgdata/models/qwen3.5-9b"
+    check "a restore keeps the snapshots the OS took on the image" holds "$t/imgdata/backups/2026-02-02_manual/backup.tar.gz" snapshot-of-the-image
+    check "a restore copies no snapshot from a backup that carries one" absent "$t/imgdata/backups/2025-12-31_other"
+    check "a restore brings a workspace directory called backups" holds "$t/imgdata/workspace/project/backups/dump.sql" theirs
 
     # An image without a model: a backup's is still not copied.
     mkdir -p "$t/newdata"
     clear_data "$t/newdata"; copy_data_in "$t/olddata" "$t/newdata"
     check "a restore onto a new image copies no native model from an older backup" absent "$t/newdata/models"
+    check "a restore onto a new image copies no snapshot either" absent "$t/newdata/backups"
     check "a restore onto a new image brings the rest of DATA" test -f "$t/newdata/wardsondb/seg" -a -f "$t/newdata/workspace/project/models/file"
 
     rm -rf "$t"

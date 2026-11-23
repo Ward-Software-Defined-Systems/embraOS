@@ -29,7 +29,7 @@ A snapshot runs only while the database is stopped, so a copy of its files is co
 
 The free-space rule: DATA must have the snapshot's size plus 256 MiB free, or the snapshot is refused with both figures. `/backup list` shows every backup by name from the last (a name begins with its timestamp, so the newest is first; an uploaded backup under a name of its own sorts by its letters), each complete one with its download route (`web: /api/backups/<name>`): the web console streams the archive to the browser behind the console's token, with no size cap. `/backup delete <name>` removes one. The automatic snapshots an update takes (labels `pre-v<version>`) rotate: the newest two stay. The rule goes by the label's `pre-` prefix, so a snapshot the operator takes under such a label rotates with them; a snapshot with any other label is never removed on its own, and neither is an uploaded backup, whatever its label.
 
-The archives are outside the workspace and the model's tools are refused them (`file_read` and the rest answer that the backups carry the operator's STATE). The host script's backup of DATA leaves `backups/` out: each is a copy of STATE and DATA already.
+The archives are outside the workspace and the model's tools are refused them (`file_read` and the rest answer that the backups carry the operator's STATE). The host script's backup of DATA leaves `backups/` out, at DATA's root alone: each snapshot is a copy of STATE and DATA already. Its restore leaves the snapshots on the image where they are.
 
 ### Uploading a backup
 

@@ -115,7 +115,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | `/backup` and `/reboot` before a session | QEMU (at the wizard and in Learning Mode); bare metal (at the wizard) | Learning Mode on bare metal |
 | `embraos-backup.sh` across image rebuilds, and its Mac wrapper | QEMU; QEMU on Apple Silicon | |
 | `embraos-backup.sh`: the web console's access token and the saved clock left out of a backup, and the image's own kept at a restore | the script's `self-test`, on scratch directories | a backup and a restore of an image |
-| `embraos-backup.sh`: the native models' files left out of a backup, and the image's own kept at a restore | the script's `self-test`, on scratch directories | a backup and a restore of an image |
+| `embraos-backup.sh`: the OS's own snapshots and the native models' files left out of a backup, at DATA's root alone (a workspace directory of either name is copied), and the image's own of both kept at a restore | the script's `self-test`, on scratch directories | a backup and a restore of an image |
 
 ## Certificate authorities of your own
 
