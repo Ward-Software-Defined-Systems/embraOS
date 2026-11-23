@@ -2,8 +2,9 @@
 #
 # Ported from .github/workflows/ci.yml (2026-09-08) when the primary origin
 # moved to gitlab.ops.wsds. Scope: workspace tests, the musl static
-# cross-builds for both architectures (the ship path, minus Buildroot), the
-# invariant guards and the RustSec audit of both lockfiles. This complements —
+# cross-builds for both architectures (the ship path, minus Buildroot) with
+# the tests type-checked for those targets, the invariant guards and the
+# RustSec audit of both lockfiles. This complements —
 # never replaces — the local pipeline (build-image.sh → Buildroot → QEMU boot
 # against existing DATA), which remains the authority for image/runtime
 # validation.
@@ -288,6 +289,16 @@ musl-cross:
         test -x "$p" || { echo "ERROR: missing binary: $bin" >&2; exit 1; }
         file "$p"
       done
+    # The tests are built and run under glibc (the `test` job), and the step
+    # above builds the programs alone, so a test that does not type-check
+    # under musl went unseen. Two did until 2026-11-22: libc's pthread_t is a
+    # pointer under musl and std's id of a thread an integer. The embra
+    # crates are therefore type-checked here with their tests, for the target
+    # the OS runs on. Checked, never run: the runner is not the target. The
+    # vendored database stays out: its tests are upstream's, and checking
+    # them would compile RocksDB once more, for the dev profile. The
+    # toolchain of the build above is still in the environment.
+    - cargo check --target x86_64-unknown-linux-musl --locked --all-targets --workspace --exclude wardsondb
 
 # The aarch64 ship path (scripts/build-image-aarch64.sh, minus Buildroot), with
 # Bootlin's aarch64 musl toolchain the way `musl-cross` uses the x86-64 one:
@@ -357,3 +368,6 @@ musl-cross-aarch64:
         file "$p" | grep -q 'ARM aarch64' || { echo "ERROR: $bin is not an aarch64 binary: $(file "$p")" >&2; exit 1; }
         file "$p"
       done
+    # As in `musl-cross`: the embra crates type-checked with their tests for
+    # this target, the vendored database left out.
+    - cargo check --target aarch64-unknown-linux-musl --locked --all-targets --workspace --exclude wardsondb
