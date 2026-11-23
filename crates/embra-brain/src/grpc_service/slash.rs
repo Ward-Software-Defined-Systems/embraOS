@@ -1622,7 +1622,7 @@ pub(super) async fn handle_attach_command(
                         count
                     );
                     if let Ok(cfg) = config::load_config(db).await {
-                        note.push_str(&image_note(&cfg.api_provider));
+                        note.push_str(&image_note(&cfg, &crate::native_model::Env::in_force()));
                     }
                     info!(target: "media", session = %session, id = %meta.id, staged = count, "media staged via /attach");
                     send(note, SystemMessageType::Info).await;
@@ -1637,16 +1637,28 @@ pub(super) async fn handle_attach_command(
 
 /// What an attached image's note adds, by the active provider: on a server
 /// preset the loaded model decides whether it reads images, and a native
-/// model reads text only (experimental).
-pub(super) fn image_note(provider: &str) -> String {
+/// model (experimental) reads them through its image file, when that file
+/// is on the machine and checked: embrad starts the model server with it.
+/// Without the file the image is not sent, and the note says how the file
+/// is got.
+pub(super) fn image_note(cfg: &config::SystemConfig, env: &crate::native_model::Env) -> String {
     use crate::provider::openai_compat::OpenAiCompatPreset;
+    use embra_boot::native_model::{self as contract, Installed, Part};
+    let provider = cfg.api_provider.as_str();
     match ProviderKind::from_str(provider).and_then(OpenAiCompatPreset::of) {
         Some(OpenAiCompatPreset::Ollama | OpenAiCompatPreset::LmStudio) => {
             format!("\nNote: the active provider is {provider} — image input works only if the loaded model is vision-capable.")
         }
-        Some(OpenAiCompatPreset::Native) => {
-            "\nNote: the active provider is a native model (experimental), which reads text only — the image is not sent; the model is told that one was attached.".to_string()
-        }
+        Some(OpenAiCompatPreset::Native) => match cfg.openai_compat.chosen_native_model() {
+            Some(model) if contract::installed_part(model, Part::Images, &env.models) == Installed::Verified => {
+                "\nNote: the active provider is a native model (experimental), which reads the image through its image file, as about a thousand tokens.".to_string()
+            }
+            Some(model) => format!(
+                "\nNote: the active provider is a native model (experimental) that stands without its image file and reads text alone — the image is not sent; the model is told that one was attached. /native install {} brings the file.",
+                model.id
+            ),
+            None => "\nNote: the active provider is a native model (experimental), and none is chosen: /native use <model> loads one.".to_string(),
+        },
         None => String::new(),
     }
 }

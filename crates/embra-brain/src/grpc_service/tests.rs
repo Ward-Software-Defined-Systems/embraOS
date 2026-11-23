@@ -2659,22 +2659,50 @@ mod key_setup_model_step_tests {
         assert_eq!(left_loaded_note(None), "");
     }
 
-    /// An attached image on a native model is not sent: the note says so,
-    /// where a server preset's says that the model decides.
+    /// An attached image's note follows the active provider: a server
+    /// preset's says that the model decides, and a native model's says
+    /// whether the image is sent, by whether the model has its image file.
     #[test]
     fn an_attached_images_note_follows_the_active_provider() {
-        assert_eq!(image_note("anthropic"), "");
-        assert_eq!(image_note("gemini"), "");
-        assert_eq!(image_note("no provider"), "");
+        use crate::native_model::test_support::{install, machine};
+        use embra_boot::native_model::{self as contract, Part};
+        let (_root, env) = machine("attach-note");
+        let cfg = |provider: &str, native_model: &str| {
+            let mut cfg: config::SystemConfig = serde_json::from_value(serde_json::json!({
+                "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase2",
+                "created_at": "", "version": "test", "api_provider": provider,
+            }))
+            .expect("a configuration");
+            cfg.openai_compat.native_model = native_model.to_string();
+            cfg
+        };
+        for other in ["anthropic", "gemini", "no provider"] {
+            assert_eq!(image_note(&cfg(other, "qwen3.5-4b"), &env), "", "{other}");
+        }
         for preset in ["ollama", "lm_studio"] {
             assert_eq!(
-                image_note(preset),
+                image_note(&cfg(preset, ""), &env),
                 format!("\nNote: the active provider is {preset} — image input works only if the loaded model is vision-capable.")
             );
         }
+        // A native model that stands without its image file: the image is not sent.
+        let four = contract::by_id("qwen3.5-4b").unwrap();
+        install(four, &env);
         assert_eq!(
-            image_note("native"),
-            "\nNote: the active provider is a native model (experimental), which reads text only — the image is not sent; the model is told that one was attached."
+            image_note(&cfg("native", "qwen3.5-4b"), &env),
+            "\nNote: the active provider is a native model (experimental) that stands without its image file and reads text alone — the image is not sent; the model is told that one was attached. /native install qwen3.5-4b brings the file."
+        );
+        // With the file there and checked, it is read.
+        std::fs::File::create(four.path_of(Part::Images, &env.models)).unwrap().set_len(four.images.bytes).unwrap();
+        let meta = std::fs::metadata(four.path_of(Part::Images, &env.models)).unwrap();
+        contract::write_verified(&four.verified_of(Part::Images, &env.models), &contract::Verified::of_part(four, Part::Images, &meta)).unwrap();
+        assert_eq!(
+            image_note(&cfg("native", "qwen3.5-4b"), &env),
+            "\nNote: the active provider is a native model (experimental), which reads the image through its image file, as about a thousand tokens."
+        );
+        assert_eq!(
+            image_note(&cfg("native", ""), &env),
+            "\nNote: the active provider is a native model (experimental), and none is chosen: /native use <model> loads one."
         );
     }
 
