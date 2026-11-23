@@ -317,6 +317,15 @@ impl OpenAICompatProvider {
         Ok(ids)
     }
 
+    /// Whether a request to this native model can carry an image: the model
+    /// server embrad keeps for it was started with the model's image file.
+    /// Waits, as a request does, until embrad follows what was asked; a
+    /// server that will not come is the error a request would get.
+    pub(crate) async fn reads_images(&self) -> Result<bool, ProviderError> {
+        crate::native_model::until_followed(&self.native_env, &self.model_id, self.model_wait).await?;
+        Ok(self.native_env.reads_images(&self.model_id))
+    }
+
     async fn post_with_retry(
         &self,
         url: &str,
@@ -573,7 +582,12 @@ impl OpenAICompatProvider {
         }
         let body_messages = conv::ir_messages_to_wire(messages)
             .map_err(|e| ProviderError::Decode(e.to_string()))?;
-        wire_messages.extend(if native { native::messages(body_messages) } else { body_messages });
+        // A native model reads an image when its server was started with
+        // the model's image file. embrad's status says so once embrad
+        // follows what was asked, so the wait for that comes before the
+        // request is built. Without the file an image is a line of text.
+        let images = native && self.reads_images().await?;
+        wire_messages.extend(if native { native::messages(body_messages, images) } else { body_messages });
 
         // Tool manifest → Vec<OpenAITool>. Empty manifest → omit tools.
         let tools_vec: Vec<OpenAITool> = match &tools.wire_json {
@@ -1812,11 +1826,39 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Complete(_))), "{events:?}");
         assert_eq!(sent().await, 1);
 
+        // An image: a line of text to a server that was started without the
+        // model's image file, the image itself to one that was started with
+        // it. The status says which, and nothing else differs.
+        let image = crate::provider::ir::ImageData { media_type: "image/png".into(), data_b64: "AAAA".into(), width: 1, height: 1, name: "dot.png".into() };
+        let seen = [ApiMessage::user_with_images(vec![image], "what is this?")];
+        assert!(!provider().reads_images().await.unwrap());
+        let _ = collect_events(provider().stream_turn(&seen, &system, &tools, LlmRequestOptions::default()).await.unwrap()).await;
+        let mut with_file = status(ServiceState::Ready, Some(four), "");
+        with_file.images = true;
+        contract::write_status(&env.status, &with_file).unwrap();
+        assert!(provider().reads_images().await.unwrap());
+        let _ = collect_events(provider().stream_turn(&seen, &system, &tools, LlmRequestOptions::default()).await.unwrap()).await;
+        let requests = server.received_requests().await.unwrap();
+        let (as_text, as_image): (JsonValue, JsonValue) = (serde_json::from_slice(&requests[1].body).unwrap(), serde_json::from_slice(&requests[2].body).unwrap());
+        let user = |body: &JsonValue| body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").cloned().unwrap();
+        assert_eq!(user(&as_text)["content"], format!("{}\nwhat is this?", native::IMAGE_LINE));
+        assert!(!as_text.to_string().contains("base64"), "nothing of the image is sent to a server that cannot read it");
+        assert_eq!(user(&as_image)["content"][0], json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}));
+        assert_eq!(user(&as_image)["content"][1], json!({"type": "text", "text": "what is this?"}));
+        // The image file of another model's server says nothing for this one.
+        let nine = Wanted::new(contract::by_id("qwen3.5-9b").unwrap());
+        let mut others = status(ServiceState::Ready, Some(nine), "");
+        others.images = true;
+        contract::write_status(&env.status, &others).unwrap();
+        assert!(!env.reads_images("qwen3.5-4b") && env.reads_images("qwen3.5-9b"));
+        contract::write_status(&env.status, &status(ServiceState::Ready, Some(four), "")).unwrap();
+        assert_eq!(sent().await, 3);
+
         // A server preset asks nothing of the records, whatever they say.
         contract::write_status(&env.status, &status(ServiceState::Halted, Some(four), "ended")).unwrap();
         let studio = OpenAICompatProvider::lm_studio(server.uri(), None, "m".to_string()).with_native_env(env.clone());
         let _ = studio.stream_turn(&turn, &system, &tools, LlmRequestOptions::default()).await.unwrap();
-        assert_eq!(sent().await, 2);
+        assert_eq!(sent().await, 4);
     }
 
     #[tokio::test]

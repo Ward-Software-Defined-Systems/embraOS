@@ -73,6 +73,14 @@ impl Env {
         };
         (contract::read_settings(&self.settings), status)
     }
+
+    /// Whether the model server that runs for `model` was started with the
+    /// model's image file, as embrad's status says: then an image can be
+    /// sent to it. A machine without a status (a development run, no
+    /// embrad) says nothing, and an image is a line of text there.
+    pub(crate) fn reads_images(&self, model: &str) -> bool {
+        self.records().1.is_some_and(|status| status.images && status.state.runs() && status.model.is_some_and(|m| m.id == model))
+    }
 }
 
 /// A size as the updater's lines say it.

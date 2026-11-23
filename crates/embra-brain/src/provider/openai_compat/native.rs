@@ -15,8 +15,10 @@
 //!   and 36 read, against 289 and 54 with `reasoning`, which the server
 //!   ignores. (No reasoning is kept from one turn to the next, which is
 //!   what the model card asks for.)
-//! - Text only: an image is a line that says one was attached. The models
-//!   read images through a second file that is not installed in this step.
+//! - An image goes as an image when the model server was started with the
+//!   model's image file (embrad's status says so), as the presets send one.
+//!   A server without the file answers an image with an error, so there an
+//!   image is a line that says one was attached and how the file is got.
 //! - While the server reads the model's file it answers 503: the request
 //!   waits and is sent again, as long as the model wait allows.
 //! - The server is asked how far it has read the prompt (`return_progress`):
@@ -47,9 +49,10 @@ pub(super) const SAMPLING_DIRECT: Sampling =
 /// none, leaves it on (William, 2026-11-22: on by default).
 pub(crate) const EFFORT_OFF: &str = "low";
 
-/// What stands where an image was.
+/// What stands where an image was, for a model server that was started
+/// without the model's image file.
 pub(super) const IMAGE_LINE: &str =
-    "[An image was attached here. The native model reads text only (experimental), so the image was not sent.]";
+    "[An image was attached here. It was not sent: the native model is loaded without its image file, which an install of the model brings (/native install).]";
 
 /// How often a request is sent again while the server loads its model.
 pub(super) const LOADING_POLL: Duration = Duration::from_secs(1);
@@ -68,8 +71,9 @@ pub(super) fn shape(body: &mut OpenAIChatRequest, thinking: bool) {
 }
 
 /// The messages as a native model's server takes them: an earlier step's
-/// reasoning under the name it reads, and every image as a line of text.
-pub(super) fn messages(messages: Vec<OpenAIMessage>) -> Vec<OpenAIMessage> {
+/// reasoning under the name it reads, and an image as it is when the server
+/// reads images, or as a line of text when it does not.
+pub(super) fn messages(messages: Vec<OpenAIMessage>, images: bool) -> Vec<OpenAIMessage> {
     messages
         .into_iter()
         .map(|message| match message {
@@ -79,7 +83,7 @@ pub(super) fn messages(messages: Vec<OpenAIMessage>) -> Vec<OpenAIMessage> {
                 reasoning: None,
                 reasoning_content: reasoning.or(reasoning_content),
             },
-            OpenAIMessage::User { content: UserContent::Parts(parts) } => {
+            OpenAIMessage::User { content: UserContent::Parts(parts) } if !images => {
                 let lines: Vec<String> = parts
                     .into_iter()
                     .map(|part| match part {
@@ -246,7 +250,7 @@ mod tests {
             call_type: "function".into(),
             function: OpenAIToolCallFunction { name: "time".into(), arguments: "{}".into() },
         };
-        let out = messages(vec![
+        let out = messages_as_text(vec![
             OpenAIMessage::System { content: "s".into() },
             OpenAIMessage::User { content: UserContent::Text("what time is it".into()) },
             OpenAIMessage::Assistant { content: None, tool_calls: Some(vec![call]), reasoning: Some("I need the time tool.".into()), reasoning_content: None },
@@ -261,10 +265,36 @@ mod tests {
         assert_eq!((wire[0]["role"].as_str(), wire[1]["content"].as_str(), wire[3]["content"].as_str()), (Some("system"), Some("what time is it"), Some("12:34")));
     }
 
+    /// The messages for a server that was started without the image file.
+    fn messages_as_text(list: Vec<OpenAIMessage>) -> Vec<OpenAIMessage> {
+        messages(list, false)
+    }
+
+    /// A server that was started with the model's image file is sent an
+    /// image as the presets send one; the reasoning still goes back under
+    /// the name the server reads.
+    #[test]
+    fn an_image_goes_as_an_image_to_a_server_that_reads_images() {
+        let image = || UserPart::ImageUrl { image_url: ImageUrlRef { url: "data:image/png;base64,AAAA".into() } };
+        let out = messages(
+            vec![
+                OpenAIMessage::User { content: UserContent::Parts(vec![image(), UserPart::Text { text: "what is this?".into() }]) },
+                OpenAIMessage::Assistant { content: Some("A dot.".into()), tool_calls: None, reasoning: Some("One pixel.".into()), reasoning_content: None },
+            ],
+            true,
+        );
+        let wire = serde_json::to_value(&out).unwrap();
+        assert_eq!(wire[0]["content"][0], json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}));
+        assert_eq!(wire[0]["content"][1], json!({"type": "text", "text": "what is this?"}));
+        assert_eq!(wire[1]["reasoning_content"], "One pixel.");
+        assert!(wire[1].get("reasoning").is_none(), "{}", wire[1]);
+        assert!(!wire.to_string().contains("An image was attached"), "{wire}");
+    }
+
     #[test]
     fn an_image_is_a_line_of_text() {
         let image = || UserPart::ImageUrl { image_url: ImageUrlRef { url: "data:image/png;base64,AAAA".into() } };
-        let out = messages(vec![
+        let out = messages_as_text(vec![
             OpenAIMessage::User { content: UserContent::Parts(vec![image(), UserPart::Text { text: "what is this?".into() }]) },
             OpenAIMessage::User { content: UserContent::Parts(vec![image(), image()]) },
         ]);
