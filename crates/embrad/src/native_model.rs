@@ -17,6 +17,12 @@
 //! - A start needs the model's file verified (`native_model::installed`: the
 //!   record the updater wrote still describes the file). Nothing is hashed
 //!   here.
+//! - The model's image file (its projector) is given to the server when it
+//!   is verified the same way: the model then reads images, and the status
+//!   says so. Without it the model is started all the same and reads text.
+//!   Whether the file is there is part of what the keeper follows: when it
+//!   arrives, or goes, the server is ended and started again, as for other
+//!   settings.
 //! - A server that ends before it answered is started again at the next
 //!   tick, [`UNREADY_EXITS_MAX`] times; after that nothing more is tried
 //!   until the settings change. One that ends after it answered (the kernel
@@ -27,13 +33,13 @@
 //! - `embra.native=0` on the kernel line starts none in this boot.
 //!
 //! The server gets no environment (the brain's holds the provider keys) and
-//! no way to load anything but the one file.
+//! no way to load anything but the model's own files.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use embra_boot::native_model::{self as native, Installed, ServiceState, Status, Wanted};
+use embra_boot::native_model::{self as native, Installed, Part, ServiceState, Status, Wanted};
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
@@ -117,12 +123,16 @@ enum Followed {
     Refused(String),
     /// No model is asked for.
     Nothing,
-    Model(Wanted),
+    /// A model and its window, and whether its image file is there to be
+    /// given to the server.
+    Model(Wanted, bool),
 }
 
 struct Server {
     child: Child,
     wanted: Wanted,
+    /// It was started with the model's image file.
+    images: bool,
     /// It answered its health once.
     ready: bool,
 }
@@ -149,7 +159,7 @@ pub(crate) struct Keeper {
 
 /// The server's arguments: one file, one name, one window, one slot, on
 /// loopback, without the web page.
-pub(crate) fn server_args(wanted: &Wanted, paths: &Paths) -> Vec<String> {
+pub(crate) fn server_args(wanted: &Wanted, paths: &Paths, images: bool) -> Vec<String> {
     [
         "--host",
         paths.host.as_str(),
@@ -175,7 +185,23 @@ pub(crate) fn server_args(wanted: &Wanted, paths: &Paths) -> Vec<String> {
     ]
     .iter()
     .map(|s| s.to_string())
+    .chain(if images { image_args(wanted, paths) } else { Vec::new() })
     .collect()
+}
+
+/// What the server is told of the model's image file: the file, and how
+/// many tokens it makes of an image, the fewest and the most alike
+/// (`NativeModel::image_tokens`).
+fn image_args(wanted: &Wanted, paths: &Paths) -> Vec<String> {
+    let tokens = wanted.model.image_tokens.to_string();
+    vec![
+        "--mmproj".to_string(),
+        wanted.model.path_of(Part::Images, &paths.models).to_string_lossy().into_owned(),
+        "--image-min-tokens".to_string(),
+        tokens.clone(),
+        "--image-max-tokens".to_string(),
+        tokens,
+    ]
 }
 
 /// How a run ended, in words: the exit code, or the signal with what it
@@ -272,7 +298,7 @@ impl Keeper {
         let followed = match native::read_settings(&self.paths.settings) {
             Err(reason) => Followed::Refused(reason),
             Ok(None) => Followed::Nothing,
-            Ok(Some(wanted)) => Followed::Model(wanted),
+            Ok(Some(wanted)) => Followed::Model(wanted, native::installed_part(wanted.model, Part::Images, &self.paths.models) == Installed::Verified),
         };
         if self.followed.as_ref() != Some(&followed) {
             // Other settings: what ran for the ones before ends, and every
@@ -292,14 +318,15 @@ impl Keeper {
                 self.publish(ServiceState::Off, None, String::new());
                 return;
             }
-            Followed::Model(wanted) => wanted,
+            Followed::Model(wanted, images) => (wanted, images),
         };
+        let (wanted, images) = wanted;
         self.look_at_the_server().await;
         // Why no server can be started for these settings now, when one cannot.
         let mut waits_for = None;
         if self.server.is_none() && self.unready_exits < UNREADY_EXITS_MAX {
             match self.file_of(&wanted) {
-                Ok(()) => self.start(wanted),
+                Ok(()) => self.start(wanted, images),
                 Err(why) => waits_for = Some(why),
             }
         }
@@ -375,9 +402,10 @@ impl Keeper {
         }
     }
 
-    /// Start the server for `wanted`. A start that fails counts as a run
-    /// that ended before it answered.
-    fn start(&mut self, wanted: Wanted) {
+    /// Start the server for `wanted`, with the model's image file when
+    /// `images` says it is there. A start that fails counts as a run that
+    /// ended before it answered.
+    fn start(&mut self, wanted: Wanted, images: bool) {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(&self.paths.log);
         let (out, err) = match log.and_then(|f| Ok((f.try_clone()?, f))) {
             Ok((a, b)) => (Stdio::from(a), Stdio::from(b)),
@@ -385,7 +413,7 @@ impl Keeper {
         };
         let mut command = Command::new(&self.paths.server);
         command
-            .args(server_args(&wanted, &self.paths))
+            .args(server_args(&wanted, &self.paths, images))
             .env_clear()
             .stdin(Stdio::null())
             .stdout(out)
@@ -399,13 +427,14 @@ impl Keeper {
                     warn!("native model: the kernel was not told to end the model server first ({e})");
                 }
                 info!(
-                    "native model: started {} for {} with a window of {} tokens (pid {:?})",
+                    "native model: started {} for {} with a window of {} tokens, {} (pid {:?})",
                     self.paths.server.display(),
                     wanted.model.id,
                     wanted.context,
+                    if images { "with its image file" } else { "to read text alone: its image file is not installed" },
                     child.id()
                 );
-                self.server = Some(Server { child, wanted, ready: false });
+                self.server = Some(Server { child, wanted, images, ready: false });
             }
             Err(e) => {
                 self.last_how = format!("it could not be started, {}: {e}", self.paths.server.display());
@@ -433,6 +462,7 @@ impl Keeper {
         status.model = wanted.map(|w| w.model);
         status.context = wanted.map(|w| w.context);
         status.pid = if state.runs() { self.pid() } else { None };
+        status.images = state.runs() && self.server.as_ref().is_some_and(|server| server.images);
         status.exits = self.exits;
         status.reason = native::one_line(&reason);
         if let Some(last) = &self.published {
@@ -486,6 +516,16 @@ mod tests {
             rig.install();
             rig.server_does(behaviour);
             rig
+        }
+
+        /// The model's image file with its record, the same way.
+        fn install_images(&self) {
+            let path = MODEL.path_of(Part::Images, &self.paths.models);
+            let file = std::fs::File::create(&path).unwrap();
+            file.set_len(MODEL.images.bytes).unwrap();
+            let record = native::Verified::of_part(MODEL, Part::Images, &file.metadata().unwrap());
+            native::write_verified(&MODEL.verified_of(Part::Images, &self.paths.models), &record).unwrap();
+            assert_eq!(native::installed_part(MODEL, Part::Images, &self.paths.models), Installed::Verified);
         }
 
         /// The model's file with the record that vouches for it. The file
@@ -577,7 +617,7 @@ mod tests {
     fn the_server_is_told_to_listen_on_loopback_and_to_load_one_file() {
         let paths = Paths::os();
         assert_eq!((paths.host.as_str(), paths.port), ("127.0.0.1", 8091), "loopback alone, the contract's port");
-        let args = server_args(&Wanted::new(MODEL), &paths);
+        let args = server_args(&Wanted::new(MODEL), &paths, false);
         assert_eq!(
             args,
             [
@@ -592,15 +632,28 @@ mod tests {
                 "--no-ui",
             ]
         );
-        // No flag that reaches outside the machine or loads another file.
-        for flag in ["--hf-repo", "-hf", "--model-url", "-mu", "--api-key", "--ssl-key-file", "--models-dir", "--webui", "--ui", "--no-webui"] {
-            assert!(!args.iter().any(|a| a == flag), "{flag}");
+        // With the model's image file: the same, then the file and the
+        // tokens of an image, the fewest and the most alike.
+        let seeing = server_args(&Wanted::new(MODEL), &paths, true);
+        assert_eq!(seeing[..args.len()], args[..]);
+        assert_eq!(
+            seeing[args.len()..],
+            ["--mmproj", "/embra/data/models/qwen3.5-4b/mmproj-F16.gguf", "--image-min-tokens", "1024", "--image-max-tokens", "1024"]
+        );
+        // No flag that reaches outside the machine or loads a file that is
+        // not the model's own: an image reaches the server in the request
+        // (the brain sends its bytes), never by a path or an address.
+        for flag in [
+            "--hf-repo", "-hf", "--model-url", "-mu", "--mmproj-url", "-mmu", "--media-path", "--media-allow-private-urls",
+            "--api-key", "--ssl-key-file", "--models-dir", "--webui", "--ui", "--no-webui",
+        ] {
+            assert!(!args.iter().any(|a| a == flag) && !seeing.iter().any(|a| a == flag), "{flag}");
         }
         // The prompt cache follows the window: one prompt that fills it,
         // with every checkpoint it can have.
         assert_eq!((cache_mib(4_096), cache_mib(65_536), cache_mib(262_144)), (1_816, 3_796, 10_132));
         assert_eq!(cache_mib(1_025), cache_mib(2_048), "a started 1,024 tokens count whole");
-        let small = server_args(&Wanted { model: MODEL, context: 4_096 }, &paths);
+        let small = server_args(&Wanted { model: MODEL, context: 4_096 }, &paths, false);
         assert_eq!(small[small.iter().position(|a| a == "--cache-ram").unwrap() + 1], "1816");
         // The whole tool list, 23,402 tokens, as the server measured it: 783 MiB
         // and the checkpoints it had. It fits beside nothing else, as it should.
@@ -665,7 +718,8 @@ mod tests {
 
         let args = std::fs::read_to_string(rig.dir.join("args")).unwrap();
         let args: Vec<&str> = args.lines().collect();
-        assert_eq!(args, server_args(&Wanted { model: MODEL, context: 32_768 }, &rig.paths));
+        assert_eq!(args, server_args(&Wanted { model: MODEL, context: 32_768 }, &rig.paths, false));
+        assert!(!rig.status().images, "no image file is installed: the model reads text");
         let env = std::fs::read_to_string(rig.dir.join("env")).unwrap();
         assert!(!env.contains("EMBRA_NATIVE_TEST_SECRET") && !env.contains("sk-never"), "{env}");
         assert!(!env.lines().any(|l| l.starts_with("HOME=") || l.starts_with("PATH=/")), "nothing is handed on: {env}");
@@ -693,6 +747,53 @@ mod tests {
         keeper.tick().await;
         assert_eq!((rig.status().state, keeper.pid()), (ServiceState::Off, None));
         assert!(!Path::new(&format!("/proc/{pid}")).exists(), "the server's process is gone");
+    }
+
+    /// A model whose image file is installed is started with it, and the
+    /// status says that it reads images. An image file that arrives while
+    /// the model runs without one ends that server and starts another with
+    /// the file, as other settings do; one that goes does the same.
+    #[tokio::test]
+    async fn the_image_file_is_given_to_the_server_when_it_is_there_and_its_coming_starts_the_server_again() {
+        let _children = crate::supervisor::test_support::CHILDREN.lock().await;
+        let rig = Rig::new("images", "exec sleep 30");
+        let wanted = Wanted::new(MODEL);
+        rig.want(Some(&wanted));
+        let mut keeper = rig.keeper();
+        keeper.tick().await;
+        rig.started(1).await;
+        let read_args = || -> Vec<String> { std::fs::read_to_string(rig.dir.join("args")).unwrap().lines().map(str::to_string).collect() };
+        assert_eq!(read_args(), server_args(&wanted, &rig.paths, false));
+        assert!(!rig.status().images);
+        let first = keeper.pid().unwrap();
+
+        // Nothing new: nothing is started again.
+        keeper.tick().await;
+        assert_eq!((rig.starts(), keeper.pid()), (1, Some(first)));
+
+        // The image file arrives (an install brought it): the next tick ends
+        // the server that reads text, and starts one with the file.
+        rig.install_images();
+        keeper.tick().await;
+        rig.started(2).await;
+        assert_ne!(keeper.pid(), Some(first));
+        assert!(!Path::new(&format!("/proc/{first}")).exists(), "the server without the file is gone");
+        let args = read_args();
+        assert_eq!(args, server_args(&wanted, &rig.paths, true));
+        assert!(args.windows(2).any(|pair| pair[0] == "--mmproj" && pair[1].ends_with("/qwen3.5-4b/mmproj-F16.gguf")), "{args:?}");
+        let status = rig.status();
+        assert!(status.images && status.exits == 0, "a start for other settings is no exit: {status:?}");
+        assert_eq!(native::read_status(&rig.paths.status).unwrap().unwrap().to_text().lines().filter(|line| *line == "images=yes").count(), 1);
+
+        // The file goes (a check found it changed and removed it): text again.
+        let second = keeper.pid().unwrap();
+        std::fs::remove_file(MODEL.path_of(Part::Images, &rig.paths.models)).unwrap();
+        keeper.tick().await;
+        rig.started(3).await;
+        assert_ne!(keeper.pid(), Some(second));
+        assert_eq!(read_args(), server_args(&wanted, &rig.paths, false));
+        assert!(!rig.status().images);
+        keeper.stop().await;
     }
 
     #[tokio::test]
