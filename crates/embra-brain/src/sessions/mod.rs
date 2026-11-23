@@ -460,18 +460,8 @@ impl SessionStore {
         // a Gemini-configured brain).
         let (provider, model) = match crate::config::load_config(&self.db).await {
             Ok(cfg) => {
-                // Display metadata only: the resolvers of the turn path own
-                // the request-time id. Gemini records its stored model and
-                // every other provider Anthropic's, a session created on
-                // Ollama or LM Studio included, as before this match named
-                // them.
-                use crate::provider::{ProviderKind, Wire};
-                let recorded_as = match ProviderKind::from_str(&cfg.api_provider).map(ProviderKind::wire) {
-                    Some(Wire::Gemini) => ProviderKind::Gemini,
-                    Some(Wire::Anthropic | Wire::OpenAiCompat(_)) | None => ProviderKind::Anthropic,
-                };
-                let m = crate::config::stored_model_display(recorded_as.as_str(), &cfg);
-                (Some(cfg.api_provider), Some(m))
+                let (provider, model) = recorded_of(&cfg);
+                (Some(provider), Some(model))
             }
             Err(_) => (None, None),
         };
@@ -1193,6 +1183,51 @@ mod history_query_tests {
         let body = history_query_body();
         assert_eq!(body["limit"], json!(10));
         assert_eq!(body["sort"], json!([{"_created_at": "asc"}]));
+    }
+}
+
+/// What a new session records of the stored configuration: the active
+/// provider, and the model that provider is configured with. Display
+/// metadata only: the resolvers of the turn path own the request-time id.
+/// (Until 2026-11-22 a session created under Ollama, LM Studio or a native
+/// model recorded Anthropic's model here: only Gemini's was its own.)
+fn recorded_of(cfg: &crate::config::SystemConfig) -> (String, String) {
+    (cfg.api_provider.clone(), crate::config::stored_model_display(&cfg.api_provider, cfg))
+}
+
+#[cfg(test)]
+mod recorded_model_tests {
+    use super::*;
+    use crate::config::SystemConfig;
+    use crate::provider::ProviderKind;
+
+    /// A new session records the provider it is created under and that
+    /// provider's own model: a session on a local model does not carry the
+    /// name of a hosted one the operator chose some other day.
+    #[test]
+    fn a_new_session_records_the_model_of_the_provider_it_is_created_under() {
+        let mut cfg = SystemConfig::boot_fallback(String::new(), "UTC".to_string());
+        cfg.anthropic_model = Some("fable-5".to_string());
+        cfg.gemini_model = Some("gemini-4-argon".to_string());
+        cfg.openai_compat.ollama_model = "qwen3.8:27b".to_string();
+        cfg.openai_compat.lm_studio_model = "qwen/qwen3.8-27b".to_string();
+        cfg.openai_compat.native_model = "qwen3.5-4b".to_string();
+        for kind in ProviderKind::ALL {
+            let its_own = match kind {
+                ProviderKind::Anthropic => "fable-5",
+                ProviderKind::Gemini => "gemini-4-argon",
+                ProviderKind::Ollama => "qwen3.8:27b",
+                ProviderKind::LmStudio => "qwen/qwen3.8-27b",
+                ProviderKind::Native => "qwen3.5-4b",
+            };
+            cfg.api_provider = kind.as_str().to_string();
+            assert_eq!(recorded_of(&cfg), (kind.as_str().to_string(), its_own.to_string()), "{kind:?}");
+        }
+        // No model chosen yet on a preset: the preset's name, never
+        // another provider's model.
+        cfg.openai_compat.ollama_model.clear();
+        cfg.api_provider = ProviderKind::Ollama.as_str().to_string();
+        assert_eq!(recorded_of(&cfg).1, "ollama");
     }
 }
 
