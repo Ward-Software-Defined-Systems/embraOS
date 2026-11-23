@@ -301,7 +301,12 @@ pub(crate) fn server_words(env: &Env) -> Option<String> {
         (ServiceState::Disabled, _) => said(&status),
         (_, None) => "off".to_string(),
         (_, Some(wanted)) if !follows => format!("embrad is about to start it for {}", wanted.model.id),
-        (ServiceState::Ready, Some(wanted)) => format!("ready, context window {}", wanted.context),
+        // Whether it reads images is the server's own matter: it was
+        // started with the model's image file, or without.
+        (ServiceState::Ready, Some(wanted)) if status.images => format!("ready, context window {}, reads images", wanted.context),
+        (ServiceState::Ready, Some(wanted)) => {
+            format!("ready, context window {}, reads text alone (its image file is not installed)", wanted.context)
+        }
         (ServiceState::Loading, Some(wanted)) => format!("loading {}, context window {}", wanted.model.id, wanted.context),
         (ServiceState::Unavailable | ServiceState::Halted | ServiceState::Off, Some(_)) => format!("not loaded: {}", said(&status)),
     })
@@ -652,7 +657,13 @@ mod tests {
         assert_eq!(words(status(ServiceState::Off, None, "")), "embrad is about to start it for qwen3.5-4b");
         assert_eq!(words(status(ServiceState::Ready, Some(nine()), "")), "embrad is about to start it for qwen3.5-4b");
         assert_eq!(words(status(ServiceState::Loading, Some(four()), "")), "loading qwen3.5-4b, context window 65536");
-        assert_eq!(words(status(ServiceState::Ready, Some(four()), "")), "ready, context window 65536");
+        assert_eq!(
+            words(status(ServiceState::Ready, Some(four()), "")),
+            "ready, context window 65536, reads text alone (its image file is not installed)"
+        );
+        let mut seeing = status(ServiceState::Ready, Some(four()), "");
+        seeing.images = true;
+        assert_eq!(words(seeing), "ready, context window 65536, reads images");
         assert_eq!(words(status(ServiceState::Unavailable, Some(four()), "qwen3.5-4b is not installed")), "not loaded: qwen3.5-4b is not installed");
         assert_eq!(words(status(ServiceState::Halted, Some(four()), "")), "not loaded: the model server is halted");
         assert_eq!(

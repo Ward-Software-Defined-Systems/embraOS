@@ -516,9 +516,10 @@ async fn install_at_the_wizard(
             send_system(
                 tx,
                 format!(
-                    "Installing {}: its file ({} MB) is downloaded and checked, and the lines below follow the updater.",
+                    "Installing {}: its model file ({} MB) and its image file ({} MB) are downloaded and checked, and the lines below follow the updater.",
                     model.id,
-                    crate::native_model::mb(model.bytes)
+                    crate::native_model::mb(model.bytes),
+                    crate::native_model::mb(model.images.bytes)
                 ),
                 SystemMessageType::Info,
             )
@@ -1284,7 +1285,10 @@ mod tests {
 
             // The larger model: its install starts, and the question that stands takes text.
             user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
-            assert_eq!(said(&mut resp_rx).await, "Installing qwen3.5-9b: its file (5417 MB) is downloaded and checked, and the lines below follow the updater.");
+            assert_eq!(
+                said(&mut resp_rx).await,
+                "Installing qwen3.5-9b: its model file (5417 MB) and its image file (875 MB) are downloaded and checked, and the lines below follow the updater."
+            );
             let waiting = question(&mut resp_rx).await;
             assert_eq!(waiting.field_type, SetupFieldType::Text as i32);
             assert_eq!(waiting.prompt, "qwen3.5-9b is being installed. Press Enter for how far it is, or answer cancel to stop it and choose again:");

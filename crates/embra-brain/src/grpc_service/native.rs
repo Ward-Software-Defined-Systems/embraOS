@@ -207,9 +207,10 @@ pub(super) async fn pick_native_model(
     say(
         tx,
         format!(
-            "{} is not ready on this machine: its file ({} MB) is installed and checked first, and the lines below follow the updater. The session stays usable; the model is loaded when the job is done.",
+            "{} is not ready on this machine: its files ({} MB, and {} MB to read images) are installed and checked first, and the lines below follow the updater. The session stays usable; the model is loaded when the job is done.",
             model.id,
-            mb(model.bytes)
+            mb(model.bytes),
+            mb(model.images.bytes)
         ),
         SystemMessageType::Info,
     )
@@ -333,10 +334,11 @@ pub(super) fn native_usage() -> String {
     format!(
         "Usage: /native | /native install <model> | /native import | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n  \
          A native model (experimental) runs on this machine; the catalogue: {}. /native shows the models, what is kept loaded, the model server and the job that runs. \
-         install downloads a model's file and checks it; import says how a file comes in through the web console, for a machine that cannot reach the source. \
+         install downloads a model's two files, the model file and the file it reads images through, and checks them; \
+         import says how a file comes in through the web console, for a machine that cannot reach the source. \
          use loads a model, installing it first when it is not there, and off frees its memory: \
          both whichever provider leads the session, and /provider native switches to a loaded model. \
-         context is the window the loaded model is given. remove deletes a model's file. cancel stops the job that runs.",
+         context is the window the loaded model is given. remove deletes a model's files. cancel stops the job that runs.",
         catalogue_ids()
     )
 }
@@ -351,12 +353,26 @@ pub(super) const NATIVE_NOT_BEFORE_A_SESSION: &str = "Not run before setup is co
 /// URL. The source of each file is the catalogue's, where another machine
 /// can fetch it.
 pub(super) fn import_instructions() -> String {
-    let files: Vec<String> = contract::CATALOGUE.iter().map(|m| format!("{} for {} ({} MB, from {})", m.file, m.id, mb(m.bytes), m.url())).collect();
+    let files: Vec<String> = contract::CATALOGUE
+        .iter()
+        .map(|m| {
+            format!(
+                "for {}, {} ({} MB, from {}) and, to read images, {} ({} MB, from {})",
+                m.id,
+                m.file,
+                mb(m.bytes),
+                m.url(),
+                m.images.file,
+                mb(m.images.bytes),
+                m.url_of(contract::Part::Images)
+            )
+        })
+        .collect();
     format!(
-        "A model's file comes in through the web console, from a browser on another machine (experimental): in the sidebar, /native with the action import, then the file. \
-         It is for a machine that cannot reach the catalogue's source. The files: {}. \
-         The machine tells which model a file is by its name and size, checks it against the catalogue's sha256 while it arrives, and keeps nothing of a file that is not the catalogue's. \
-         /native use <model> loads it then.",
+        "A model's files come in through the web console, from a browser on another machine (experimental): in the sidebar, /native with the action import, then a file. \
+         It is for a machine that cannot reach the catalogue's source. A model has two files, each sent by itself: {}. \
+         The machine tells which file of which model it is by its name and size, checks it against the catalogue's sha256 while it arrives, and keeps nothing of a file that is not the catalogue's. \
+         A model runs once its model file is there and reads images once its image file is. /native use <model> loads it then.",
         files.join("; ")
     )
 }
@@ -517,15 +533,16 @@ async fn start_job(kind: JobKind, model: &'static NativeModel, tx: &mpsc::Sender
     };
     let started = match kind {
         JobKind::Install => format!(
-            "Installing {}: its file ({} MB) is downloaded and checked, and the lines below follow the updater. The session stays usable; /native cancel stops it.",
+            "Installing {}: its model file ({} MB) and its image file ({} MB) are downloaded and checked, a file that is there already is left alone, and the lines below follow the updater. The session stays usable; /native cancel stops it.",
             model.id,
-            mb(model.bytes)
+            mb(model.bytes),
+            mb(model.images.bytes)
         ),
-        JobKind::Remove => format!("Removing the file of {}.", model.id),
+        JobKind::Remove => format!("Removing the files of {}.", model.id),
     };
     say(tx, started, SystemMessageType::Info).await;
-    let tx = tx.clone();
-    tokio::spawn(async move { follow_to_the_end(kind, model, events, &tx).await });
+    let (tx, env) = (tx.clone(), env.clone());
+    tokio::spawn(async move { follow_to_the_end(kind, model, events, &tx, &env).await });
 }
 
 /// A job's lines to the console that started it, then how it ended.
@@ -534,6 +551,7 @@ async fn follow_to_the_end(
     model: &'static NativeModel,
     mut events: broadcast::Receiver<JobEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    env: &Env,
 ) {
     let end = loop {
         match events.recv().await {
@@ -544,6 +562,16 @@ async fn follow_to_the_end(
         }
     };
     let (said, how) = match (kind, end) {
+        // An install for the model that is kept loaded brought a file the
+        // model server was started without (its image file): embrad sees it
+        // and starts the server again.
+        (JobKind::Install, JobEnd::Done) if env.records().0.is_ok_and(|wanted| wanted.is_some_and(|wanted| wanted.model.id == model.id)) => (
+            format!(
+                "{} is installed. It is the model kept loaded: the model server starts again with what the install brought, and a call that runs on it now is cut.",
+                model.id
+            ),
+            SystemMessageType::Info,
+        ),
         (JobKind::Install, JobEnd::Done) => (format!("{} is installed. /native use {} loads it.", model.id, model.id), SystemMessageType::Info),
         // The updater's own last line said it.
         (JobKind::Remove, JobEnd::Done) | (_, JobEnd::Nothing(_)) => return,
@@ -877,7 +905,7 @@ mod tests {
         pick_native_model(nine(), &tx, &db, &hands).await;
         assert_eq!(
             told(&mut rx).await,
-            "qwen3.5-9b is not ready on this machine: its file (5417 MB) is installed and checked first, and the lines below follow the updater. The session stays usable; the model is loaded when the job is done."
+            "qwen3.5-9b is not ready on this machine: its files (5417 MB, and 875 MB to read images) are installed and checked first, and the lines below follow the updater. The session stays usable; the model is loaded when the job is done."
         );
         assert_eq!(told(&mut rx).await, "qwen3.5-9b: downloading its file");
         assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
@@ -1074,9 +1102,20 @@ mod tests {
     #[test]
     fn the_import_form_says_how_and_prints_no_address_or_token_of_its_own() {
         let said = import_instructions();
-        assert!(said.starts_with("A model's file comes in through the web console, from a browser on another machine (experimental): in the sidebar, /native with the action import, then the file."), "{said}");
+        assert!(said.starts_with("A model's files come in through the web console, from a browser on another machine (experimental): in the sidebar, /native with the action import, then a file."), "{said}");
         for model in &contract::CATALOGUE {
-            assert!(said.contains(&format!("{} for {} ({} MB, from {})", model.file, model.id, mb(model.bytes), model.url())), "{}: {said}", model.id);
+            // Both files of each model, each with its size and where another machine fetches it.
+            let both = format!(
+                "for {}, {} ({} MB, from {}) and, to read images, {} ({} MB, from {})",
+                model.id,
+                model.file,
+                mb(model.bytes),
+                model.url(),
+                model.images.file,
+                mb(model.images.bytes),
+                model.url_of(contract::Part::Images)
+            );
+            assert!(said.contains(&both), "{}: {said}", model.id);
         }
         assert!(said.contains("keeps nothing of a file that is not the catalogue's") && said.ends_with("/native use <model> loads it then."), "{said}");
         for never in ["3345", "token", "/embraOS", "localhost", "127.0.0.1"] {
@@ -1136,7 +1175,7 @@ mod tests {
         let cfg = config_of("native", serde_json::json!({"native_model": "qwen3.5-4b", "native_effort_by_model": {"qwen3.5-4b": "low"}}));
         let shown = show_native(&env, &jobs, Some(&cfg)).await;
         assert!(
-            shown.contains("\n  Kept loaded: qwen3.5-4b, context window 65536, thinking off. It leads the session.\n  The model server: ready, context window 65536.\n  /native help"),
+            shown.contains("\n  Kept loaded: qwen3.5-4b, context window 65536, thinking off. It leads the session.\n  The model server: ready, context window 65536, reads text alone (its image file is not installed).\n  /native help"),
             "{shown}"
         );
         // Another provider leads; the model thinks; before a session the thinking is not said.
@@ -1149,7 +1188,7 @@ mod tests {
         machine_action(MachineAction::Install(nine()), &tx, &env, &jobs, None).await;
         assert_eq!(
             told(&mut rx).await,
-            "Installing qwen3.5-9b: its file (5417 MB) is downloaded and checked, and the lines below follow the updater. The session stays usable; /native cancel stops it."
+            "Installing qwen3.5-9b: its model file (5417 MB) and its image file (875 MB) are downloaded and checked, a file that is there already is left alone, and the lines below follow the updater. The session stays usable; /native cancel stops it."
         );
         assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5417 MB (5%)");
         assert!(show_native(&env, &jobs, None)
@@ -1168,7 +1207,7 @@ mod tests {
 
         // A removal the updater refuses is said in the updater's words.
         machine_action(MachineAction::Remove(four()), &tx, &env, &jobs, None).await;
-        assert_eq!(told(&mut rx).await, "Removing the file of qwen3.5-4b.");
+        assert_eq!(told(&mut rx).await, "Removing the files of qwen3.5-4b.");
         assert_eq!(
             told(&mut rx).await,
             "The removal of qwen3.5-4b did not finish: the settings ask for qwen3.5-4b to be kept loaded; free it first (/native off)."
