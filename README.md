@@ -45,13 +45,15 @@ Phase 2–5 add a full TUI rewrite, an image factory for other hypervisors and b
 > **Native models — experimental.** embraOS can run the conversational model on the
 > machine itself. The image carries llama.cpp's model server, and the first-boot wizard's
 > third answer, or `/native install <model>` and `/native use <model>` in a session, puts
-> one of two small models on the machine's own processor: Qwen3.5 4B or 9B, downloaded at
-> your request or uploaded through the web console. Nothing leaves the machine and there
-> is no key. It is a first step: the models are small (they answer slower than a hosted
-> model and with less judgement, and they are not vetted for the full toolset), no
-> graphics card is used, and the Guardian's replicant check is not run while one leads. A
-> model reads images through a second file that an install brings. A session on any
-> provider can ask the native model through the `native_ask` tool.
+> one of three models on the machine's own processor: Qwen3.5 4B or 9B, or Qwen3.8 27B on
+> a machine with the memory for it (about 20 GB in use). They are this project's own
+> conversions of Qwen's weights, downloaded at your request or uploaded through the web
+> console. Nothing leaves the machine and there is no key. It is a first step: the models
+> answer slower than a hosted model, the two small ones with less judgement, and none is
+> vetted for the full toolset in its four-bit build; no graphics card is used, and the
+> Guardian's replicant check is not run while one leads. A model reads images through a
+> second file that an install brings. A session on any provider can ask the native model
+> through the `native_ask` tool.
 > **[Native models →](docs/OPERATIONS/NATIVE-MODELS.md)**
 
 > **Pair it with WSDS Local AI Gateway — under evaluation.** embraOS can route every
@@ -272,7 +274,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Identity Graph](docs/MULTI-GRAPH/IDENTITY-GRAPH.md)** | The sealed IDENTITY+SOUL graph — format, the Learning-Mode import, KG projection, prompt rendering, and the re-seal migration ceremony |
 | **[Open Problems](docs/OPEN-PROBLEMS.md)** | Unresolved design questions tracked at the architecture level |
 | **[Recommended Local Models](docs/LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md)** | Vetted models and server configuration for the Ollama / LM Studio backends |
-| **[Native Models](docs/OPERATIONS/NATIVE-MODELS.md)** | Native models (experimental): a model that runs on the machine itself — the two models and what they need, a model's file, `/native`, the `native_ask` tool |
+| **[Native Models](docs/OPERATIONS/NATIVE-MODELS.md)** | Native models (experimental): a model that runs on the machine itself — the three models and what they need, a model's files, `/native`, the `native_ask` tool |
 | **[Replicant Check](docs/GUARDIAN/REPLICANT-CHECK.md)** | The soul-spec gate every dynamic tool passes before it compiles — how it works, both authoring paths, and how to test it |
 | **[Guardian Tool Examples](docs/GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
 | **[Guardian Advanced Example](docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md)** | The shipped flagship: a worked end-to-end Guardian tool |
