@@ -15,7 +15,7 @@ import os
 import subprocess
 
 OUT = os.path.dirname(os.path.abspath(__file__))
-W, H = 1200, 1189
+W, H = 1200, 1202
 SCALE = 2
 
 # ---------------------------------------------------------------- palette --
@@ -130,8 +130,8 @@ box(200, 308, 520, 56, "embra-apid", [
 ], APID, order=3, port="gRPC :50000 · REST :8443")
 # row C
 box(60, 400, 680, 124, "embra-brain", [
-    "headless AI runtime: providers (Anthropic, Gemini,",
-    "Ollama, LM Studio) · 120 tools · sessions · Learning Mode",
+    "headless AI runtime: providers (Anthropic, Gemini, Ollama,",
+    "LM Studio, native) · 121 tools · sessions · Learning Mode",
     "knowledge graph + in-OS embeddings (tract · bge-small)",
     "proactive: reminders, cron · media (images in and out)",
     "tools write under /embra/workspace only · read everything",
@@ -191,7 +191,7 @@ box(880, 560, 280, 110, "Writable mounts", [
     "/embra/state ← STATE: soul.sha256, keys (0600), CA",
     "drop-ins, imported-intelligence/, update-source,",
     "network/, web-console/ (the token), last-known-time",
-    "/embra/data ← DATA: WardSONDB · backups/",
+    "/embra/data ← DATA: WardSONDB, backups, models",
     "/embra/workspace: a bind mount by embrad,",
     "the one place the tools write",
 ], SLAB, size=9.6, lead=11.2)
@@ -231,7 +231,7 @@ def slab(y, h, title, color, lines, order_note=None):
 
 # The four slabs stack with a 24 px gap for the connector's label; a slab is
 # 35 px to its first line and 12.6 px a line after it.
-Y_EMBRAD, H_EMBRAD = 712, 120
+Y_EMBRAD, H_EMBRAD = 712, 133
 Y_KERNEL, H_KERNEL = Y_EMBRAD + H_EMBRAD + 24, 82
 Y_GRUB, H_GRUB = Y_KERNEL + H_KERNEL + 24, 82
 Y_HOST, H_HOST = Y_GRUB + H_GRUB + 24, 84
@@ -244,6 +244,7 @@ slab(Y_EMBRAD, H_EMBRAD, "embrad · PID 1 · init and service supervisor", SLAB,
     "embra.mode=update|backup|restore|install runs embra-update on both consoles in place of the services: the signed release into the other slot, a snapshot, a restore, the installer",
     "the network: a udhcpc for every card on DHCP, started and stopped as the cards come and go, the wired cards first · Wi-Fi: the card's driver loaded as a module, a wpa_supplicant with the stored networks",
     "/network: a card's own address, the machine's name, the time servers and the Wi-Fi networks, kept on STATE · the clock: never before the image's build time, set by SNTP at boot, checked every hour",
+    "native models (experimental): one llama-server on 127.0.0.1:8091 while a model is kept loaded, for one checked file on DATA · never awaited, started again when it ends, the first the kernel ends for memory",
     "a stop — /reboot now (SIGTERM, a restart) or /reboot halt (SIGUSR2, a power-off): the services stopped in reverse order, every other process ended, the workspace, DATA and STATE unmounted",
 ])
 slab(Y_KERNEL, H_KERNEL, "Linux kernel 6.18 LTS · Buildroot 2026.02.1 · initramfs /init = embra-init", KERNEL, [
@@ -260,7 +261,7 @@ slab(Y_GRUB, H_GRUB, "UEFI firmware · GRUB 2.12 on the EFI System Partition · 
 ])
 slab(Y_HOST, H_HOST, "Where it runs · one disk, converted or installed", QEMU, [
     "QEMU (run-qemu.sh, run-qemu-aarch64.sh): kvm | hvf · -m 4G · the firmware on pflash (EMBRA_BOOT=uefi, default) | -kernel + -initrd (direct) · -serial mon:stdio · EMBRA_VNC=1 gives the x86_64 VM a display",
-    "-nic user: hostfwd 3345 → every host interface, 8443 → the host's loopback · QEMU's DHCP leases 10.0.2.15 · a bridged or a real NIC answers on 3345 and 8443; the other four ports listen on loopback alone",
+    "-nic user: hostfwd 3345 → every host interface, 8443 → the host's loopback · QEMU's DHCP leases 10.0.2.15 · a bridged or a real NIC answers on 3345 and 8443; every other port listens on loopback alone",
     "hypervisors: vmware/embraos.ova and .vmdk (ESXi, Fusion) · hyper-v/embraos.vhdx (generation 2) · parallels/embraos.vmx with its VMDK · any of them, and bare metal: embraos.iso as a DVD or a USB stick",
     "embraos.img · GPT aligned to 1 MiB: esp vfat 64 MiB (GRUB, grub.cfg, grubenv) · rootfs_a | rootfs_b 2 GiB each, an xz SquashFS with its kernel and initrds · state ext4 256 MiB · data ext4 4 GiB, grown at boot",
 ])
