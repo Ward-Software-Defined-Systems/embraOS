@@ -338,7 +338,9 @@ impl Keeper {
             Installed::Unverified(_) if at_work => Err(format!("{id} is being checked")),
             Installed::No => Err(format!("{id} is not installed")),
             Installed::Partial(_) => Err(format!("{id} is not installed: its download stopped")),
-            Installed::Unverified(why) => Err(format!("{id} cannot be used: {why}")),
+            // With the way on: a turn, `/native` and the provider pill
+            // carry this sentence.
+            Installed::Unverified(why) => Err(format!("{id} cannot be used: {why}; /native install {id} checks it again and replaces a file that is not this release's")),
         }
     }
 
@@ -846,12 +848,18 @@ mod tests {
         keeper.tick().await;
         let status = rig.status();
         assert_eq!((status.state, status.model), (ServiceState::Unavailable, Some(MODEL)));
-        assert_eq!(status.reason, "qwen3.5-4b cannot be used: the file changed since it was checked");
+        assert_eq!(
+            status.reason,
+            "qwen3.5-4b cannot be used: the file changed since it was checked; /native install qwen3.5-4b checks it again and replaces a file that is not this release's"
+        );
 
         // Never checked.
         std::fs::remove_file(MODEL.verified_path(&rig.paths.models)).unwrap();
         keeper.tick().await;
-        assert_eq!(rig.status().reason, "qwen3.5-4b cannot be used: the file was never checked");
+        assert_eq!(
+            rig.status().reason,
+            "qwen3.5-4b cannot be used: the file was never checked; /native install qwen3.5-4b checks it again and replaces a file that is not this release's"
+        );
 
         // A stopped download, and nothing at all.
         std::fs::rename(MODEL.file_path(&rig.paths.models), MODEL.partial_path(&rig.paths.models)).unwrap();
