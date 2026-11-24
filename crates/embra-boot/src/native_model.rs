@@ -53,6 +53,23 @@ pub const SERVER_PATH: &str = "/usr/bin/llama-server";
 /// The CPU backends it loads one of when it starts, by what the processor
 /// can do.
 pub const BACKEND_DIR: &str = "/usr/lib/llama-cpp";
+/// What a backend's file is called there: `libggml-cpu-<name>.so`, one for
+/// each family of instruction sets (`haswell`, `armv8.2_2`).
+pub const BACKEND_FILE_PREFIX: &str = "libggml-cpu-";
+pub const BACKEND_FILE_SUFFIX: &str = ".so";
+/// What embrad asks the server's program, to learn which backend its loader
+/// takes on this processor: the list of devices, at the verbosity that shows
+/// the loader's own line. The program loads its backends as a server does,
+/// writes `load_backend: loaded CPU backend from <file>`, lists no device
+/// (the build has none but the processor) and ends; no model is read. The
+/// server itself runs a step below that verbosity and never writes the
+/// line, and its memory map names every backend the loader looked at: a C
+/// library that never unloads keeps them all.
+pub const BACKEND_QUESTION: [&str; 3] = ["-lv", "4", "--list-devices"];
+/// The words of the loader's line that stand before the file's path.
+const BACKEND_LOADED: &str = "loaded CPU backend from ";
+/// A backend's name is short: `sapphirerapids` is the longest the builds make.
+const BACKEND_NAME_MAX: usize = 40;
 
 /// The model files, a directory a model. On DATA, and outside the snapshots
 /// and restores of STATE and DATA: a model is downloaded again, not backed
@@ -603,6 +620,40 @@ pub fn write_settings(path: &Path, wanted: Option<&Wanted>) -> std::io::Result<(
 }
 
 // ---------------------------------------------------------------------------
+// The backend: which of the directory's files the loader takes.
+
+/// Whether a backend's name is one the status carries: what stands between
+/// the prefix and the suffix of a backend's file, in letters, digits, dots,
+/// underscores and hyphens.
+pub fn backend_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= BACKEND_NAME_MAX
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// The backend a file is by its path: `haswell` of
+/// `/usr/lib/llama-cpp/libggml-cpu-haswell.so`. `None` for a path that is
+/// not a backend's file in [`BACKEND_DIR`].
+pub fn backend_of_file(path: &str) -> Option<&str> {
+    let path = Path::new(path);
+    if path.parent() != Some(Path::new(BACKEND_DIR)) {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?.strip_prefix(BACKEND_FILE_PREFIX)?.strip_suffix(BACKEND_FILE_SUFFIX)?;
+    backend_name_ok(name).then_some(name)
+}
+
+/// The backend the program's answer to [`BACKEND_QUESTION`] names: the file
+/// of the loader's line. `None` when no line of the answer is the loader's,
+/// or the file it names is no backend of the directory.
+pub fn backend_of_answer(answer: &str) -> Option<&str> {
+    answer.lines().find_map(|line| {
+        let (_, path) = line.split_once(BACKEND_LOADED)?;
+        backend_of_file(path.trim())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // The status: embrad writes, the brain reads.
 
 /// What became of the settings.
@@ -677,6 +728,10 @@ pub struct Status {
     /// Whether the server was started with the model's image file: with it
     /// the model reads images, without it text alone.
     pub images: bool,
+    /// The CPU backend the server's loader takes on this processor
+    /// ([`backend_of_answer`]), while a server runs and once embrad has the
+    /// program's answer. `None` until then, and when the program named none.
+    pub backend: Option<String>,
     /// One line for the operator: why the model cannot be run, or how the
     /// server's last run ended. Empty when there is nothing to say.
     pub reason: String,
@@ -685,7 +740,7 @@ pub struct Status {
 impl Status {
     /// A state with nothing else to say about it.
     pub fn of(state: ServiceState, since: u64) -> Self {
-        Status { state, model: None, context: None, pid: None, since, exits: 0, images: false, reason: String::new() }
+        Status { state, model: None, context: None, pid: None, since, exits: 0, images: false, backend: None, reason: String::new() }
     }
 
     /// The record's text. The reason is kept to one line.
@@ -703,6 +758,9 @@ impl Status {
         text.push_str(&format!("since={}\nexits={}\n", self.since, self.exits));
         if self.images {
             text.push_str("images=yes\n");
+        }
+        if let Some(backend) = self.backend.as_deref().filter(|name| backend_name_ok(name)) {
+            text.push_str(&format!("backend={backend}\n"));
         }
         let reason = one_line(&self.reason);
         if !reason.is_empty() {
@@ -723,7 +781,7 @@ pub fn one_line(reason: &str) -> String {
 /// window and its process.
 pub fn parse_status(text: &str) -> Result<Status, String> {
     let (mut state, mut model, mut context, mut pid) = (None, None, None, None);
-    let (mut since, mut exits, mut reason, mut images) = (None, None, None, None);
+    let (mut since, mut exits, mut reason, mut images, mut backend) = (None, None, None, None, None);
     for (key, value, shown) in fields(text)? {
         match key {
             "images" => once(
@@ -746,6 +804,12 @@ pub fn parse_status(text: &str) -> Result<Status, String> {
             "since" => once(&mut since, value.parse::<u64>().map_err(|_| format!("{shown}: not a number of seconds"))?, &shown)?,
             "exits" => once(&mut exits, value.parse::<u32>().map_err(|_| format!("{shown}: not a count"))?, &shown)?,
             "reason" => once(&mut reason, one_line(value), &shown)?,
+            "backend" => {
+                if !backend_name_ok(value) {
+                    return Err(format!("{shown}: not a backend's name"));
+                }
+                once(&mut backend, value.to_string(), &shown)?
+            }
             _ => return Err(format!("{shown}: not a field this release knows")),
         }
     }
@@ -761,6 +825,7 @@ pub fn parse_status(text: &str) -> Result<Status, String> {
         since: since.unwrap_or(0),
         exits: exits.unwrap_or(0),
         images: images.unwrap_or(false),
+        backend,
         reason: reason.unwrap_or_default(),
     })
 }
@@ -1146,6 +1211,48 @@ mod tests {
         assert_eq!(running, ["loading", "ready"]);
     }
 
+    /// The program's answer as the image's own build gives it, on three
+    /// processors: the loader's line among the two lines of the list.
+    #[test]
+    fn the_backend_is_read_from_the_loaders_line_of_the_answer() {
+        let answer = |file: &str| format!("Available devices:\n0.00.427.675 I load_backend: loaded CPU backend from {file}\n  (none)\n");
+        assert_eq!(backend_of_answer(&answer("/usr/lib/llama-cpp/libggml-cpu-haswell.so")), Some("haswell"));
+        assert_eq!(backend_of_answer(&answer("/usr/lib/llama-cpp/libggml-cpu-sse42.so")), Some("sse42"));
+        assert_eq!(backend_of_answer(&answer("/usr/lib/llama-cpp/libggml-cpu-x64.so")), Some("x64"));
+        assert_eq!(backend_of_answer(&answer("/usr/lib/llama-cpp/libggml-cpu-armv8.2_2.so")), Some("armv8.2_2"));
+        assert_eq!(backend_of_answer(&answer("/usr/lib/llama-cpp/libggml-cpu-android_armv8.0_1.so")), Some("android_armv8.0_1"));
+        // The line stands wherever the program's two streams put it, with
+        // a carriage return or without.
+        assert_eq!(backend_of_answer("load_backend: loaded CPU backend from /usr/lib/llama-cpp/libggml-cpu-x64.so\r\nAvailable devices:\n"), Some("x64"));
+        // No line of the loader's, a backend of another kind, a file that is
+        // no backend of the directory: no name.
+        for none in [
+            "",
+            "Available devices:\n  (none)\n",
+            "0.00.1 I load_backend: loaded Vulkan backend from /usr/lib/llama-cpp/libggml-vulkan.so\n",
+            "0.00.1 I load_backend: loaded CPU backend from /usr/lib/llama-cpp/libggml-base.so\n",
+            "0.00.1 I load_backend: loaded CPU backend from /tmp/libggml-cpu-haswell.so\n",
+            "0.00.1 I load_backend: loaded CPU backend from /usr/lib/llama-cpp/sub/libggml-cpu-haswell.so\n",
+            "0.00.1 I load_backend: loaded CPU backend from /usr/lib/llama-cpp/libggml-cpu-.so\n",
+            "0.00.1 I load_backend: loaded CPU backend from /usr/lib/llama-cpp/libggml-cpu-has well.so\n",
+            "0.00.1 I load_backend: loaded CPU backend from \n",
+        ] {
+            assert_eq!(backend_of_answer(none), None, "{none:?}");
+        }
+        // The first line that names one is the answer.
+        assert_eq!(
+            backend_of_answer("x loaded CPU backend from /nowhere/libggml-cpu-a.so\ny loaded CPU backend from /usr/lib/llama-cpp/libggml-cpu-b.so\n"),
+            Some("b")
+        );
+        assert_eq!(backend_of_file("/usr/lib/llama-cpp/libggml-cpu-haswell.so"), Some("haswell"));
+        assert_eq!(backend_of_file("libggml-cpu-haswell.so"), None);
+        assert!(backend_name_ok("armv9.2_2") && backend_name_ok("x64") && !backend_name_ok("") && !backend_name_ok("a b") && !backend_name_ok("a/b"));
+        // The question loads no model and names no file: the list of
+        // devices, a step above the server's own verbosity.
+        assert_eq!(BACKEND_QUESTION, ["-lv", "4", "--list-devices"]);
+        assert!(BACKEND_QUESTION.iter().all(|word| !word.contains('/') && *word != "-m" && *word != "--mmproj"));
+    }
+
     #[test]
     fn the_status_reads_back_with_its_reason_on_one_line() {
         let ready = Status {
@@ -1156,6 +1263,7 @@ mod tests {
             since: 96,
             exits: 0,
             images: false,
+            backend: None,
             reason: String::new(),
         };
         assert_eq!(ready.to_text(), "state=ready\nmodel=qwen3.5-4b\ncontext=65536\npid=412\nsince=96\nexits=0\n");
@@ -1165,7 +1273,21 @@ mod tests {
         // one more line; a record without the line is a server without it.
         let seeing = Status { images: true, ..ready };
         assert_eq!(seeing.to_text(), "state=ready\nmodel=qwen3.5-4b\ncontext=65536\npid=412\nsince=96\nexits=0\nimages=yes\n");
-        assert_eq!(parse_status(&seeing.to_text()), Ok(seeing));
+        assert_eq!(parse_status(&seeing.to_text()), Ok(seeing.clone()));
+
+        // The backend the loader takes, once embrad has asked: one more
+        // line, and a record without it is a backend nobody has named yet.
+        let named = Status { backend: Some("armv8.2_2".to_string()), ..seeing };
+        assert_eq!(named.to_text(), "state=ready\nmodel=qwen3.5-4b\ncontext=65536\npid=412\nsince=96\nexits=0\nimages=yes\nbackend=armv8.2_2\n");
+        assert_eq!(parse_status(&named.to_text()), Ok(named.clone()));
+        assert_eq!(parse_status("state=off\nbackend=haswell\n").map(|s| s.backend), Ok(Some("haswell".to_string())));
+        for bad in ["", "has well", "../x64", "a/b", &"x".repeat(41)] {
+            assert_eq!(parse_status(&format!("state=off\nbackend={bad}\n")), Err(format!("backend={bad}: not a backend's name")), "{bad:?}");
+        }
+        assert_eq!(parse_status("state=off\nbackend=x64\nbackend=x64\n"), Err("backend=x64: named twice".to_string()));
+        // A name the grammar refuses is never written: the record stays one a reader takes.
+        let odd = Status { backend: Some("two words".to_string()), ..named };
+        assert!(!odd.to_text().contains("backend="), "{}", odd.to_text());
         assert_eq!(parse_status("state=off\nimages=no\n").map(|s| s.images), Ok(false));
         assert_eq!(parse_status("state=off\nimages=maybe\n"), Err("images=maybe: yes or no".to_string()));
         assert_eq!(parse_status("state=off\nimages=yes\nimages=yes\n"), Err("images=yes: named twice".to_string()));

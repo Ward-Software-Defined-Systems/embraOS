@@ -31,9 +31,16 @@
 //! - The kernel is told to end the model server first when memory runs out
 //!   (`oom_score_adj`): the database and the brain stay.
 //! - `embra.native=0` on the kernel line starts none in this boot.
+//! - Which CPU backend the server's loader takes on this processor is asked
+//!   of the server's own program, when a server is first started in a boot
+//!   (`native::BACKEND_QUESTION`): a second, short run that loads no model.
+//!   It is not waited for either; a later tick reads its answer, and the
+//!   status carries the name from then on. The server itself does not say
+//!   it at the verbosity it runs at.
 //!
 //! The server gets no environment (the brain's holds the provider keys) and
-//! no way to load anything but the model's own files.
+//! no way to load anything but the model's own files; the question gets no
+//! environment and names no file.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -63,6 +70,13 @@ const LOG_KEEP: u64 = 1024 * 1024;
 const LOG_LAST_LINE_WINDOW: u64 = 4096;
 /// The kernel ends the process with the highest score first.
 const OOM_SCORE_ADJ: &str = "1000";
+/// How many ticks the program's answer to the backend's question is looked
+/// for before the question is ended. The program answers in a fraction of a
+/// second (20 ms once its files were read, about a second before); one that
+/// does not is not looked at for the life of the boot.
+pub(crate) const BACKEND_TICKS_MAX: u32 = 24;
+/// How much of the answer is read: three lines, the loader's among them.
+const BACKEND_ANSWER_MAX: u64 = 64 * 1024;
 
 /// Where the keeper reads and writes; a test passes its own.
 #[derive(Clone, Debug)]
@@ -72,6 +86,9 @@ pub(crate) struct Paths {
     pub models: PathBuf,
     pub log: PathBuf,
     pub server: PathBuf,
+    /// Where the program's answer to the backend's question is written,
+    /// until it is read.
+    pub backend_answer: PathBuf,
     /// Where the server listens and the keeper asks.
     pub host: String,
     pub port: u16,
@@ -85,6 +102,8 @@ impl Paths {
             models: PathBuf::from(native::MODELS_DIR),
             log: PathBuf::from(native::LOG_PATH),
             server: PathBuf::from(native::SERVER_PATH),
+            // Beside the status, on the same tmpfs.
+            backend_answer: PathBuf::from(native::STATUS_PATH).with_file_name("native-model-backend-answer"),
             host: native::HOST.to_string(),
             port: native::PORT,
         }
@@ -112,6 +131,21 @@ struct Server {
     ready: bool,
 }
 
+/// Which CPU backend the server's loader takes on this processor, as the
+/// server's own program says it. A processor does not change while the
+/// machine runs: once named, it is not asked again in this boot.
+enum Backend {
+    /// Nobody asked yet: the tick that finds a server running asks.
+    Unasked,
+    /// The question runs: the program, and the ticks it was looked at since.
+    Asked(Child, u32),
+    /// The program's answer (`haswell`, `armv8.2_2`).
+    Named(String),
+    /// The program named none, or could not be asked. The next start of a
+    /// server asks once more.
+    Unnamed,
+}
+
 pub(crate) struct Keeper {
     enabled: bool,
     paths: Paths,
@@ -130,6 +164,10 @@ pub(crate) struct Keeper {
     last_how: String,
     /// What was last written, so that a tick with nothing new writes nothing.
     published: Option<Status>,
+    backend: Backend,
+    /// How many ticks the program's answer is looked for
+    /// ([`BACKEND_TICKS_MAX`]; a test sets its own).
+    backend_ticks_max: u32,
 }
 
 /// The server's arguments: one file, one name, one window, one slot, on
@@ -224,6 +262,37 @@ fn trim_log(log: &Path) {
     }
 }
 
+/// The start of a small file as text: the program's answer. Empty when it
+/// cannot be read.
+fn read_start(path: &Path, max: u64) -> String {
+    use std::io::Read;
+    let mut start = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(max).read_to_end(&mut start);
+    }
+    String::from_utf8_lossy(&start).into_owned()
+}
+
+/// The status to write, or `None` when it is what was written last. `since`
+/// says when the state began: it moves when anything of the state does, and
+/// stays when the one thing new is the backend's name, which arrives a tick
+/// after the server it is about and is no new state.
+fn to_publish(last: Option<&Status>, mut status: Status, now: u64) -> Option<Status> {
+    let Some(last) = last else {
+        status.since = now;
+        return Some(status);
+    };
+    status.since = last.since;
+    if *last == status {
+        return None;
+    }
+    let but_for_the_backend = Status { backend: last.backend.clone(), ..status.clone() };
+    if but_for_the_backend != *last {
+        status.since = now;
+    }
+    Some(status)
+}
+
 /// One question to the server's health: whether it answers 200. Loading, it
 /// answers 503; not listening yet, the connection is refused.
 async fn answers(host: &str, port: u16) -> bool {
@@ -257,12 +326,24 @@ impl Keeper {
             last_end: String::new(),
             last_how: String::new(),
             published: None,
+            backend: Backend::Unasked,
+            backend_ticks_max: BACKEND_TICKS_MAX,
         }
     }
 
-    /// The server's process, for the reaper to leave alone.
+    /// The server's process.
     pub(crate) fn pid(&self) -> Option<u32> {
         self.server.as_ref().and_then(|s| s.child.id())
+    }
+
+    /// The keeper's processes, for the reaper to leave alone: the server,
+    /// and the program while it is asked for its backend.
+    pub(crate) fn pids(&self) -> Vec<u32> {
+        let asked = match &self.backend {
+            Backend::Asked(program, _) => program.id(),
+            Backend::Unasked | Backend::Named(_) | Backend::Unnamed => None,
+        };
+        self.pid().into_iter().chain(asked).collect()
     }
 
     /// One look at the settings and at the server. Never waits for a model
@@ -272,6 +353,9 @@ impl Keeper {
             self.publish(ServiceState::Disabled, None, "native models are switched off on the kernel line (embra.native=0)".to_string());
             return;
         }
+        // Whatever the settings say by now: a program that was asked is
+        // looked at until it has answered, and collected.
+        self.look_at_the_answer().await;
         let followed = match native::read_settings(&self.paths.settings) {
             Err(reason) => Followed::Refused(reason),
             Ok(None) => Followed::Nothing,
@@ -306,6 +390,9 @@ impl Keeper {
                 Ok(()) => self.start(wanted, images),
                 Err(why) => waits_for = Some(why),
             }
+        }
+        if self.server.is_some() && matches!(self.backend, Backend::Unasked) {
+            self.ask_for_the_backend();
         }
         trim_log(&self.paths.log);
         let (state, reason) = match (&self.server, waits_for) {
@@ -381,6 +468,76 @@ impl Keeper {
         }
     }
 
+    /// Ask the server's program which backend its loader takes on this
+    /// processor ([`native::BACKEND_QUESTION`]): a run of its own, without
+    /// an environment, its two streams into one small file. Not waited for.
+    fn ask_for_the_backend(&mut self) {
+        if let Some(dir) = self.paths.backend_answer.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let answer = std::fs::File::create(&self.paths.backend_answer).and_then(|f| Ok((f.try_clone()?, f)));
+        let asked = answer.and_then(|(out, err)| {
+            Command::new(&self.paths.server)
+                .args(native::BACKEND_QUESTION)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(out))
+                .stderr(Stdio::from(err))
+                .kill_on_drop(true)
+                .spawn()
+        });
+        self.backend = match asked {
+            Ok(program) => Backend::Asked(program, 0),
+            Err(e) => {
+                warn!("native model: {} could not be asked which backend it takes on this processor ({e})", self.paths.server.display());
+                let _ = std::fs::remove_file(&self.paths.backend_answer);
+                Backend::Unnamed
+            }
+        };
+    }
+
+    /// Whether the program that was asked has answered, and what. One that
+    /// has not ended after [`BACKEND_TICKS_MAX`] ticks is ended.
+    async fn look_at_the_answer(&mut self) {
+        let limit = self.backend_ticks_max;
+        let Backend::Asked(program, ticks) = &mut self.backend else { return };
+        let how = match program.try_wait() {
+            Ok(Some(status)) => ended_words(status),
+            Ok(None) if ticks.saturating_add(1) < limit => {
+                *ticks += 1;
+                return;
+            }
+            Ok(None) => {
+                // Killed and collected here: it is this process's child.
+                let _ = program.kill().await;
+                format!("it had not ended after {limit} looks and was ended")
+            }
+            Err(e) => format!("its state could not be read: {e}"),
+        };
+        let answer = read_start(&self.paths.backend_answer, BACKEND_ANSWER_MAX);
+        let _ = std::fs::remove_file(&self.paths.backend_answer);
+        self.backend = match native::backend_of_answer(&answer) {
+            Some(name) => {
+                info!(
+                    "native model: on this processor the model server takes the {name} backend ({}/{}{name}{})",
+                    native::BACKEND_DIR,
+                    native::BACKEND_FILE_PREFIX,
+                    native::BACKEND_FILE_SUFFIX
+                );
+                Backend::Named(name.to_string())
+            }
+            None => {
+                let said = answer.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("nothing");
+                warn!(
+                    "native model: {} named no backend when asked ({how}; it said: {}); the status carries none",
+                    self.paths.server.display(),
+                    native::one_line(said)
+                );
+                Backend::Unnamed
+            }
+        };
+    }
+
     /// Start the server for `wanted`, with the model's image file when
     /// `images` says it is there. A start that fails counts as a run that
     /// ended before it answered.
@@ -414,6 +571,11 @@ impl Keeper {
                     child.id()
                 );
                 self.server = Some(Server { child, wanted, images, ready: false });
+                // A program that named no backend is asked once more with
+                // every start: by the tick this start belongs to.
+                if matches!(self.backend, Backend::Unnamed) {
+                    self.backend = Backend::Unasked;
+                }
             }
             Err(e) => {
                 self.last_how = format!("it could not be started, {}: {e}", self.paths.server.display());
@@ -434,23 +596,22 @@ impl Keeper {
         }
     }
 
-    /// Write the status when it is not what was written last. `since` moves
-    /// when anything else does.
+    /// Write the status when it is not what was written last
+    /// ([`to_publish`]).
     fn publish(&mut self, state: ServiceState, wanted: Option<Wanted>, reason: String) {
         let mut status = Status::of(state, 0);
         status.model = wanted.map(|w| w.model);
         status.context = wanted.map(|w| w.context);
         status.pid = if state.runs() { self.pid() } else { None };
         status.images = state.runs() && self.server.as_ref().is_some_and(|server| server.images);
+        // The backend is said of a server that runs, once the program named it.
+        status.backend = match &self.backend {
+            Backend::Named(name) if state.runs() => Some(name.clone()),
+            Backend::Named(_) | Backend::Unasked | Backend::Asked(..) | Backend::Unnamed => None,
+        };
         status.exits = self.exits;
         status.reason = native::one_line(&reason);
-        if let Some(last) = &self.published {
-            status.since = last.since;
-            if *last == status {
-                return;
-            }
-        }
-        status.since = native::uptime_secs();
+        let Some(status) = to_publish(self.published.as_ref(), status, native::uptime_secs()) else { return };
         if let Err(e) = native::write_status(&self.paths.status, &status) {
             warn!("native model: the status could not be written to {} ({e})", self.paths.status.display());
         }
@@ -473,6 +634,10 @@ mod tests {
 
     const MODEL: &native::NativeModel = &native::CATALOGUE[0];
 
+    /// What the image's own build answers on a processor with AVX2: the
+    /// list's two lines on one stream, the loader's line on the other.
+    const NAMES_HASWELL: &str = "echo 'Available devices:'\necho '0.00.427.675 I load_backend: loaded CPU backend from /usr/lib/llama-cpp/libggml-cpu-haswell.so' >&2\necho '  (none)'";
+
     impl Rig {
         fn new(tag: &str, behaviour: &str) -> Rig {
             let dir = std::env::temp_dir().join(format!("embrad-native-{tag}-{}", std::process::id()));
@@ -488,6 +653,7 @@ mod tests {
                 models: dir.join("models"),
                 log: dir.join("native-model.log"),
                 server: dir.join("llama-server"),
+                backend_answer: dir.join("run/native-model-backend-answer"),
                 host: "127.0.0.1".to_string(),
                 port,
             };
@@ -521,12 +687,47 @@ mod tests {
         }
 
         fn server_does(&self, behaviour: &str) {
+            self.program_does(behaviour, NAMES_HASWELL);
+        }
+
+        /// The stand-in program. Asked for its backend
+        /// ([`native::BACKEND_QUESTION`]) it writes the question and its
+        /// environment down and does what `asked` says; started as a server
+        /// it writes its arguments and its environment down and does what
+        /// `behaviour` says. The two leave their marks in files of their
+        /// own: a question is no start.
+        fn program_does(&self, behaviour: &str, asked: &str) {
             let script = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{dir}/args'\nenv > '{dir}/env'\necho started >> '{dir}/starts'\n{behaviour}\n",
+                "#!/bin/sh\ncase \" $* \" in *' --list-devices '*)\nprintf '%s\\n' \"$@\" > '{dir}/question'\nenv > '{dir}/question-env'\necho asked >> '{dir}/questions'\n{asked}\nexit 0 ;;\nesac\nprintf '%s\\n' \"$@\" > '{dir}/args'\nenv > '{dir}/env'\necho started >> '{dir}/starts'\n{behaviour}\n",
                 dir = self.dir.display()
             );
             std::fs::write(&self.paths.server, script).unwrap();
             std::fs::set_permissions(&self.paths.server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        /// A keeper that looks for the program's answer as long as a test
+        /// goes on: the tests that are not about that limit.
+        fn patient_keeper(&self) -> Keeper {
+            let mut keeper = self.keeper();
+            keeper.backend_ticks_max = u32::MAX;
+            keeper
+        }
+
+        fn questions(&self) -> usize {
+            std::fs::read_to_string(self.dir.join("questions")).map(|s| s.lines().count()).unwrap_or(0)
+        }
+
+        /// Tick until the program that was asked has ended and the keeper
+        /// has read its answer: its run is not the keeper's to await.
+        async fn answered(&self, keeper: &mut Keeper) {
+            for _ in 0..5_000 {
+                keeper.tick().await;
+                if !matches!(keeper.backend, Backend::Asked(..) | Backend::Unasked) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("the program that was asked for its backend never answered");
         }
 
         fn want(&self, wanted: Option<&Wanted>) {
@@ -684,9 +885,16 @@ mod tests {
         // A secret in this process's environment, as the brain's has.
         // SAFETY: the tests that spawn children hold one lock; no other thread reads the environment meanwhile.
         unsafe { std::env::set_var("EMBRA_NATIVE_TEST_SECRET", "sk-never") };
-        let mut keeper = rig.keeper();
+        let mut keeper = rig.patient_keeper();
         keeper.tick().await;
         rig.started(1).await;
+        // The question is asked in the same tick, with the same nothing.
+        for _ in 0..5_000 {
+            if rig.questions() >= 1 && rig.dir.join("question-env").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
         unsafe { std::env::remove_var("EMBRA_NATIVE_TEST_SECRET") };
         let status = rig.status();
         assert_eq!((status.state, status.model, status.context), (ServiceState::Loading, Some(MODEL), Some(32_768)));
@@ -700,6 +908,16 @@ mod tests {
         let env = std::fs::read_to_string(rig.dir.join("env")).unwrap();
         assert!(!env.contains("EMBRA_NATIVE_TEST_SECRET") && !env.contains("sk-never"), "{env}");
         assert!(!env.lines().any(|l| l.starts_with("HOME=") || l.starts_with("PATH=/")), "nothing is handed on: {env}");
+        let asked_env = std::fs::read_to_string(rig.dir.join("question-env")).unwrap();
+        assert!(!asked_env.contains("sk-never") && !asked_env.lines().any(|l| l.starts_with("HOME=") || l.starts_with("PATH=/")), "{asked_env}");
+
+        // The program's answer arrives a tick or more after the start: the
+        // status names the backend then, and the state it is about began
+        // when it began.
+        let began = status.since;
+        rig.answered(&mut keeper).await;
+        let status = rig.status();
+        assert_eq!((status.state, status.backend.as_deref(), status.since), (ServiceState::Loading, Some("haswell"), began));
 
         // Not answering yet: nothing changes, and nothing is written again.
         let written = std::fs::metadata(&rig.paths.status).unwrap().modified().unwrap();
@@ -941,6 +1159,161 @@ mod tests {
         assert_eq!((status.state, status.exits), (ServiceState::Loading, 4), "four exits, each after an answer: never left");
         assert_eq!(status.reason, "the model server ended (signal 9: killed, by the kernel when memory ran out or by hand)", "no last line of one that was killed");
         keeper.stop().await;
+    }
+
+    /// The program is asked once in a boot, by the fixed question; the
+    /// status names the backend while a server runs, across starts for
+    /// other settings, and names none when no server runs.
+    #[tokio::test]
+    async fn the_backend_is_asked_of_the_program_once_and_the_status_names_it_while_a_server_runs() {
+        let _children = crate::supervisor::test_support::CHILDREN.lock().await;
+        let rig = Rig::new("backend", "exec sleep 30");
+        rig.want(Some(&Wanted::new(MODEL)));
+        let mut keeper = rig.patient_keeper();
+        assert_eq!(keeper.pids(), Vec::<u32>::new());
+        keeper.tick().await;
+        rig.started(1).await;
+        // Both are this process's children, and the reaper leaves both alone.
+        let server = keeper.pid().unwrap();
+        let pids = keeper.pids();
+        assert!(pids.len() == 2 && pids[0] == server && pids[1] != server, "the server and the program that is asked: {pids:?}");
+        assert_eq!(rig.status().backend, None, "nobody has answered yet");
+
+        rig.answered(&mut keeper).await;
+        assert_eq!(rig.status().backend.as_deref(), Some("haswell"));
+        assert_eq!(keeper.pids(), vec![server], "the program that answered is collected");
+        let question = std::fs::read_to_string(rig.dir.join("question")).unwrap();
+        assert_eq!(question.lines().collect::<Vec<_>>(), native::BACKEND_QUESTION);
+        assert!(!rig.paths.backend_answer.exists(), "the answer is read and removed");
+        // A question is no start: the server's own marks are the server's.
+        let args = std::fs::read_to_string(rig.dir.join("args")).unwrap();
+        assert_eq!(args.lines().collect::<Vec<_>>(), server_args(&Wanted::new(MODEL), &rig.paths, false));
+        assert_eq!((rig.starts(), rig.questions()), (1, 1));
+
+        // Other settings: another server, and the same processor. Nobody is
+        // asked again, and the first status of the new server names it.
+        rig.want(Some(&Wanted { model: MODEL, context: 8_192 }));
+        keeper.tick().await;
+        rig.started(2).await;
+        let status = rig.status();
+        assert_eq!((status.state, status.context, status.backend.as_deref()), (ServiceState::Loading, Some(8_192), Some("haswell")));
+        assert_eq!(status.to_text().lines().filter(|line| *line == "backend=haswell").count(), 1);
+        keeper.tick().await;
+        assert_eq!(rig.questions(), 1);
+
+        // No server, no backend to say anything of.
+        rig.want(None);
+        keeper.tick().await;
+        let status = rig.status();
+        assert_eq!((status.state, status.backend.as_deref()), (ServiceState::Off, None));
+        assert!(!status.to_text().contains("backend="));
+        assert_eq!(rig.questions(), 1);
+    }
+
+    /// A program that names no backend leaves the status without one, and
+    /// is asked once more at the next start of a server.
+    #[tokio::test]
+    async fn a_program_that_names_no_backend_is_asked_again_at_the_next_start() {
+        let _children = crate::supervisor::test_support::CHILDREN.lock().await;
+        let rig = Rig::new("unnamed", "exec sleep 30");
+        rig.program_does("exec sleep 30", "echo 'Available devices:'\necho '  (none)'");
+        rig.want(Some(&Wanted::new(MODEL)));
+        let mut keeper = rig.patient_keeper();
+        keeper.tick().await;
+        rig.started(1).await;
+        rig.answered(&mut keeper).await;
+        assert!(matches!(keeper.backend, Backend::Unnamed));
+        assert_eq!((rig.status().state, rig.status().backend), (ServiceState::Loading, None));
+        assert!(!rig.paths.backend_answer.exists());
+        // The same server goes on: nobody is asked at every tick.
+        for _ in 0..3 {
+            keeper.tick().await;
+        }
+        assert_eq!(rig.questions(), 1);
+
+        // A start for other settings asks once more, and this time the
+        // program names one.
+        rig.server_does("exec sleep 30");
+        rig.want(Some(&Wanted { model: MODEL, context: 8_192 }));
+        keeper.tick().await;
+        rig.started(2).await;
+        rig.answered(&mut keeper).await;
+        assert_eq!((rig.questions(), rig.status().backend.as_deref()), (2, Some("haswell")));
+        keeper.stop().await;
+    }
+
+    /// A program that does not end is looked at a few times and then ended:
+    /// the reaper is not kept from its sweep by a child nobody collects.
+    #[tokio::test]
+    async fn a_question_that_does_not_end_is_ended_after_its_looks() {
+        let _children = crate::supervisor::test_support::CHILDREN.lock().await;
+        let rig = Rig::new("stuck", "exec sleep 30");
+        rig.program_does("exec sleep 30", "exec sleep 30");
+        rig.want(Some(&Wanted::new(MODEL)));
+        let mut keeper = rig.keeper();
+        keeper.backend_ticks_max = 3;
+        keeper.tick().await;
+        rig.started(1).await;
+        let server = keeper.pid().unwrap();
+        let asked = keeper.pids().into_iter().find(|pid| *pid != server).expect("the program is asked");
+        // Two looks leave it; the third ends it.
+        keeper.tick().await;
+        keeper.tick().await;
+        assert!(matches!(keeper.backend, Backend::Asked(_, 2)));
+        assert!(Path::new(&format!("/proc/{asked}")).exists());
+        keeper.tick().await;
+        assert!(matches!(keeper.backend, Backend::Unnamed));
+        assert!(!Path::new(&format!("/proc/{asked}")).exists(), "the program that was asked is gone");
+        assert_eq!(keeper.pids(), vec![server]);
+        assert_eq!((rig.status().state, rig.status().backend), (ServiceState::Loading, None));
+        assert!(!rig.paths.backend_answer.exists());
+        keeper.stop().await;
+    }
+
+    /// With native models switched off nobody is asked, and a machine that
+    /// keeps no model loaded asks nobody either.
+    #[tokio::test]
+    async fn nobody_is_asked_while_no_server_is_started() {
+        let _children = crate::supervisor::test_support::CHILDREN.lock().await;
+        let rig = Rig::new("unasked", "exec sleep 30");
+        let mut keeper = rig.keeper();
+        rig.want(None);
+        for _ in 0..3 {
+            keeper.tick().await;
+        }
+        rig.want(Some(&Wanted::new(MODEL)));
+        let mut disabled = Keeper::with_paths(false, rig.paths.clone());
+        for _ in 0..3 {
+            disabled.tick().await;
+        }
+        assert_eq!((rig.starts(), rig.questions()), (0, 0));
+        assert!(matches!(keeper.backend, Backend::Unasked) && matches!(disabled.backend, Backend::Unasked));
+    }
+
+    /// `since` is when the state began: it moves with the state, and stays
+    /// when the backend's name is all that is new.
+    #[test]
+    fn the_backends_name_arriving_is_no_new_state() {
+        let mut loading = Status::of(ServiceState::Loading, 0);
+        (loading.model, loading.context, loading.pid) = (Some(MODEL), Some(65_536), Some(412));
+        // The first status is stamped.
+        let first = to_publish(None, loading.clone(), 100).unwrap();
+        assert_eq!(first.since, 100);
+        // The same again: nothing to write, however late.
+        assert_eq!(to_publish(Some(&first), loading.clone(), 160), None);
+        // The name arrives: written, and the state began when it began.
+        let named = Status { backend: Some("haswell".to_string()), ..loading.clone() };
+        let second = to_publish(Some(&first), named.clone(), 160).unwrap();
+        assert_eq!((second.since, second.backend.as_deref()), (100, Some("haswell")));
+        assert_eq!(to_publish(Some(&second), named.clone(), 200), None);
+        // The state moves: stamped anew, with the name or without.
+        let ready = Status { state: ServiceState::Ready, ..named.clone() };
+        assert_eq!(to_publish(Some(&second), ready.clone(), 200).unwrap().since, 200);
+        let both = Status { state: ServiceState::Ready, ..named };
+        assert_eq!(to_publish(Some(&first), both, 300).unwrap().since, 300, "the name and the state at once");
+        // The name goes with the server it was said of: a new state.
+        let off = Status::of(ServiceState::Off, 0);
+        assert_eq!(to_publish(Some(&second), off, 400).unwrap().since, 400);
     }
 
     #[test]

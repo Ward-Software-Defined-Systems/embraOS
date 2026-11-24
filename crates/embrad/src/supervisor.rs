@@ -862,7 +862,7 @@ impl Supervisor {
         self.services
             .iter()
             .filter_map(|s| s.child.as_ref().and_then(|c| c.id()))
-            .chain(self.model_server.pid())
+            .chain(self.model_server.pids())
             .collect()
     }
 

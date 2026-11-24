@@ -575,7 +575,7 @@ pub(super) async fn show_native(env: &Env, jobs: &Jobs, cfg: Option<&config::Sys
         Ok(None) => "  Kept loaded: none. /native use <model> loads one.".to_string(),
         Err(why) => format!("  Kept loaded: the settings cannot be read ({why})."),
     });
-    if let Some(words) = native_model::server_words(env) {
+    if let Some(words) = native_model::server_words_with_backend(env) {
         lines.push(format!("  The model server: {words}."));
     }
     match (jobs.running(), jobs.last()) {
@@ -1387,6 +1387,13 @@ mod tests {
             shown.contains("\n  Kept loaded: qwen3.5-4b, context window 65536, thinking off. It leads the session.\n  The model server: ready, context window 65536, reads text alone (its image file is not installed).\n  /native help"),
             "{shown}"
         );
+        // Once embrad's status names the backend the processor is given, the same line says it.
+        let mut named = status(ServiceState::Ready, Some(wanted), "");
+        (named.images, named.backend) = (true, Some("haswell".to_string()));
+        contract::write_status(&env.status, &named).unwrap();
+        let shown = show_native(&env, &jobs, Some(&cfg)).await;
+        assert!(shown.contains("\n  The model server: ready, context window 65536, reads images, processor backend haswell.\n  /native help"), "{shown}");
+        contract::write_status(&env.status, &status(ServiceState::Ready, Some(wanted), "")).unwrap();
         // Another provider leads; the model thinks; before a session the thinking is not said.
         let cfg = config_of("anthropic", serde_json::json!({"native_model": "qwen3.5-4b"}));
         assert!(show_native(&env, &jobs, Some(&cfg)).await.contains("\n  Kept loaded: qwen3.5-4b, context window 65536, thinking on.\n"));

@@ -36,7 +36,7 @@ Every 1,024 tokens of window are about 32 MB, and 64 MB for the 27B. A model's i
 
 The 4B at the default window loads in a machine of 5 GiB and does not in one of 3. embrad marks the model server as the process the kernel ends first when memory runs out (`oom_score_adj` 1000), so the database, the brain and the web console stay up. A model server the kernel ended is started again, and a turn in flight on it is cut. One that is ended at every load is left alone after the third, and the turn, `/native` and the provider pill say why: `signal 9: killed, by the kernel when memory ran out or by hand`. `/native context <tokens>` loads the model with a smaller window, and `/native off` frees all of it.
 
-**The processor.** The server loads the backend that fits the processor it finds (`/usr/lib/llama-cpp/libggml-cpu-*.so`, one for each family of instruction sets). A processor without AVX runs a model as well: on the same hardware a prompt was read about seven times slower without it, and an image took about eight times as long.
+**The processor.** The server loads the backend that fits the processor it finds (`/usr/lib/llama-cpp/libggml-cpu-*.so`, one for each family of instruction sets), and `/native` names the one it took (`processor backend haswell`). A processor without AVX runs a model as well: on the same hardware a prompt was read about seven times slower without it, and an image took about eight times as long.
 
 **DATA.** A model's files are on DATA, under `/embra/data/models/<name>/`. An install needs each file's size and DATA's reserve of 256 MiB. The DATA of a disk image as built is 4 GiB: the 4B fits, and the 9B and the 27B need a larger disk first. DATA grows to the end of its disk at boot ([UPDATES-AND-BACKUPS.md](UPDATES-AND-BACKUPS.md)); an installed machine's DATA is the rest of its disk. `/native` shows what is free.
 
@@ -64,7 +64,7 @@ A stop (**Esc**, `/stop`) closes the request, and the server leaves it: within a
 
 `/native use <model>` keeps a model loaded, and `/native off` keeps none. Both are independent of the provider that leads the session: a model can stay loaded for the `native_ask` tool while Anthropic, Gemini, Ollama or LM Studio answers the operator. The stored configuration carries the choice (`openai_compat.native_model`), so the model is loaded again at every boot.
 
-The brain writes the choice to `/embra/state/native-model/settings`, and embrad follows that record within five seconds: it starts the model server for the model, or ends it. The load itself is the read of the model's file, a few seconds from memory and longer from a cold disk. `/native` shows the state: `ready`, `loading`, or `not loaded` with the reason, and whether the server reads images or text alone.
+The brain writes the choice to `/embra/state/native-model/settings`, and embrad follows that record within five seconds: it starts the model server for the model, or ends it. The load itself is the read of the model's file, a few seconds from memory and longer from a cold disk. `/native` shows the state: `ready`, `loading`, or `not loaded` with the reason, whether the server reads images or text alone, and the processor backend it runs on.
 
 - **The context window** is 65,536 tokens unless set: `/native context <tokens>` takes 1,024 up to the model's 262,144, and `/native context reset` returns to the default. Each model keeps its own. A change ends the model server and loads the model again; a turn in flight on it is cut.
 - **A model whose model file is not installed** is installed first, with both its files, and loaded when the job is done. A model that has its model file and not its image file is loaded as it is, and reads text alone until `/native install <model>` brings the other.
@@ -101,12 +101,13 @@ The replicant check is a model's judgement of a tool against the sealed soul ([R
 - **Loopback alone.** The listener is `127.0.0.1:8091`, plain HTTP without a key; the brain is its one client. Nothing forwards it.
 - **Not a service of the supervisor.** embrad's reconcile loop keeps it, never waits for it, and never stops the machine because of it: a model server that ends is started again at the next look.
 - **Its output** goes to `/embra/ephemeral/native-model.log`, cut back to its last mebibyte when it passes eight; the file tools read it.
+- **Its backend is asked of its own program.** The server writes which backend its loader took at a verbosity it does not run at, and its log has no line of it. When a model server is first started in a boot, embrad starts the program once more beside it, as `llama-server -lv 4 --list-devices`: it loads the backends as a server does, writes the loader's line, lists no device and ends. No model is read, and it gets no environment either. embrad does not wait for it; a later look reads the answer, and the status record and `/native` name the backend from then on, for every model server of that boot. A program that names none is asked once more at the next start.
 - **Three records**, one `key=value` a line (`crates/embra-boot/src/native_model.rs`):
 
 | Record | Written by | Read by | Holds |
 |---|---|---|---|
 | `/embra/state/native-model/settings` | the brain | embrad | the model to keep loaded and its window; absent or empty for none |
-| `/run/embra/native-model-status` | embrad | the brain | `off`, `disabled`, `unavailable`, `loading`, `ready` or `halted`, with the model, the window, the process, whether the server was started with the image file, and the reason |
+| `/run/embra/native-model-status` | embrad | the brain | `off`, `disabled`, `unavailable`, `loading`, `ready` or `halted`, with the model, the window, the process, whether the server was started with the image file, the backend its processor is given (`backend=`), and the reason |
 | `/embra/data/models/<name>/verified` and `verified-images` | the updater | embrad | each file's name, size, sha256 and modification time as they were when it was checked |
 
 embrad starts a model only from a file whose record still describes it; nothing is hashed at a start. A file changed since it was checked is not loaded, and `/native install <model>` checks it again.

@@ -796,8 +796,9 @@ assert_rootfs_invariants() {
 # libraries name is in the root filesystem, none of them a TLS or a transfer
 # library, and no run path is written into any; on x86_64, the server, its
 # libraries and the two backends below AVX use no AVX register (a processor
-# without AVX stops on the first such instruction); the licence texts are the
-# build's own.
+# without AVX stops on the first such instruction); the library that loads a
+# backend still writes the line embrad reads the backend's name from; the
+# licence texts are the build's own.
 assert_native_model_runtime() {
     local tgt="$1" triple="${2:-}" version src bin readelf objdump f name dyn n want have baseline lic count
     local -a files plain
@@ -857,6 +858,18 @@ $(printf '%s\n' "$dyn" | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p')
 NEEDED
     done
 
+    # embrad learns which CPU backend the loader takes on a processor from the
+    # loader's own line, which the server's program writes when it is asked
+    # (BACKEND_QUESTION and backend_of_answer, crates/embra-boot/src/native_model.rs).
+    # A llama.cpp whose loader words the line otherwise would leave /native and
+    # the status record without the backend's name, and nothing would say so.
+    n=0
+    for f in "$tgt"/usr/lib/libggml.so.*; do
+        if [ -f "$f" ] && [ ! -L "$f" ] && grep -a -q 'loaded %s backend from %s' "$f"; then n=$((n + 1)); fi
+    done
+    [ "$n" = 1 ] \
+        || reject_image "libggml.so in the rootfs does not carry the loader's line 'loaded %s backend from %s': embrad reads the CPU backend's name from it (crates/embra-boot/src/native_model.rs, backend_of_answer)"
+
     case "$triple" in
         x86_64-*)
             plain+=("$tgt/usr/lib/llama-cpp/libggml-cpu-x64.so")
@@ -879,7 +892,7 @@ NEEDED
     have="$(ls "$tgt/usr/share/licenses/llama.cpp" | wc -l)"
     [ "$have" -eq "$count" ] \
         || reject_image "/usr/share/licenses/llama.cpp in the rootfs holds $have files; the recipe installs $count"
-    echo "native models (experimental): llama-server of llama.cpp $version, $(printf '%s\n' $want | wc -l) CPU backends${baseline:+ with $baseline}, every library it loads in the rootfs, no TLS library, no run path, $count licence texts"
+    echo "native models (experimental): llama-server of llama.cpp $version, $(printf '%s\n' $want | wc -l) CPU backends${baseline:+ with $baseline}, every library it loads in the rootfs, no TLS library, no run path, the loader's line that names a backend, $count licence texts"
 }
 
 # clean_packages_that_name_the_builder <buildroot dir>: a package whose file

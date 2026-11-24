@@ -416,22 +416,35 @@ pub(crate) async fn ask_again_if_halted(env: &Env) -> Result<bool, String> {
 /// The model server in a few words for a status line, by the two records;
 /// `None` on a machine without embrad's status.
 pub(crate) fn server_words(env: &Env) -> Option<String> {
+    server_said(env, false)
+}
+
+/// The same for `/native`, which says more: with the CPU backend the
+/// server's loader takes on this processor, once embrad has asked the
+/// server's program and the status names it.
+pub(crate) fn server_words_with_backend(env: &Env) -> Option<String> {
+    server_said(env, true)
+}
+
+fn server_said(env: &Env, with_backend: bool) -> Option<String> {
     let (wanted, status) = env.records();
     let status = status?;
     let asked = wanted.as_ref().ok().and_then(|wanted| wanted.as_ref());
     // Whether the status is about what the record asks now.
     let follows = asked.is_some_and(|wanted| status.model == Some(wanted.model) && status.context == Some(wanted.context));
+    // Said of a server that runs for what is asked, and of no other state.
+    let backend = status.backend.as_deref().filter(|_| with_backend).map(|name| format!(", processor backend {name}")).unwrap_or_default();
     Some(match (status.state, asked) {
         (ServiceState::Disabled, _) => said(&status),
         (_, None) => "off".to_string(),
         (_, Some(wanted)) if !follows => format!("embrad is about to start it for {}", wanted.model.id),
         // Whether it reads images is the server's own matter: it was
         // started with the model's image file, or without.
-        (ServiceState::Ready, Some(wanted)) if status.images => format!("ready, context window {}, reads images", wanted.context),
+        (ServiceState::Ready, Some(wanted)) if status.images => format!("ready, context window {}, reads images{backend}", wanted.context),
         (ServiceState::Ready, Some(wanted)) => {
-            format!("ready, context window {}, reads text alone (its image file is not installed)", wanted.context)
+            format!("ready, context window {}, reads text alone (its image file is not installed){backend}", wanted.context)
         }
-        (ServiceState::Loading, Some(wanted)) => format!("loading {}, context window {}", wanted.model.id, wanted.context),
+        (ServiceState::Loading, Some(wanted)) => format!("loading {}, context window {}{backend}", wanted.model.id, wanted.context),
         (ServiceState::Unavailable | ServiceState::Halted | ServiceState::Off, Some(_)) => format!("not loaded: {}", said(&status)),
     })
 }
@@ -888,7 +901,30 @@ mod tests {
         );
         let mut seeing = status(ServiceState::Ready, Some(four()), "");
         seeing.images = true;
-        assert_eq!(words(seeing), "ready, context window 65536, reads images");
+        assert_eq!(words(seeing.clone()), "ready, context window 65536, reads images");
+
+        // The backend its processor is given, once embrad's status names it:
+        // said by `/native`'s words, and by the provider's line never.
+        assert_eq!(server_words_with_backend(&env).as_deref(), Some("ready, context window 65536, reads images"), "nobody has named it yet");
+        let named = |state: ServiceState, wanted: Option<Wanted>, images: bool| {
+            let mut said = status(state, wanted, "");
+            (said.images, said.backend) = (images, Some("armv8.2_2".to_string()));
+            contract::write_status(&env.status, &said).unwrap();
+            (server_words(&env).unwrap(), server_words_with_backend(&env).unwrap())
+        };
+        assert_eq!(
+            named(ServiceState::Ready, Some(four()), true),
+            ("ready, context window 65536, reads images".to_string(), "ready, context window 65536, reads images, processor backend armv8.2_2".to_string())
+        );
+        assert_eq!(
+            named(ServiceState::Ready, Some(four()), false).1,
+            "ready, context window 65536, reads text alone (its image file is not installed), processor backend armv8.2_2"
+        );
+        assert_eq!(named(ServiceState::Loading, Some(four()), false).1, "loading qwen3.5-4b, context window 65536, processor backend armv8.2_2");
+        // A status about another model, and a state without a server: the
+        // words say nothing of a backend.
+        assert_eq!(named(ServiceState::Ready, Some(nine()), true).1, "embrad is about to start it for qwen3.5-4b");
+        assert_eq!(named(ServiceState::Halted, Some(four()), false).1, "not loaded: the model server is halted");
         assert_eq!(words(status(ServiceState::Unavailable, Some(four()), "qwen3.5-4b is not installed")), "not loaded: qwen3.5-4b is not installed");
         assert_eq!(words(status(ServiceState::Halted, Some(four()), "")), "not loaded: the model server is halted");
         assert_eq!(
