@@ -15,9 +15,9 @@ What has been run, and on which machines, is in [VALIDATION-STATUS.md](../VALIDA
 
 | Model | The name to type | Model file | Image file | Source on huggingface.co |
 |---|---|---|---|---|
-| Qwen3.5 4B | `qwen3.5-4b` | `Qwen3.5-4B-Q4_K_M.gguf`, 2,815,884,544 bytes | `mmproj-Qwen3.5-4B-F16.gguf`, 672,423,488 bytes | `William-WSDS/Qwen3.5-4B-GGUF` at revision `57076606b44a1762870e97d8df25353d110fd880` |
-| Qwen3.5 9B | `qwen3.5-9b` | `Qwen3.5-9B-Q4_K_M.gguf`, 5,831,992,608 bytes | `mmproj-Qwen3.5-9B-F16.gguf`, 918,165,952 bytes | `William-WSDS/Qwen3.5-9B-GGUF` at revision `6ecf21517d2d576dcdb8be08d4b67dcb7a31ea74` |
-| Qwen3.8 27B | `qwen3.8-27b` | `Qwen3.8-27B-Q4_K_M.gguf`, 17,005,351,136 bytes | `mmproj-Qwen3.8-27B-F16.gguf`, 927,607,008 bytes | `William-WSDS/Qwen3.8-27B-GGUF` at revision `e5b7846f3a274775eadc33b90d2e205612d14ed9` |
+| Qwen3.5 4B | `qwen3.5-4b` | `Qwen3.5-4B-Q4_K_M.gguf`, 2,815,884,544 bytes | `mmproj-Qwen3.5-4B-F16.gguf`, 672,423,488 bytes | `William-WSDS/Qwen3.5-4B-GGUF` at revision `da4c4c82f253530032349f4b0d146153a8def63e` |
+| Qwen3.5 9B | `qwen3.5-9b` | `Qwen3.5-9B-Q4_K_M.gguf`, 5,831,992,608 bytes | `mmproj-Qwen3.5-9B-F16.gguf`, 918,165,952 bytes | `William-WSDS/Qwen3.5-9B-GGUF` at revision `50e35c8389019e081813e4095bf93edcb45b4df5` |
+| Qwen3.8 27B | `qwen3.8-27b` | `Qwen3.8-27B-Q4_K_M.gguf`, 17,005,351,136 bytes | `mmproj-Qwen3.8-27B-F16.gguf`, 927,607,008 bytes | `William-WSDS/Qwen3.8-27B-GGUF` at revision `ddee62e887833f1494f8a4a4829de841959a94ab` |
 
 All three are Apache-2.0. The files are this project's own conversions of Qwen's repositories (`Qwen/Qwen3.5-4B`, `Qwen/Qwen3.5-9B`, `Qwen/Qwen3.8-27B`): converted to GGUF and quantised to Q4_K_M with llama.cpp v1.0.0, the version the image's model server is built from. Each repository's card names the revision it was made from, the commands and the hashes. An image file holds its weights as F16: llama.cpp v1.0.0 multiplies that format in vector code on x86 and on Arm processors, and BF16, the format of Qwen's own files, on x86 alone. The catalogue is compiled into the image (`embra_boot::native_model::CATALOGUE`): each model is two files of one revision of a repository, the model and what it reads images through, each with its size and its sha256. A file that is not those bytes is not kept, and nothing else is loaded: no other model, no other quantisation, no file of the operator's own.
 

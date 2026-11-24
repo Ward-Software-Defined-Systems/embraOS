@@ -264,7 +264,7 @@ pub const CATALOGUE: [NativeModel; 3] = [
         },
         image_tokens: IMAGE_TOKENS,
         repository: "William-WSDS/Qwen3.5-4B-GGUF",
-        revision: "57076606b44a1762870e97d8df25353d110fd880",
+        revision: "da4c4c82f253530032349f4b0d146153a8def63e",
         licence: "Apache-2.0",
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
@@ -286,7 +286,7 @@ pub const CATALOGUE: [NativeModel; 3] = [
         },
         image_tokens: IMAGE_TOKENS,
         repository: "William-WSDS/Qwen3.5-9B-GGUF",
-        revision: "6ecf21517d2d576dcdb8be08d4b67dcb7a31ea74",
+        revision: "50e35c8389019e081813e4095bf93edcb45b4df5",
         licence: "Apache-2.0",
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
@@ -308,7 +308,7 @@ pub const CATALOGUE: [NativeModel; 3] = [
         },
         image_tokens: IMAGE_TOKENS,
         repository: "William-WSDS/Qwen3.8-27B-GGUF",
-        revision: "e5b7846f3a274775eadc33b90d2e205612d14ed9",
+        revision: "ddee62e887833f1494f8a4a4829de841959a94ab",
         licence: "Apache-2.0",
         // The same window as the others (William, 2026-11-23: "keep the 27B
         // default the same").
