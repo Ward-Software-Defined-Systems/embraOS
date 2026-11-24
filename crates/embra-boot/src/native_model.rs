@@ -236,6 +236,17 @@ const QWEN: &str = "Alibaba's Qwen family";
 /// built from. Each file was hashed where it was made; the hub's own record
 /// of each published file says the same size and sha256, and a second
 /// conversion gave the same bytes.
+///
+/// An image file holds its weights as F16, and not as BF16, the format Qwen
+/// stores them in. llama.cpp 1.0.0 has vector code for F16 weights on Arm
+/// and on x86 (`ggml_vec_dot_f16`, and the matrix product of
+/// `llamafile/sgemm.cpp`), and for BF16 weights on x86 alone: an Arm
+/// processor multiplies them one value at a time. From the BF16 files this
+/// catalogue had first, four cores of an Apple Silicon machine took 11 to 14
+/// minutes to encode one image, and four threads of an x86 processor with
+/// AVX2 half a minute. With AVX2 the two formats take the same time. F16
+/// cannot hold the smallest values of BF16: of a projector's values 0.03 to
+/// 0.05 % differ between the two, by 3e-8 at most.
 pub const CATALOGUE: [NativeModel; 3] = [
     NativeModel {
         id: "qwen3.5-4b",
@@ -247,17 +258,17 @@ pub const CATALOGUE: [NativeModel; 3] = [
         bytes: 2_815_884_544,
         sha256: "d18d77c64865e93083daecb5a65f9cd7dd535e859fbbc71d5fdfe49954089a2b",
         images: CatalogueFile {
-            file: "mmproj-Qwen3.5-4B-BF16.gguf",
-            bytes: 675_569_216,
-            sha256: "463f39bd1c291c1186c319a8c90ff8640aafa678b14cbee2232d695113dfbb66",
+            file: "mmproj-Qwen3.5-4B-F16.gguf",
+            bytes: 672_423_488,
+            sha256: "659b59dd44b73b1cd34af6cc424669484b06dc80f4340adf8ea84ad776eef813",
         },
         image_tokens: IMAGE_TOKENS,
         repository: "William-WSDS/Qwen3.5-4B-GGUF",
-        revision: "a4d3a4d917bbbae2cf19f932cce4da64938117d2",
+        revision: "57076606b44a1762870e97d8df25353d110fd880",
         licence: "Apache-2.0",
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
-        memory: Memory { at_32768: 3_780, per_32768: 1_025, images: 649, first_image: 348, checkpoint: 51, state_per_1024: 33 },
+        memory: Memory { at_32768: 3_780, per_32768: 1_025, images: 646, first_image: 315, checkpoint: 51, state_per_1024: 33 },
     },
     NativeModel {
         id: "qwen3.5-9b",
@@ -269,17 +280,17 @@ pub const CATALOGUE: [NativeModel; 3] = [
         bytes: 5_831_992_608,
         sha256: "f16a85f201f87fa707f3fad681e381ed3dfb293b06064437a4246d160842bcc2",
         images: CatalogueFile {
-            file: "mmproj-Qwen3.5-9B-BF16.gguf",
-            bytes: 921_704_896,
-            sha256: "d89c4bc142d02ed64aeed5c0a358bdead9109f21f4ada03a6b2df17a1aa94d9e",
+            file: "mmproj-Qwen3.5-9B-F16.gguf",
+            bytes: 918_165_952,
+            sha256: "97f420245a85ce129bb764e86a5e21e27d782fe6d6056c6839b9c5fdb8f38289",
         },
         image_tokens: IMAGE_TOKENS,
         repository: "William-WSDS/Qwen3.5-9B-GGUF",
-        revision: "2d2c56225c331a43c09f12c7479557c9c6d0969b",
+        revision: "6ecf21517d2d576dcdb8be08d4b67dcb7a31ea74",
         licence: "Apache-2.0",
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
-        memory: Memory { at_32768: 6_039, per_32768: 1_026, images: 884, first_image: 386, checkpoint: 51, state_per_1024: 33 },
+        memory: Memory { at_32768: 6_039, per_32768: 1_026, images: 880, first_image: 353, checkpoint: 51, state_per_1024: 33 },
     },
     NativeModel {
         id: "qwen3.8-27b",
@@ -291,19 +302,19 @@ pub const CATALOGUE: [NativeModel; 3] = [
         bytes: 17_005_351_136,
         sha256: "4fc2219c0f0335e04b92ea446ce9f9cb6584370ac35cc751e340829bdebffa80",
         images: CatalogueFile {
-            file: "mmproj-Qwen3.8-27B-BF16.gguf",
-            bytes: 931_145_952,
-            sha256: "e43a597863a21bfa48b0fbd4553a771ae4117e25bb172e66f1dbc3fc6d037131",
+            file: "mmproj-Qwen3.8-27B-F16.gguf",
+            bytes: 927_607_008,
+            sha256: "cb0a71fe9b84af2552fc6260acf8e9773a29d115c683aba01c72a7ac537b212b",
         },
         image_tokens: IMAGE_TOKENS,
         repository: "William-WSDS/Qwen3.8-27B-GGUF",
-        revision: "930332595f8f72f27ce2bd9ae5dfc7aea4e877da",
+        revision: "e5b7846f3a274775eadc33b90d2e205612d14ed9",
         licence: "Apache-2.0",
         // The same window as the others (William, 2026-11-23: "keep the 27B
         // default the same").
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
-        memory: Memory { at_32768: 17_586, per_32768: 2_050, images: 892, first_image: 622, checkpoint: 150, state_per_1024: 65 },
+        memory: Memory { at_32768: 17_586, per_32768: 2_050, images: 889, first_image: 587, checkpoint: 150, state_per_1024: 65 },
     },
 ];
 
@@ -944,8 +955,8 @@ mod tests {
         assert_eq!([32_768, 65_536, 131_072].map(|window| nine.loaded_mib(window, false)), [6_039, 7_065, 9_117]);
         // The 27B, measured in use: 17,586, 19,636 and 23,735 MiB; its attention cache is twice the others'.
         assert_eq!([32_768, 65_536, 131_072].map(|window| big.loaded_mib(window, false)), [17_586, 19_636, 23_736]);
-        // With the image file at the default window: 5,454, 7,949 and 20,528 MiB, as measured.
-        assert_eq!([four, nine, big].map(|model| model.loaded_mib(DEFAULT_CONTEXT, true)), [5_454, 7_949, 20_528]);
+        // With the image file at the default window: 5,451, 7,946 and 20,525 MiB, as measured.
+        assert_eq!([four, nine, big].map(|model| model.loaded_mib(DEFAULT_CONTEXT, true)), [5_451, 7_945, 20_525]);
         // A smaller window takes less, down to the smallest.
         assert_eq!((four.loaded_mib(4_096, false), four.loaded_mib(SMALLEST_CONTEXT, false)), (2_884, 2_788));
         // The cache's limit follows the window, and a started 1,024 tokens
@@ -964,8 +975,8 @@ mod tests {
         // nothing else, as it should.
         assert!(52 + 23 * 33 + 4 * 51 < four.cache_mib(32_768));
         assert_eq!(four.growth_mib(DEFAULT_CONTEXT, false), 32 * 51 + 3_796);
-        assert_eq!(four.growth_mib(DEFAULT_CONTEXT, true), 32 * 51 + 3_796 + 348);
-        assert_eq!(big.growth_mib(DEFAULT_CONTEXT, true), 32 * 150 + 9_111 + 622);
+        assert_eq!(four.growth_mib(DEFAULT_CONTEXT, true), 32 * 51 + 3_796 + 315);
+        assert_eq!(big.growth_mib(DEFAULT_CONTEXT, true), 32 * 150 + 9_111 + 587);
         for model in &CATALOGUE {
             assert!(model.memory.at_32768 as u64 > model.bytes / (1024 * 1024), "{}: more than its file", model.id);
             assert!(model.loaded_mib(model.largest_context, true) > model.loaded_mib(model.default_context, true));
@@ -1010,7 +1021,7 @@ mod tests {
             // catalogue have one name.
             let name = model.label.replace(' ', "-");
             assert_eq!(model.repository, format!("William-WSDS/{name}-GGUF"));
-            assert_eq!((model.file, model.images.file), (format!("{name}-Q4_K_M.gguf").as_str(), format!("mmproj-{name}-BF16.gguf").as_str()));
+            assert_eq!((model.file, model.images.file), (format!("{name}-Q4_K_M.gguf").as_str(), format!("mmproj-{name}-F16.gguf").as_str()));
             // Its image file: another file of the same revision, with a name
             // and a size of its own, so that a size alone says which of the
             // two an upload brings.
@@ -1028,7 +1039,7 @@ mod tests {
             assert_eq!(model.image_tokens, IMAGE_TOKENS);
         }
         assert_eq!(CATALOGUE.map(|m| m.bytes), [2_815_884_544, 5_831_992_608, 17_005_351_136]);
-        assert_eq!(CATALOGUE.map(|m| m.images.bytes), [675_569_216, 921_704_896, 931_145_952]);
+        assert_eq!(CATALOGUE.map(|m| m.images.bytes), [672_423_488, 918_165_952, 927_607_008]);
         assert_eq!(CATALOGUE.map(|m| m.family), [Family::Qwen35, Family::Qwen35, Family::Qwen38]);
         // No two files of the catalogue have one size: an upload that names
         // no model is told apart by its size as well.
@@ -1052,8 +1063,8 @@ mod tests {
         assert_eq!(model.partial_path(models), Path::new("/embra/data/models/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf.partial"));
         assert_eq!(model.verified_path(models), Path::new("/embra/data/models/qwen3.5-4b/verified"));
         // The image file stands beside it, with a download and a record of its own.
-        assert_eq!(model.path_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-Qwen3.5-4B-BF16.gguf"));
-        assert_eq!(model.partial_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-Qwen3.5-4B-BF16.gguf.partial"));
+        assert_eq!(model.path_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-Qwen3.5-4B-F16.gguf"));
+        assert_eq!(model.partial_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/mmproj-Qwen3.5-4B-F16.gguf.partial"));
         assert_eq!(model.verified_of(Part::Images, models), Path::new("/embra/data/models/qwen3.5-4b/verified-images"));
         assert_eq!((model.path_of(Part::Model, models), model.verified_of(Part::Model, models)), (model.file_path(models), model.verified_path(models)));
     }

@@ -393,14 +393,14 @@ mod tests {
         assert_eq!(r.status, StatusCode::BAD_REQUEST);
         assert_eq!(
             r.error,
-            "this file is 1234 bytes, and the catalogue's files of qwen3.5-4b are Qwen3.5-4B-Q4_K_M.gguf (Q4_K_M, 2815884544 bytes) and its image file mmproj-Qwen3.5-4B-BF16.gguf (675569216 bytes)"
+            "this file is 1234 bytes, and the catalogue's files of qwen3.5-4b are Qwen3.5-4B-Q4_K_M.gguf (Q4_K_M, 2815884544 bytes) and its image file mmproj-Qwen3.5-4B-F16.gguf (672423488 bytes)"
         );
         // The other model's image file is not this model's: the id and the size have to agree.
         let nine = native::by_id("qwen3.5-9b").unwrap();
         assert_eq!(refused(FOUR, Some(nine.images.bytes), u64::MAX, false).status, StatusCode::BAD_REQUEST);
         let r = refused(FOUR, Some(model.images.bytes), model.images.bytes + RESERVE_BYTES - 1, false);
         assert_eq!(r.status, StatusCode::INSUFFICIENT_STORAGE);
-        assert!(r.error.starts_with("DATA has 900 MB free; the file is 645 MB and leaves a reserve of 256 MB."), "{}", r.error);
+        assert!(r.error.starts_with("DATA has 897 MB free; the file is 642 MB and leaves a reserve of 256 MB."), "{}", r.error);
         let r = refused(FOUR, Some(model.bytes), room - 1, false);
         assert_eq!(r.status, StatusCode::INSUFFICIENT_STORAGE);
         assert!(r.error.starts_with("DATA has 2941 MB free; the file is 2686 MB and leaves a reserve of 256 MB."), "{}", r.error);
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(r.status, StatusCode::CONFLICT);
         assert_eq!(
             r.error,
-            "the model file of qwen3.5-4b is installed and checked already; its image file (mmproj-Qwen3.5-4B-BF16.gguf, 675569216 bytes) is the one that is not"
+            "the model file of qwen3.5-4b is installed and checked already; its image file (mmproj-Qwen3.5-4B-F16.gguf, 672423488 bytes) is the one that is not"
         );
         assert_eq!(taken(model.images.bytes, u64::MAX), Ok((FOUR, Part::Images)));
         // With both there the model takes no file, whatever its size.
@@ -457,9 +457,9 @@ mod tests {
         let images = &models[0]["images"];
         assert_eq!(
             (images["file"].as_str(), images["bytes"].as_u64(), images["state"].as_str()),
-            (Some("mmproj-Qwen3.5-4B-BF16.gguf"), Some(675_569_216), Some("not installed"))
+            (Some("mmproj-Qwen3.5-4B-F16.gguf"), Some(672_423_488), Some("not installed"))
         );
-        assert!(images["url"].as_str().unwrap().ends_with("/mmproj-Qwen3.5-4B-BF16.gguf"), "{images}");
+        assert!(images["url"].as_str().unwrap().ends_with("/mmproj-Qwen3.5-4B-F16.gguf"), "{images}");
         install(four(), Part::Images, &root);
         let (_, body) = answer(api_models_list(State(state(&root, &script))).await).await;
         assert_eq!(body["models"][0]["images"]["state"], "installed");
@@ -504,7 +504,7 @@ mod tests {
         let (root, script) = scratch("put-images", TAKES_IT_IN);
         let (status, said) = answer(put_model(&state(&root, &script), FOUR, &sized(four().images.bytes), Body::from(body.clone()), ROOMY()).await).await;
         assert_eq!(status, StatusCode::CREATED, "{said}");
-        assert_eq!((said["part"].as_str(), said["file"].as_str()), (Some("image file"), Some("mmproj-Qwen3.5-4B-BF16.gguf")));
+        assert_eq!((said["part"].as_str(), said["file"].as_str()), (Some("image file"), Some("mmproj-Qwen3.5-4B-F16.gguf")));
         assert_eq!(std::fs::read_to_string(root.join("args")).unwrap().trim(), "model-import qwen3.5-4b images");
 
         // A file that is not the catalogue's: the updater's reason, after the whole body was read.
@@ -561,7 +561,7 @@ mod tests {
         assert!(!four().partial_path(&root).exists(), "what the updater had written is gone");
 
         // The image file's partial is the one that goes when the upload was its.
-        let (root, script) = scratch("interrupted-images", "mkdir -p \"ROOT/$2\" && exec cat > \"ROOT/$2/mmproj-Qwen3.5-4B-BF16.gguf.partial\"\n");
+        let (root, script) = scratch("interrupted-images", "mkdir -p \"ROOT/$2\" && exec cat > \"ROOT/$2/mmproj-Qwen3.5-4B-F16.gguf.partial\"\n");
         let frames = futures_util::stream::iter(vec![
             Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![5u8; 200_000])),
             Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "the browser went away")),
@@ -581,7 +581,7 @@ mod tests {
         assert_eq!((said["model"].as_str(), said["part"].as_str(), said["file"].as_str()), (Some(FOUR), Some("model file"), Some("Qwen3.5-4B-Q4_K_M.gguf")));
         let (status, said) = check(st.clone(), FOUR, Some(four().images.bytes)).await;
         assert_eq!(status, StatusCode::OK, "{said}");
-        assert_eq!((said["part"].as_str(), said["file"].as_str()), (Some("image file"), Some("mmproj-Qwen3.5-4B-BF16.gguf")));
+        assert_eq!((said["part"].as_str(), said["file"].as_str()), (Some("image file"), Some("mmproj-Qwen3.5-4B-F16.gguf")));
         let (status, said) = check(st.clone(), FOUR, Some(12)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{said}");
         let (status, _) = check(st.clone(), "nothing", Some(12)).await;

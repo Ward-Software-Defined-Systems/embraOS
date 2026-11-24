@@ -827,7 +827,7 @@ mod tests {
         assert!(!note.at_the_load);
         assert_eq!(
             note.text,
-            "Memory: Qwen3.5 9B with a context window of 65536 tokens takes about 7.8 GB when it is loaded, its image file included, as measured, and its model server can grow by up to 5.7 GB as a session goes on: it keeps what it read of earlier prompts. For both this machine has 11.5 GB free for it (12.6 GB in all). When memory runs short the answers come slowly, or the kernel ends the model server and embrad starts it again. /native off and /native use free what it kept. A smaller window lowers both figures (/native context <tokens>)."
+            "Memory: Qwen3.5 9B with a context window of 65536 tokens takes about 7.8 GB when it is loaded, its image file included, as measured, and its model server can grow by up to 5.6 GB as a session goes on: it keeps what it read of earlier prompts. For both this machine has 11.5 GB free for it (12.6 GB in all). When memory runs short the answers come slowly, or the kernel ends the model server and embrad starts it again. /native off and /native use free what it kept. A smaller window lowers both figures (/native context <tokens>)."
         );
         // The same on 8 GB: the load itself is more than is free.
         let note = memory_note(nine, 65_536, true, machine(7_700, 7_000), true).expect("a note");

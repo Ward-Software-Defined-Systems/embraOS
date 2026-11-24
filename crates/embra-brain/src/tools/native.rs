@@ -727,7 +727,7 @@ mod tests {
         // is refused with the way to get the file, and nothing is read.
         let said = call(config("anthropic", "qwen3.5-4b"), json!({"prompt": "What is in it?", "images": ["/nonexistent/shot.png"]})).await.unwrap_err();
         assert!(
-            said.ends_with("the native model is loaded without its image file, so it reads text alone, and the images were not sent. /native install qwen3.5-4b fetches the file (644 MB); the model server starts again with it."),
+            said.ends_with("the native model is loaded without its image file, so it reads text alone, and the images were not sent. /native install qwen3.5-4b fetches the file (641 MB); the model server starts again with it."),
             "{said}"
         );
         // More files than one message takes.

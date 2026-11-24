@@ -1111,9 +1111,9 @@ mod tests {
         assert_eq!(words(&list_command(&roots, &mut out)).0, "done");
         let said = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = said.lines().collect();
-        assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2685 MB and 644 MB for images, Apache-2.0): incomplete, 5 of 2685 MB are there");
-        assert_eq!(lines[1], "qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5561 MB and 879 MB for images, Apache-2.0): installed, not usable: the file was never checked (installing the model again checks it, and replaces a file that is not this release's)");
-        assert_eq!(lines[2], "qwen3.8-27b  Qwen3.8 27B (Q4_K_M, 16217 MB and 888 MB for images, Apache-2.0): not installed");
+        assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2685 MB and 641 MB for images, Apache-2.0): incomplete, 5 of 2685 MB are there");
+        assert_eq!(lines[1], "qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5561 MB and 875 MB for images, Apache-2.0): installed, not usable: the file was never checked (installing the model again checks it, and replaces a file that is not this release's)");
+        assert_eq!(lines[2], "qwen3.8-27b  Qwen3.8 27B (Q4_K_M, 16217 MB and 884 MB for images, Apache-2.0): not installed");
         assert!(lines[3].starts_with("DATA has ") && lines[3].ends_with(" MB free"), "{said}");
         assert_eq!(lines.len(), 4);
         assert_eq!(state_words(Target::of(&tiny("tiny", CONTENT), Part::Model), &models), "not installed");

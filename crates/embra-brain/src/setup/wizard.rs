@@ -1315,7 +1315,7 @@ mod tests {
             user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
             assert_eq!(
                 said(&mut resp_rx).await,
-                "Installing qwen3.5-9b: its model file (5561 MB) and its image file (879 MB) are downloaded and checked, and the lines below follow the updater."
+                "Installing qwen3.5-9b: its model file (5561 MB) and its image file (875 MB) are downloaded and checked, and the lines below follow the updater."
             );
             let waiting = question(&mut resp_rx).await;
             assert_eq!(waiting.field_type, SetupFieldType::Text as i32);

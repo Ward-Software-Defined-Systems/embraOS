@@ -1063,7 +1063,7 @@ mod tests {
         pick_native_model(nine(), &tx, &db, &hands).await;
         assert_eq!(
             told(&mut rx).await,
-            "qwen3.5-9b is not ready on this machine: its files (5561 MB, and 879 MB to read images) are installed and checked first, and the lines below follow the updater. The session stays usable; the model is loaded when the job is done."
+            "qwen3.5-9b is not ready on this machine: its files (5561 MB, and 875 MB to read images) are installed and checked first, and the lines below follow the updater. The session stays usable; the model is loaded when the job is done."
         );
         assert_eq!(told(&mut rx).await, "qwen3.5-9b: downloading its file");
         assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5561 MB (5%)");
@@ -1397,7 +1397,7 @@ mod tests {
         machine_action(MachineAction::Install(nine()), &tx, &env, &jobs, None).await;
         assert_eq!(
             told(&mut rx).await,
-            "Installing qwen3.5-9b: its model file (5561 MB) and its image file (879 MB) are downloaded and checked, a file that is there already is left alone, and the lines below follow the updater. The session stays usable; /native cancel stops it."
+            "Installing qwen3.5-9b: its model file (5561 MB) and its image file (875 MB) are downloaded and checked, a file that is there already is left alone, and the lines below follow the updater. The session stays usable; /native cancel stops it."
         );
         assert_eq!(told(&mut rx).await, "qwen3.5-9b: received 270 of 5561 MB (5%)");
         assert!(show_native(&env, &jobs, None)
