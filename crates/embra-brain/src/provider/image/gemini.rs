@@ -1,12 +1,19 @@
 //! Gemini image generation over the Interactions API
 //! (`POST https://generativelanguage.googleapis.com/v1beta/interactions`,
-//! header `x-goog-api-key`). Verified against the REST reference
-//! 2026-08-20: request `{model, input:[{type:"text",text}|{type:"image",
-//! mime_type,data}], response_format:{type:"image", mime_type,
-//! aspect_ratio?, image_size?}}` (snake_case); response `{id, model,
-//! status, steps:[{type:"model_output", content:[{type:"text",text}|
+//! header `x-goog-api-key`). The shapes, by the REST reference: request
+//! `{model, input:[{type:"text",text}|{type:"image", mime_type,data}],
+//! response_format:{type:"image", mime_type, aspect_ratio?,
+//! image_size?}}` (snake_case); response `{id, model, status,
+//! steps:[{type:"model_output", content:[{type:"text",text}|
 //! {type:"image", data, mime_type}]}], usage}`; `status` ∈ completed |
 //! failed | incomplete | …; errors `{error:{code, message}}`.
+//!
+//! The values, by the same reference's `ImageResponseFormat`: `mime_type`
+//! has one, `image/jpeg` (`OUTPUT_MIME`); `image_size` has `512`, `1K`,
+//! `2K` and `4K` (`IMAGE_SIZES`), and which of them a model renders is
+//! `sizes_of`'s. A value is read from the reference's list of values,
+//! never from the guide's prose or the name of a file in its samples:
+//! the prose says "512px" and a sample saves `generated_image.png`.
 //!
 //! The request/response codecs are pure functions (wiremock-tested); the
 //! transport is one POST with explicit timeouts — the tool layer adds the
@@ -15,7 +22,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value as JsonValue};
 
-use super::{GeneratedImage, ImageGenError, ImageGenRequest, ImageGenResponse, ImageProvider, ImageProviderKind};
+use super::{
+    GeneratedImage, ImageGenError, ImageGenRequest, ImageGenResponse, ImageProvider, ImageProviderKind, OUTPUT_MIME,
+};
 
 pub struct GeminiImageProvider {
     api_key: String,
@@ -49,7 +58,7 @@ impl GeminiImageProvider {
         }
         let mut response_format = serde_json::Map::new();
         response_format.insert("type".into(), json!("image"));
-        response_format.insert("mime_type".into(), json!(req.output_format.mime()));
+        response_format.insert("mime_type".into(), json!(OUTPUT_MIME));
         if let Some(ar) = &req.aspect_ratio {
             response_format.insert("aspect_ratio".into(), json!(ar));
         }
@@ -86,7 +95,7 @@ impl GeminiImageProvider {
                         let mime = block
                             .get("mime_type")
                             .and_then(|m| m.as_str())
-                            .unwrap_or("image/png")
+                            .unwrap_or(OUTPUT_MIME)
                             .to_string();
                         let bytes = STANDARD
                             .decode(data)
@@ -165,29 +174,27 @@ impl ImageProvider for GeminiImageProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::image::OutputFormat;
 
     fn req() -> ImageGenRequest {
         ImageGenRequest {
             prompt: "a 16:9 poster of a lighthouse".into(),
             aspect_ratio: Some("16:9".into()),
             size: Some("2K".into()),
-            output_format: OutputFormat::Png,
             reference_images: vec![("image/jpeg".into(), vec![0xFF, 0xD8, 0xFF, 0x00])],
         }
     }
 
     #[test]
     fn gemini_request_body_shape_matches_docs() {
-        let body = GeminiImageProvider::request_body("gemini-3-pro-image", &req());
-        assert_eq!(body["model"], "gemini-3-pro-image");
+        let body = GeminiImageProvider::request_body("gemini-nano-banana-2.1", &req());
+        assert_eq!(body["model"], "gemini-nano-banana-2.1");
         assert_eq!(body["input"][0]["type"], "text");
         assert_eq!(body["input"][0]["text"], "a 16:9 poster of a lighthouse");
         assert_eq!(body["input"][1]["type"], "image");
         assert_eq!(body["input"][1]["mime_type"], "image/jpeg");
         assert_eq!(body["input"][1]["data"], "/9j/AA==");
         assert_eq!(body["response_format"]["type"], "image");
-        assert_eq!(body["response_format"]["mime_type"], "image/png");
+        assert_eq!(body["response_format"]["mime_type"], "image/jpeg");
         assert_eq!(body["response_format"]["aspect_ratio"], "16:9");
         assert_eq!(body["response_format"]["image_size"], "2K");
         // snake_case everywhere; no camelCase leaks.
@@ -202,6 +209,57 @@ mod tests {
         assert!(body["response_format"].get("aspect_ratio").is_none());
         assert!(body["response_format"].get("image_size").is_none());
         assert_eq!(body["input"].as_array().unwrap().len(), 1);
+        // The call with no option at all: the type and JPEG, nothing more.
+        assert_eq!(body["response_format"], json!({"type": "image", "mime_type": "image/jpeg"}));
+    }
+
+    /// Whatever the tool lets through reaches the API as a value of its
+    /// reference: every model with every size and ratio the validator
+    /// accepts, against the reference's lists typed here from it
+    /// (`ImageResponseFormat`: one `mime_type`, four `image_size`s, and
+    /// the ratios, of which the tool offers the ten every model renders).
+    #[test]
+    fn every_request_the_validator_lets_through_carries_values_of_the_reference() {
+        use crate::provider::image::{validate_request, ASPECT_RATIOS, GEMINI_IMAGE_MODELS, IMAGE_SIZES};
+        const MIME_TYPES: [&str; 1] = ["image/jpeg"];
+        const SIZES: [&str; 4] = ["512", "1K", "2K", "4K"];
+        const RATIOS: [&str; 14] = [
+            "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "1:8", "8:1", "1:4", "4:1",
+        ];
+        let mut sent = 0;
+        for model in GEMINI_IMAGE_MODELS {
+            for size in IMAGE_SIZES.iter().map(|s| Some(*s)).chain([None]) {
+                for ratio in ASPECT_RATIOS.iter().map(|r| Some(*r)).chain([None]) {
+                    let request = ImageGenRequest {
+                        prompt: "a poster".into(),
+                        aspect_ratio: ratio.map(str::to_string),
+                        size: size.map(str::to_string),
+                        reference_images: Vec::new(),
+                    };
+                    if validate_request(model, &request).is_err() {
+                        continue;
+                    }
+                    let body = GeminiImageProvider::request_body(model, &request);
+                    let format = body["response_format"].as_object().expect("an object");
+                    assert_eq!(format["type"], "image");
+                    assert!(MIME_TYPES.contains(&format["mime_type"].as_str().unwrap()), "{model}: {format:?}");
+                    match format.get("image_size") {
+                        Some(v) => assert!(SIZES.contains(&v.as_str().unwrap()), "{model}: {format:?}"),
+                        None => assert!(size.is_none()),
+                    }
+                    match format.get("aspect_ratio") {
+                        Some(v) => assert!(RATIOS.contains(&v.as_str().unwrap()), "{model}: {format:?}"),
+                        None => assert!(ratio.is_none()),
+                    }
+                    for key in format.keys() {
+                        assert!(["type", "mime_type", "aspect_ratio", "image_size"].contains(&key.as_str()), "{key}");
+                    }
+                    sent += 1;
+                }
+            }
+        }
+        // 5 models; sizes 3+3+4+1+1 and none each: 17 rows, by 11 ratios.
+        assert_eq!(sent, 17 * 11);
     }
 
     #[test]
@@ -212,15 +270,23 @@ mod tests {
                 {"type": "user_input", "content": [{"type": "text", "text": "a poster"}]},
                 {"type": "model_output", "content": [
                     {"type": "text", "text": "Here is your poster."},
-                    {"type": "image", "mime_type": "image/png", "data": "iVBORw0KGgo="}
+                    {"type": "image", "mime_type": "image/jpeg", "data": "/9j/4AAQ"}
                 ]}
             ],
             "usage": {"total_tokens": 10}
         });
         let out = GeminiImageProvider::parse_response(&body).unwrap();
         assert_eq!(out.images.len(), 1);
-        assert_eq!(out.images[0].media_type, "image/png");
-        assert_eq!(out.images[0].data, STANDARD.decode("iVBORw0KGgo=").unwrap());
+        assert_eq!(out.images[0].media_type, "image/jpeg");
+        assert_eq!(out.images[0].data, STANDARD.decode("/9j/4AAQ").unwrap());
+        // A block that declares no type is taken as the endpoint's one
+        // output type; the tool sniffs the bytes either way.
+        let undeclared = json!({
+            "status": "completed",
+            "steps": [{"type": "model_output", "content": [{"type": "image", "data": "/9j/4AAQ"}]}]
+        });
+        let taken = GeminiImageProvider::parse_response(&undeclared).unwrap();
+        assert_eq!(taken.images[0].media_type, "image/jpeg");
         // Prompt echo in the user_input step is NOT mistaken for output text
         // when it is a text block... (it is concatenated; callers show it
         // as-is) — but the image is what matters.
@@ -241,7 +307,7 @@ mod tests {
         assert!(matches!(err, ImageGenError::NoImage(d) if d == "status failed"));
         let err = GeminiImageProvider::parse_response(&json!({
             "status": "completed",
-            "steps": [{"type": "model_output", "content": [{"type": "image", "mime_type": "image/png", "data": "%%%"}]}]
+            "steps": [{"type": "model_output", "content": [{"type": "image", "mime_type": "image/jpeg", "data": "%%%"}]}]
         }))
         .unwrap_err();
         assert!(matches!(err, ImageGenError::NoImage(d) if d.contains("base64")));

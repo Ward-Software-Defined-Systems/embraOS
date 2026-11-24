@@ -74,7 +74,7 @@ Media:
   /media off | <id>              Hide the pane, or fetch a specific media id
   /image-provider                Show the image-generation backend, model, key status
   /image-provider gemini         Use Gemini image models for image_generate
-  /image-provider model <id>     gemini-3-pro-image (default) | gemini-3.1-flash-image | …
+  /image-provider model <id>     gemini-nano-banana-2.1 (default) | gemini-3-pro-image | …
   /image-provider key <token>    Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it
 
 Git & SSH:

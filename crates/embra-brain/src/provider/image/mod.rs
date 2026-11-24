@@ -27,21 +27,47 @@ pub const IMAGE_KEY_PATH_GEMINI: &str = "/embra/state/api_key_image_gemini";
 /// Env override for the image key (highest precedence; dev/test).
 pub const IMAGE_KEY_ENV: &str = "EMBRA_IMAGE_API_KEY";
 
-/// Gemini image models (models page, 2026-08-20, all stable). Default =
-/// `gemini-3-pro-image` (William's pick — there is no `gemini-3.1-pro-image`;
-/// the 3.1 line is Flash / Flash-Lite only).
+/// Gemini image models, each with the sizes it renders: Google's image
+/// guide and the model's own page. The first is the default, William's
+/// pick: the model the guide recommends for new work. There is no
+/// `gemini-3.1-pro-image`; the 3.1 line is Flash and Flash-Lite only.
+const MODEL_SIZES: &[(&str, &[&str])] = &[
+    ("gemini-nano-banana-2.1", &["1K", "2K", "4K"]),
+    ("gemini-3-pro-image", &["1K", "2K", "4K"]),
+    ("gemini-3.1-flash-image", &["512", "1K", "2K", "4K"]),
+    ("gemini-3.1-flash-lite-image", &["1K"]),
+    ("gemini-2.5-flash-image", &["1K"]),
+];
+/// The names of `MODEL_SIZES`, in its order (guard
+/// `every_image_model_has_its_sizes_and_each_is_a_value_of_the_api`).
 pub const GEMINI_IMAGE_MODELS: &[&str] = &[
+    "gemini-nano-banana-2.1",
     "gemini-3-pro-image",
     "gemini-3.1-flash-image",
     "gemini-3.1-flash-lite-image",
     "gemini-2.5-flash-image",
 ];
-pub const DEFAULT_GEMINI_IMAGE_MODEL: &str = "gemini-3-pro-image";
+pub const DEFAULT_GEMINI_IMAGE_MODEL: &str = "gemini-nano-banana-2.1";
 
+/// The ten ratios every model above renders.
 pub const ASPECT_RATIOS: &[&str] = &["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
-/// Output sizes. `4K` is accepted ONLY with JPEG output: a 4K PNG can
-/// exceed the 12 MiB store / gRPC ceiling (a 4K JPEG is 2–4 MB).
-pub const IMAGE_SIZES: &[&str] = &["512px", "1K", "2K", "4K"];
+/// The values of `image_size` in the API's reference
+/// (`ImageResponseFormat`). The smallest is `512`: "512px" is how the
+/// reference describes it and never a value. Which of the four a model
+/// renders is `sizes_of`'s.
+pub const IMAGE_SIZES: &[&str] = &["512", "1K", "2K", "4K"];
+/// What the endpoint returns: `image/jpeg` is the one value of the
+/// reference's `mime_type`. The file's name and the summary follow the
+/// bytes that came back, not this.
+pub const OUTPUT_MIME: &str = "image/jpeg";
+
+/// The sizes `model` renders; none for a model that is not listed.
+pub fn sizes_of(model: &str) -> &'static [&'static str] {
+    MODEL_SIZES
+        .iter()
+        .find(|(name, _)| *name == model)
+        .map_or(&[], |(_, sizes)| sizes)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageProviderKind {
@@ -75,35 +101,11 @@ impl ImageProviderKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputFormat {
-    Png,
-    Jpeg,
-}
-
-impl OutputFormat {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "png" | "image/png" => Some(OutputFormat::Png),
-            "jpeg" | "jpg" | "image/jpeg" => Some(OutputFormat::Jpeg),
-            _ => None,
-        }
-    }
-
-    pub fn mime(self) -> &'static str {
-        match self {
-            OutputFormat::Png => "image/png",
-            OutputFormat::Jpeg => "image/jpeg",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ImageGenRequest {
     pub prompt: String,
     pub aspect_ratio: Option<String>,
     pub size: Option<String>,
-    pub output_format: OutputFormat,
     /// `(mime_type, bytes)` reference images for editing / style guidance.
     pub reference_images: Vec<(String, Vec<u8>)>,
 }
@@ -142,9 +144,10 @@ pub trait ImageProvider: Send + Sync {
     async fn generate(&self, req: &ImageGenRequest) -> Result<ImageGenResponse, ImageGenError>;
 }
 
-/// Validate the (aspect_ratio, size, output_format, model) combination the
-/// way the tool surfaces it — instructive messages, never a bare 400 from
-/// the API for things we can check locally.
+/// Validate the (aspect_ratio, size, model) combination the way the tool
+/// surfaces it — instructive messages, never a bare 400 from the API for
+/// things we can check locally. A size is checked twice: that it is a
+/// value of the API, then that this model renders it.
 pub fn validate_request(model: &str, req: &ImageGenRequest) -> Result<(), ImageGenError> {
     if req.prompt.trim().is_empty() {
         return Err(ImageGenError::InvalidRequest("prompt is empty".into()));
@@ -166,15 +169,18 @@ pub fn validate_request(model: &str, req: &ImageGenRequest) -> Result<(), ImageG
                 IMAGE_SIZES.join("|")
             )));
         }
-        if size == "4K" && req.output_format != OutputFormat::Jpeg {
-            return Err(ImageGenError::InvalidRequest(
-                "size 4K is only available with output_format=jpeg (a 4K PNG exceeds the 12 MiB store ceiling); use size 2K for PNG".into(),
-            ));
-        }
-        if model == "gemini-3.1-flash-lite-image" && size != "1K" {
-            return Err(ImageGenError::InvalidRequest(
-                "gemini-3.1-flash-lite-image only renders 1K; omit size or pick another model".into(),
-            ));
+        let rendered = sizes_of(model);
+        if !rendered.contains(&size) {
+            let by: Vec<&str> = MODEL_SIZES
+                .iter()
+                .filter(|(_, sizes)| sizes.contains(&size))
+                .map(|(name, _)| *name)
+                .collect();
+            return Err(ImageGenError::InvalidRequest(format!(
+                "{model} renders {}; size {size} is rendered by {} (the operator picks the model with /image-provider model <id>). Omit size or ask for one this model renders",
+                rendered.join("|"),
+                by.join(", ")
+            )));
         }
     }
     Ok(())
@@ -297,25 +303,29 @@ mod gateway_tests {
 mod tests {
     use super::*;
 
-    fn req(size: Option<&str>, fmt: OutputFormat) -> ImageGenRequest {
+    fn req(size: Option<&str>) -> ImageGenRequest {
         ImageGenRequest {
             prompt: "a poster".into(),
             aspect_ratio: Some("16:9".into()),
             size: size.map(str::to_string),
-            output_format: fmt,
             reference_images: Vec::new(),
         }
     }
 
     #[test]
-    fn image_provider_model_allowlist_defaults_to_pro_and_rejects_unknown() {
-        assert_eq!(ImageProviderKind::Gemini.default_model(), "gemini-3-pro-image");
+    fn image_provider_model_allowlist_defaults_to_nano_banana_and_rejects_unknown() {
+        assert_eq!(ImageProviderKind::Gemini.default_model(), "gemini-nano-banana-2.1");
+        assert!(GEMINI_IMAGE_MODELS.contains(&ImageProviderKind::Gemini.default_model()));
+        assert!(GEMINI_IMAGE_MODELS.contains(&"gemini-3-pro-image"), "the former default stays selectable");
         assert!(GEMINI_IMAGE_MODELS.contains(&"gemini-3.1-flash-image"));
         assert!(!GEMINI_IMAGE_MODELS.contains(&"gemini-3.1-pro-image"), "no such model");
         let mut cfg = crate::config::tests_support::minimal_cfg();
         let c = resolve_image_choice(&cfg).unwrap();
         assert_eq!(c.kind, ImageProviderKind::Gemini);
-        assert_eq!(c.model, "gemini-3-pro-image");
+        assert_eq!(c.model, "gemini-nano-banana-2.1");
+        // A model the operator picked before the default moved stays theirs.
+        cfg.image_model = Some("gemini-3-pro-image".into());
+        assert_eq!(resolve_image_choice(&cfg).unwrap().model, "gemini-3-pro-image");
         cfg.image_model = Some("gemini-3.1-pro-image".into());
         assert!(matches!(resolve_image_choice(&cfg), Err(ImageGenError::NotConfigured(_))));
         cfg.image_model = Some("gemini-3.1-flash-image".into());
@@ -324,18 +334,76 @@ mod tests {
         assert!(matches!(resolve_image_choice(&cfg), Err(ImageGenError::NotConfigured(_))));
     }
 
+    /// The values of the API's reference, typed here from it and not read
+    /// from the constants under test: `ImageResponseFormat.image_size`.
+    const REFERENCE_SIZES: [&str; 4] = ["512", "1K", "2K", "4K"];
+
+    /// Every listed model has a row of sizes, in the list's order, no row
+    /// holds a size the API does not know, and every size of the API is
+    /// rendered by a model, so a refusal can always name one.
     #[test]
-    fn image_generate_rejects_4k_png_and_allows_4k_jpeg() {
-        assert!(validate_request("gemini-3-pro-image", &req(Some("4K"), OutputFormat::Png)).is_err());
-        assert!(validate_request("gemini-3-pro-image", &req(Some("4K"), OutputFormat::Jpeg)).is_ok());
-        assert!(validate_request("gemini-3-pro-image", &req(Some("2K"), OutputFormat::Png)).is_ok());
-        assert!(validate_request("gemini-3-pro-image", &req(Some("3K"), OutputFormat::Png)).is_err());
-        assert!(validate_request("gemini-3.1-flash-lite-image", &req(Some("2K"), OutputFormat::Png)).is_err());
-        assert!(validate_request("gemini-3.1-flash-lite-image", &req(Some("1K"), OutputFormat::Png)).is_ok());
-        let mut bad_ar = req(None, OutputFormat::Png);
+    fn every_image_model_has_its_sizes_and_each_is_a_value_of_the_api() {
+        assert_eq!(IMAGE_SIZES, REFERENCE_SIZES);
+        let named: Vec<&str> = MODEL_SIZES.iter().map(|(name, _)| *name).collect();
+        assert_eq!(named, GEMINI_IMAGE_MODELS);
+        assert_eq!(GEMINI_IMAGE_MODELS[0], DEFAULT_GEMINI_IMAGE_MODEL, "the default is listed first");
+        for (model, sizes) in MODEL_SIZES {
+            assert!(!sizes.is_empty(), "{model}");
+            assert!(sizes.contains(&"1K"), "{model}: every model renders 1K, the size of a call that names none");
+            for size in *sizes {
+                assert!(REFERENCE_SIZES.contains(size), "{model}: {size} is no value of image_size");
+            }
+            assert_eq!(sizes_of(model), *sizes);
+        }
+        for size in REFERENCE_SIZES {
+            assert!(MODEL_SIZES.iter().any(|(_, sizes)| sizes.contains(&size)), "no model renders {size}");
+        }
+        assert!(sizes_of("gemini-3.1-pro-image").is_empty(), "a model that is not listed renders nothing");
+        assert_eq!(OUTPUT_MIME, "image/jpeg", "the one value of the reference's mime_type");
+    }
+
+    /// A size is refused before the call when it is no value of the API,
+    /// and when the model does not render it; the refusal names the model's
+    /// own sizes and the models that render what was asked.
+    #[test]
+    fn a_size_is_checked_against_the_api_and_against_the_model() {
+        for model in GEMINI_IMAGE_MODELS {
+            assert!(validate_request(model, &req(None)).is_ok(), "{model}: no size");
+            assert!(validate_request(model, &req(Some("1K"))).is_ok(), "{model}: 1K");
+            for size in REFERENCE_SIZES {
+                let answer = validate_request(model, &req(Some(size)));
+                assert_eq!(answer.is_ok(), sizes_of(model).contains(&size), "{model} {size}: {answer:?}");
+            }
+            for no_value in ["512px", "3K", "1k", "0.5K", "1024"] {
+                let err = validate_request(model, &req(Some(no_value))).unwrap_err().to_string();
+                assert!(err.contains("is not one of 512|1K|2K|4K"), "{model} {no_value}: {err}");
+            }
+        }
+        // The default model and the former one: 1K, 2K and 4K, never 512.
+        for model in ["gemini-nano-banana-2.1", "gemini-3-pro-image"] {
+            assert!(validate_request(model, &req(Some("2K"))).is_ok());
+            assert!(validate_request(model, &req(Some("4K"))).is_ok(), "4K needs no other option");
+            let err = validate_request(model, &req(Some("512"))).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("{model} renders 1K|2K|4K; size 512 is rendered by gemini-3.1-flash-image (")),
+                "{err}"
+            );
+            assert!(err.contains("/image-provider model <id>"), "{err}");
+        }
+        assert!(validate_request("gemini-3.1-flash-image", &req(Some("512"))).is_ok());
+        for model in ["gemini-3.1-flash-lite-image", "gemini-2.5-flash-image"] {
+            let err = validate_request(model, &req(Some("2K"))).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!(
+                    "{model} renders 1K; size 2K is rendered by gemini-nano-banana-2.1, gemini-3-pro-image, gemini-3.1-flash-image ("
+                )),
+                "{err}"
+            );
+        }
+        let mut bad_ar = req(None);
         bad_ar.aspect_ratio = Some("7:3".into());
         assert!(validate_request("gemini-3-pro-image", &bad_ar).is_err());
-        let mut empty = req(None, OutputFormat::Png);
+        let mut empty = req(None);
         empty.prompt = "  ".into();
         assert!(validate_request("gemini-3-pro-image", &empty).is_err());
     }
@@ -356,15 +424,5 @@ mod tests {
         );
         assert_eq!(resolve_image_key_inner(None, None, Some(String::new())), None);
         assert_eq!(resolve_image_key_inner(None, None, None), None);
-    }
-
-    #[test]
-    fn output_format_parses_and_maps() {
-        assert_eq!(OutputFormat::parse("PNG"), Some(OutputFormat::Png));
-        assert_eq!(OutputFormat::parse("jpg"), Some(OutputFormat::Jpeg));
-        assert_eq!(OutputFormat::parse("image/jpeg"), Some(OutputFormat::Jpeg));
-        assert_eq!(OutputFormat::parse("webp"), None);
-        assert_eq!(OutputFormat::Jpeg.mime(), "image/jpeg");
-        assert_eq!(OutputFormat::Png.mime(), "image/png");
     }
 }

@@ -13,9 +13,7 @@ use serde::Deserialize;
 use super::registry::DispatchContext;
 use crate::media::store::{self, MediaOrigin, MediaStore};
 use crate::media::{ingest, tiles, MEDIA_LONG_EDGE_MAX, MEDIA_TILES_PER_VIEW, MEDIA_UPLOAD_MAX};
-use crate::provider::image::{
-    self as image_provider, ImageGenError, ImageGenRequest, ImageProvider, OutputFormat, IMAGE_GEN_TIMEOUT,
-};
+use crate::provider::image::{self as image_provider, ImageGenError, ImageGenRequest, ImageProvider, IMAGE_GEN_TIMEOUT};
 
 /// Reference images accepted per generation call.
 pub const IMAGE_GENERATE_MAX_REFERENCES: usize = 4;
@@ -266,7 +264,7 @@ fn brought_down(rect: &tiles::TileRect, image: &ingest::Normalized) -> bool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "image_generate",
-    description = "Generate an image from a text prompt with the configured image backend (Gemini image models; default gemini-3-pro-image — the operator sets it with /image-provider). The result is written to /embra/workspace/MEDIA/gen-<id>.<png|jpg> at full resolution and a JSON summary {id, path, width, height, bytes, media_type, model, provider} is returned; unless return_image=false the image is ALSO returned to you as an image block so you can check it against the prompt before telling the operator. aspect_ratio: 1:1|3:2|2:3|3:4|4:3|4:5|5:4|9:16|16:9|21:9. size: 512px|1K|2K|4K — 4K only with output_format=jpeg (a 4K PNG exceeds the 12 MiB store ceiling); gemini-3.1-flash-lite-image renders 1K only. output_format: png (default) | jpeg. reference_images: up to 4 media ids or workspace image paths used as visual references or edit sources (for edits, describe the change in the prompt). Not configured → an explanation naming /image-provider. Side-effectful: writes a file and spends API credits.",
+    description = "Generate an image from a text prompt with the configured image backend (Gemini image models; default gemini-nano-banana-2.1 — the operator sets it with /image-provider). The result is a JPEG, the API's one output type, written to /embra/workspace/MEDIA/gen-<id>.jpg at full resolution, and a JSON summary {id, path, width, height, bytes, media_type, model, provider} is returned; unless return_image=false the image is ALSO returned to you as an image block so you can check it against the prompt before telling the operator. aspect_ratio: 1:1|3:2|2:3|3:4|4:3|4:5|5:4|9:16|16:9|21:9. size: 1K|2K|4K, 1K when omitted; 512 on gemini-3.1-flash-image only; gemini-3.1-flash-lite-image and gemini-2.5-flash-image render 1K only. A size the configured model does not render is refused before the call, and the refusal names the model and the sizes it renders. reference_images: up to 4 media ids or workspace image paths used as visual references or edit sources (for edits, describe the change in the prompt). Not configured → an explanation naming /image-provider. Side-effectful: writes a file and spends API credits.",
     is_side_effectful = true
 )]
 pub struct ImageGenerateArgs {
@@ -275,12 +273,9 @@ pub struct ImageGenerateArgs {
     /// One of 1:1, 3:2, 2:3, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9.
     #[serde(default)]
     pub aspect_ratio: Option<String>,
-    /// One of 512px, 1K, 2K, 4K (4K requires output_format=jpeg).
+    /// One of 1K, 2K, 4K (512 on gemini-3.1-flash-image only); 1K when omitted.
     #[serde(default)]
     pub size: Option<String>,
-    /// png (default) or jpeg.
-    #[serde(default)]
-    pub output_format: Option<String>,
     /// Media ids (att-/gen-/view-…) or image paths file_read can read, max 4.
     #[serde(default)]
     pub reference_images: Option<Vec<String>>,
@@ -354,13 +349,6 @@ pub async fn image_generate(
     args: ImageGenerateArgs,
     session: &str,
 ) -> Result<ToolOutput, DispatchError> {
-    let output_format = match args.output_format.as_deref() {
-        None | Some("") => OutputFormat::Png,
-        Some(s) => match OutputFormat::parse(s) {
-            Some(f) => f,
-            None => return Ok(ToolOutput::text(format!("image_generate: output_format '{s}' is not png or jpeg"))),
-        },
-    };
     let mut reference_images = Vec::new();
     if let Some(refs) = &args.reference_images {
         if refs.len() > IMAGE_GENERATE_MAX_REFERENCES {
@@ -381,7 +369,6 @@ pub async fn image_generate(
         prompt: args.prompt.clone(),
         aspect_ratio: args.aspect_ratio.clone().filter(|s| !s.trim().is_empty()),
         size: args.size.clone().filter(|s| !s.trim().is_empty()),
-        output_format,
         reference_images,
     };
     if let Err(e) = image_provider::validate_request(provider.model(), &req) {
@@ -402,7 +389,7 @@ pub async fn image_generate(
         Ok(Err(e)) => return Ok(ToolOutput::text(format!("image_generate: {e}"))),
         Err(_) => {
             return Ok(ToolOutput::text(format!(
-                "image_generate: no response within {}s — the request was abandoned (nothing was written). Try a smaller size or a faster model (/image-provider model gemini-3.1-flash-image).",
+                "image_generate: no response within {}s — the request was abandoned (nothing was written). Try a smaller size or a faster model (/image-provider model gemini-3.1-flash-lite-image).",
                 IMAGE_GEN_TIMEOUT.as_secs()
             )));
         }
@@ -486,7 +473,7 @@ pub async fn image_generate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::ingest::tests::{gif_fixture, png_fixture};
+    use crate::media::ingest::tests::{gif_fixture, jpeg_fixture_with_orientation, png_fixture};
 
     struct TempDir(std::path::PathBuf);
     impl TempDir {
@@ -646,7 +633,13 @@ mod tests {
         assert_eq!(store.usage().await.unwrap().0, 1);
     }
 
-    /// Fake backend: returns a fixed PNG (or an error) without the network.
+    /// What the image endpoint returns: a JPEG, here without a rotation.
+    fn jpeg_fixture(w: u32, h: u32) -> Vec<u8> {
+        jpeg_fixture_with_orientation(w, h, 1)
+    }
+
+    /// Fake backend: returns a fixed image (or an error) without the
+    /// network, declared as the endpoint declares it.
     struct FakeProvider {
         result: std::sync::Mutex<Option<Result<image_provider::ImageGenResponse, ImageGenError>>>,
         seen: std::sync::Mutex<Option<ImageGenRequest>>,
@@ -657,7 +650,10 @@ mod tests {
         fn ok(model: &str, bytes: Vec<u8>) -> Self {
             FakeProvider {
                 result: std::sync::Mutex::new(Some(Ok(image_provider::ImageGenResponse {
-                    images: vec![image_provider::GeneratedImage { media_type: "image/png".into(), data: bytes }],
+                    images: vec![image_provider::GeneratedImage {
+                        media_type: image_provider::OUTPUT_MIME.into(),
+                        data: bytes,
+                    }],
                     text: Some("Here it is.".into()),
                 }))),
                 seen: std::sync::Mutex::new(None),
@@ -692,7 +688,6 @@ mod tests {
             prompt: prompt.into(),
             aspect_ratio: None,
             size: None,
-            output_format: None,
             reference_images: None,
             return_image: None,
         }
@@ -702,7 +697,7 @@ mod tests {
     async fn image_generate_writes_gen_file_and_returns_summary() {
         let dir = TempDir::new();
         let store = MediaStore::at(dir.0.join("MEDIA"));
-        let provider = FakeProvider::ok("gemini-3-pro-image", png_fixture(9, 6));
+        let provider = FakeProvider::ok("gemini-nano-banana-2.1", jpeg_fixture(9, 6));
         let mut args = gen_args("A lighthouse at dusk, poster style!");
         args.aspect_ratio = Some("16:9".into());
         args.size = Some("2K".into());
@@ -711,32 +706,69 @@ mod tests {
         let seen = provider.seen.lock().unwrap().clone().unwrap();
         assert_eq!(seen.aspect_ratio.as_deref(), Some("16:9"));
         assert_eq!(seen.size.as_deref(), Some("2K"));
-        assert_eq!(seen.output_format, OutputFormat::Png);
         // Summary JSON + model note + the image block.
         let json_part = out.text.split("\nModel note:").next().unwrap();
         let summary: serde_json::Value = serde_json::from_str(json_part).unwrap();
         assert!(summary["id"].as_str().unwrap().starts_with("gen-"));
         assert_eq!(summary["width"], 9);
         assert_eq!(summary["height"], 6);
-        assert_eq!(summary["model"], "gemini-3-pro-image");
+        assert_eq!(summary["media_type"], "image/jpeg");
+        assert!(summary["path"].as_str().unwrap().ends_with(".jpg"), "{summary}");
+        assert_eq!(summary["model"], "gemini-nano-banana-2.1");
         assert_eq!(summary["provider"], "gemini");
         assert!(out.text.contains("Model note: Here it is."));
         assert!(out.text.contains("follows as an image block"));
         assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].media_type, "image/jpeg");
+        assert_eq!(ingest::sniff(&out.images[0].data), Some(ingest::ImageKind::Jpeg));
         let r = out.images[0].media_ref.as_ref().unwrap();
         assert_eq!(r.origin, "generated");
-        assert_eq!(r.name, "a-lighthouse-at-dusk-poster-style.png");
+        assert_eq!(r.name, "a-lighthouse-at-dusk-poster-style.jpg");
         assert!(r.caption.starts_with("A lighthouse"));
         assert!(std::path::Path::new(&r.path).exists());
-        assert_eq!(std::fs::read(&r.path).unwrap(), png_fixture(9, 6), "full-res bytes stored untouched");
+        assert_eq!(std::fs::read(&r.path).unwrap(), jpeg_fixture(9, 6), "full-res bytes stored untouched");
         assert!(out.media_refs.is_empty());
+    }
+
+    /// The call with nothing but a prompt is the request the API takes:
+    /// no size and no ratio of the tool's own, on the configured model.
+    #[tokio::test]
+    async fn a_call_with_only_a_prompt_asks_for_no_size_and_no_ratio() {
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let provider = FakeProvider::ok(image_provider::DEFAULT_GEMINI_IMAGE_MODEL, jpeg_fixture(8, 8));
+        let out = image_generate(&store, &provider, gen_args("a lighthouse"), "s").await.unwrap();
+        let seen = provider.seen.lock().unwrap().clone().expect("the backend was called");
+        assert_eq!((seen.size, seen.aspect_ratio), (None, None));
+        assert!(seen.reference_images.is_empty());
+        assert_eq!(out.images.len(), 1, "{}", out.text);
+        // An argument the tool no longer has is no reason to refuse a
+        // call: a model that still sends `output_format` gets its image.
+        let args: ImageGenerateArgs =
+            serde_json::from_value(serde_json::json!({"prompt": "a lighthouse", "output_format": "png"})).unwrap();
+        assert_eq!(args.prompt, "a lighthouse");
+    }
+
+    /// The file's type and name follow the bytes that came back, whatever
+    /// the API declared them to be.
+    #[tokio::test]
+    async fn the_stored_file_is_named_by_the_bytes_that_came_back() {
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let provider = FakeProvider::ok("gemini-nano-banana-2.1", png_fixture(5, 4));
+        let out = image_generate(&store, &provider, gen_args("a seal"), "s").await.unwrap();
+        let json_part = out.text.split("\nModel note:").next().unwrap();
+        let summary: serde_json::Value = serde_json::from_str(json_part).unwrap();
+        assert_eq!(summary["media_type"], "image/png");
+        assert!(summary["path"].as_str().unwrap().ends_with(".png"), "{summary}");
+        assert_eq!(out.images[0].media_ref.as_ref().unwrap().name, "a-seal.png");
     }
 
     #[tokio::test]
     async fn image_generate_return_image_false_is_display_only() {
         let dir = TempDir::new();
         let store = MediaStore::at(dir.0.join("MEDIA"));
-        let provider = FakeProvider::ok("gemini-3-pro-image", png_fixture(3, 3));
+        let provider = FakeProvider::ok("gemini-nano-banana-2.1", jpeg_fixture(3, 3));
         let mut args = gen_args("tiny");
         args.return_image = Some(false);
         let out = image_generate(&store, &provider, args, "s").await.unwrap();
@@ -749,16 +781,26 @@ mod tests {
     async fn image_generate_rejects_bad_options_before_calling() {
         let dir = TempDir::new();
         let store = MediaStore::at(dir.0.join("MEDIA"));
-        let provider = FakeProvider::ok("gemini-3-pro-image", png_fixture(3, 3));
+        let provider = FakeProvider::ok("gemini-nano-banana-2.1", jpeg_fixture(3, 3));
+        // A size the model does not render, and the description of one
+        // that is no value of the API: each refused here, by name.
         let mut args = gen_args("x");
-        args.size = Some("4K".into()); // PNG by default → refused locally
+        args.size = Some("512".into());
         let out = image_generate(&store, &provider, args, "s").await.unwrap();
-        assert!(out.text.contains("4K is only available with output_format=jpeg"), "{}", out.text);
+        assert!(
+            out.text.contains("gemini-nano-banana-2.1 renders 1K|2K|4K; size 512 is rendered by gemini-3.1-flash-image"),
+            "{}",
+            out.text
+        );
+        let mut args = gen_args("x");
+        args.size = Some("512px".into());
+        let out = image_generate(&store, &provider, args, "s").await.unwrap();
+        assert!(out.text.contains("size '512px' is not one of 512|1K|2K|4K"), "{}", out.text);
+        let mut args = gen_args("x");
+        args.aspect_ratio = Some("7:3".into());
+        let out = image_generate(&store, &provider, args, "s").await.unwrap();
+        assert!(out.text.contains("aspect_ratio '7:3' is not one of"), "{}", out.text);
         assert!(provider.seen.lock().unwrap().is_none(), "never called the backend");
-        let mut args = gen_args("x");
-        args.output_format = Some("webp".into());
-        let out = image_generate(&store, &provider, args, "s").await.unwrap();
-        assert!(out.text.contains("not png or jpeg"));
         let mut args = gen_args("x");
         args.reference_images = Some(vec!["nope-id".into()]);
         let out = image_generate(&store, &provider, args, "s").await.unwrap();
@@ -799,12 +841,58 @@ mod tests {
             .expect("image_generate registered");
         assert!(d.is_side_effectful);
         assert!(d.description.contains("/image-provider"));
-        assert!(d.description.contains("4K only with output_format=jpeg"));
         let schema = (d.input_schema)();
         assert_eq!(schema["type"], "object");
         assert!(schema.get("oneOf").is_none() && schema.get("anyOf").is_none() && schema.get("allOf").is_none());
         assert_eq!(schema["properties"]["prompt"]["type"], "string");
         assert_eq!(schema["required"], serde_json::json!(["prompt"]));
+    }
+
+    /// What the model is told about the tool is what the tool does: the
+    /// default model, each size with the models that render it, the ten
+    /// ratios, and no option the tool does not have. The words are read
+    /// from the provider module, so a model or a size changed there
+    /// without the description fails here.
+    #[test]
+    fn the_description_names_the_default_model_and_every_size_and_ratio_as_the_tool_takes_them() {
+        use image_provider::{sizes_of, ASPECT_RATIOS, DEFAULT_GEMINI_IMAGE_MODEL, GEMINI_IMAGE_MODELS, IMAGE_SIZES};
+        let d = crate::tools::registry::all_descriptors()
+            .find(|d| d.name == "image_generate")
+            .expect("image_generate registered");
+        let desc = d.description;
+        assert!(desc.contains(&format!("default {DEFAULT_GEMINI_IMAGE_MODEL} —")), "{desc}");
+        assert!(desc.contains(&format!("aspect_ratio: {}.", ASPECT_RATIOS.join("|"))), "{desc}");
+        // The sizes of the default model, then every other model by what
+        // sets it apart: the one with more, the ones with one.
+        assert!(
+            desc.contains(&format!("size: {}, 1K when omitted;", sizes_of(DEFAULT_GEMINI_IMAGE_MODEL).join("|"))),
+            "{desc}"
+        );
+        for model in GEMINI_IMAGE_MODELS {
+            let sizes = sizes_of(model);
+            if sizes == sizes_of(DEFAULT_GEMINI_IMAGE_MODEL) {
+                continue;
+            }
+            assert!(desc.contains(model), "{model} renders {sizes:?} and the description does not name it: {desc}");
+            if sizes == ["1K"] {
+                assert!(desc.contains("render 1K only"), "{desc}");
+            } else {
+                for size in sizes.iter().filter(|s| !sizes_of(DEFAULT_GEMINI_IMAGE_MODEL).contains(s)) {
+                    assert!(desc.contains(&format!("{size} on {model} only")), "{desc}");
+                }
+            }
+        }
+        for size in IMAGE_SIZES {
+            assert!(desc.contains(size), "{size}: {desc}");
+        }
+        for gone in ["512px", "output_format", "png"] {
+            assert!(!desc.contains(gone), "the description still says {gone}: {desc}");
+        }
+        let schema = (d.input_schema)();
+        let properties: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(properties, ["aspect_ratio", "prompt", "reference_images", "return_image", "size"]);
+        let size = schema["properties"]["size"]["description"].as_str().unwrap();
+        assert!(!size.contains("512px") && !size.contains("output_format"), "{size}");
     }
 
     #[test]

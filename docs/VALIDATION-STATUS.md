@@ -134,6 +134,15 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | HTTPS with the CA the image was built with | Bare metal | |
 | A certificate refused on its dates, with the clock named | | a machine whose clock is behind |
 
+## Image generation
+
+The first row is Gemini's own endpoint, reached with a key. The second is the OS with a stand-in for that endpoint, which refuses what the API's reference does not list (PNG output, the size `512px`, a size the model does not render) and answers with a JPEG of the dimensions Google's image guide gives: it shows what the OS sends and what it does with a picture, and not what Gemini answers.
+
+| What | Validated on | TBD |
+|---|---|---|
+| A picture from Gemini's image endpoint | A request for a JPEG at size `1K`, answered with a picture of 1024×1024: an instance with a Gemini key, on the programs from before the tool's values were corrected, with both options named in the call | `image_generate` with a prompt alone on the default model, `gemini-nano-banana-2.1`; the sizes `2K` and `4K`; `512` on `gemini-3.1-flash-image`; each of the other models; a reference image |
+| `image_generate` to the stored picture: a call with a prompt alone asks the default model for a JPEG and names no size; `2K`, `4K` and a ratio as asked; `512` on the one model that renders it; a reference image sent with the prompt; the picture stored as `gen-<id>.jpg` at the size that came back (to 6336×2688), served by the web console as a JPEG and handed to the model; a size the configured model does not render refused before a request, with the model's own sizes and the models that render it named, and `512px` refused as no value of the API; a call that still names `output_format` answered; `/image-provider` with the default and the five models, `model`, a model that does not exist, `clear` | QEMU, with a stand-in for Gemini's endpoint behind the gateway's route | |
+
 ## Native models (experimental)
 
 Every row is the 4B (`qwen3.5-4b`) on the machine's processor, unless it names the 9B or the 27B. The rows of the Beelink are with the files of an earlier catalogue. In the QEMU runs the model server is the recipe's, built in a Buildroot output of its own and put into the root filesystem of the last image; on the Beelink it is the one an image build made.

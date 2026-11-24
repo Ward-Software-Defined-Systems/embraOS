@@ -130,8 +130,10 @@ pub struct SystemConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_provider: Option<String>,
     /// Image-generation model id. `None` = the backend's default
-    /// (`gemini-3-pro-image`). Allowlisted in `provider::image`; set via
-    /// `/image-provider model <id>`. Serde-additive `Option`.
+    /// (`provider::image::DEFAULT_GEMINI_IMAGE_MODEL`), so an instance that
+    /// never picked one follows the default when it moves. Allowlisted in
+    /// `provider::image`; set via `/image-provider model <id>`.
+    /// Serde-additive `Option`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_model: Option<String>,
     /// Per-host git tokens (host → PAT) for self-hosted git servers

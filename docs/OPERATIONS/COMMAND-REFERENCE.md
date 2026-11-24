@@ -80,7 +80,7 @@ Before a session exists (the first-boot configuration wizard, Learning Mode and 
 | `/media off` \| `/media <id>` | Hide the pane, or fetch a specific media id into it |
 | `/image-provider` | Show the `image_generate` backend: provider (explicit or default), model, key status (env / dedicated STATE key / Gemini LLM key fallback / not set) |
 | `/image-provider gemini` | Use Gemini image models (the only backend today; also the default when unset) |
-| `/image-provider model <id>` | Pick the model: `gemini-3-pro-image` (default, 4K-capable), `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image` (1K only), `gemini-2.5-flash-image` (legacy). Persists to `SystemConfig.image_model`; takes effect on the next `image_generate` call |
+| `/image-provider model <id>` | Pick the model: `gemini-nano-banana-2.1` (default; sizes 1K, 2K, 4K), `gemini-3-pro-image` (1K, 2K, 4K), `gemini-3.1-flash-image` (512, 1K, 2K, 4K), `gemini-3.1-flash-lite-image` (1K only), `gemini-2.5-flash-image` (legacy, 1K only). Persists to `SystemConfig.image_model`; takes effect on the next `image_generate` call. An instance on which no model was picked uses the default of the release it runs |
 | `/image-provider key <token>` \| `key` \| `key remove` | Set a dedicated image-generation key (`/embra/state/api_key_image_gemini`, `0600`, never echoed), show whether one is set, or delete it. Precedence: `EMBRA_IMAGE_API_KEY` env > this key > the Gemini LLM key. The value is masked while it is typed in the console and echoed masked in the mobile chat; it is never shown back. |
 | `/image-provider clear` | Reset provider + model to the defaults (the key file is untouched) |
 
