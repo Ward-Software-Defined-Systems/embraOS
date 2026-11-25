@@ -10,6 +10,8 @@
 //! > the LLM Gemini key (`SystemConfig::key_for(Gemini)`).
 
 pub mod gemini;
+#[cfg_attr(not(test), expect(dead_code, reason = "selected through /image-provider once the provider is wired in"))]
+pub mod higgsfield;
 
 use std::time::Duration;
 
@@ -27,6 +29,15 @@ pub const IMAGE_KEY_PATH_GEMINI: &str = "/embra/state/api_key_image_gemini";
 /// Env override for the image key (highest precedence; dev/test).
 pub const IMAGE_KEY_ENV: &str = "EMBRA_IMAGE_API_KEY";
 
+/// How a model takes the tool's `reference_images`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum References {
+    /// It takes none, in this OS.
+    None,
+    /// Sent inline with the request itself (Gemini's).
+    Inline,
+}
+
 /// One image model and what the tool may ask of it, read from the model's
 /// own page. The tool's word for a size and the API's value for it are
 /// kept apart, since an API may write a size its own way.
@@ -34,10 +45,15 @@ pub const IMAGE_KEY_ENV: &str = "EMBRA_IMAGE_API_KEY";
 pub struct ImageModel {
     pub id: &'static str,
     pub kind: ImageProviderKind,
-    /// `(the tool's word, the API's value)`, in the model's own order.
+    /// `(the tool's word, the API's value)`, in the model's own order;
+    /// none for a model whose size is its own.
     pub sizes: &'static [(&'static str, &'static str)],
     /// The aspect ratios the tool takes for the model.
     pub ratios: &'static [&'static str],
+    pub references: References,
+    /// The prompt's bounds in characters, where the model's page states
+    /// them.
+    pub prompt_chars: Option<(usize, usize)>,
 }
 
 impl ImageModel {
@@ -56,30 +72,80 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         kind: ImageProviderKind::Gemini,
         sizes: &[("1K", "1K"), ("2K", "2K"), ("4K", "4K")],
         ratios: ASPECT_RATIOS,
+        references: References::Inline,
+        prompt_chars: None,
     },
     ImageModel {
         id: "gemini-3-pro-image",
         kind: ImageProviderKind::Gemini,
         sizes: &[("1K", "1K"), ("2K", "2K"), ("4K", "4K")],
         ratios: ASPECT_RATIOS,
+        references: References::Inline,
+        prompt_chars: None,
     },
     ImageModel {
         id: "gemini-3.1-flash-image",
         kind: ImageProviderKind::Gemini,
         sizes: &[("512", "512"), ("1K", "1K"), ("2K", "2K"), ("4K", "4K")],
         ratios: ASPECT_RATIOS,
+        references: References::Inline,
+        prompt_chars: None,
     },
     ImageModel {
         id: "gemini-3.1-flash-lite-image",
         kind: ImageProviderKind::Gemini,
         sizes: &[("1K", "1K")],
         ratios: ASPECT_RATIOS,
+        references: References::Inline,
+        prompt_chars: None,
     },
     ImageModel {
         id: "gemini-2.5-flash-image",
         kind: ImageProviderKind::Gemini,
         sizes: &[("1K", "1K")],
         ratios: ASPECT_RATIOS,
+        references: References::Inline,
+        prompt_chars: None,
+    },
+    // Higgsfield's: each model's page at docs.higgsfield.ai/docs/models/,
+    // its input schema, read 2026-11-24. Each is its own endpoint, whose id
+    // is the model's id here. A size is the tool's word and the API's
+    // value; a ratio of the page but "auto" (no ratio leaves the field
+    // out, and the page's default stands).
+    ImageModel {
+        id: "xai/grok-imagine-image-2.0",
+        kind: ImageProviderKind::Higgsfield,
+        sizes: &[("1K", "1k"), ("2K", "2k")],
+        ratios: &["1:1", "1:2", "2:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"],
+        references: References::None,
+        prompt_chars: None,
+    },
+    ImageModel {
+        id: "higgsfield-ai/soul/v2/standard",
+        kind: ImageProviderKind::Higgsfield,
+        sizes: &[("720p", "720p"), ("1080p", "1080p")],
+        ratios: &["9:16", "16:9", "4:3", "3:4", "1:1", "2:3", "3:2"],
+        references: References::None,
+        prompt_chars: None,
+    },
+    ImageModel {
+        id: "ideogram/v4.0",
+        kind: ImageProviderKind::Higgsfield,
+        sizes: &[],
+        ratios: &[
+            "1:1", "1:2", "2:1", "2:3", "3:2", "4:5", "5:4", "9:16", "16:9", "5:8", "8:5", "3:4", "4:3", "9:22", "22:9",
+            "9:23", "23:9", "3:8", "8:3", "5:12", "12:5", "1:3", "3:1",
+        ],
+        references: References::None,
+        prompt_chars: Some((2, 2048)),
+    },
+    ImageModel {
+        id: "z-image/turbo",
+        kind: ImageProviderKind::Higgsfield,
+        sizes: &[("1K", "1k"), ("2K", "2k")],
+        ratios: &["1:1", "2:3", "3:2", "3:4", "4:3", "7:9", "9:7", "9:16", "16:9", "21:9"],
+        references: References::None,
+        prompt_chars: Some((1, 800)),
     },
 ];
 /// Gemini's models of `IMAGE_MODELS`, in its order (guard
@@ -94,6 +160,20 @@ pub const GEMINI_IMAGE_MODELS: &[&str] = &[
     "gemini-2.5-flash-image",
 ];
 pub const DEFAULT_GEMINI_IMAGE_MODEL: &str = "gemini-nano-banana-2.1";
+
+/// Higgsfield's models of `IMAGE_MODELS`, in its order. The first is the
+/// default, William's pick: the one that both makes a picture and edits
+/// one with references.
+pub const HIGGSFIELD_IMAGE_MODELS: &[&str] = &[
+    "xai/grok-imagine-image-2.0",
+    "higgsfield-ai/soul/v2/standard",
+    "ideogram/v4.0",
+    "z-image/turbo",
+];
+pub const DEFAULT_HIGGSFIELD_IMAGE_MODEL: &str = "xai/grok-imagine-image-2.0";
+/// The size words of Higgsfield's models, every one's in the order of
+/// `IMAGE_MODELS`.
+pub const HIGGSFIELD_SIZE_WORDS: &[&str] = &["1K", "2K", "720p", "1080p"];
 
 /// The ten ratios the tool takes for each of Gemini's models: every one
 /// of them renders these.
@@ -122,12 +202,22 @@ pub fn sizes_of(model: &str) -> Vec<&'static str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageProviderKind {
     Gemini,
+    Higgsfield,
 }
 
 impl ImageProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             ImageProviderKind::Gemini => "gemini",
+            ImageProviderKind::Higgsfield => "higgsfield",
+        }
+    }
+
+    /// The provider's name in a sentence.
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageProviderKind::Gemini => "Gemini",
+            ImageProviderKind::Higgsfield => "Higgsfield",
         }
     }
 
@@ -141,12 +231,14 @@ impl ImageProviderKind {
     pub fn default_model(self) -> &'static str {
         match self {
             ImageProviderKind::Gemini => DEFAULT_GEMINI_IMAGE_MODEL,
+            ImageProviderKind::Higgsfield => DEFAULT_HIGGSFIELD_IMAGE_MODEL,
         }
     }
 
     pub fn models(self) -> &'static [&'static str] {
         match self {
             ImageProviderKind::Gemini => GEMINI_IMAGE_MODELS,
+            ImageProviderKind::Higgsfield => HIGGSFIELD_IMAGE_MODELS,
         }
     }
 
@@ -155,6 +247,7 @@ impl ImageProviderKind {
     pub fn size_words(self) -> &'static [&'static str] {
         match self {
             ImageProviderKind::Gemini => IMAGE_SIZES,
+            ImageProviderKind::Higgsfield => HIGGSFIELD_SIZE_WORDS,
         }
     }
 }
@@ -193,6 +286,9 @@ pub enum ImageGenError {
     NoImage(String),
     #[error("image generation transport error: {0}")]
     Transport(String),
+    /// The request was still running at the provider's deadline.
+    #[error("the request {request_id} did not finish within {waited_secs} s: {detail}")]
+    StillRunning { request_id: String, waited_secs: u64, detail: String },
 }
 
 #[async_trait::async_trait]
@@ -208,13 +304,33 @@ pub trait ImageProvider: Send + Sync {
 /// `IMAGE_MODELS`. A size is checked twice: that it is a word of the
 /// model's provider, then that this model renders it.
 pub fn validate_request(model_id: &str, req: &ImageGenRequest) -> Result<(), ImageGenError> {
-    if req.prompt.trim().is_empty() {
+    validate_options(model_id, &req.prompt, req.aspect_ratio.as_deref(), req.size.as_deref(), req.reference_images.len())
+}
+
+/// `validate_request` on the request's parts, before the references are
+/// read: `references` is how many were asked for.
+pub fn validate_options(
+    model_id: &str,
+    prompt: &str,
+    aspect_ratio: Option<&str>,
+    size: Option<&str>,
+    references: usize,
+) -> Result<(), ImageGenError> {
+    if prompt.trim().is_empty() {
         return Err(ImageGenError::InvalidRequest("prompt is empty".into()));
     }
     let Some(model) = image_model(model_id) else {
         return Err(ImageGenError::InvalidRequest(format!("{model_id} is not an image model of this OS")));
     };
-    if let Some(ar) = req.aspect_ratio.as_deref()
+    if let Some((least, most)) = model.prompt_chars {
+        let n = prompt.chars().count();
+        if n < least || n > most {
+            return Err(ImageGenError::InvalidRequest(format!(
+                "the prompt is {n} characters; {model_id} takes {least} to {most}"
+            )));
+        }
+    }
+    if let Some(ar) = aspect_ratio
         && !model.ratios.contains(&ar)
     {
         return Err(ImageGenError::InvalidRequest(format!(
@@ -223,7 +339,7 @@ pub fn validate_request(model_id: &str, req: &ImageGenRequest) -> Result<(), Ima
             model.ratios.join("|")
         )));
     }
-    if let Some(size) = req.size.as_deref() {
+    if let Some(size) = size {
         let words = model.kind.size_words();
         if !words.contains(&size) {
             return Err(ImageGenError::InvalidRequest(format!(
@@ -239,12 +355,36 @@ pub fn validate_request(model_id: &str, req: &ImageGenRequest) -> Result<(), Ima
                 .filter(|other| other.kind == model.kind && other.api_size(size).is_some())
                 .map(|other| other.id)
                 .collect();
+            if rendered.is_empty() {
+                return Err(ImageGenError::InvalidRequest(format!(
+                    "{model_id} takes no size, its own is fixed; size {size} is rendered by {} (the operator picks the model with /image-provider model <id>). Omit size",
+                    by.join(", ")
+                )));
+            }
             return Err(ImageGenError::InvalidRequest(format!(
                 "{model_id} renders {}; size {size} is rendered by {} (the operator picks the model with /image-provider model <id>). Omit size or ask for one this model renders",
                 rendered.join("|"),
                 by.join(", ")
             )));
         }
+    }
+    if references > 0 && model.references == References::None {
+        let by: Vec<&str> = IMAGE_MODELS
+            .iter()
+            .filter(|other| other.kind == model.kind && other.references != References::None)
+            .map(|other| other.id)
+            .collect();
+        let way = if by.is_empty() {
+            format!(
+                "none of {}'s models takes one here: Gemini's do (the operator picks the provider with /image-provider gemini)",
+                model.kind.label()
+            )
+        } else {
+            format!("{} do (the operator picks the model with /image-provider model <id>)", by.join(", "))
+        };
+        return Err(ImageGenError::InvalidRequest(format!(
+            "{model_id} takes no reference image; {way}. Omit reference_images"
+        )));
     }
     Ok(())
 }
@@ -326,6 +466,8 @@ pub fn resolve_image_provider(cfg: &SystemConfig) -> Result<Box<dyn ImageProvide
             choice.model,
             interactions_url(cfg),
         ))),
+        // `parse` does not name it yet: no configuration reaches here.
+        ImageProviderKind::Higgsfield => Err(ImageGenError::NotConfigured("Higgsfield cannot be selected in this build".into())),
     }
 }
 
@@ -430,6 +572,69 @@ mod tests {
         assert_eq!(unique.len(), ids.len(), "an id names one model");
         assert!(sizes_of("gemini-3.1-pro-image").is_empty(), "a model that is not listed renders nothing");
         assert_eq!(OUTPUT_MIME, "image/jpeg", "the one value of the reference's mime_type");
+    }
+
+    /// Higgsfield's rows: one a model of its list, in its order, the default
+    /// first; its size words are its models', each rendered by one; a word
+    /// is the API's value but for its case.
+    #[test]
+    fn higgsfields_models_are_its_list_and_its_size_words_are_theirs() {
+        let rows: Vec<&ImageModel> = IMAGE_MODELS.iter().filter(|m| m.kind == ImageProviderKind::Higgsfield).collect();
+        let named: Vec<&str> = rows.iter().map(|m| m.id).collect();
+        assert_eq!(named, HIGGSFIELD_IMAGE_MODELS);
+        assert_eq!(HIGGSFIELD_IMAGE_MODELS[0], DEFAULT_HIGGSFIELD_IMAGE_MODEL, "the default is listed first");
+        let mut words: Vec<&str> = Vec::new();
+        for model in &rows {
+            for (word, value) in model.sizes {
+                assert!(word.eq_ignore_ascii_case(value), "{}: {word} sends {value}", model.id);
+                if !words.contains(word) {
+                    words.push(word);
+                }
+            }
+            assert!(!model.ratios.contains(&"auto"), "{}: no ratio means the model's own", model.id);
+        }
+        assert_eq!(words, HIGGSFIELD_SIZE_WORDS);
+        assert_eq!(ImageProviderKind::Higgsfield.size_words(), HIGGSFIELD_SIZE_WORDS);
+        assert_eq!(ImageProviderKind::parse("higgsfield"), None, "not selectable before it is wired in");
+    }
+
+    /// What Higgsfield's models refuse before a call: a size the model does
+    /// not render, a size on the model whose size is its own, a prompt past
+    /// a model's bounds, a ratio of another model, and a reference.
+    #[test]
+    fn higgsfields_models_refuse_what_their_pages_do_not_take() {
+        let refused = |model: &str, prompt: &str, ratio: Option<&str>, size: Option<&str>, references: usize| {
+            validate_options(model, prompt, ratio, size, references).expect_err("refused").to_string()
+        };
+        const TAIL: &str = " (the operator picks the model with /image-provider model <id>).";
+        assert_eq!(
+            refused("ideogram/v4.0", "a poster", None, Some("1K"), 0),
+            format!("invalid image request: ideogram/v4.0 takes no size, its own is fixed; size 1K is rendered by xai/grok-imagine-image-2.0, z-image/turbo{TAIL} Omit size")
+        );
+        assert_eq!(
+            refused("z-image/turbo", "a poster", None, Some("720p"), 0),
+            format!("invalid image request: z-image/turbo renders 1K|2K; size 720p is rendered by higgsfield-ai/soul/v2/standard{TAIL} Omit size or ask for one this model renders")
+        );
+        assert_eq!(
+            refused("xai/grok-imagine-image-2.0", "a poster", None, Some("4K"), 0),
+            "invalid image request: size '4K' is not one of 1K|2K|720p|1080p"
+        );
+        assert_eq!(refused("ideogram/v4.0", "x", None, None, 0), "invalid image request: the prompt is 1 characters; ideogram/v4.0 takes 2 to 2048");
+        assert_eq!(
+            refused("z-image/turbo", &"é".repeat(801), None, None, 0),
+            "invalid image request: the prompt is 801 characters; z-image/turbo takes 1 to 800"
+        );
+        assert!(validate_options("z-image/turbo", &"é".repeat(800), None, None, 0).is_ok(), "characters, not bytes");
+        assert_eq!(
+            refused("higgsfield-ai/soul/v2/standard", "a poster", Some("21:9"), None, 0),
+            "invalid image request: aspect_ratio '21:9' is not one of 9:16|16:9|4:3|3:4|1:1|2:3|3:2"
+        );
+        assert_eq!(
+            refused("xai/grok-imagine-image-2.0", "a poster", None, None, 1),
+            "invalid image request: xai/grok-imagine-image-2.0 takes no reference image; none of Higgsfield's models takes one here: Gemini's do (the operator picks the provider with /image-provider gemini). Omit reference_images"
+        );
+        assert!(validate_options("ideogram/v4.0", "a poster", Some("22:9"), None, 0).is_ok());
+        assert!(validate_options("higgsfield-ai/soul/v2/standard", "a poster", Some("3:2"), Some("1080p"), 0).is_ok());
     }
 
     /// Every refusal of Gemini's models, word for word as it read before

@@ -606,7 +606,7 @@ pub(crate) async fn public_url_client(
 
 /// Scheme, host and port alike.
 #[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
-fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+pub(crate) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
     a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
 }
 
