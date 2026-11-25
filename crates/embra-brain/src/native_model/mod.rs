@@ -178,10 +178,26 @@ pub(crate) fn memory_note(model: &contract::NativeModel, context: u32, images: b
     let has = format!("this machine has {} GB free for it ({} GB in all)", gb(machine.free), gb(machine.total));
     let window = if in_session { "/native context <tokens>" } else { "/native context <tokens>, once the setup is done" };
     if loaded > machine.free {
-        let smaller = if context > contract::SMALLEST_CONTEXT {
-            format!(" A smaller window takes less, about {} MB for every 1,024 tokens ({window}).", model.memory.per_32768 / 32)
-        } else {
+        // A smaller window is advice only where one is small enough: a
+        // model whose file is larger than the machine's memory fits at no
+        // window, and the note says that in place of the advice.
+        let least = model.loaded_mib(contract::SMALLEST_CONTEXT, images);
+        let smaller = if context <= contract::SMALLEST_CONTEXT {
             String::new()
+        } else if least > machine.total {
+            format!(
+                " No window makes it fit this machine: with the smallest, {} tokens, it takes about {} GB.",
+                contract::SMALLEST_CONTEXT,
+                gb(least)
+            )
+        } else if least > machine.free {
+            format!(
+                " No window makes it fit what is free: with the smallest, {} tokens, it takes about {} GB.",
+                contract::SMALLEST_CONTEXT,
+                gb(least)
+            )
+        } else {
+            format!(" A smaller window takes less, about {} MB for every 1,024 tokens ({window}).", model.memory.per_32768 / 32)
         };
         return Some(MemoryNote {
             at_the_load: true,
@@ -857,6 +873,37 @@ mod tests {
         // The smallest window has no smaller one to name.
         let smallest = memory_note(four, contract::SMALLEST_CONTEXT, false, machine(3_900, 2_500), true).unwrap();
         assert!(smallest.at_the_load && smallest.text.ends_with("or the kernel ends the model server."), "{}", smallest.text);
+        // A smaller window is named only where one is small enough. The 27B
+        // on a machine of 16 GB, as one was asked: its file alone is more
+        // than the machine's memory, so no window makes it fit the machine.
+        let big = contract::by_id("qwen3.8-27b").unwrap();
+        let least = big.loaded_mib(contract::SMALLEST_CONTEXT, true);
+        assert!(least > 15_798, "the 27B at its smallest window takes {least} MiB");
+        let note = memory_note(big, 65_536, true, machine(15_798, 13_700), true).unwrap();
+        assert!(note.at_the_load);
+        assert!(
+            note.text.ends_with(&format!(
+                "or the kernel ends the model server. No window makes it fit this machine: with the smallest, 1024 tokens, it takes about {} GB.",
+                gb(least)
+            )),
+            "{}",
+            note.text
+        );
+        assert!(!note.text.contains("A smaller window"), "{}", note.text);
+        // The same model on a machine that could hold it, with too little
+        // of its memory free now: no window fits what is free.
+        let note = memory_note(big, 65_536, true, machine(64_000, least - 1), true).unwrap();
+        assert!(
+            note.text.ends_with(&format!("No window makes it fit what is free: with the smallest, 1024 tokens, it takes about {} GB.", gb(least))),
+            "{}",
+            note.text
+        );
+        // One megabyte more free, and the smallest window fits: the advice is back.
+        let note = memory_note(big, 65_536, true, machine(64_000, least), true).unwrap();
+        assert!(note.at_the_load && note.text.contains(" A smaller window takes less, about "), "{}", note.text);
+        // Before a session too: the sentence names no command.
+        let early = memory_note(big, 65_536, true, machine(15_798, 13_700), false).unwrap().text;
+        assert!(early.contains("No window makes it fit this machine") && !early.contains("/native"), "{early}");
         // The edges: what is free is exactly the load, then exactly the load and its growth.
         let (loaded, growth) = (four.loaded_mib(65_536, false), four.growth_mib(65_536, false));
         assert!(memory_note(four, 65_536, false, machine(64_000, loaded - 1), true).unwrap().at_the_load);
