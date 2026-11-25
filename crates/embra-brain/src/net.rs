@@ -514,6 +514,113 @@ pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockSt
     }
 }
 
+/// A body read whole, refused when it is more than `cap` bytes: by the
+/// length it declares, before any of it is read, and chunk by chunk, so a
+/// body that declares none or a false one is stopped at the cap too.
+#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
+pub(crate) async fn read_capped(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
+    if let Some(declared) = response.content_length()
+        && declared > cap as u64
+    {
+        return Err(format!("the answer is {declared} bytes, more than the {cap} taken"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("the answer broke off: {}", error_chain(&e)))?
+    {
+        if bytes.len() + chunk.len() > cap {
+            return Err(format!("the answer is more than the {cap} bytes taken"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+/// A URL an API handed back for the brain to fetch or to send to (a
+/// generated picture, an upload slot), with the one client that may reach
+/// it ([`public_url_client`]).
+#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
+pub(crate) struct PublicUrl {
+    pub(crate) url: reqwest::Url,
+    pub(crate) client: reqwest::Client,
+}
+
+/// The URL as an error shows it: scheme, host, port and path, without the
+/// query, which may hold a signature.
+#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
+pub(crate) fn url_shown(url: &reqwest::Url) -> String {
+    let mut shown = url.clone();
+    shown.set_query(None);
+    shown.set_fragment(None);
+    shown.to_string()
+}
+
+/// The client for one URL an API handed back. The URL is `https` and
+/// carries no user or password, and its host is an address, or a name
+/// whose every address is, that `embra_guardian::caps::is_blocked_ip`
+/// does not refuse: no loopback, private, link-local or reserved address.
+/// The client is pinned to the addresses checked, so the name is not
+/// looked up a second time between the check and the connection; it uses
+/// no proxy (one would see a host the check never saw), follows no
+/// redirect, sends no credential, and is bounded by `timeout`. `also` is
+/// one more origin that is taken as it is, scheme and address unchecked:
+/// a test's stand-in server, and nothing else passes one.
+#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
+pub(crate) async fn public_url_client(
+    url: &str,
+    also: Option<&reqwest::Url>,
+    timeout: std::time::Duration,
+) -> Result<PublicUrl, String> {
+    let url = reqwest::Url::parse(url).map_err(|e| format!("the address handed back is not a URL ({e})"))?;
+    let shown = url_shown(&url);
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("{shown} carries a user or a password"));
+    }
+    if also.is_some_and(|also| same_origin(&url, also)) {
+        return Ok(PublicUrl { client: direct_client(None, timeout)?, url });
+    }
+    if url.scheme() != "https" {
+        return Err(format!("{shown} is not https"));
+    }
+    let host = url.host_str().ok_or_else(|| format!("{shown} names no host"))?.to_string();
+    let port = url.port_or_known_default().unwrap_or(443);
+    let literal = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().ok();
+    let addrs: Vec<std::net::SocketAddr> = match literal {
+        Some(ip) => vec![std::net::SocketAddr::new(ip, port)],
+        None => tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("{host} could not be looked up: {e}"))?
+            .collect(),
+    };
+    if addrs.is_empty() {
+        return Err(format!("{host} has no address"));
+    }
+    if let Some(refused) = addrs.iter().find(|a| embra_guardian::caps::is_blocked_ip(&a.ip())) {
+        return Err(format!("{host} is at {}, which is not a public address", refused.ip()));
+    }
+    let pin = if literal.is_none() { Some((host.as_str(), addrs.as_slice())) } else { None };
+    Ok(PublicUrl { client: direct_client(pin, timeout)?, url })
+}
+
+/// Scheme, host and port alike.
+#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
+fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// The client of [`public_url_client`]: the roots in force, no redirect,
+/// no proxy, both bounds, and a name pinned to the addresses checked.
+#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
+fn direct_client(pin: Option<(&str, &[std::net::SocketAddr])>, timeout: std::time::Duration) -> Result<reqwest::Client, String> {
+    let mut builder = builder().redirect(Policy::none()).no_proxy().connect_timeout(CONNECT_TIMEOUT).timeout(timeout);
+    if let Some((name, addrs)) = pin {
+        builder = builder.resolve_to_addrs(name, addrs);
+    }
+    builder.build().map_err(|e| format!("an HTTP client could not be built: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1052,6 +1159,107 @@ mod tests {
         let r = c.get(format!("{}/stay", home.uri())).send().await.unwrap();
         assert_eq!(r.status(), 200);
         assert_eq!(r.text().await.unwrap(), "home");
+    }
+
+    /// A body over the cap is refused by its declared length and, without
+    /// one, chunk by chunk; one within it is read whole.
+    #[tokio::test]
+    async fn a_body_past_the_cap_is_refused_with_or_without_a_declared_length() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/picture"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8; 1000]))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let get = || client.get(format!("{}/picture", server.uri())).send();
+        assert_eq!(read_capped(get().await.unwrap(), 1000).await.unwrap(), vec![7u8; 1000]);
+        let err = read_capped(get().await.unwrap(), 999).await.unwrap_err();
+        assert_eq!(err, "the answer is 1000 bytes, more than the 999 taken");
+        // A chunked body declares no length: the chunks are counted.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = socket.read(&mut request).await.unwrap();
+                let chunk = format!("{:x}\r\n{}\r\n", 400, "x".repeat(400));
+                let reply = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{chunk}{chunk}{chunk}0\r\n\r\n");
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let chunked = || client.get(format!("http://{addr}/picture")).send();
+        let response = chunked().await.unwrap();
+        assert_eq!(response.content_length(), None, "the stand-in declares no length");
+        assert_eq!(read_capped(response, 1200).await.unwrap().len(), 1200);
+        let err = read_capped(chunked().await.unwrap(), 1000).await.unwrap_err();
+        assert_eq!(err, "the answer is more than the 1000 bytes taken");
+    }
+
+    /// What a URL handed back must be before it is reached, each refused
+    /// without a connection: https, no user, and no address that is not
+    /// public, a name's included.
+    #[tokio::test]
+    async fn a_url_handed_back_is_refused_unless_https_and_public() {
+        let limit = std::time::Duration::from_secs(5);
+        let refused = |url: &'static str| async move { public_url_client(url, None, limit).await.err().unwrap_or_default() };
+        assert_eq!(refused("http://cdn.example.com/a.png?sig=1").await, "http://cdn.example.com/a.png is not https");
+        assert_eq!(refused("https://u:p@cdn.example.com/a.png").await, "https://u:p@cdn.example.com/a.png carries a user or a password");
+        assert_eq!(refused("https://127.0.0.1/a.png").await, "127.0.0.1 is at 127.0.0.1, which is not a public address");
+        assert_eq!(refused("https://10.1.2.3/a.png").await, "10.1.2.3 is at 10.1.2.3, which is not a public address");
+        assert_eq!(refused("https://169.254.169.254/latest").await, "169.254.169.254 is at 169.254.169.254, which is not a public address");
+        assert_eq!(refused("https://[::1]/a.png").await, "[::1] is at ::1, which is not a public address");
+        assert_eq!(refused("https://[::ffff:192.168.1.1]/a.png").await, "[::ffff:c0a8:101] is at ::ffff:192.168.1.1, which is not a public address");
+        // A name is looked up and every address it has is checked.
+        let local = refused("https://localhost/a.png").await;
+        assert!(local.starts_with("localhost is at ") && local.ends_with(", which is not a public address"), "{local}");
+        assert!(refused("not a url").await.starts_with("the address handed back is not a URL"));
+        // A public address passes, and nothing is sent to it here.
+        assert!(public_url_client("https://93.184.215.14/a.png", None, limit).await.is_ok());
+    }
+
+    /// The client goes where the check looked: a name pinned to the
+    /// addresses checked reaches them without a second lookup (a name of
+    /// `.invalid` is never in DNS), follows no redirect, and sends nothing
+    /// it was not asked to. The one origin passed as `also` is taken as it
+    /// is, here a stand-in on loopback.
+    #[tokio::test]
+    async fn the_client_is_pinned_follows_no_redirect_and_carries_no_credential() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/picture"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"bytes".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/moved"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", format!("{}/picture", server.uri())))
+            .mount(&server)
+            .await;
+        let addr = *server.address();
+        let pinned = direct_client(Some(("picture.invalid", &[addr])), std::time::Duration::from_secs(5)).unwrap();
+        let answer = pinned.get(format!("http://picture.invalid:{}/picture", addr.port())).send().await.unwrap();
+        assert_eq!(answer.status(), 200);
+        assert_eq!(answer.bytes().await.unwrap().as_ref(), b"bytes");
+        let base = reqwest::Url::parse(&server.uri()).unwrap();
+        let reached = public_url_client(&format!("{}/moved", server.uri()), Some(&base), std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        let answer = reached.client.get(reached.url.clone()).send().await.unwrap();
+        assert_eq!(answer.status(), 302, "a redirect comes back as it is");
+        for request in server.received_requests().await.unwrap() {
+            for header in ["authorization", "x-goog-api-key", "proxy-authorization", "cookie"] {
+                assert!(request.headers.get(header).is_none(), "{header} was sent");
+            }
+        }
+        // Another origin than `also` is checked as any other.
+        let other = reqwest::Url::parse("http://127.0.0.1:1").unwrap();
+        let err = public_url_client(&format!("{}/picture", server.uri()), Some(&other), std::time::Duration::from_secs(5))
+            .await
+            .err()
+            .unwrap();
+        assert!(err.ends_with("is not https"), "{err}");
     }
 
     #[tokio::test]
