@@ -197,9 +197,10 @@ pub const ASPECT_RATIOS: &[&str] = &["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "
 /// reference describes it and never a value. Which of the four a model
 /// renders is `sizes_of`'s.
 pub const IMAGE_SIZES: &[&str] = &["512", "1K", "2K", "4K"];
-/// What the endpoint returns: `image/jpeg` is the one value of the
-/// reference's `mime_type`. The file's name and the summary follow the
-/// bytes that came back, not this.
+/// What a Gemini request asks for: `image/jpeg`, the one value of the
+/// reference's `mime_type`. A model may answer in another format
+/// (`gemini-2.5-flash-image` answers with PNG), so the file's name and the
+/// summary follow the bytes that came back, not this.
 pub const OUTPUT_MIME: &str = "image/jpeg";
 
 /// The model of that id, of any provider.
