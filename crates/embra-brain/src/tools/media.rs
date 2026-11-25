@@ -402,28 +402,34 @@ pub async fn image_generate(
     let Some(first) = generated.images.into_iter().next() else {
         return Ok(ToolOutput::text("image_generate: the API returned no image".to_string()));
     };
-    // Trust the bytes, not the declared MIME: sniff + header dims, full-res
-    // into the store, a normalized copy for the model.
-    let (kind, width, height) = match ingest::probe_dimensions(&first.data) {
-        Ok(t) => t,
+    // Trust the bytes, not the declared MIME. Full-res into the store: as
+    // it came when it is within the store's ceiling, and written again to
+    // fit when it is over it, which the answer says. A normalized copy for
+    // the model.
+    let declared = first.media_type;
+    let (full, refit) = match ingest::fit_generated(first.data).await {
+        Ok(pair) => pair,
         Err(e) => return Ok(ToolOutput::text(format!("image_generate: the API returned unusable image bytes: {e}"))),
     };
-    if first.media_type != kind.media_type() {
+    let came_as = refit.map_or(full.kind, |r| r.from_kind);
+    if declared != came_as.media_type() {
         tracing::warn!(
             target: "media",
-            declared = %first.media_type,
-            sniffed = kind.media_type(),
+            declared = %declared,
+            sniffed = came_as.media_type(),
             "image_generate: declared MIME disagrees with the bytes; trusting the bytes"
         );
     }
-    let full = ingest::Normalized {
-        bytes: first.data,
-        kind,
-        width,
-        height,
-        transformed: false,
-    };
-    let name = slug_from_prompt(&args.prompt, kind.ext());
+    if let Some(r) = refit {
+        tracing::info!(
+            target: "media",
+            from_bytes = r.from_bytes,
+            bytes = full.bytes.len(),
+            quality = r.quality,
+            "a generated picture over the store's ceiling was written again to fit"
+        );
+    }
+    let name = slug_from_prompt(&args.prompt, full.kind.ext());
     // The picture's record names who made it: the tool's answer is gone
     // with its turn, and the picture stays.
     let meta = store
@@ -448,6 +454,10 @@ pub async fn image_generate(
     if let Some(t) = generated.text.as_deref() {
         text.push_str("\nModel note: ");
         text.push_str(t.trim());
+    }
+    if let Some(r) = refit {
+        text.push('\n');
+        text.push_str(&refit_note(&r, &meta));
     }
     let return_image = args.return_image.unwrap_or(true);
     let caption: String = args.prompt.chars().take(140).collect();
@@ -477,10 +487,28 @@ pub async fn image_generate(
     Ok(out)
 }
 
+/// What the answer says of a picture that was written again to fit the
+/// store: the model and the operator are told that the stored file is not
+/// the backend's own, by how much, and what it no longer carries.
+fn refit_note(refit: &ingest::Refit, stored: &store::MediaMeta) -> String {
+    format!(
+        "Encoded again to fit the media store: the backend's picture was {} bytes ({}), over the {} the store takes. It is stored as a JPEG at quality {}, {} bytes, with the same {}x{} pixels; any content credentials the backend signed into its file are not in the stored one.",
+        refit.from_bytes,
+        refit.from_kind.media_type(),
+        MEDIA_UPLOAD_MAX,
+        refit.quality,
+        stored.byte_size,
+        stored.width,
+        stored.height
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::ingest::tests::{gif_fixture, jpeg_fixture_with_orientation, png_fixture};
+    use crate::media::ingest::tests::{
+        gif_fixture, heavy_jpeg_fixture, heavy_png_fixture, jpeg_fixture_with_orientation, png_fixture,
+    };
 
     struct TempDir(std::path::PathBuf);
     impl TempDir {
@@ -740,6 +768,7 @@ mod tests {
         assert!(r.caption.starts_with("A lighthouse"));
         assert!(std::path::Path::new(&r.path).exists());
         assert_eq!(std::fs::read(&r.path).unwrap(), jpeg_fixture(9, 6), "full-res bytes stored untouched");
+        assert!(!out.text.contains("Encoded again"), "{}", out.text);
         assert!(out.media_refs.is_empty());
         // The picture's record names the provider and the model, as the
         // summary does: the record is what stays.
@@ -779,6 +808,82 @@ mod tests {
         assert_eq!(summary["media_type"], "image/png");
         assert!(summary["path"].as_str().unwrap().ends_with(".png"), "{summary}");
         assert_eq!(out.images[0].media_ref.as_ref().unwrap().name, "a-seal.png");
+    }
+
+    /// A picture that comes back heavier than the store takes is not lost:
+    /// it is stored written again as a JPEG, with its pixel size, and the
+    /// answer says from what size and at what quality. One heavier than a
+    /// generated picture is taken at is refused, and nothing is written.
+    #[tokio::test]
+    async fn a_picture_heavier_than_the_store_takes_is_stored_written_again_and_the_answer_says_so() {
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let heavy = heavy_jpeg_fixture(9, 6, 1, MEDIA_UPLOAD_MAX);
+        let weight = heavy.len();
+        let provider = FakeProvider::ok("gemini-nano-banana-2.1", heavy);
+        let mut args = gen_args("a forest floor");
+        args.size = Some("4K".into());
+        let out = image_generate(&store, &provider, args, "s").await.unwrap();
+        let json_part = out.text.split("\nModel note:").next().unwrap();
+        let summary: serde_json::Value = serde_json::from_str(json_part).unwrap();
+        let stored = std::fs::read(summary["path"].as_str().unwrap()).unwrap();
+        assert_eq!(ingest::sniff(&stored), Some(ingest::ImageKind::Jpeg));
+        assert!(stored.len() < 4096 && stored.len() as u64 == summary["bytes"].as_u64().unwrap(), "{summary}");
+        assert_eq!((summary["width"].as_u64(), summary["height"].as_u64()), (Some(9), Some(6)));
+        assert_eq!(summary["media_type"], "image/jpeg");
+        let note = format!(
+            "\nEncoded again to fit the media store: the backend's picture was {weight} bytes (image/jpeg), over the 12582912 the store takes. It is stored as a JPEG at quality 98, {} bytes, with the same 9x6 pixels; any content credentials the backend signed into its file are not in the stored one.\n",
+            stored.len()
+        );
+        assert!(out.text.contains(&note), "{}", out.text);
+        // After the model's own note and before the line on the image block.
+        let at = |needle: &str| out.text.find(needle).unwrap_or_else(|| panic!("{needle} is not in {}", out.text));
+        assert!(at("Model note: Here it is.") < at("Encoded again") && at("Encoded again") < at("follows as an image block"));
+        assert_eq!(out.images.len(), 1, "the model still gets its copy");
+        let record = store.meta(summary["id"].as_str().unwrap()).await.unwrap();
+        assert_eq!((record.byte_size, record.media_type.as_str()), (stored.len() as u64, "image/jpeg"));
+        // The note's words, at a quality below the first: each figure is the
+        // one it names.
+        let mut as_stored = record.clone();
+        (as_stored.byte_size, as_stored.width, as_stored.height) = (11_756_120, 4096, 4096);
+        assert_eq!(
+            refit_note(&ingest::Refit { from_bytes: 16_688_566, from_kind: ingest::ImageKind::Jpeg, quality: 96 }, &as_stored),
+            "Encoded again to fit the media store: the backend's picture was 16688566 bytes (image/jpeg), over the 12582912 the store takes. It is stored as a JPEG at quality 96, 11756120 bytes, with the same 4096x4096 pixels; any content credentials the backend signed into its file are not in the stored one."
+        );
+        // A PNG that heavy (Higgsfield returns PNGs) is stored as the JPEG
+        // it was written as, and named as one.
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let heavy = heavy_png_fixture(7, 5, MEDIA_UPLOAD_MAX);
+        let weight = heavy.len();
+        let provider = FakeProvider::answering(
+            image_provider::ImageProviderKind::Higgsfield,
+            "xai/grok-imagine-image-2.0",
+            Ok(image_provider::ImageGenResponse {
+                images: vec![image_provider::GeneratedImage { media_type: "image/png".into(), data: heavy }],
+                text: None,
+            }),
+        );
+        let out = image_generate(&store, &provider, gen_args("a seal"), "s").await.unwrap();
+        let json_part = out.text.split("\nEncoded again").next().unwrap();
+        let summary: serde_json::Value = serde_json::from_str(json_part).unwrap();
+        assert_eq!(summary["media_type"], "image/jpeg");
+        assert!(summary["path"].as_str().unwrap().ends_with(".jpg"), "{summary}");
+        assert_eq!(out.images[0].media_ref.as_ref().unwrap().name, "a-seal.jpg");
+        assert!(out.text.contains(&format!("the backend's picture was {weight} bytes (image/png), over the 12582912")), "{}", out.text);
+        assert_eq!(ingest::sniff(&std::fs::read(summary["path"].as_str().unwrap()).unwrap()), Some(ingest::ImageKind::Jpeg));
+        // Heavier than a generated picture is taken at: refused, nothing written.
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let mut too_heavy = jpeg_fixture(2, 2);
+        too_heavy.resize(crate::media::MEDIA_GENERATED_RAW_MAX + 1, 0);
+        let provider = FakeProvider::ok("gemini-nano-banana-2.1", too_heavy);
+        let out = image_generate(&store, &provider, gen_args("a forest floor"), "s").await.unwrap();
+        assert_eq!(
+            out.text,
+            "image_generate: the API returned unusable image bytes: image is 50331649 bytes; the limit is 50331648 bytes"
+        );
+        assert_eq!(store.usage().await.unwrap().0, 0);
     }
 
     #[tokio::test]

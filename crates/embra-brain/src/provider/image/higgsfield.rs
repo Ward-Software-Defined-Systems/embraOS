@@ -409,8 +409,10 @@ impl HiggsfieldImageProvider {
     }
 
     /// The picture of a completed request, from the address the status
-    /// named: through the one client that may reach it, capped at the media
-    /// store's ceiling, and fetched once more after a network failure. A
+    /// named: through the one client that may reach it, capped at what a
+    /// generated picture is taken at (one over the media store's ceiling
+    /// is fitted by the tool), and fetched once more after a network
+    /// failure. A
     /// picture that cannot be fetched is paid for: the error names the
     /// request and the address. A fetch that works leaves the host in the
     /// log.
@@ -433,7 +435,8 @@ impl HiggsfieldImageProvider {
                 }
                 Ok(answer) if !answer.status().is_success() => return Err(paid(&format!("HTTP {}", answer.status().as_u16()))),
                 Ok(answer) => {
-                    let bytes = net::read_capped(answer, crate::media::MEDIA_UPLOAD_MAX).await.map_err(|e| paid(&e))?;
+                    let bytes =
+                        net::read_capped(answer, crate::media::MEDIA_GENERATED_RAW_MAX).await.map_err(|e| paid(&e))?;
                     tracing::info!(
                         target: "media",
                         request_id,
@@ -1447,21 +1450,30 @@ mod tests {
             .await;
         let err = provider(&server, "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
         assert!(err.to_string().ends_with("from http://127.0.0.1:9/p.png: http://127.0.0.1:9/p.png is not https. It is paid for: the address works for seven days, and the Higgsfield console at open.higgsfield.ai keeps it"), "{err}");
-        // A picture over the media store's ceiling.
-        let server = MockServer::start().await;
-        mount_once(&server, "POST", "/z-image/turbo", queued(&server, "r-1")).await;
-        Mock::given(method("GET"))
-            .and(path("/requests/r-1/status"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "completed", "images": [{"url": format!("{}/out/big.png", server.uri())}]})))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/out/big.png"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; crate::media::MEDIA_UPLOAD_MAX + 1]))
-            .mount(&server)
-            .await;
-        let err = provider(&server, "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
-        assert!(err.to_string().contains(&format!("the answer is {} bytes, more than the {} taken", crate::media::MEDIA_UPLOAD_MAX + 1, crate::media::MEDIA_UPLOAD_MAX)), "{err}");
+        // A picture over the media store's ceiling is fetched whole (the
+        // tool fits it); one over what a generated picture is taken at is not.
+        use crate::media::{MEDIA_GENERATED_RAW_MAX, MEDIA_UPLOAD_MAX};
+        for (weight, fetched) in [(MEDIA_UPLOAD_MAX + 1, true), (MEDIA_GENERATED_RAW_MAX + 1, false)] {
+            let server = MockServer::start().await;
+            mount_once(&server, "POST", "/z-image/turbo", queued(&server, "r-1")).await;
+            Mock::given(method("GET"))
+                .and(path("/requests/r-1/status"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "completed", "images": [{"url": format!("{}/out/big.png", server.uri())}]})))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/out/big.png"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; weight]))
+                .mount(&server)
+                .await;
+            let answer = provider(&server, "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await;
+            if fetched {
+                assert_eq!(answer.unwrap().images[0].data.len(), weight);
+            } else {
+                let err = answer.unwrap_err();
+                assert!(err.to_string().contains(&format!("the answer is {weight} bytes, more than the {MEDIA_GENERATED_RAW_MAX} taken")), "{err}");
+            }
+        }
     }
 
     /// A reference goes to Higgsfield's storage first, by the slot's own

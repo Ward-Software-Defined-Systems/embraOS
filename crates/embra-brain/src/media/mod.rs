@@ -33,11 +33,16 @@ use crate::provider::ProviderKind;
 
 pub use store::{MediaMeta, MediaOrigin, MediaStore};
 
-/// Largest upload / import / generated file accepted (raw bytes). Also
-/// the ceiling every `GetMedia` response stays under, so
+/// Largest upload / import / stored file (raw bytes). Also the ceiling
+/// every `GetMedia` response stays under, so
 /// `embra_common::GRPC_MAX_MESSAGE_BYTES` (16 MiB) always fits it plus
 /// framing.
 pub const MEDIA_UPLOAD_MAX: usize = 12 * 1024 * 1024;
+/// Largest generated picture taken from its provider (raw bytes). One over
+/// [`MEDIA_UPLOAD_MAX`] is not stored as it came: it is encoded again to
+/// fit ([`ingest::fit_generated`]). Gemini writes a `4K` picture without
+/// quantization, and a detailed one weighs 12.6 to 15.9 MiB.
+pub const MEDIA_GENERATED_RAW_MAX: usize = 4 * MEDIA_UPLOAD_MAX;
 /// Largest NORMALIZED image handed to a model inline (per image). Bounds
 /// the per-turn request growth under the inline-replay policy.
 pub const MEDIA_INLINE_MAX: usize = 1_572_864;
@@ -224,6 +229,7 @@ mod tests {
     #[test]
     fn caps_pinned() {
         assert_eq!(MEDIA_UPLOAD_MAX, 12 * 1024 * 1024);
+        assert_eq!(MEDIA_GENERATED_RAW_MAX, 48 * 1024 * 1024);
         assert_eq!(MEDIA_INLINE_MAX, 1_572_864);
         assert_eq!(MEDIA_LONG_EDGE_MAX, 2576);
         assert_eq!(MEDIA_DECODE_PIXELS_MAX, 64_000_000);
