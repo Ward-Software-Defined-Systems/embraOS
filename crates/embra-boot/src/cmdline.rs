@@ -419,6 +419,84 @@ mod tests {
         assert!(menu.contains("echo \"  embra.native=0 "), "the boot menu's list of knobs");
     }
 
+    /// Both boot menus read the machine's SMBIOS OEM string for the
+    /// launcher's knobs, and a machine's firmware has such a string of its
+    /// own ("Default string", a board's name, an address). Neither menu
+    /// puts the string on a kernel line: each takes the words of it that
+    /// are `embra.*` knobs into `$extra`, and every kernel line ends in
+    /// `$extra`. A word the kernel does not know is handed to the first
+    /// process, and the kernel stops the boot at the 33rd.
+    #[test]
+    fn the_boot_menus_take_only_the_embra_knobs_of_the_firmwares_oem_string() {
+        for name in ["grub.cfg.in", "grub-installer.cfg.in"] {
+            let menu = std::fs::read_to_string(format!("{}/../../buildroot/board/embraos/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+            let code: Vec<&str> = menu.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("@@")).collect();
+            // The table is read once, into a variable of its own.
+            let reads: Vec<&str> = code.iter().copied().filter(|l| l.starts_with("smbios ")).collect();
+            assert_eq!(reads, ["smbios --type 11 --get-string 4 --set=oem_string"], "{name}");
+            // Its words that are knobs go into $extra, one at a time.
+            let at = code
+                .iter()
+                .position(|l| *l == "for word in $oem_string; do")
+                .unwrap_or_else(|| panic!("{name}: no loop over the string's words"));
+            assert_eq!(
+                code[at + 1..at + 5],
+                [
+                    r#"if regexp '^embra\.[a-z]' "$word"; then"#,
+                    r#"if [ -z "$extra" ]; then set extra="$word"; else set extra="$extra $word"; fi"#,
+                    "fi",
+                    "done",
+                ],
+                "{name}"
+            );
+            let mut kernel_lines = 0;
+            for (i, line) in code.iter().enumerate() {
+                // Nothing but the loop writes $extra: it starts empty.
+                if line.starts_with("set extra=") {
+                    assert!(matches!(*line, "set extra=" | "set extra=\"\""), "{name}: {line}");
+                } else if line.contains("set extra=") {
+                    assert_eq!(i, at + 2, "{name}: {line}");
+                }
+                // The string itself reaches the loop, and nothing else.
+                if line.contains("oem_string") && !line.starts_with("set oem_string=") {
+                    assert!(line.starts_with("smbios ") || *line == "for word in $oem_string; do", "{name}: {line}");
+                }
+                if line.starts_with("linux ") {
+                    kernel_lines += 1;
+                    assert!(line.ends_with(" $extra"), "{name}: a kernel line that does not end in the knobs: {line}");
+                }
+            }
+            assert!(kernel_lines >= 1, "{name}: no kernel line was read");
+        }
+    }
+
+    /// The words the menus' pattern takes and the words it leaves, on the
+    /// strings three machines' firmwares and the launcher have.
+    #[test]
+    fn the_menus_pattern_takes_a_knob_and_leaves_a_firmwares_word() {
+        // `^embra\.[a-z]`, as the menus hand it to GRUB's regexp.
+        let taken = |word: &str| word.strip_prefix("embra.").and_then(|rest| rest.chars().next()).is_some_and(|c| c.is_ascii_lowercase());
+        let knobs = |string: &str| string.split_whitespace().filter(|w| taken(w)).collect::<Vec<_>>().join(" ");
+        assert_eq!(knobs("embra.cols=120 embra.rows=40 embra.ntp=off"), "embra.cols=120 embra.rows=40 embra.ntp=off");
+        assert_eq!(knobs("Default string"), "");
+        assert_eq!(knobs("Supermicro motherboard-X11 Series"), "");
+        assert_eq!(knobs("https://example.org/firmware"), "");
+        assert_eq!(knobs("To be filled by O.E.M."), "");
+        assert_eq!(knobs("ignore_loglevel embra.tui=1 video=efifb:off"), "embra.tui=1");
+        assert_eq!(knobs("embra. embra.=1 EMBRA.TUI=1 xembra.tui=1 embra.Tui=1"), "");
+        // Every knob the kernel line's reader knows is a word the pattern takes.
+        let source = include_str!("cmdline.rs");
+        let mut seen = 0;
+        for word in source.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_')).filter(|w| w.starts_with("embra.") && w.len() > 6) {
+            if word.ends_with('.') || word == "embra.Tui" {
+                continue;
+            }
+            seen += 1;
+            assert!(taken(word), "{word} is named in this file as a knob and the menus would drop it");
+        }
+        assert!(seen > 20, "the knobs of this file were not read: {seen}");
+    }
+
     #[test]
     fn embra_slot_and_embra_mode_take_the_last_occurrence_and_refuse_an_unknown_value() {
         let c = Cmdline::parse("console=ttyS0 embra.slot=a quiet embra.slot=b embra.mode=update");

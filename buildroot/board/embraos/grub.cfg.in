@@ -24,6 +24,7 @@ set slot_a_status=
 set slot_b_status=
 set menu_timeout=3
 set extra=
+set oem_string=
 set trial_a=
 set trial_b=
 
@@ -39,9 +40,21 @@ set slot_b_dev="($disk,gpt3)"
 
 # The host's knobs: run-qemu.sh passes ONE SMBIOS type 11 OEM string. Byte 4
 # of a type 11 structure is its string count; with one string that byte
-# reads 1, which --get-string takes as the index of that string. Without
-# the table (a real VM) the command fails quietly and $extra stays empty.
-smbios --type 11 --get-string 4 --set=extra
+# reads 1, which --get-string takes as the index of that string, and with
+# more it names the last. Without the table the command fails quietly and
+# $oem_string stays empty.
+#
+# A machine's firmware fills that table too, with words of its own: a
+# placeholder, the board's name, an address. So the string is never put on
+# the kernel line as it is: $extra takes the words of it that are embra.*
+# knobs and no other. A word the kernel does not know is handed to the first
+# process as an argument, and the kernel stops the boot at the 33rd.
+smbios --type 11 --get-string 4 --set=oem_string
+for word in $oem_string; do
+    if regexp '^embra\.[a-z]' "$word"; then
+        if [ -z "$extra" ]; then set extra="$word"; else set extra="$extra $word"; fi
+    fi
+done
 
 # A/B: a staged slot is booted while it has tries left; at zero it is marked
 # failed and the active slot boots.

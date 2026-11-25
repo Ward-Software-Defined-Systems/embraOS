@@ -14,10 +14,19 @@
 # host's knobs ride the SMBIOS type 11 string (run-qemu.sh); a machine
 # without that table gets GRUB's one-line error for the lookup, which the
 # menu's own redraw covers (an `if` around the command does not silence it).
+# A machine's firmware fills that table with words of its own, so $extra
+# takes the words of the string that are embra.* knobs and no other, as in
+# grub.cfg.in, which has the reason.
 set timeout=10
 set timeout_style=menu
 set extra=""
-smbios --type 11 --get-string 4 --set=extra
+set oem_string=""
+smbios --type 11 --get-string 4 --set=oem_string
+for word in $oem_string; do
+    if regexp '^embra\.[a-z]' "$word"; then
+        if [ -z "$extra" ]; then set extra="$word"; else set extra="$extra $word"; fi
+    fi
+done
 
 menuentry "Install embraOS @VERSION@" --id install {
     linux /boot/@KERNEL_IMAGE@ console=tty0 console=@SERIAL_CONSOLE@ quiet embra.mode=install $extra
