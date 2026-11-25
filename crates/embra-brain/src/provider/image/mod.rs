@@ -385,8 +385,9 @@ pub fn validate_options(
     if let Some((least, most)) = model.prompt_chars {
         let n = prompt.chars().count();
         if n < least || n > most {
+            let unit = if n == 1 { "character" } else { "characters" };
             return Err(ImageGenError::InvalidRequest(format!(
-                "the prompt is {n} characters; {model_id} takes {least} to {most}"
+                "the prompt is {n} {unit}; {model_id} takes {least} to {most}"
             )));
         }
     }
@@ -768,7 +769,7 @@ mod tests {
             refused("xai/grok-imagine-image-2.0", "a poster", None, Some("4K"), 0),
             "invalid image request: size '4K' is not one of 1K|2K|720p|1080p"
         );
-        assert_eq!(refused("ideogram/v4.0", "x", None, None, 0), "invalid image request: the prompt is 1 characters; ideogram/v4.0 takes 2 to 2048");
+        assert_eq!(refused("ideogram/v4.0", "x", None, None, 0), "invalid image request: the prompt is 1 character; ideogram/v4.0 takes 2 to 2048");
         assert_eq!(
             refused("z-image/turbo", &"é".repeat(801), None, None, 0),
             "invalid image request: the prompt is 801 characters; z-image/turbo takes 1 to 800"
