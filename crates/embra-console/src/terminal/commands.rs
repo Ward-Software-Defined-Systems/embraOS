@@ -73,9 +73,10 @@ Media:
   /media                         Show the last image in the media pane (console-local)
   /media off | <id>              Hide the pane, or fetch a specific media id
   /image-provider                Show the image-generation backend, model, key status
-  /image-provider gemini         Use Gemini image models for image_generate
+  /image-provider gemini|higgsfield  Use Gemini's or Higgsfield's image models for image_generate
   /image-provider model <id>     gemini-nano-banana-2.1 (default) | gemini-3-pro-image | …
-  /image-provider key <token>    Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it
+                                 on Higgsfield: xai/grok-imagine-image-2.0 (default) | z-image/turbo | …
+  /image-provider key <token>    Set the selected provider's key (STATE, 0600; Higgsfield's is <key id>:<key secret>); `key remove` deletes it
 
 Git & SSH:
   /git-setup <name> | <email>    Set git user config

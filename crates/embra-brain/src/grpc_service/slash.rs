@@ -119,7 +119,7 @@ async fn send_thinking(tx: &mpsc::Sender<Result<ConversationResponse, Status>>, 
 /// What `/help` answers: every command the dispatcher below handles, a line
 /// or more each. The console's own `/help` (`embra-console`) lists the same
 /// commands with the four it answers itself.
-pub(super) const BRAIN_HELP: &str = "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /continue                          Send the last call of a turn that a failed model call cut once more, with everything the turn held\n  /status, /soul, /identity, /mode\n  /reboot                            Say what a reboot does; /reboot now reboots embraOS through the boot menu (sessions are kept); /reboot halt stops embraOS and powers the machine off\n  /backup create [label]             Schedule a snapshot of STATE and DATA for the next boot (before the database starts; the boot then continues)\n  /backup list | delete <name>       The backups under /embra/data/backups (each with its download route), or remove one\n  /backup restore <name>             Schedule a restore for the next boot, after you type its confirmation; /backup status shows what is scheduled\n  /ca                                The certificate authorities this machine trusts beside the public ones: the image's and STATE's\n  /ca import <url|uploads/file>      Read a certificate and show it; with sha256:<fingerprint>, import it: the brain trusts it at once, git and the OS updater after the next boot\n  /ca remove <file>                  Remove one of STATE's certificates\n  /network                           The network cards, their links and addresses, the default route, the resolvers and the machine's name\n  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...]   That card keeps this address; /network dhcp <card> goes back to DHCP\n  /network hostname <name>|auto      The machine's name; auto takes the one a DHCP server assigns, or embraos\n  /network time <server> ...|default|off   The time servers the clock is checked against, every hour and when the network returns; blank shows the clock\n  /network wifi [join <name> --key <passphrase>|join <name> --open|forget <name>|country <CC>]   Wi-Fi: blank shows the card, its network and the ones in range\n  /update                            Check the release published at the update source against this one (its signature verified first)\n  /update apply | status | rollback  Write the release into the inactive slot and stage it for the next boot; show both slots; make the other slot the default again\n  /update [apply] --tag <v…>         One release of a GitHub releases source in place of the latest; apply --allow-downgrade takes an older release, or another build of this version\n  /update source [<url>|reset]       Show, set or reset the operator's own update source (default: the GitHub releases of the public mirror)\n  /update auto [on|off]              Show, or turn on or off, the check the brain runs by itself a few minutes after boot and once a day\n  /web-token                         Say what the web console's access token is; /web-token rotate makes a new one (every browser is signed out, the new URL is on the serial console and in the display console's menu)\n  /theme                             Show the web console's themes and the one in use; /theme <name> sets it for the whole machine (every browser, the phone's page and the display console follow); /theme reset goes back to the default\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio|native>  Switch provider for future turns (native: a model on this machine, experimental)\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /provider --setup native           Pick a native model (experimental); its file is downloaded first when it is not installed\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists; on a native model, from the catalogue\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio, qwen3.5-4b|qwen3.5-9b|qwen3.8-27b on a native model (experimental)\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /effort <on|off>                   A native model (experimental): think first, or answer without thinking; Qwen3.8 27B also takes low|medium|xhigh\n  /model-wait                        Show how long embraOS waits while Ollama, LM Studio or a native model sends nothing (default 120 minutes)\n  /model-wait <minutes>|reset        Set that wait for the three of them, or go back to the default; Esc ends a wait\n  /native                            Native models (experimental): the models' files, what is kept loaded, the model server and the job that runs\n  /native install <model>            Download a model's two files and check them (qwen3.5-4b|qwen3.5-9b|qwen3.8-27b); /native cancel stops the job that runs\n  /native import                     How a model's files come in through the web console, for a machine that cannot reach the source\n  /native use <model> | off          Keep a model loaded, installing it first when needed, or free its memory; whichever provider leads the session\n  /native context [<tokens>|reset]   The context window the loaded model is given\n  /native remove <model>             Delete a model's file\n  /local-ai-gateway                  Show WSDS Local AI Gateway's URL and whether requests go through it\n  /local-ai-gateway <url>|on|off|reset  Route every provider request through its unified listener (http(s)://host:4000, which must answer with its x-local-ai-gateway header); off keeps the URL, reset forgets it\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-nano-banana-2.1 (default) | gemini-3-pro-image | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate the SSH key pair (its comment: the instance's name at embraos), or show the public key\n  /ssh-keygen remove|rotate          Delete the key pair after showing its public key and fingerprint, or replace it with a new one\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host on its port, 443 or the one in <host>:<port> (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /guardian connections [close <id>|all]   The WebSocket connections the tools hold open; close one, or all\n  /feedback-loop                     (EXPERIMENTAL) trigger the Phase 2 Continuity Engine self-evaluation protocol\n  /help";
+pub(super) const BRAIN_HELP: &str = "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /continue                          Send the last call of a turn that a failed model call cut once more, with everything the turn held\n  /status, /soul, /identity, /mode\n  /reboot                            Say what a reboot does; /reboot now reboots embraOS through the boot menu (sessions are kept); /reboot halt stops embraOS and powers the machine off\n  /backup create [label]             Schedule a snapshot of STATE and DATA for the next boot (before the database starts; the boot then continues)\n  /backup list | delete <name>       The backups under /embra/data/backups (each with its download route), or remove one\n  /backup restore <name>             Schedule a restore for the next boot, after you type its confirmation; /backup status shows what is scheduled\n  /ca                                The certificate authorities this machine trusts beside the public ones: the image's and STATE's\n  /ca import <url|uploads/file>      Read a certificate and show it; with sha256:<fingerprint>, import it: the brain trusts it at once, git and the OS updater after the next boot\n  /ca remove <file>                  Remove one of STATE's certificates\n  /network                           The network cards, their links and addresses, the default route, the resolvers and the machine's name\n  /network static <card> <address>/<prefix> [<gateway>] [dns <server> ...]   That card keeps this address; /network dhcp <card> goes back to DHCP\n  /network hostname <name>|auto      The machine's name; auto takes the one a DHCP server assigns, or embraos\n  /network time <server> ...|default|off   The time servers the clock is checked against, every hour and when the network returns; blank shows the clock\n  /network wifi [join <name> --key <passphrase>|join <name> --open|forget <name>|country <CC>]   Wi-Fi: blank shows the card, its network and the ones in range\n  /update                            Check the release published at the update source against this one (its signature verified first)\n  /update apply | status | rollback  Write the release into the inactive slot and stage it for the next boot; show both slots; make the other slot the default again\n  /update [apply] --tag <v…>         One release of a GitHub releases source in place of the latest; apply --allow-downgrade takes an older release, or another build of this version\n  /update source [<url>|reset]       Show, set or reset the operator's own update source (default: the GitHub releases of the public mirror)\n  /update auto [on|off]              Show, or turn on or off, the check the brain runs by itself a few minutes after boot and once a day\n  /web-token                         Say what the web console's access token is; /web-token rotate makes a new one (every browser is signed out, the new URL is on the serial console and in the display console's menu)\n  /theme                             Show the web console's themes and the one in use; /theme <name> sets it for the whole machine (every browser, the phone's page and the display console follow); /theme reset goes back to the default\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio|native>  Switch provider for future turns (native: a model on this machine, experimental)\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /provider --setup native           Pick a native model (experimental); its file is downloaded first when it is not installed\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists; on a native model, from the catalogue\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio, qwen3.5-4b|qwen3.5-9b|qwen3.8-27b on a native model (experimental)\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /effort <on|off>                   A native model (experimental): think first, or answer without thinking; Qwen3.8 27B also takes low|medium|xhigh\n  /model-wait                        Show how long embraOS waits while Ollama, LM Studio or a native model sends nothing (default 120 minutes)\n  /model-wait <minutes>|reset        Set that wait for the three of them, or go back to the default; Esc ends a wait\n  /native                            Native models (experimental): the models' files, what is kept loaded, the model server and the job that runs\n  /native install <model>            Download a model's two files and check them (qwen3.5-4b|qwen3.5-9b|qwen3.8-27b); /native cancel stops the job that runs\n  /native import                     How a model's files come in through the web console, for a machine that cannot reach the source\n  /native use <model> | off          Keep a model loaded, installing it first when needed, or free its memory; whichever provider leads the session\n  /native context [<tokens>|reset]   The context window the loaded model is given\n  /native remove <model>             Delete a model's file\n  /local-ai-gateway                  Show WSDS Local AI Gateway's URL and whether requests go through it\n  /local-ai-gateway <url>|on|off|reset  Route every provider request through its unified listener (http(s)://host:4000, which must answer with its x-local-ai-gateway header); off keeps the URL, reset forgets it\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini|higgsfield  Use Gemini's or Higgsfield's image models for image_generate\n  /image-provider model <id>         gemini-nano-banana-2.1 (default) | gemini-3-pro-image | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n                                     on Higgsfield: xai/grok-imagine-image-2.0 (default) | higgsfield-ai/soul/v2/standard | ideogram/v4.0 | z-image/turbo\n  /image-provider key <token>        Set the selected provider's image-generation key (STATE, 0600; Higgsfield's is <key id>:<key secret>); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate the SSH key pair (its comment: the instance's name at embraos), or show the public key\n  /ssh-keygen remove|rotate          Delete the key pair after showing its public key and fingerprint, or replace it with a new one\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host on its port, 443 or the one in <host>:<port> (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /guardian connections [close <id>|all]   The WebSocket connections the tools hold open; close one, or all\n  /feedback-loop                     (EXPERIMENTAL) trigger the Phase 2 Continuity Engine self-evaluation protocol\n  /help";
 
 pub(super) async fn handle_slash_command(
     command: &str,
@@ -1866,17 +1866,17 @@ pub(super) fn humanize_secs(secs: u64) -> String {
 }
 
 /// `/image-provider` — the image_generate backend. Status (no args),
-/// `gemini`, `model <id>`, `key [<token>|remove]`, `clear`. Modeled on
-/// `/effort` (config load → validate → save) and `/guardian key brave`
-/// (STATE-only secret via `write_credential_state`, never echoed).
+/// `gemini` or `higgsfield`, `model <id>`, `key [<token>|remove]`, `clear`.
+/// Modeled on `/effort` (config load → validate → save) and `/guardian key
+/// brave` (STATE-only secret via `write_credential_state`, never echoed).
+/// What it does is decided by `image_provider_step`, apart from the
+/// database and the key files.
 pub(super) async fn handle_image_provider_command(
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     db: &Arc<WardsonDbClient>,
 ) {
-    use crate::provider::image::{
-        resolve_image_choice, ImageProviderKind, IMAGE_KEY_ENV, IMAGE_KEY_PATH_GEMINI,
-    };
+    use crate::provider::image::{resolve_image_key, ImageProviderKind};
     let send = |content: String, kind: SystemMessageType| {
         let tx = tx.clone();
         async move {
@@ -1896,113 +1896,185 @@ pub(super) async fn handle_image_provider_command(
             return;
         }
     };
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let usage = "Usage: /image-provider | /image-provider gemini | /image-provider model <id> | /image-provider key <token> | /image-provider key remove | /image-provider clear";
-    match parts.as_slice() {
-        [] => {
-            let status = match resolve_image_choice(&cfg) {
-                Ok(c) => {
-                    let key = match c.key_source {
-                        Some("env") => format!("SET ({IMAGE_KEY_ENV})"),
-                        Some("state") => "SET (dedicated image key on STATE)".to_string(),
-                        Some("gemini-llm-key") => "SET (falling back to the Gemini LLM key)".to_string(),
-                        _ => "NOT set — /image-provider key <token> (or configure Gemini as the LLM provider)".to_string(),
-                    };
-                    format!(
-                        "Image generation: provider {} ({}), model {}, key {}.\nModels: {}\n{}",
-                        c.kind.as_str(),
-                        if cfg.image_provider.is_some() { "explicit" } else { "default" },
-                        c.model,
-                        key,
-                        c.kind.models().join(" | "),
-                        usage
-                    )
-                }
-                Err(e) => format!("Image generation: misconfigured — {e}\n{usage}"),
-            };
-            send(status, SystemMessageType::Info).await;
+    let sources: Vec<(ImageProviderKind, Option<&'static str>)> =
+        ImageProviderKind::ALL.iter().map(|kind| (*kind, resolve_image_key(&cfg, *kind).map(|(_, source)| source))).collect();
+    let source = |kind: ImageProviderKind| sources.iter().find(|(k, _)| *k == kind).and_then(|(_, s)| *s);
+    let stored = |kind: ImageProviderKind| {
+        std::fs::read_to_string(kind.key_path()).map(|s| !s.trim().is_empty()).unwrap_or(false)
+    };
+    // Decided in a statement of its own: the facts borrow closures that
+    // are not held across an await.
+    let step = image_provider_step(&mut cfg, args, &ImageKeyFacts { source: &source, stored: &stored });
+    match step {
+        ImageProviderStep::Say { text, error } => {
+            send(text, if error { SystemMessageType::Error } else { SystemMessageType::Info }).await
         }
-        ["gemini"] => {
-            cfg.image_provider = Some("gemini".to_string());
-            match config::save_config(db, &cfg).await {
-                Ok(()) => send(
-                    format!(
-                        "Image provider set to gemini (model {}). image_generate uses it on its next call.",
-                        cfg.image_model.clone().unwrap_or_else(|| ImageProviderKind::Gemini.default_model().to_string())
-                    ),
+        ImageProviderStep::Save { text } => match config::save_config(db, &cfg).await {
+            Ok(()) => send(text, SystemMessageType::Info).await,
+            Err(e) => send(format!("/image-provider: failed to save config: {e}"), SystemMessageType::Error).await,
+        },
+        ImageProviderStep::WriteKey { kind, key } => match config::write_credential_state(kind.key_path(), &key) {
+            Ok(()) => {
+                info!(target: "media", provider = kind.as_str(), "image-generation key saved to STATE");
+                send(
+                    format!("{}'s image-generation key saved (STATE, 0600). It is never echoed; image_generate uses it on its next call.", kind.label()),
                     SystemMessageType::Info,
                 )
-                .await,
-                Err(e) => send(format!("/image-provider: failed to save config: {e}"), SystemMessageType::Error).await,
+                .await
+            }
+            Err(e) => send(format!("/image-provider: failed to save the key: {e}"), SystemMessageType::Error).await,
+        },
+        ImageProviderStep::RemoveKey { kind } => match std::fs::remove_file(kind.key_path()) {
+            Ok(()) => send(format!("{}'s image-generation key removed.", kind.label()), SystemMessageType::Info).await,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                send(format!("No image-generation key of {} was set.", kind.label()), SystemMessageType::Info).await
+            }
+            Err(e) => send(format!("/image-provider: failed to remove the key: {e}"), SystemMessageType::Error).await,
+        },
+    }
+}
+
+/// What `image_provider_step` reads of the keys, given by the caller.
+pub(super) struct ImageKeyFacts<'a> {
+    /// Where the provider's key would come from now: `env`, `state`,
+    /// `gemini-llm-key`, or nowhere.
+    pub(super) source: &'a dyn Fn(crate::provider::image::ImageProviderKind) -> Option<&'static str>,
+    /// Whether the provider's STATE file holds a key.
+    pub(super) stored: &'a dyn Fn(crate::provider::image::ImageProviderKind) -> bool,
+}
+
+/// What `/image-provider <args>` comes to.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ImageProviderStep {
+    /// An answer; nothing is stored.
+    Say { text: String, error: bool },
+    /// The configuration was changed in place: save it, then say this.
+    Save { text: String },
+    /// Store this key in the provider's STATE file.
+    WriteKey { kind: crate::provider::image::ImageProviderKind, key: String },
+    /// Remove the provider's STATE file.
+    RemoveKey { kind: crate::provider::image::ImageProviderKind },
+}
+
+const IMAGE_PROVIDER_USAGE: &str = "Usage: /image-provider | /image-provider gemini|higgsfield | /image-provider model <id> | /image-provider key <token> | /image-provider key remove | /image-provider clear";
+
+/// `/image-provider`'s decision on `cfg` (changed in place for a `Save`).
+/// A key is never in what it says.
+pub(super) fn image_provider_step(cfg: &mut config::SystemConfig, args: &str, keys: &ImageKeyFacts<'_>) -> ImageProviderStep {
+    use crate::provider::image::{key_shape_ok, resolve_image_choice, ImageProviderKind};
+    let say = |text: String| ImageProviderStep::Say { text, error: false };
+    let refuse = |text: String| ImageProviderStep::Say { text, error: true };
+    let selected = cfg.image_provider.as_deref().and_then(ImageProviderKind::parse).unwrap_or(ImageProviderKind::Gemini);
+    let gateway_on = cfg.provider_gateway.as_ref().is_some_and(|g| g.enabled && !g.url.trim().is_empty());
+    let direct = |kind: ImageProviderKind| {
+        if kind == ImageProviderKind::Higgsfield && gateway_on {
+            " Higgsfield is reached directly, not through the provider gateway, which neither routes nor records its requests."
+        } else {
+            ""
+        }
+    };
+    let key_words = |kind: ImageProviderKind| match (keys.source)(kind) {
+        Some("env") => format!("SET ({})", kind.key_env()),
+        Some("state") => "SET (dedicated image key on STATE)".to_string(),
+        Some("gemini-llm-key") => "SET (falling back to the Gemini LLM key)".to_string(),
+        _ => match kind {
+            ImageProviderKind::Gemini => "NOT set — /image-provider key <token> (or configure Gemini as the LLM provider)".to_string(),
+            ImageProviderKind::Higgsfield => "NOT set — /image-provider key <key id>:<key secret>, a key of Higgsfield's API console at open.higgsfield.ai (an account and balance of its own, apart from a higgsfield.ai plan)".to_string(),
+        },
+    };
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.as_slice() {
+        [] => match resolve_image_choice(cfg) {
+            Ok(c) => {
+                let lists: Vec<String> = ImageProviderKind::ALL
+                    .iter()
+                    .map(|kind| format!("{}'s models: {}", kind.label(), kind.models().join(" | ")))
+                    .collect();
+                say(format!(
+                    "Image generation: provider {} ({}), model {}, key {}.{}\n{}\n{IMAGE_PROVIDER_USAGE}",
+                    c.kind.as_str(),
+                    if cfg.image_provider.is_some() { "explicit" } else { "default" },
+                    c.model,
+                    key_words(c.kind),
+                    direct(c.kind),
+                    lists.join("\n")
+                ))
+            }
+            Err(e) => say(format!("Image generation: misconfigured — {e}\n{IMAGE_PROVIDER_USAGE}")),
+        },
+        [name] if ImageProviderKind::parse(name).is_some() => {
+            let kind = ImageProviderKind::parse(name).expect("parsed just now");
+            cfg.image_provider = Some(kind.as_str().to_string());
+            let cleared = match cfg.image_model.take() {
+                Some(model) if !kind.models().contains(&model.as_str()) => {
+                    format!(" The model {model} is not one of {}'s and is cleared.", kind.label())
+                }
+                kept => {
+                    cfg.image_model = kept;
+                    String::new()
+                }
+            };
+            let model = cfg.image_model.clone().unwrap_or_else(|| kind.default_model().to_string());
+            let key = if (keys.source)(kind).is_none() { format!(" Its key: {}.", key_words(kind)) } else { String::new() };
+            ImageProviderStep::Save {
+                text: format!(
+                    "Image provider set to {} (model {model}). image_generate uses it on its next call.{cleared}{key}{}",
+                    kind.as_str(),
+                    direct(kind)
+                ),
             }
         }
         ["model", id] => {
-            let kind = cfg
-                .image_provider
-                .as_deref()
-                .and_then(ImageProviderKind::parse)
-                .unwrap_or(ImageProviderKind::Gemini);
-            if !kind.models().contains(id) {
-                send(
-                    format!("Unknown image model '{}'. Options: {}", id, kind.models().join(" | ")),
-                    SystemMessageType::Error,
-                )
-                .await;
-                return;
+            if !selected.models().contains(id) {
+                let other = ImageProviderKind::ALL.iter().find(|kind| kind.models().contains(id));
+                return refuse(match other {
+                    Some(other) => format!(
+                        "{id} is one of {}'s image models, and the provider is {}: /image-provider {} first, then /image-provider model {id}.",
+                        other.label(),
+                        selected.as_str(),
+                        other.as_str()
+                    ),
+                    None => format!("Unknown image model '{}'. Options: {}", id, selected.models().join(" | ")),
+                });
             }
             cfg.image_model = Some((*id).to_string());
-            match config::save_config(db, &cfg).await {
-                Ok(()) => send(format!("Image model set to {id}. Takes effect on the next image_generate call."), SystemMessageType::Info).await,
-                Err(e) => send(format!("/image-provider: failed to save config: {e}"), SystemMessageType::Error).await,
+            ImageProviderStep::Save { text: format!("Image model set to {id}. Takes effect on the next image_generate call.") }
+        }
+        ["key"] => say(format!(
+            "Dedicated image-generation key of {}: {}. Set with /image-provider key {}; remove with /image-provider key remove.{}",
+            selected.label(),
+            if (keys.stored)(selected) { "SET" } else { "NOT set" },
+            match selected {
+                ImageProviderKind::Gemini => "<token>",
+                ImageProviderKind::Higgsfield => "<key id>:<key secret>",
+            },
+            match selected {
+                ImageProviderKind::Gemini => " Without it image_generate falls back to the Gemini LLM key when one is configured.",
+                ImageProviderKind::Higgsfield => "",
             }
-        }
-        ["key"] => {
-            let set = std::fs::read_to_string(IMAGE_KEY_PATH_GEMINI)
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            send(
-                format!(
-                    "Dedicated image-generation key: {}. Set with /image-provider key <token>; remove with /image-provider key remove. Without it image_generate falls back to the Gemini LLM key when one is configured.",
-                    if set { "SET" } else { "NOT set" }
-                ),
-                SystemMessageType::Info,
-            )
-            .await;
-        }
-        ["key", "remove"] => {
-            match std::fs::remove_file(IMAGE_KEY_PATH_GEMINI) {
-                Ok(()) => send("Dedicated image-generation key removed.".to_string(), SystemMessageType::Info).await,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    send("No dedicated image-generation key was set.".to_string(), SystemMessageType::Info).await
-                }
-                Err(e) => send(format!("/image-provider: failed to remove the key: {e}"), SystemMessageType::Error).await,
-            }
-        }
+        )),
+        ["key", "remove"] => ImageProviderStep::RemoveKey { kind: selected },
         ["key", token] => {
-            match config::write_credential_state(IMAGE_KEY_PATH_GEMINI, token.trim()) {
-                Ok(()) => {
-                    info!(target: "media", "image-generation key saved to STATE");
-                    send("Image-generation key saved (STATE, 0600). It is never echoed; image_generate uses it on its next call.".to_string(), SystemMessageType::Info).await
-                }
-                Err(e) => send(format!("/image-provider: failed to save the key: {e}"), SystemMessageType::Error).await,
+            let token = token.trim();
+            if key_shape_ok(selected, token) {
+                return ImageProviderStep::WriteKey { kind: selected, key: token.to_string() };
             }
+            refuse(match selected {
+                ImageProviderKind::Gemini => "That is not a Gemini key: a Gemini API key has no colon, and a key id and a key secret joined by one are Higgsfield's (/image-provider higgsfield first). Nothing was stored.".to_string(),
+                ImageProviderKind::Higgsfield => "That is not a Higgsfield key: Higgsfield's is the key id and the key secret of its API console at open.higgsfield.ai, joined by one colon (<key id>:<key secret>). Nothing was stored.".to_string(),
+            })
         }
         ["clear"] => {
             cfg.image_provider = None;
             cfg.image_model = None;
-            match config::save_config(db, &cfg).await {
-                Ok(()) => send(
-                    format!(
-                        "Image provider settings cleared (back to the defaults: gemini / {}; the key file is untouched).",
-                        ImageProviderKind::Gemini.default_model()
-                    ),
-                    SystemMessageType::Info,
-                )
-                .await,
-                Err(e) => send(format!("/image-provider: failed to save config: {e}"), SystemMessageType::Error).await,
+            ImageProviderStep::Save {
+                text: format!(
+                    "Image provider settings cleared (back to the defaults: gemini / {}; the key files are untouched).",
+                    ImageProviderKind::Gemini.default_model()
+                ),
             }
         }
-        _ => send(usage.to_string(), SystemMessageType::Error).await,
+        _ => refuse(IMAGE_PROVIDER_USAGE.to_string()),
     }
 }
 
@@ -2386,46 +2458,121 @@ mod slash_catalogue_tests {
         }
     }
 
-    /// An image model added to the list, or a default that moves, is named
-    /// on every surface that names the image models: the brain's `/help`
-    /// (the whole list, the default marked), the serial console's help (the
-    /// default marked), the web console's command sheet (the selector of
-    /// `/image-provider model`, in the list's order) and the command
-    /// reference. `/image-provider` itself prints the list as it is.
+    /// An image model added to a provider's list, or a default that moves,
+    /// is named on every surface that names the image models: the brain's
+    /// `/help` (each provider's list on a row of its own, its default
+    /// marked), the serial console's help (both defaults marked), the web
+    /// console's command sheet (the selector of `/image-provider model`,
+    /// every model in the table's order, and each default in its note) and
+    /// the command reference. `/image-provider` itself prints the lists as
+    /// they are.
     #[test]
     fn every_image_model_is_named_on_each_surface_and_the_default_is_marked() {
-        use crate::provider::image::{DEFAULT_GEMINI_IMAGE_MODEL, GEMINI_IMAGE_MODELS};
+        use crate::provider::image::{ImageProviderKind, IMAGE_MODELS};
         let help = sibling("embra-console/src/terminal/commands.rs");
         let sheet = sibling("embra-web-ui/src/app.rs");
         let reference = sibling("../docs/OPERATIONS/COMMAND-REFERENCE.md");
-        let marked: Vec<String> = GEMINI_IMAGE_MODELS
-            .iter()
-            .map(|m| if *m == DEFAULT_GEMINI_IMAGE_MODEL { format!("{m} (default)") } else { m.to_string() })
-            .collect();
-        let line = format!("/image-provider model <id>         {}", marked.join(" | "));
-        assert!(super::BRAIN_HELP.contains(&line), "the brain's /help: {line}");
-        assert!(
-            help.contains(&format!("/image-provider model <id>     {DEFAULT_GEMINI_IMAGE_MODEL} (default) | ")),
-            "the console's help does not mark {DEFAULT_GEMINI_IMAGE_MODEL} as the default"
-        );
-        let quoted = GEMINI_IMAGE_MODELS.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", ");
+        for kind in ImageProviderKind::ALL {
+            let marked: Vec<String> = kind
+                .models()
+                .iter()
+                .map(|m| if *m == kind.default_model() { format!("{m} (default)") } else { m.to_string() })
+                .collect();
+            let row = match kind {
+                ImageProviderKind::Gemini => format!("/image-provider model <id>         {}", marked.join(" | ")),
+                ImageProviderKind::Higgsfield => format!("on Higgsfield: {}", marked.join(" | ")),
+            };
+            assert!(super::BRAIN_HELP.contains(&row), "the brain's /help: {row}");
+            assert!(help.contains(&format!("{} (default)", kind.default_model())), "the console's help does not mark {}", kind.default_model());
+            assert!(sheet.contains(&format!("{} is {}'s default", kind.default_model(), kind.label())), "the command sheet's note for {}", kind.label());
+            for model in kind.models() {
+                assert!(reference.contains(&format!("`{model}`")), "the command reference does not name {model}");
+            }
+            assert!(reference.contains(&format!("`{}` ({}'s default", kind.default_model(), kind.label())), "the command reference's default of {}", kind.label());
+        }
+        assert!(super::BRAIN_HELP.contains("/image-provider gemini|higgsfield"), "the brain's /help names both providers");
+        let quoted = IMAGE_MODELS.iter().map(|m| format!("\"{}\"", m.id)).collect::<Vec<_>>().join(", ");
         assert!(sheet.contains(&format!("sel(\"Model\", &[{quoted}], true)")), "the command sheet's selector: {quoted}");
-        assert!(
-            sheet.contains(&format!("note: \"{DEFAULT_GEMINI_IMAGE_MODEL} is the default")),
-            "the command sheet's note does not name {DEFAULT_GEMINI_IMAGE_MODEL} as the default"
-        );
-        for model in GEMINI_IMAGE_MODELS {
-            assert!(reference.contains(&format!("`{model}`")), "the command reference does not name {model}");
-        }
-        assert!(
-            reference.contains(&format!("`{DEFAULT_GEMINI_IMAGE_MODEL}` (default")),
-            "the command reference does not mark {DEFAULT_GEMINI_IMAGE_MODEL} as the default"
-        );
-        // One default on each surface, and no other model marked as it.
+        let providers = ImageProviderKind::ALL.iter().map(|k| format!("\"{}\"", k.as_str())).collect::<Vec<_>>().join(", ");
+        assert!(sheet.contains(&format!("sel(\"Action\", &[\"(show status)\", {providers}, \"clear\"], false)")), "the command sheet's providers");
+        // One default on a row of the brain's help and of the console's.
         for (surface, text) in [("the brain's /help", super::BRAIN_HELP), ("the console's help", help.as_str())] {
-            let row = text.lines().find(|l| l.contains("/image-provider model <id>")).expect("the row");
-            assert_eq!(row.matches("(default)").count(), 1, "{surface}: {row}");
+            for row in text.lines().filter(|l| l.contains("/image-provider model <id>") || l.contains("on Higgsfield: ")) {
+                assert_eq!(row.matches("(default)").count(), 1, "{surface}: {row}");
+            }
         }
+    }
+
+    /// What `/image-provider` does, decided apart from the database and
+    /// the key files: a switch that clears the other provider's model, a
+    /// model of the other provider refused with the way, each key refused
+    /// in the other's shape and never said back, the gateway's note.
+    #[test]
+    fn the_image_provider_command_switches_checks_models_and_keys_and_never_says_a_key() {
+        use super::{image_provider_step, ImageKeyFacts, ImageProviderStep};
+        use crate::provider::image::ImageProviderKind::{self, Gemini, Higgsfield};
+        let none = |_: ImageProviderKind| None;
+        let not_stored = |_: ImageProviderKind| false;
+        let keys = ImageKeyFacts { source: &none, stored: &not_stored };
+        let mut cfg = crate::config::tests_support::minimal_cfg();
+        let say = |step: ImageProviderStep| match step {
+            ImageProviderStep::Say { text, .. } | ImageProviderStep::Save { text } => text,
+            other => panic!("{other:?}"),
+        };
+        let status = say(image_provider_step(&mut cfg, "", &keys));
+        assert!(status.starts_with("Image generation: provider gemini (default), model gemini-nano-banana-2.1, key NOT set — /image-provider key <token>"), "{status}");
+        assert!(status.contains("\nGemini's models: gemini-nano-banana-2.1 | gemini-3-pro-image"), "{status}");
+        assert!(status.contains("\nHiggsfield's models: xai/grok-imagine-image-2.0 | higgsfield-ai/soul/v2/standard | ideogram/v4.0 | z-image/turbo"), "{status}");
+        // The switch clears the other provider's model and names the key's way.
+        cfg.image_model = Some("gemini-3-pro-image".into());
+        let step = image_provider_step(&mut cfg, "higgsfield", &keys);
+        let text = match step {
+            ImageProviderStep::Save { text } => text,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!((cfg.image_provider.as_deref(), cfg.image_model.as_deref()), (Some("higgsfield"), None));
+        assert!(text.starts_with("Image provider set to higgsfield (model xai/grok-imagine-image-2.0). image_generate uses it on its next call. The model gemini-3-pro-image is not one of Higgsfield's and is cleared. Its key: NOT set — /image-provider key <key id>:<key secret>"), "{text}");
+        assert!(!text.contains("reached directly"), "no gateway, no note: {text}");
+        // A model of the other provider is refused with the way; one of its own is kept.
+        let refused = image_provider_step(&mut cfg, "model gemini-3-pro-image", &keys);
+        assert_eq!(
+            refused,
+            ImageProviderStep::Say {
+                text: "gemini-3-pro-image is one of Gemini's image models, and the provider is higgsfield: /image-provider gemini first, then /image-provider model gemini-3-pro-image.".into(),
+                error: true
+            }
+        );
+        assert_eq!(cfg.image_model, None);
+        assert!(matches!(image_provider_step(&mut cfg, "model z-image/turbo", &keys), ImageProviderStep::Save { .. }));
+        assert_eq!(cfg.image_model.as_deref(), Some("z-image/turbo"));
+        let unknown = say(image_provider_step(&mut cfg, "model dall-e", &keys));
+        assert_eq!(unknown, "Unknown image model 'dall-e'. Options: xai/grok-imagine-image-2.0 | higgsfield-ai/soul/v2/standard | ideogram/v4.0 | z-image/turbo");
+        // The provider's own key shape, and no key is said back.
+        let pair = "hf-id-1:hf-secret-1";
+        assert_eq!(image_provider_step(&mut cfg, &format!("key {pair}"), &keys), ImageProviderStep::WriteKey { kind: Higgsfield, key: pair.into() });
+        let refused = image_provider_step(&mut cfg, "key AIzaSy-0123456789", &keys);
+        assert!(matches!(&refused, ImageProviderStep::Say { text, error: true } if text.starts_with("That is not a Higgsfield key") && !text.contains("AIzaSy")), "{refused:?}");
+        assert_eq!(image_provider_step(&mut cfg, "key remove", &keys), ImageProviderStep::RemoveKey { kind: Higgsfield });
+        let stored = |kind: ImageProviderKind| kind == Higgsfield;
+        let held = ImageKeyFacts { source: &none, stored: &stored };
+        assert!(say(image_provider_step(&mut cfg, "key", &held)).starts_with("Dedicated image-generation key of Higgsfield: SET. Set with /image-provider key <key id>:<key secret>"));
+        // With the gateway on, Higgsfield is said to go direct.
+        cfg.provider_gateway = Some(crate::config::ProviderGateway { url: "http://gw:4000".into(), enabled: true });
+        let from_state = |kind: ImageProviderKind| (kind == Higgsfield).then_some("state");
+        let held = ImageKeyFacts { source: &from_state, stored: &stored };
+        let status = say(image_provider_step(&mut cfg, "", &held));
+        assert!(status.contains("model z-image/turbo, key SET (dedicated image key on STATE). Higgsfield is reached directly, not through the provider gateway"), "{status}");
+        // Back to Gemini: Higgsfield's model is cleared, Gemini's key shape is asked.
+        assert!(matches!(image_provider_step(&mut cfg, "gemini", &keys), ImageProviderStep::Save { .. }));
+        assert_eq!((cfg.image_provider.as_deref(), cfg.image_model.as_deref()), (Some("gemini"), None));
+        let refused = image_provider_step(&mut cfg, &format!("key {pair}"), &keys);
+        assert!(matches!(&refused, ImageProviderStep::Say { text, error: true } if text.starts_with("That is not a Gemini key") && !text.contains("hf-secret-1")), "{refused:?}");
+        assert_eq!(image_provider_step(&mut cfg, "key AIzaSy-0123456789", &keys), ImageProviderStep::WriteKey { kind: Gemini, key: "AIzaSy-0123456789".into() });
+        assert!(!say(image_provider_step(&mut cfg, "", &held)).contains("reached directly"), "Gemini goes through the gateway");
+        let cleared = image_provider_step(&mut cfg, "clear", &keys);
+        assert_eq!(cleared, ImageProviderStep::Save { text: "Image provider settings cleared (back to the defaults: gemini / gemini-nano-banana-2.1; the key files are untouched).".into() });
+        assert_eq!((cfg.image_provider.as_deref(), cfg.image_model.as_deref()), (None, None));
+        assert!(matches!(image_provider_step(&mut cfg, "openai", &keys), ImageProviderStep::Say { error: true, .. }));
     }
 
     #[test]

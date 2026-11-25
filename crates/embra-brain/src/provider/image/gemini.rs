@@ -27,6 +27,19 @@ use super::{
     OUTPUT_MIME,
 };
 
+/// The tool's words for a refusal of Gemini's API.
+pub(crate) fn api_error_words(status: u16, body: &str) -> String {
+    format!("the gemini API answered {status}: {body}. Not retried — adjust the prompt/options or try again later.")
+}
+
+/// The tool's words when a call outlasted its limit.
+pub(crate) fn timeout_words(limit: std::time::Duration) -> String {
+    format!(
+        "no response within {}s — the request was abandoned (nothing was written). Try a smaller size or a faster model (/image-provider model gemini-3.1-flash-lite-image).",
+        limit.as_secs()
+    )
+}
+
 pub struct GeminiImageProvider {
     api_key: String,
     model: String,

@@ -1,16 +1,19 @@
 //! Image-generation backends for the `image_generate` tool (media wave,
 //! part 2). Pluggable like `LlmProvider`, but deliberately NOT an arm on
 //! `ProviderKind` — that enum drives LLM construction and session-compat
-//! checks. One backend today: Gemini's image models (`gemini.rs`).
+//! checks. Two backends: Gemini's image models (`gemini.rs`) and
+//! Higgsfield's (`higgsfield.rs`).
 //!
 //! Resolution (`resolve_image_provider`): `SystemConfig.image_provider`
-//! (or Gemini by default when a Gemini key is resolvable) + the model
-//! allowlist + the key precedence `EMBRA_IMAGE_API_KEY` env >
-//! `/embra/state/api_key_image_gemini` (written by `/image-provider key`)
-//! > the LLM Gemini key (`SystemConfig::key_for(Gemini)`).
+//! (Gemini when unset) + the model allowlist + the provider's key. Gemini's:
+//! `EMBRA_IMAGE_API_KEY` env > `/embra/state/api_key_image_gemini` (written
+//! by `/image-provider key`) > the LLM Gemini key
+//! (`SystemConfig::key_for(Gemini)`). Higgsfield's: `EMBRA_HIGGSFIELD_API_KEY`
+//! env > `/embra/state/api_key_image_higgsfield`, a `<key id>:<key secret>`
+//! of its API console. A key of the other provider's shape is never sent
+//! (`key_shape_ok`).
 
 pub mod gemini;
-#[cfg_attr(not(test), expect(dead_code, reason = "selected through /image-provider once the provider is wired in"))]
 pub mod higgsfield;
 
 use std::time::Duration;
@@ -23,11 +26,18 @@ use crate::provider::ProviderKind;
 /// global backstop.
 pub const IMAGE_GEN_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// STATE file for the dedicated image-generation key (0600, written via
-/// `config::write_credential_state` by `/image-provider key <token>`).
+/// STATE files for the dedicated image-generation keys, one a provider
+/// (0600, written via `config::write_credential_state` by `/image-provider
+/// key <token>` for the selected provider).
 pub const IMAGE_KEY_PATH_GEMINI: &str = "/embra/state/api_key_image_gemini";
-/// Env override for the image key (highest precedence; dev/test).
+pub const IMAGE_KEY_PATH_HIGGSFIELD: &str = "/embra/state/api_key_image_higgsfield";
+/// Env overrides for the image keys (highest precedence; dev/test).
 pub const IMAGE_KEY_ENV: &str = "EMBRA_IMAGE_API_KEY";
+pub const HIGGSFIELD_KEY_ENV: &str = "EMBRA_HIGGSFIELD_API_KEY";
+/// A stand-in for Higgsfield's API (dev/test): its base replaces
+/// `higgsfield::API_BASE`, and its origin is also taken for a picture's
+/// address. Unset in the OS.
+pub const HIGGSFIELD_BASE_ENV: &str = "EMBRA_HIGGSFIELD_BASE";
 
 /// How a model takes the tool's `reference_images`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +216,8 @@ pub enum ImageProviderKind {
 }
 
 impl ImageProviderKind {
+    pub const ALL: [ImageProviderKind; 2] = [ImageProviderKind::Gemini, ImageProviderKind::Higgsfield];
+
     pub fn as_str(self) -> &'static str {
         match self {
             ImageProviderKind::Gemini => "gemini",
@@ -224,7 +236,49 @@ impl ImageProviderKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "gemini" => Some(ImageProviderKind::Gemini),
+            "higgsfield" => Some(ImageProviderKind::Higgsfield),
             _ => None,
+        }
+    }
+
+    /// The provider's dedicated key on STATE.
+    pub fn key_path(self) -> &'static str {
+        match self {
+            ImageProviderKind::Gemini => IMAGE_KEY_PATH_GEMINI,
+            ImageProviderKind::Higgsfield => IMAGE_KEY_PATH_HIGGSFIELD,
+        }
+    }
+
+    /// The environment variable that overrides the provider's key.
+    pub fn key_env(self) -> &'static str {
+        match self {
+            ImageProviderKind::Gemini => IMAGE_KEY_ENV,
+            ImageProviderKind::Higgsfield => HIGGSFIELD_KEY_ENV,
+        }
+    }
+
+    /// How long one call of the provider may take before the tool ends
+    /// it: the provider's own bounds fit inside it.
+    pub fn time_limit(self) -> Duration {
+        match self {
+            ImageProviderKind::Gemini => IMAGE_GEN_TIMEOUT,
+            ImageProviderKind::Higgsfield => higgsfield::TIME_LIMIT,
+        }
+    }
+
+    /// The tool's words for a refusal of the provider's API.
+    pub fn api_error_words(self, status: u16, body: &str) -> String {
+        match self {
+            ImageProviderKind::Gemini => gemini::api_error_words(status, body),
+            ImageProviderKind::Higgsfield => higgsfield::api_error_words(status, body),
+        }
+    }
+
+    /// The tool's words when a call outlasted `time_limit`.
+    pub fn timeout_words(self, limit: Duration) -> String {
+        match self {
+            ImageProviderKind::Gemini => gemini::timeout_words(limit),
+            ImageProviderKind::Higgsfield => higgsfield::timeout_words(limit),
         }
     }
 
@@ -298,17 +352,19 @@ pub trait ImageProvider: Send + Sync {
     async fn generate(&self, req: &ImageGenRequest) -> Result<ImageGenResponse, ImageGenError>;
 }
 
-/// Validate the (aspect_ratio, size, model) combination the way the tool
-/// surfaces it — instructive messages, never a bare 400 from the API for
-/// things we can check locally. Every check reads the model's row of
-/// `IMAGE_MODELS`. A size is checked twice: that it is a word of the
-/// model's provider, then that this model renders it.
+/// `validate_options` on a whole request: the tests' form. The tool
+/// checks before it reads the references, with `validate_options`.
+#[cfg(test)]
 pub fn validate_request(model_id: &str, req: &ImageGenRequest) -> Result<(), ImageGenError> {
     validate_options(model_id, &req.prompt, req.aspect_ratio.as_deref(), req.size.as_deref(), req.reference_images.len())
 }
 
-/// `validate_request` on the request's parts, before the references are
-/// read: `references` is how many were asked for.
+/// Validate a request's options against the model, the way the tool
+/// surfaces it — instructive messages, never a bare 400 from the API for
+/// things we can check locally — before the references are read
+/// (`references` is how many were asked for). Every check reads the
+/// model's row of `IMAGE_MODELS`. A size is checked twice: that it is a
+/// word of the model's provider, then that this model renders it.
 pub fn validate_options(
     model_id: &str,
     prompt: &str,
@@ -406,13 +462,60 @@ fn read_state_key(path: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Key precedence: env > STATE image key > the LLM Gemini key.
-pub fn resolve_image_key(cfg: &SystemConfig) -> Option<(String, &'static str)> {
+/// Whether `key` has the shape of the provider's key, before it is stored
+/// and again before it is sent, so a key never goes to the other provider:
+/// Gemini's has no colon; Higgsfield's is a key id and a key secret joined
+/// by one colon. Neither holds a space.
+pub fn key_shape_ok(kind: ImageProviderKind, key: &str) -> bool {
+    if key.is_empty() || key.chars().any(char::is_whitespace) {
+        return false;
+    }
+    match kind {
+        ImageProviderKind::Gemini => !key.contains(':'),
+        ImageProviderKind::Higgsfield => matches!(key.split_once(':'), Some((id, secret)) if !id.is_empty() && !secret.is_empty() && !secret.contains(':')),
+    }
+}
+
+/// The provider's key and where it came from. Gemini's: env > STATE image
+/// key > the LLM Gemini key. Higgsfield's: env > STATE image key.
+pub fn resolve_image_key(cfg: &SystemConfig, kind: ImageProviderKind) -> Option<(String, &'static str)> {
     resolve_image_key_inner(
-        std::env::var(IMAGE_KEY_ENV).ok().filter(|s| !s.trim().is_empty()),
-        read_state_key(IMAGE_KEY_PATH_GEMINI),
-        cfg.key_for(ProviderKind::Gemini).map(str::to_string),
+        std::env::var(kind.key_env()).ok().filter(|s| !s.trim().is_empty()),
+        read_state_key(kind.key_path()),
+        match kind {
+            ImageProviderKind::Gemini => cfg.key_for(ProviderKind::Gemini).map(str::to_string),
+            ImageProviderKind::Higgsfield => None,
+        },
     )
+}
+
+/// Every image key the OS holds, whichever provider is selected: each
+/// provider's STATE file and environment variable, and the secret half of a
+/// Higgsfield key on its own, for the outbound guard (`secrets::collect`).
+/// `read` reads a STATE file, `var` the environment.
+pub(crate) fn image_key_values(read: &dyn Fn(&str) -> Option<String>, var: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    let mut values = Vec::new();
+    for kind in ImageProviderKind::ALL {
+        for value in [read(kind.key_path()), var(kind.key_env())].into_iter().flatten() {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                continue;
+            }
+            if kind == ImageProviderKind::Higgsfield
+                && let Some((_, secret)) = value.split_once(':')
+                && !secret.is_empty()
+            {
+                values.push(secret.to_string());
+            }
+            values.push(value);
+        }
+    }
+    values
+}
+
+/// `image_key_values` on this machine.
+pub(crate) fn stored_image_keys() -> Vec<String> {
+    image_key_values(&read_state_key, &|name| std::env::var(name).ok())
 }
 
 pub(crate) fn resolve_image_key_inner(
@@ -433,7 +536,7 @@ pub fn resolve_image_choice(cfg: &SystemConfig) -> Result<ImageProviderChoice, I
     let kind = match cfg.image_provider.as_deref() {
         None | Some("") => ImageProviderKind::Gemini,
         Some(s) => ImageProviderKind::parse(s)
-            .ok_or_else(|| ImageGenError::NotConfigured(format!("unknown image provider '{s}' (supported: gemini)")))?,
+            .ok_or_else(|| ImageGenError::NotConfigured(format!("unknown image provider '{s}' (supported: gemini, higgsfield)")))?,
     };
     let model = match cfg.image_model.as_deref() {
         None | Some("") => kind.default_model().to_string(),
@@ -448,26 +551,55 @@ pub fn resolve_image_choice(cfg: &SystemConfig) -> Result<ImageProviderChoice, I
             m.to_string()
         }
     };
-    let key_source = resolve_image_key(cfg).map(|(_, src)| src);
+    let key_source = resolve_image_key(cfg, kind).map(|(_, src)| src);
     Ok(ImageProviderChoice { kind, model, key_source })
 }
 
 /// Build the configured backend, or an instructive `NotConfigured`.
 pub fn resolve_image_provider(cfg: &SystemConfig) -> Result<Box<dyn ImageProvider>, ImageGenError> {
+    resolve_image_provider_with(
+        cfg,
+        &|kind| resolve_image_key(cfg, kind),
+        std::env::var(HIGGSFIELD_BASE_ENV).ok().filter(|base| !base.trim().is_empty()),
+    )
+}
+
+/// `resolve_image_provider` with the key and the stand-in's base given.
+pub(crate) fn resolve_image_provider_with(
+    cfg: &SystemConfig,
+    key_of: &dyn Fn(ImageProviderKind) -> Option<(String, &'static str)>,
+    stand_in: Option<String>,
+) -> Result<Box<dyn ImageProvider>, ImageGenError> {
     let choice = resolve_image_choice(cfg)?;
-    let (key, _) = resolve_image_key(cfg).ok_or_else(|| {
-        ImageGenError::NotConfigured(
-            "no Gemini API key for image generation — set one with `/image-provider key <token>` (or configure Gemini as the LLM provider)".into(),
-        )
+    let (key, source) = key_of(choice.kind).ok_or_else(|| {
+        ImageGenError::NotConfigured(match choice.kind {
+            ImageProviderKind::Gemini => "no Gemini API key for image generation — set one with `/image-provider key <token>` (or configure Gemini as the LLM provider)".into(),
+            ImageProviderKind::Higgsfield => "no Higgsfield key for image generation — set one with `/image-provider key <key id>:<key secret>`, a key of Higgsfield's API console at open.higgsfield.ai (an account and balance of its own, apart from a higgsfield.ai plan)".into(),
+        })
     })?;
+    if !key_shape_ok(choice.kind, &key) {
+        return Err(ImageGenError::NotConfigured(format!(
+            "the {} key ({source}) does not have the shape of one, so it is not sent: /image-provider key stores another",
+            choice.kind.label()
+        )));
+    }
     match choice.kind {
         ImageProviderKind::Gemini => Ok(Box::new(gemini::GeminiImageProvider::with_endpoint(
             key,
             choice.model,
             interactions_url(cfg),
         ))),
-        // `parse` does not name it yet: no configuration reaches here.
-        ImageProviderKind::Higgsfield => Err(ImageGenError::NotConfigured("Higgsfield cannot be selected in this build".into())),
+        // Never through the provider gateway, which has no route for it.
+        ImageProviderKind::Higgsfield => {
+            let base = stand_in.clone().unwrap_or_else(|| higgsfield::API_BASE.to_string());
+            Ok(Box::new(higgsfield::HiggsfieldImageProvider::new(
+                &key,
+                &choice.model,
+                &base,
+                stand_in.is_some(),
+                higgsfield::Pacing::ADVISED,
+            )?))
+        }
     }
 }
 
@@ -595,7 +727,11 @@ mod tests {
         }
         assert_eq!(words, HIGGSFIELD_SIZE_WORDS);
         assert_eq!(ImageProviderKind::Higgsfield.size_words(), HIGGSFIELD_SIZE_WORDS);
-        assert_eq!(ImageProviderKind::parse("higgsfield"), None, "not selectable before it is wired in");
+        assert_eq!(ImageProviderKind::parse(" Higgsfield "), Some(ImageProviderKind::Higgsfield));
+        for kind in ImageProviderKind::ALL {
+            assert_eq!(ImageProviderKind::parse(kind.as_str()), Some(kind));
+            assert!(kind.models().contains(&kind.default_model()));
+        }
     }
 
     /// What Higgsfield's models refuse before a call: a size the model does
@@ -747,6 +883,78 @@ mod tests {
         let mut empty = req(None);
         empty.prompt = "  ".into();
         assert!(validate_request("gemini-3-pro-image", &empty).is_err());
+    }
+
+    /// A key reaches the provider whose shape it has and no other.
+    #[test]
+    fn a_key_is_taken_by_the_provider_whose_shape_it_has() {
+        use ImageProviderKind::{Gemini, Higgsfield};
+        for (key, gemini, higgsfield) in [
+            ("AIzaSy-stand-in-0123", true, false),
+            ("hf-id-1:hf-secret-1", false, true),
+            ("a:b", false, true),
+            (":secret", false, false),
+            ("id:", false, false),
+            ("id:se:cret", false, false),
+            ("id: secret", false, false),
+            ("", false, false),
+            ("AIza Sy", false, false),
+        ] {
+            assert_eq!(key_shape_ok(Gemini, key), gemini, "{key:?} for Gemini");
+            assert_eq!(key_shape_ok(Higgsfield, key), higgsfield, "{key:?} for Higgsfield");
+        }
+    }
+
+    /// The provider the configuration selects, with its key: refused
+    /// without one, and refused with a key of the other provider's shape,
+    /// which is never sent.
+    #[test]
+    fn the_selected_provider_is_built_with_its_own_key_and_never_the_others() {
+        let mut cfg = crate::config::tests_support::minimal_cfg();
+        let none = |_: ImageProviderKind| None;
+        cfg.image_provider = Some("higgsfield".into());
+        let err = resolve_image_provider_with(&cfg, &none, None).err().unwrap().to_string();
+        assert!(err.contains("/image-provider key <key id>:<key secret>") && err.contains("open.higgsfield.ai"), "{err}");
+        let gemini_shaped = |_: ImageProviderKind| Some(("AIzaSy-0123456789".to_string(), "env"));
+        let err = resolve_image_provider_with(&cfg, &gemini_shaped, None).err().unwrap().to_string();
+        assert_eq!(err, "image provider not configured: the Higgsfield key (env) does not have the shape of one, so it is not sent: /image-provider key stores another");
+        let pair = |_: ImageProviderKind| Some(("hf-id:hf-secret".to_string(), "state"));
+        let built = resolve_image_provider_with(&cfg, &pair, None).ok().unwrap();
+        assert_eq!((built.kind(), built.model()), (ImageProviderKind::Higgsfield, DEFAULT_HIGGSFIELD_IMAGE_MODEL));
+        cfg.image_model = Some("z-image/turbo".into());
+        assert_eq!(resolve_image_provider_with(&cfg, &pair, Some("http://10.0.2.2:28082".into())).ok().unwrap().model(), "z-image/turbo");
+        cfg.image_provider = None;
+        cfg.image_model = None;
+        let err = resolve_image_provider_with(&cfg, &pair, None).err().unwrap().to_string();
+        assert!(err.contains("the Gemini key (state) does not have the shape of one"), "{err}");
+        let built = resolve_image_provider_with(&cfg, &gemini_shaped, None).ok().unwrap();
+        assert_eq!(built.kind(), ImageProviderKind::Gemini);
+        // A Higgsfield model stored under Gemini is refused, as any model
+        // not of the provider is.
+        cfg.image_model = Some("z-image/turbo".into());
+        assert!(matches!(resolve_image_choice(&cfg), Err(ImageGenError::NotConfigured(_))));
+    }
+
+    /// Every image key on the machine is collected for the outbound guard,
+    /// whichever provider is selected, and a Higgsfield key's secret half on
+    /// its own as well.
+    #[test]
+    fn every_image_key_and_the_secret_half_of_higgsfields_are_collected() {
+        let read = |path: &str| match path {
+            IMAGE_KEY_PATH_GEMINI => Some("AIzaSy-stored-0123456789\n".to_string()),
+            IMAGE_KEY_PATH_HIGGSFIELD => Some("hf-id-1:hf-secret-stored-1\n".to_string()),
+            _ => None,
+        };
+        let var = |name: &str| match name {
+            HIGGSFIELD_KEY_ENV => Some("hf-id-2:hf-secret-env-2".to_string()),
+            _ => None,
+        };
+        let values = image_key_values(&read, &var);
+        assert_eq!(
+            values,
+            ["AIzaSy-stored-0123456789", "hf-secret-stored-1", "hf-id-1:hf-secret-stored-1", "hf-secret-env-2", "hf-id-2:hf-secret-env-2"]
+        );
+        assert!(image_key_values(&|_| None, &|_| Some("  ".into())).is_empty());
     }
 
     #[test]

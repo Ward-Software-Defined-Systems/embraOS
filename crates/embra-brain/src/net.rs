@@ -517,7 +517,6 @@ pub(crate) fn date_hint(refusal: DateRefusal, clock: Option<&embra_boot::ClockSt
 /// A body read whole, refused when it is more than `cap` bytes: by the
 /// length it declares, before any of it is read, and chunk by chunk, so a
 /// body that declares none or a false one is stopped at the cap too.
-#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
 pub(crate) async fn read_capped(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {
     if let Some(declared) = response.content_length()
         && declared > cap as u64
@@ -541,7 +540,6 @@ pub(crate) async fn read_capped(mut response: reqwest::Response, cap: usize) -> 
 /// A URL an API handed back for the brain to fetch or to send to (a
 /// generated picture, an upload slot), with the one client that may reach
 /// it ([`public_url_client`]).
-#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
 pub(crate) struct PublicUrl {
     pub(crate) url: reqwest::Url,
     pub(crate) client: reqwest::Client,
@@ -549,7 +547,6 @@ pub(crate) struct PublicUrl {
 
 /// The URL as an error shows it: scheme, host, port and path, without the
 /// query, which may hold a signature.
-#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
 pub(crate) fn url_shown(url: &reqwest::Url) -> String {
     let mut shown = url.clone();
     shown.set_query(None);
@@ -567,7 +564,6 @@ pub(crate) fn url_shown(url: &reqwest::Url) -> String {
 /// redirect, sends no credential, and is bounded by `timeout`. `also` is
 /// one more origin that is taken as it is, scheme and address unchecked:
 /// a test's stand-in server, and nothing else passes one.
-#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
 pub(crate) async fn public_url_client(
     url: &str,
     also: Option<&reqwest::Url>,
@@ -605,14 +601,12 @@ pub(crate) async fn public_url_client(
 }
 
 /// Scheme, host and port alike.
-#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
 pub(crate) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
     a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
 }
 
 /// The client of [`public_url_client`]: the roots in force, no redirect,
 /// no proxy, both bounds, and a name pinned to the addresses checked.
-#[cfg_attr(not(test), expect(dead_code, reason = "taken by the Higgsfield image provider once it is selectable"))]
 fn direct_client(pin: Option<(&str, &[std::net::SocketAddr])>, timeout: std::time::Duration) -> Result<reqwest::Client, String> {
     let mut builder = builder().redirect(Policy::none()).no_proxy().connect_timeout(CONNECT_TIMEOUT).timeout(timeout);
     if let Some((name, addrs)) = pin {

@@ -17,6 +17,13 @@ use crate::config::SystemConfig;
 
 /// Every stored secret the OS holds, in the forms it could take on the wire.
 pub(crate) fn collect(cfg: Option<&SystemConfig>) -> SecretSet {
+    collect_with(cfg, crate::provider::image::stored_image_keys())
+}
+
+/// `collect` with the image keys given: every image key of either provider,
+/// whichever is selected, and the secret half of a Higgsfield key on its
+/// own (`provider::image::image_key_values`).
+fn collect_with(cfg: Option<&SystemConfig>, image_keys: Vec<String>) -> SecretSet {
     let mut set = SecretSet::new();
     if let Some(cfg) = cfg {
         set.add("the provider API key", &cfg.api_key);
@@ -37,9 +44,9 @@ pub(crate) fn collect(cfg: Option<&SystemConfig>) -> SecretSet {
         {
             set.add("a /guardian secret", value);
         }
-        if let Some((key, _source)) = crate::provider::image::resolve_image_key(cfg) {
-            set.add("the image key", &key);
-        }
+    }
+    for key in image_keys {
+        set.add("the image key", &key);
     }
     if let Some(key) = crate::guardian::read_brave_key() {
         set.add("the Brave key", &key);
@@ -47,7 +54,6 @@ pub(crate) fn collect(cfg: Option<&SystemConfig>) -> SecretSet {
     for (var, kind) in [
         ("GITHUB_TOKEN", "the GitHub token"),
         ("ANTHROPIC_API_KEY", "the provider API key"),
-        (crate::provider::image::IMAGE_KEY_ENV, "the image key"),
         ("EMBRA_OLLAMA_BEARER", "a provider bearer"),
         ("EMBRA_LM_STUDIO_BEARER", "a provider bearer"),
     ] {
@@ -100,6 +106,18 @@ mod tests {
             assert!(!text.contains(found.unwrap()), "the kind is a phrase, not the value");
         }
         assert_eq!(set.found_in("an ordinary comment"), None);
+    }
+
+    /// The image keys are in the set whichever provider is selected, and a
+    /// Higgsfield key's secret half is found alone.
+    #[test]
+    fn every_image_key_and_a_higgsfield_secret_alone_are_found() {
+        let read = |path: &str| (path == crate::provider::image::IMAGE_KEY_PATH_HIGGSFIELD).then(|| "hf-id-0123:hf-secret-0123456789".to_string());
+        let keys = crate::provider::image::image_key_values(&read, &|_| None);
+        let set = super::collect_with(None, keys);
+        assert_eq!(set.found_in("Key hf-id-0123:hf-secret-0123456789"), Some("the image key"));
+        assert_eq!(set.found_in("secret=hf-secret-0123456789"), Some("the image key"), "the secret half alone");
+        assert_eq!(super::collect_with(None, Vec::new()).found_in("hf-secret-0123456789"), None);
     }
 
     #[test]

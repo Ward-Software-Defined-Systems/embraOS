@@ -87,6 +87,21 @@ const _: () = assert!(
 );
 const _: () = assert!(TIME_LIMIT.as_secs() < crate::tools::registry::MAX_TOOL_DURATION.as_secs());
 
+/// The tool's words for a refusal of Higgsfield's API: the API's words and
+/// what to do are in `body` already (`api_error`).
+pub(crate) fn api_error_words(status: u16, body: &str) -> String {
+    format!("Higgsfield answered {status}: {body}")
+}
+
+/// The tool's words when a call outlasted its limit, which the provider's
+/// own bounds keep it inside of: a backstop.
+pub(crate) fn timeout_words(limit: Duration) -> String {
+    format!(
+        "no answer within {}s, and the call was ended. A request Higgsfield took may still complete and be charged; the Higgsfield console at open.higgsfield.ai lists it.",
+        limit.as_secs()
+    )
+}
+
 /// The wait after `previous`: half again, to `max`.
 pub fn next_delay(previous: Duration, max: Duration) -> Duration {
     (previous + previous / 2).min(max)

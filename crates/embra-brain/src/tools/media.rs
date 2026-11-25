@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::registry::DispatchContext;
 use crate::media::store::{self, MediaOrigin, MediaStore};
 use crate::media::{ingest, tiles, MEDIA_LONG_EDGE_MAX, MEDIA_TILES_PER_VIEW, MEDIA_UPLOAD_MAX};
-use crate::provider::image::{self as image_provider, ImageGenError, ImageGenRequest, ImageProvider, IMAGE_GEN_TIMEOUT};
+use crate::provider::image::{self as image_provider, ImageGenError, ImageGenRequest, ImageProvider};
 
 /// Reference images accepted per generation call.
 pub const IMAGE_GENERATE_MAX_REFERENCES: usize = 4;
@@ -264,16 +264,16 @@ fn brought_down(rect: &tiles::TileRect, image: &ingest::Normalized) -> bool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "image_generate",
-    description = "Generate an image from a text prompt with the configured image backend (Gemini image models; default gemini-nano-banana-2.1 — the operator sets it with /image-provider). The result is a JPEG, the API's one output type, written to /embra/workspace/MEDIA/gen-<id>.jpg at full resolution, and a JSON summary {id, path, width, height, bytes, media_type, model, provider} is returned; unless return_image=false the image is ALSO returned to you as an image block so you can check it against the prompt before telling the operator. aspect_ratio: 1:1|3:2|2:3|3:4|4:3|4:5|5:4|9:16|16:9|21:9. size: 1K|2K|4K, 1K when omitted; 512 on gemini-3.1-flash-image only; gemini-3.1-flash-lite-image and gemini-2.5-flash-image render 1K only. A size the configured model does not render is refused before the call, and the refusal names the model and the sizes it renders. reference_images: up to 4 media ids or workspace image paths used as visual references or edit sources (for edits, describe the change in the prompt). Not configured → an explanation naming /image-provider. Side-effectful: writes a file and spends API credits.",
+    description = "Generate an image from a text prompt with the image backend the operator configures with /image-provider: Gemini's image models (default gemini-nano-banana-2.1) or Higgsfield's (default xai/grok-imagine-image-2.0). The result is written to /embra/workspace/MEDIA/gen-<id>.<jpg|png|webp> at full resolution, in the format the backend returned, and a JSON summary {id, path, width, height, bytes, media_type, model, provider, elapsed_ms} is returned; unless return_image=false the image is ALSO returned to you as an image block so you can check it against the prompt before telling the operator. aspect_ratio: every model renders 1:1|3:2|2:3|3:4|4:3|9:16|16:9, and some render more. size, the model's own when omitted: on Gemini 1K|2K|4K, with 512 on gemini-3.1-flash-image only, and 1K only on gemini-3.1-flash-lite-image and gemini-2.5-flash-image; on Higgsfield 1K|2K on xai/grok-imagine-image-2.0 and z-image/turbo, 720p|1080p on higgsfield-ai/soul/v2/standard, and none on ideogram/v4.0, whose size is its own. A size, a ratio, a prompt's length or a reference the configured model does not take is refused before the call, and the refusal names what it takes. reference_images: up to 4 media ids or workspace image paths used as visual references or edit sources (for edits, describe the change in the prompt), on Gemini's models. A call to Higgsfield waits for its picture and can take minutes. Not configured → an explanation naming /image-provider. Side-effectful: writes a file and spends API credits.",
     is_side_effectful = true
 )]
 pub struct ImageGenerateArgs {
     /// What to render. Be concrete: subject, style, composition, text to include.
     pub prompt: String,
-    /// One of 1:1, 3:2, 2:3, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9.
+    /// Every model renders 1:1, 3:2, 2:3, 3:4, 4:3, 9:16, 16:9; some render more.
     #[serde(default)]
     pub aspect_ratio: Option<String>,
-    /// One of 1K, 2K, 4K (512 on gemini-3.1-flash-image only); 1K when omitted.
+    /// The configured model's: on Gemini 1K, 2K, 4K (512 on gemini-3.1-flash-image only); on Higgsfield 1K or 2K, or 720p or 1080p on higgsfield-ai/soul/v2/standard. Omitted: the model's own.
     #[serde(default)]
     pub size: Option<String>,
     /// Media ids (att-/gen-/view-…) or image paths file_read can read, max 4.
@@ -349,50 +349,38 @@ pub async fn image_generate(
     args: ImageGenerateArgs,
     session: &str,
 ) -> Result<ToolOutput, DispatchError> {
-    let mut reference_images = Vec::new();
-    if let Some(refs) = &args.reference_images {
-        if refs.len() > IMAGE_GENERATE_MAX_REFERENCES {
-            return Ok(ToolOutput::text(format!(
-                "image_generate: {} reference images; the limit is {}",
-                refs.len(),
-                IMAGE_GENERATE_MAX_REFERENCES
-            )));
-        }
-        for spec in refs {
-            match load_reference(store, spec).await {
-                Ok(pair) => reference_images.push(pair),
-                Err(e) => return Ok(ToolOutput::text(format!("image_generate: reference '{spec}' — {e}"))),
-            }
-        }
+    let refs = args.reference_images.as_deref().unwrap_or_default();
+    if refs.len() > IMAGE_GENERATE_MAX_REFERENCES {
+        return Ok(ToolOutput::text(format!(
+            "image_generate: {} reference images; the limit is {}",
+            refs.len(),
+            IMAGE_GENERATE_MAX_REFERENCES
+        )));
     }
-    let req = ImageGenRequest {
-        prompt: args.prompt.clone(),
-        aspect_ratio: args.aspect_ratio.clone().filter(|s| !s.trim().is_empty()),
-        size: args.size.clone().filter(|s| !s.trim().is_empty()),
-        reference_images,
-    };
-    if let Err(e) = image_provider::validate_request(provider.model(), &req) {
+    let aspect_ratio = args.aspect_ratio.clone().filter(|s| !s.trim().is_empty());
+    let size = args.size.clone().filter(|s| !s.trim().is_empty());
+    // Before a reference is read: a model that takes none refuses them unread.
+    if let Err(e) = image_provider::validate_options(provider.model(), &args.prompt, aspect_ratio.as_deref(), size.as_deref(), refs.len()) {
         return Ok(ToolOutput::text(format!("image_generate: {e}")));
     }
+    let mut reference_images = Vec::new();
+    for spec in refs {
+        match load_reference(store, spec).await {
+            Ok(pair) => reference_images.push(pair),
+            Err(e) => return Ok(ToolOutput::text(format!("image_generate: reference '{spec}' — {e}"))),
+        }
+    }
+    let req = ImageGenRequest { prompt: args.prompt.clone(), aspect_ratio, size, reference_images };
 
     let started = std::time::Instant::now();
-    let generated = match tokio::time::timeout(IMAGE_GEN_TIMEOUT, provider.generate(&req)).await {
+    let limit = provider.kind().time_limit();
+    let generated = match tokio::time::timeout(limit, provider.generate(&req)).await {
         Ok(Ok(r)) => r,
         Ok(Err(ImageGenError::Api { status, body })) => {
-            return Ok(ToolOutput::text(format!(
-                "image_generate: the {} API answered {}: {}. Not retried — adjust the prompt/options or try again later.",
-                provider.kind().as_str(),
-                status,
-                body
-            )));
+            return Ok(ToolOutput::text(format!("image_generate: {}", provider.kind().api_error_words(status, &body))));
         }
         Ok(Err(e)) => return Ok(ToolOutput::text(format!("image_generate: {e}"))),
-        Err(_) => {
-            return Ok(ToolOutput::text(format!(
-                "image_generate: no response within {}s — the request was abandoned (nothing was written). Try a smaller size or a faster model (/image-provider model gemini-3.1-flash-lite-image).",
-                IMAGE_GEN_TIMEOUT.as_secs()
-            )));
-        }
+        Err(_) => return Ok(ToolOutput::text(format!("image_generate: {}", provider.kind().timeout_words(limit)))),
     };
     let Some(first) = generated.images.into_iter().next() else {
         return Ok(ToolOutput::text("image_generate: the API returned no image".to_string()));
@@ -644,27 +632,32 @@ mod tests {
         result: std::sync::Mutex<Option<Result<image_provider::ImageGenResponse, ImageGenError>>>,
         seen: std::sync::Mutex<Option<ImageGenRequest>>,
         model: String,
+        kind: image_provider::ImageProviderKind,
     }
 
     impl FakeProvider {
         fn ok(model: &str, bytes: Vec<u8>) -> Self {
-            FakeProvider {
-                result: std::sync::Mutex::new(Some(Ok(image_provider::ImageGenResponse {
-                    images: vec![image_provider::GeneratedImage {
-                        media_type: image_provider::OUTPUT_MIME.into(),
-                        data: bytes,
-                    }],
-                    text: Some("Here it is.".into()),
-                }))),
-                seen: std::sync::Mutex::new(None),
-                model: model.into(),
-            }
+            Self::answering(image_provider::ImageProviderKind::Gemini, model, Ok(image_provider::ImageGenResponse {
+                images: vec![image_provider::GeneratedImage {
+                    media_type: image_provider::OUTPUT_MIME.into(),
+                    data: bytes,
+                }],
+                text: Some("Here it is.".into()),
+            }))
         }
         fn err(model: &str, e: ImageGenError) -> Self {
+            Self::answering(image_provider::ImageProviderKind::Gemini, model, Err(e))
+        }
+        fn answering(
+            kind: image_provider::ImageProviderKind,
+            model: &str,
+            result: Result<image_provider::ImageGenResponse, ImageGenError>,
+        ) -> Self {
             FakeProvider {
-                result: std::sync::Mutex::new(Some(Err(e))),
+                result: std::sync::Mutex::new(Some(result)),
                 seen: std::sync::Mutex::new(None),
                 model: model.into(),
+                kind,
             }
         }
     }
@@ -672,7 +665,7 @@ mod tests {
     #[async_trait::async_trait]
     impl ImageProvider for FakeProvider {
         fn kind(&self) -> image_provider::ImageProviderKind {
-            image_provider::ImageProviderKind::Gemini
+            self.kind
         }
         fn model(&self) -> &str {
             &self.model
@@ -848,44 +841,67 @@ mod tests {
         assert_eq!(schema["required"], serde_json::json!(["prompt"]));
     }
 
-    /// What the model is told about the tool is what the tool does: the
-    /// default model, each size with the models that render it, the ten
-    /// ratios, and no option the tool does not have. The words are read
-    /// from the provider module, so a model or a size changed there
-    /// without the description fails here.
+    /// What the model is told about the tool is what the tool does: each
+    /// provider's default model, the ratios every model renders, each
+    /// model's sizes as its row has them, where references go, and no
+    /// option the tool does not have. The words are read from the provider
+    /// module, so a model or a size changed there without the description
+    /// fails here.
     #[test]
     fn the_description_names_the_default_model_and_every_size_and_ratio_as_the_tool_takes_them() {
-        use image_provider::{sizes_of, ASPECT_RATIOS, DEFAULT_GEMINI_IMAGE_MODEL, GEMINI_IMAGE_MODELS, IMAGE_SIZES};
+        use image_provider::{image_model, sizes_of, ImageProviderKind, References, ASPECT_RATIOS, IMAGE_MODELS};
         let d = crate::tools::registry::all_descriptors()
             .find(|d| d.name == "image_generate")
             .expect("image_generate registered");
         let desc = d.description;
-        assert!(desc.contains(&format!("default {DEFAULT_GEMINI_IMAGE_MODEL} —")), "{desc}");
-        assert!(desc.contains(&format!("aspect_ratio: {}.", ASPECT_RATIOS.join("|"))), "{desc}");
-        // The sizes of the default model, then every other model by what
-        // sets it apart: the one with more, the ones with one.
-        assert!(
-            desc.contains(&format!("size: {}, 1K when omitted;", sizes_of(DEFAULT_GEMINI_IMAGE_MODEL).join("|"))),
-            "{desc}"
-        );
-        for model in GEMINI_IMAGE_MODELS {
-            let sizes = sizes_of(model);
-            if sizes == sizes_of(DEFAULT_GEMINI_IMAGE_MODEL) {
+        for kind in ImageProviderKind::ALL {
+            assert!(desc.contains(&format!("{}'s", kind.label())), "{}: {desc}", kind.label());
+            assert!(desc.contains(&format!("(default {})", kind.default_model())), "{desc}");
+        }
+        // The ratios every model renders, in the tool's order.
+        let common: Vec<&str> = ASPECT_RATIOS.iter().copied().filter(|r| IMAGE_MODELS.iter().all(|m| m.ratios.contains(r))).collect();
+        assert!(desc.contains(&format!("aspect_ratio: every model renders {}, and some render more.", common.join("|"))), "{desc}");
+        // Each model's sizes: Gemini's by its default's and what sets a
+        // model apart; Higgsfield's model by model.
+        let gemini_default = sizes_of(ImageProviderKind::Gemini.default_model());
+        assert!(desc.contains(&format!("on Gemini {},", gemini_default.join("|"))), "{desc}");
+        for id in ImageProviderKind::Gemini.models() {
+            let sizes = sizes_of(id);
+            if sizes == gemini_default {
                 continue;
             }
-            assert!(desc.contains(model), "{model} renders {sizes:?} and the description does not name it: {desc}");
+            assert!(desc.contains(id), "{id} renders {sizes:?} and the description does not name it: {desc}");
+            for size in sizes.iter().filter(|s| !gemini_default.contains(s)) {
+                assert!(desc.contains(&format!("{size} on {id} only")), "{desc}");
+            }
             if sizes == ["1K"] {
-                assert!(desc.contains("render 1K only"), "{desc}");
-            } else {
-                for size in sizes.iter().filter(|s| !sizes_of(DEFAULT_GEMINI_IMAGE_MODEL).contains(s)) {
-                    assert!(desc.contains(&format!("{size} on {model} only")), "{desc}");
-                }
+                assert!(desc.contains("1K only on "), "{desc}");
             }
         }
-        for size in IMAGE_SIZES {
-            assert!(desc.contains(size), "{size}: {desc}");
+        let higgsfield = &desc[desc.find("on Higgsfield ").expect("Higgsfield's sizes")..];
+        for id in ImageProviderKind::Higgsfield.models() {
+            let sizes = sizes_of(id);
+            let said = if sizes.is_empty() { format!("none on {id}") } else { sizes.join("|") };
+            assert!(higgsfield.contains(id) && higgsfield.contains(&said), "{id}: {said}: {desc}");
         }
-        for gone in ["512px", "output_format", "png"] {
+        // References go where a model takes them: the clause says Gemini's
+        // models, names no Higgsfield model that takes none, and names
+        // Higgsfield not at all while none of its models takes one.
+        let clause = &desc[desc.find("reference_images: ").expect("the references' clause")..];
+        let clause = &clause[..clause.find(". ").expect("the clause ends")];
+        assert!(clause.contains("on Gemini's models"), "{clause}");
+        let higgsfield: Vec<_> = IMAGE_MODELS.iter().filter(|m| m.kind == ImageProviderKind::Higgsfield).collect();
+        if higgsfield.iter().all(|m| m.references == References::None) {
+            assert!(!clause.contains("Higgsfield"), "no Higgsfield model takes a reference: {clause}");
+        }
+        for model in higgsfield {
+            match model.references {
+                References::None => assert!(!clause.contains(model.id), "{} takes none: {clause}", model.id),
+                References::Inline => panic!("{} takes inline references", model.id),
+            }
+        }
+        assert!(image_model(ImageProviderKind::Higgsfield.default_model()).is_some());
+        for gone in ["512px", "output_format"] {
             assert!(!desc.contains(gone), "the description still says {gone}: {desc}");
         }
         let schema = (d.input_schema)();
@@ -893,6 +909,74 @@ mod tests {
         assert_eq!(properties, ["aspect_ratio", "prompt", "reference_images", "return_image", "size"]);
         let size = schema["properties"]["size"]["description"].as_str().unwrap();
         assert!(!size.contains("512px") && !size.contains("output_format"), "{size}");
+    }
+
+    /// A Higgsfield picture is stored in the format it came in, under its
+    /// own extension, and the summary names the provider.
+    #[tokio::test]
+    async fn a_higgsfield_picture_is_stored_in_the_format_it_came_in() {
+        use image_provider::{GeneratedImage, ImageGenResponse, ImageProviderKind};
+        let webp = {
+            let picture = image::RgbaImage::from_fn(6, 4, |x, y| image::Rgba([(x * 40) as u8, (y * 60) as u8, 90, 255]));
+            let mut out = Vec::new();
+            image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+                .encode(&picture, 6, 4, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            out
+        };
+        for (bytes, ext, media_type) in [(png_fixture(5, 4), "png", "image/png"), (webp, "webp", "image/webp")] {
+            let dir = TempDir::new();
+            let store = MediaStore::at(dir.0.join("MEDIA"));
+            let answer = ImageGenResponse { images: vec![GeneratedImage { media_type: media_type.into(), data: bytes.clone() }], text: None };
+            let provider = FakeProvider::answering(ImageProviderKind::Higgsfield, "xai/grok-imagine-image-2.0", Ok(answer));
+            let out = image_generate(&store, &provider, gen_args("a harbour at dawn"), "s").await.unwrap();
+            let summary: serde_json::Value = serde_json::from_str(out.text.split("\nThe generated image").next().unwrap()).unwrap();
+            assert_eq!(summary["provider"], "higgsfield");
+            assert_eq!(summary["model"], "xai/grok-imagine-image-2.0");
+            assert_eq!(summary["media_type"], media_type);
+            assert!(summary["path"].as_str().unwrap().ends_with(&format!(".{ext}")), "{summary}");
+            assert_eq!(std::fs::read(summary["path"].as_str().unwrap()).unwrap(), bytes, "stored as it came");
+        }
+    }
+
+    /// A model that takes no reference refuses one before a file is read:
+    /// the refusal is the model's, not the missing file's.
+    #[tokio::test]
+    async fn a_model_that_takes_no_reference_refuses_one_before_a_file_is_read() {
+        use image_provider::ImageProviderKind;
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let provider = FakeProvider::answering(ImageProviderKind::Higgsfield, "z-image/turbo", Err(ImageGenError::NoImage("never asked".into())));
+        let mut args = gen_args("a lighthouse");
+        args.reference_images = Some(vec!["/no/such/picture.png".into()]);
+        let out = image_generate(&store, &provider, args, "s").await.unwrap();
+        assert!(out.text.starts_with("image_generate: invalid image request: z-image/turbo takes no reference image"), "{}", out.text);
+        assert!(provider.seen.lock().unwrap().is_none(), "never called the backend");
+    }
+
+    /// Each provider has its own words for a refusal of its API and for a
+    /// call that ran out of time: Higgsfield's say that a request it took
+    /// may still be charged, and never that nothing was written.
+    #[tokio::test]
+    async fn each_provider_says_a_refusal_and_a_call_that_ran_out_in_its_own_words() {
+        use image_provider::ImageProviderKind;
+        assert_eq!(
+            ImageProviderKind::Gemini.api_error_words(429, "quota"),
+            "the gemini API answered 429: quota. Not retried — adjust the prompt/options or try again later."
+        );
+        assert_eq!(ImageProviderKind::Higgsfield.api_error_words(403, "Insufficient balance."), "Higgsfield answered 403: Insufficient balance.");
+        let limit = std::time::Duration::from_secs(300);
+        assert!(ImageProviderKind::Gemini.timeout_words(limit).contains("abandoned (nothing was written)"));
+        let words = ImageProviderKind::Higgsfield.timeout_words(limit);
+        assert!(words.starts_with("no answer within 300s") && words.contains("may still complete and be charged"), "{words}");
+        assert!(!words.contains("nothing was written"));
+        assert!(ImageProviderKind::Higgsfield.time_limit() > ImageProviderKind::Gemini.time_limit());
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let refused = ImageGenError::Api { status: 403, body: "Insufficient balance. Higgsfield refused the account".into() };
+        let provider = FakeProvider::answering(ImageProviderKind::Higgsfield, "z-image/turbo", Err(refused));
+        let out = image_generate(&store, &provider, gen_args("x"), "s").await.unwrap();
+        assert_eq!(out.text, "image_generate: Higgsfield answered 403: Insufficient balance. Higgsfield refused the account");
     }
 
     #[test]
