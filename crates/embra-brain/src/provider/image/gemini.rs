@@ -23,7 +23,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value as JsonValue};
 
 use super::{
-    GeneratedImage, ImageGenError, ImageGenRequest, ImageGenResponse, ImageProvider, ImageProviderKind, OUTPUT_MIME,
+    image_model, GeneratedImage, ImageGenError, ImageGenRequest, ImageGenResponse, ImageProvider, ImageProviderKind,
+    OUTPUT_MIME,
 };
 
 pub struct GeminiImageProvider {
@@ -63,7 +64,10 @@ impl GeminiImageProvider {
             response_format.insert("aspect_ratio".into(), json!(ar));
         }
         if let Some(size) = &req.size {
-            response_format.insert("image_size".into(), json!(size));
+            // The API's value for the tool's word (the same word for
+            // Gemini); the validator has refused any other before.
+            let value = image_model(model).and_then(|m| m.api_size(size)).unwrap_or(size);
+            response_format.insert("image_size".into(), json!(value));
         }
         json!({
             "model": model,

@@ -27,19 +27,65 @@ pub const IMAGE_KEY_PATH_GEMINI: &str = "/embra/state/api_key_image_gemini";
 /// Env override for the image key (highest precedence; dev/test).
 pub const IMAGE_KEY_ENV: &str = "EMBRA_IMAGE_API_KEY";
 
-/// Gemini image models, each with the sizes it renders: Google's image
-/// guide and the model's own page. The first is the default, William's
-/// pick: the model the guide recommends for new work. There is no
+/// One image model and what the tool may ask of it, read from the model's
+/// own page. The tool's word for a size and the API's value for it are
+/// kept apart, since an API may write a size its own way.
+#[derive(Debug)]
+pub struct ImageModel {
+    pub id: &'static str,
+    pub kind: ImageProviderKind,
+    /// `(the tool's word, the API's value)`, in the model's own order.
+    pub sizes: &'static [(&'static str, &'static str)],
+    /// The aspect ratios the tool takes for the model.
+    pub ratios: &'static [&'static str],
+}
+
+impl ImageModel {
+    /// The API's value for one of the tool's size words.
+    pub fn api_size(&self, word: &str) -> Option<&'static str> {
+        self.sizes.iter().find(|(w, _)| *w == word).map(|(_, value)| *value)
+    }
+}
+
+/// Every image model the OS offers, each with the sizes it renders.
+/// Gemini's: Google's image guide and the model's own page. There is no
 /// `gemini-3.1-pro-image`; the 3.1 line is Flash and Flash-Lite only.
-const MODEL_SIZES: &[(&str, &[&str])] = &[
-    ("gemini-nano-banana-2.1", &["1K", "2K", "4K"]),
-    ("gemini-3-pro-image", &["1K", "2K", "4K"]),
-    ("gemini-3.1-flash-image", &["512", "1K", "2K", "4K"]),
-    ("gemini-3.1-flash-lite-image", &["1K"]),
-    ("gemini-2.5-flash-image", &["1K"]),
+pub const IMAGE_MODELS: &[ImageModel] = &[
+    ImageModel {
+        id: "gemini-nano-banana-2.1",
+        kind: ImageProviderKind::Gemini,
+        sizes: &[("1K", "1K"), ("2K", "2K"), ("4K", "4K")],
+        ratios: ASPECT_RATIOS,
+    },
+    ImageModel {
+        id: "gemini-3-pro-image",
+        kind: ImageProviderKind::Gemini,
+        sizes: &[("1K", "1K"), ("2K", "2K"), ("4K", "4K")],
+        ratios: ASPECT_RATIOS,
+    },
+    ImageModel {
+        id: "gemini-3.1-flash-image",
+        kind: ImageProviderKind::Gemini,
+        sizes: &[("512", "512"), ("1K", "1K"), ("2K", "2K"), ("4K", "4K")],
+        ratios: ASPECT_RATIOS,
+    },
+    ImageModel {
+        id: "gemini-3.1-flash-lite-image",
+        kind: ImageProviderKind::Gemini,
+        sizes: &[("1K", "1K")],
+        ratios: ASPECT_RATIOS,
+    },
+    ImageModel {
+        id: "gemini-2.5-flash-image",
+        kind: ImageProviderKind::Gemini,
+        sizes: &[("1K", "1K")],
+        ratios: ASPECT_RATIOS,
+    },
 ];
-/// The names of `MODEL_SIZES`, in its order (guard
-/// `every_image_model_has_its_sizes_and_each_is_a_value_of_the_api`).
+/// Gemini's models of `IMAGE_MODELS`, in its order (guard
+/// `every_image_model_has_its_sizes_and_each_is_a_value_of_the_api`). The
+/// first is the default, William's pick: the model Google's guide
+/// recommends for new work.
 pub const GEMINI_IMAGE_MODELS: &[&str] = &[
     "gemini-nano-banana-2.1",
     "gemini-3-pro-image",
@@ -49,7 +95,8 @@ pub const GEMINI_IMAGE_MODELS: &[&str] = &[
 ];
 pub const DEFAULT_GEMINI_IMAGE_MODEL: &str = "gemini-nano-banana-2.1";
 
-/// The ten ratios every model above renders.
+/// The ten ratios the tool takes for each of Gemini's models: every one
+/// of them renders these.
 pub const ASPECT_RATIOS: &[&str] = &["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
 /// The values of `image_size` in the API's reference
 /// (`ImageResponseFormat`). The smallest is `512`: "512px" is how the
@@ -61,12 +108,15 @@ pub const IMAGE_SIZES: &[&str] = &["512", "1K", "2K", "4K"];
 /// bytes that came back, not this.
 pub const OUTPUT_MIME: &str = "image/jpeg";
 
-/// The sizes `model` renders; none for a model that is not listed.
-pub fn sizes_of(model: &str) -> &'static [&'static str] {
-    MODEL_SIZES
-        .iter()
-        .find(|(name, _)| *name == model)
-        .map_or(&[], |(_, sizes)| sizes)
+/// The model of that id, of any provider.
+pub fn image_model(id: &str) -> Option<&'static ImageModel> {
+    IMAGE_MODELS.iter().find(|model| model.id == id)
+}
+
+/// The tool's words for the sizes `model` renders; none for a model that is
+/// not listed.
+pub fn sizes_of(model: &str) -> Vec<&'static str> {
+    image_model(model).map_or_else(Vec::new, |model| model.sizes.iter().map(|(word, _)| *word).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +147,14 @@ impl ImageProviderKind {
     pub fn models(self) -> &'static [&'static str] {
         match self {
             ImageProviderKind::Gemini => GEMINI_IMAGE_MODELS,
+        }
+    }
+
+    /// The size words the provider's models know, in the order a refusal
+    /// names them: for Gemini the values of its API's `image_size`.
+    pub fn size_words(self) -> &'static [&'static str] {
+        match self {
+            ImageProviderKind::Gemini => IMAGE_SIZES,
         }
     }
 }
@@ -146,38 +204,43 @@ pub trait ImageProvider: Send + Sync {
 
 /// Validate the (aspect_ratio, size, model) combination the way the tool
 /// surfaces it — instructive messages, never a bare 400 from the API for
-/// things we can check locally. A size is checked twice: that it is a
-/// value of the API, then that this model renders it.
-pub fn validate_request(model: &str, req: &ImageGenRequest) -> Result<(), ImageGenError> {
+/// things we can check locally. Every check reads the model's row of
+/// `IMAGE_MODELS`. A size is checked twice: that it is a word of the
+/// model's provider, then that this model renders it.
+pub fn validate_request(model_id: &str, req: &ImageGenRequest) -> Result<(), ImageGenError> {
     if req.prompt.trim().is_empty() {
         return Err(ImageGenError::InvalidRequest("prompt is empty".into()));
     }
+    let Some(model) = image_model(model_id) else {
+        return Err(ImageGenError::InvalidRequest(format!("{model_id} is not an image model of this OS")));
+    };
     if let Some(ar) = req.aspect_ratio.as_deref()
-        && !ASPECT_RATIOS.contains(&ar)
+        && !model.ratios.contains(&ar)
     {
         return Err(ImageGenError::InvalidRequest(format!(
             "aspect_ratio '{}' is not one of {}",
             ar,
-            ASPECT_RATIOS.join("|")
+            model.ratios.join("|")
         )));
     }
     if let Some(size) = req.size.as_deref() {
-        if !IMAGE_SIZES.contains(&size) {
+        let words = model.kind.size_words();
+        if !words.contains(&size) {
             return Err(ImageGenError::InvalidRequest(format!(
                 "size '{}' is not one of {}",
                 size,
-                IMAGE_SIZES.join("|")
+                words.join("|")
             )));
         }
-        let rendered = sizes_of(model);
+        let rendered = sizes_of(model_id);
         if !rendered.contains(&size) {
-            let by: Vec<&str> = MODEL_SIZES
+            let by: Vec<&str> = IMAGE_MODELS
                 .iter()
-                .filter(|(_, sizes)| sizes.contains(&size))
-                .map(|(name, _)| *name)
+                .filter(|other| other.kind == model.kind && other.api_size(size).is_some())
+                .map(|other| other.id)
                 .collect();
             return Err(ImageGenError::InvalidRequest(format!(
-                "{model} renders {}; size {size} is rendered by {} (the operator picks the model with /image-provider model <id>). Omit size or ask for one this model renders",
+                "{model_id} renders {}; size {size} is rendered by {} (the operator picks the model with /image-provider model <id>). Omit size or ask for one this model renders",
                 rendered.join("|"),
                 by.join(", ")
             )));
@@ -344,22 +407,95 @@ mod tests {
     #[test]
     fn every_image_model_has_its_sizes_and_each_is_a_value_of_the_api() {
         assert_eq!(IMAGE_SIZES, REFERENCE_SIZES);
-        let named: Vec<&str> = MODEL_SIZES.iter().map(|(name, _)| *name).collect();
+        let gemini: Vec<&ImageModel> = IMAGE_MODELS.iter().filter(|m| m.kind == ImageProviderKind::Gemini).collect();
+        let named: Vec<&str> = gemini.iter().map(|m| m.id).collect();
         assert_eq!(named, GEMINI_IMAGE_MODELS);
         assert_eq!(GEMINI_IMAGE_MODELS[0], DEFAULT_GEMINI_IMAGE_MODEL, "the default is listed first");
-        for (model, sizes) in MODEL_SIZES {
-            assert!(!sizes.is_empty(), "{model}");
-            assert!(sizes.contains(&"1K"), "{model}: every model renders 1K, the size of a call that names none");
-            for size in *sizes {
-                assert!(REFERENCE_SIZES.contains(size), "{model}: {size} is no value of image_size");
+        for model in &gemini {
+            assert!(!model.sizes.is_empty(), "{}", model.id);
+            assert!(model.api_size("1K").is_some(), "{}: every model renders 1K, the size of a call that names none", model.id);
+            for (word, value) in model.sizes {
+                assert!(REFERENCE_SIZES.contains(value), "{}: {value} is no value of image_size", model.id);
+                assert_eq!(word, value, "{}: Gemini's API takes the tool's word as it is", model.id);
             }
-            assert_eq!(sizes_of(model), *sizes);
+            assert_eq!(model.ratios, ASPECT_RATIOS, "{}", model.id);
         }
         for size in REFERENCE_SIZES {
-            assert!(MODEL_SIZES.iter().any(|(_, sizes)| sizes.contains(&size)), "no model renders {size}");
+            assert!(gemini.iter().any(|m| m.api_size(size).is_some()), "no model renders {size}");
         }
+        let ids: Vec<&str> = IMAGE_MODELS.iter().map(|m| m.id).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "an id names one model");
         assert!(sizes_of("gemini-3.1-pro-image").is_empty(), "a model that is not listed renders nothing");
         assert_eq!(OUTPUT_MIME, "image/jpeg", "the one value of the reference's mime_type");
+    }
+
+    /// Every refusal of Gemini's models, word for word as it read before
+    /// the models went into one table with a second provider's: a change
+    /// to the table changes none of them.
+    #[test]
+    fn every_gemini_refusal_reads_as_it_did() {
+        let refused = |model: &str, prompt: &str, ratio: Option<&str>, size: Option<&str>| {
+            let request = ImageGenRequest {
+                prompt: prompt.into(),
+                aspect_ratio: ratio.map(str::to_string),
+                size: size.map(str::to_string),
+                reference_images: Vec::new(),
+            };
+            validate_request(model, &request).expect_err("refused").to_string()
+        };
+        const TAIL: &str = " (the operator picks the model with /image-provider model <id>). Omit size or ask for one this model renders";
+        for model in GEMINI_IMAGE_MODELS {
+            assert_eq!(refused(model, "  ", None, None), "invalid image request: prompt is empty");
+            for ratio in ["7:3", "1:4", "4:1", "auto", ""] {
+                assert_eq!(
+                    refused(model, "a poster", Some(ratio), None),
+                    format!("invalid image request: aspect_ratio '{ratio}' is not one of 1:1|3:2|2:3|3:4|4:3|4:5|5:4|9:16|16:9|21:9")
+                );
+            }
+            for size in ["512px", "3K", "1k", "0.5K", "1024", "720p", ""] {
+                assert_eq!(
+                    refused(model, "a poster", Some("16:9"), Some(size)),
+                    format!("invalid image request: size '{size}' is not one of 512|1K|2K|4K")
+                );
+            }
+        }
+        let renders = [
+            ("gemini-nano-banana-2.1", "512", "gemini-nano-banana-2.1 renders 1K|2K|4K; size 512 is rendered by gemini-3.1-flash-image"),
+            ("gemini-3-pro-image", "512", "gemini-3-pro-image renders 1K|2K|4K; size 512 is rendered by gemini-3.1-flash-image"),
+            ("gemini-3.1-flash-lite-image", "512", "gemini-3.1-flash-lite-image renders 1K; size 512 is rendered by gemini-3.1-flash-image"),
+            ("gemini-3.1-flash-lite-image", "2K", "gemini-3.1-flash-lite-image renders 1K; size 2K is rendered by gemini-nano-banana-2.1, gemini-3-pro-image, gemini-3.1-flash-image"),
+            ("gemini-3.1-flash-lite-image", "4K", "gemini-3.1-flash-lite-image renders 1K; size 4K is rendered by gemini-nano-banana-2.1, gemini-3-pro-image, gemini-3.1-flash-image"),
+            ("gemini-2.5-flash-image", "512", "gemini-2.5-flash-image renders 1K; size 512 is rendered by gemini-3.1-flash-image"),
+            ("gemini-2.5-flash-image", "2K", "gemini-2.5-flash-image renders 1K; size 2K is rendered by gemini-nano-banana-2.1, gemini-3-pro-image, gemini-3.1-flash-image"),
+            ("gemini-2.5-flash-image", "4K", "gemini-2.5-flash-image renders 1K; size 4K is rendered by gemini-nano-banana-2.1, gemini-3-pro-image, gemini-3.1-flash-image"),
+        ];
+        for (model, size, words) in renders {
+            assert_eq!(refused(model, "a poster", None, Some(size)), format!("invalid image request: {words}{TAIL}"));
+        }
+        // And what is not refused: each model with the sizes it renders and every ratio.
+        let taken = [
+            ("gemini-nano-banana-2.1", &["1K", "2K", "4K"][..]),
+            ("gemini-3-pro-image", &["1K", "2K", "4K"][..]),
+            ("gemini-3.1-flash-image", &["512", "1K", "2K", "4K"][..]),
+            ("gemini-3.1-flash-lite-image", &["1K"][..]),
+            ("gemini-2.5-flash-image", &["1K"][..]),
+        ];
+        for (model, sizes) in taken {
+            for size in sizes.iter().map(|s| Some(*s)).chain([None]) {
+                for ratio in ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"].map(Some).into_iter().chain([None]) {
+                    let request = ImageGenRequest {
+                        prompt: "a poster".into(),
+                        aspect_ratio: ratio.map(str::to_string),
+                        size: size.map(str::to_string),
+                        reference_images: vec![("image/png".into(), vec![1, 2, 3]); 4],
+                    };
+                    assert!(validate_request(model, &request).is_ok(), "{model} {size:?} {ratio:?}");
+                }
+            }
+        }
     }
 
     /// A size is refused before the call when it is no value of the API,
