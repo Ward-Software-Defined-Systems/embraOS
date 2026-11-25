@@ -46,6 +46,10 @@ pub enum References {
     None,
     /// Sent inline with the request itself (Gemini's).
     Inline,
+    /// Public URLs in a list field of the request, at most `max`.
+    Urls { field: &'static str, max: usize },
+    /// One public URL in a field of the request.
+    Url { field: &'static str },
 }
 
 /// One image model and what the tool may ask of it, read from the model's
@@ -127,7 +131,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         kind: ImageProviderKind::Higgsfield,
         sizes: &[("1K", "1k"), ("2K", "2k")],
         ratios: &["1:1", "1:2", "2:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"],
-        references: References::None,
+        references: References::Urls { field: "image_urls", max: 10 },
         prompt_chars: None,
     },
     ImageModel {
@@ -146,7 +150,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
             "1:1", "1:2", "2:1", "2:3", "3:2", "4:5", "5:4", "9:16", "16:9", "5:8", "8:5", "3:4", "4:3", "9:22", "22:9",
             "9:23", "23:9", "3:8", "8:3", "5:12", "12:5", "1:3", "3:1",
         ],
-        references: References::None,
+        references: References::Url { field: "image_url" },
         prompt_chars: Some((2, 2048)),
     },
     ImageModel {
@@ -423,6 +427,15 @@ pub fn validate_options(
                 by.join(", ")
             )));
         }
+    }
+    match model.references {
+        References::Urls { max, .. } if references > max => {
+            return Err(ImageGenError::InvalidRequest(format!("{model_id} takes at most {max} reference images; {references} were asked for")));
+        }
+        References::Url { .. } if references > 1 => {
+            return Err(ImageGenError::InvalidRequest(format!("{model_id} takes one reference image; {references} were asked for")));
+        }
+        _ => {}
     }
     if references > 0 && model.references == References::None {
         let by: Vec<&str> = IMAGE_MODELS
@@ -766,9 +779,13 @@ mod tests {
             "invalid image request: aspect_ratio '21:9' is not one of 9:16|16:9|4:3|3:4|1:1|2:3|3:2"
         );
         assert_eq!(
-            refused("xai/grok-imagine-image-2.0", "a poster", None, None, 1),
-            "invalid image request: xai/grok-imagine-image-2.0 takes no reference image; none of Higgsfield's models takes one here: Gemini's do (the operator picks the provider with /image-provider gemini). Omit reference_images"
+            refused("z-image/turbo", "a poster", None, None, 1),
+            "invalid image request: z-image/turbo takes no reference image; xai/grok-imagine-image-2.0, ideogram/v4.0 do (the operator picks the model with /image-provider model <id>). Omit reference_images"
         );
+        assert_eq!(refused("ideogram/v4.0", "a poster", None, None, 2), "invalid image request: ideogram/v4.0 takes one reference image; 2 were asked for");
+        assert_eq!(refused("xai/grok-imagine-image-2.0", "a poster", None, None, 11), "invalid image request: xai/grok-imagine-image-2.0 takes at most 10 reference images; 11 were asked for");
+        assert!(validate_options("xai/grok-imagine-image-2.0", "a poster", None, None, 4).is_ok());
+        assert!(validate_options("ideogram/v4.0", "a poster", None, None, 1).is_ok());
         assert!(validate_options("ideogram/v4.0", "a poster", Some("22:9"), None, 0).is_ok());
         assert!(validate_options("higgsfield-ai/soul/v2/standard", "a poster", Some("3:2"), Some("1080p"), 0).is_ok());
     }

@@ -21,7 +21,12 @@
 //! - `POST cancel_url` answers 202 when the request is canceled and 400 once
 //!   it has started; a request that completes is charged, one that fails,
 //!   is refused by moderation or is canceled is not;
-//! - an error is `{"detail": <a string, a list or an object>}`.
+//! - an error is `{"detail": <a string, a list or an object>}`;
+//! - a reference image is a public URL: `POST /files/generate-upload-url`
+//!   with its content type answers `{public_url, upload_url,
+//!   upload_headers}`, the bytes are `PUT` to `upload_url` with those
+//!   headers and without the credential, and `public_url` goes into the
+//!   model's own field (`References::Urls` or `Url`).
 //!
 //! The credential goes to the API's own origin and nowhere else: a status
 //! or cancel URL of another origin is not followed (the URL the reference
@@ -39,7 +44,10 @@ use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde_json::{json, Map, Value as JsonValue};
 use tokio::time::Instant;
 
-use super::{image_model, GeneratedImage, ImageGenError, ImageGenRequest, ImageGenResponse, ImageModel, ImageProvider, ImageProviderKind};
+use super::{
+    image_model, GeneratedImage, ImageGenError, ImageGenRequest, ImageGenResponse, ImageModel, ImageProvider, ImageProviderKind,
+    References,
+};
 use crate::net;
 
 /// The API's own origin.
@@ -49,6 +57,8 @@ pub const API_BASE: &str = "https://api.higgsfield.ai";
 const API_TIMEOUT: Duration = Duration::from_secs(10);
 /// One fetch of the picture.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+/// One reference image sent to its upload slot.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 /// The most an answer of the API itself may be: a status is a few hundred
 /// bytes.
 const API_ANSWER_MAX: usize = 256 * 1024;
@@ -81,10 +91,13 @@ impl Pacing {
 
 /// The whole of a call: the wait, the last status read begun before the
 /// deadline, and two fetches of the picture (or the cancel, which is less).
+/// A reference's upload is begun before the deadline only, and ends within
+/// its two calls of it, less than the fetches.
 pub const TIME_LIMIT: Duration = Duration::from_secs(300);
 const _: () = assert!(
     Pacing::ADVISED.wait.as_secs() + API_TIMEOUT.as_secs() + 2 * DOWNLOAD_TIMEOUT.as_secs() <= TIME_LIMIT.as_secs()
 );
+const _: () = assert!(API_TIMEOUT.as_secs() + UPLOAD_TIMEOUT.as_secs() <= API_TIMEOUT.as_secs() + 2 * DOWNLOAD_TIMEOUT.as_secs());
 const _: () = assert!(TIME_LIMIT.as_secs() < crate::tools::registry::MAX_TOOL_DURATION.as_secs());
 
 /// The tool's words for a refusal of Higgsfield's API: the API's words and
@@ -176,6 +189,51 @@ impl HiggsfieldImageProvider {
         url
     }
 
+    /// A reference image sent to Higgsfield's storage: an upload slot asked
+    /// of the API, the bytes put to it without the credential (through the
+    /// one client that may reach the slot's address), and the public URL
+    /// that names it in a request.
+    async fn upload(&self, media_type: &str, bytes: &[u8]) -> Result<String, ImageGenError> {
+        let mut slot_url = self.base.clone();
+        slot_url.path_segments_mut().expect("an http base has a path").pop_if_empty().extend(["files", "generate-upload-url"]);
+        let answer = self
+            .http
+            .post(slot_url)
+            .header(AUTHORIZATION, self.authorization.clone())
+            .json(&json!({"content_type": media_type}))
+            .send()
+            .await
+            .map_err(|e| ImageGenError::Transport(format!("Higgsfield's upload slot: {}", net::error_chain(&e))))?;
+        if !answer.status().is_success() {
+            return Err(api_error(answer, Asked::Storage).await);
+        }
+        let bytes_read = net::read_capped(answer, API_ANSWER_MAX)
+            .await
+            .map_err(|e| ImageGenError::Transport(format!("Higgsfield's upload slot: {e}")))?;
+        let slot: JsonValue = serde_json::from_slice(&bytes_read)
+            .map_err(|e| ImageGenError::Transport(format!("Higgsfield's upload slot is not JSON ({e})")))?;
+        let UploadSlot { public_url, upload_url, headers } = parse_upload_slot(&slot).map_err(ImageGenError::Transport)?;
+        let also = self.stand_in.then_some(&self.base);
+        let reach = net::public_url_client(&upload_url, also, UPLOAD_TIMEOUT)
+            .await
+            .map_err(|e| ImageGenError::Transport(format!("Higgsfield's upload slot is refused: {e}; nothing was submitted, nothing is charged")))?;
+        let mut put = reach.client.put(reach.url.clone()).body(bytes.to_vec());
+        for (name, value) in &headers {
+            put = put.header(name.as_str(), value.as_str());
+        }
+        let answer = put
+            .send()
+            .await
+            .map_err(|e| ImageGenError::Transport(format!("a reference image could not be put to Higgsfield's storage: {}", net::error_chain(&e))))?;
+        if !answer.status().is_success() {
+            return Err(ImageGenError::Transport(format!(
+                "Higgsfield's storage answered HTTP {} to a reference image; nothing was submitted, nothing is charged",
+                answer.status().as_u16()
+            )));
+        }
+        Ok(public_url)
+    }
+
     /// The submission: once, and once more with the same idempotency key
     /// after a network failure or a 5xx; never after a 4xx.
     async fn submit(&self, body: &JsonValue) -> Result<Submitted, ImageGenError> {
@@ -195,7 +253,7 @@ impl HiggsfieldImageProvider {
                 Ok(answer) if answer.status().is_server_error() && attempt == 1 => {
                     last = format!("HTTP {}", answer.status().as_u16());
                 }
-                Ok(answer) if !answer.status().is_success() => return Err(api_error(answer).await),
+                Ok(answer) if !answer.status().is_success() => return Err(api_error(answer, Asked::Model).await),
                 Ok(answer) => {
                     let bytes = net::read_capped(answer, API_ANSWER_MAX)
                         .await
@@ -234,7 +292,7 @@ impl HiggsfieldImageProvider {
                     }
                     tracing::info!(target: "media", status = answer.status().as_u16(), "Higgsfield answered a status read with an error; read again");
                 }
-                Ok(answer) if !answer.status().is_success() => return Waited::Failed(api_error(answer).await),
+                Ok(answer) if !answer.status().is_success() => return Waited::Failed(api_error(answer, Asked::Model).await),
                 Ok(answer) => {
                     let read = net::read_capped(answer, API_ANSWER_MAX)
                         .await
@@ -324,7 +382,20 @@ impl ImageProvider for HiggsfieldImageProvider {
 
     async fn generate(&self, req: &ImageGenRequest) -> Result<ImageGenResponse, ImageGenError> {
         let deadline = Instant::now() + self.pacing.wait;
-        let body = request_body(self.model, req);
+        // Each reference goes to Higgsfield's storage first; the request
+        // names it by its public URL. Nothing is submitted, and nothing is
+        // charged, when one cannot be sent or the wait ran out meanwhile: an
+        // upload is begun before the deadline only.
+        let mut reference_urls = Vec::with_capacity(req.reference_images.len());
+        for (media_type, bytes) in &req.reference_images {
+            reference_urls.push(self.upload(media_type, bytes).await?);
+            if Instant::now() >= deadline {
+                return Err(ImageGenError::NoImage(
+                    "the reference images took the whole wait; nothing was submitted, nothing is charged".into(),
+                ));
+            }
+        }
+        let body = request_body(self.model, req, &reference_urls);
         let submitted = self.submit(&body).await?;
         let request_id = submitted.request_id.as_str();
         let status_url = self.own_url(submitted.status_url.as_deref(), request_id, "status");
@@ -423,9 +494,10 @@ pub(crate) enum Status {
 }
 
 /// The request's body: the prompt, the ratio and the model's size word for
-/// the size when they are asked, and nothing else, so the model's own
-/// defaults stand for the rest.
-pub(crate) fn request_body(model: &ImageModel, req: &ImageGenRequest) -> JsonValue {
+/// the size when they are asked, the references' public URLs in the model's
+/// own field, and nothing else, so the model's own defaults stand for the
+/// rest.
+pub(crate) fn request_body(model: &ImageModel, req: &ImageGenRequest, reference_urls: &[String]) -> JsonValue {
     let mut body = Map::new();
     body.insert("prompt".into(), json!(req.prompt));
     if let Some(ratio) = &req.aspect_ratio {
@@ -434,7 +506,45 @@ pub(crate) fn request_body(model: &ImageModel, req: &ImageGenRequest) -> JsonVal
     if let Some(value) = req.size.as_deref().and_then(|size| model.api_size(size)) {
         body.insert("resolution".into(), json!(value));
     }
+    match model.references {
+        References::Urls { field, .. } if !reference_urls.is_empty() => {
+            body.insert(field.into(), json!(reference_urls));
+        }
+        References::Url { field } => {
+            if let Some(first) = reference_urls.first() {
+                body.insert(field.into(), json!(first));
+            }
+        }
+        _ => {}
+    }
     JsonValue::Object(body)
+}
+
+/// A slot in Higgsfield's storage for one reference.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UploadSlot {
+    /// The address a request names the reference by.
+    pub(crate) public_url: String,
+    /// The address its bytes are put to.
+    pub(crate) upload_url: String,
+    /// The headers to put them with: every one the answer names.
+    pub(crate) headers: Vec<(String, String)>,
+}
+
+/// An upload slot, as the answer to `POST /files/generate-upload-url`
+/// names it; every header is text.
+pub(crate) fn parse_upload_slot(value: &JsonValue) -> Result<UploadSlot, String> {
+    let text = |field: &str| value.get(field).and_then(JsonValue::as_str).filter(|v| !v.trim().is_empty()).map(str::to_string);
+    let public_url = text("public_url").ok_or_else(|| "Higgsfield's upload slot names no public_url".to_string())?;
+    let upload_url = text("upload_url").ok_or_else(|| "Higgsfield's upload slot names no upload_url".to_string())?;
+    let mut headers = Vec::new();
+    if let Some(named) = value.get("upload_headers").and_then(JsonValue::as_object) {
+        for (name, value) in named {
+            let value = value.as_str().ok_or_else(|| format!("Higgsfield's upload slot names a header {name} that is not text"))?;
+            headers.push((name.clone(), value.to_string()));
+        }
+    }
+    Ok(UploadSlot { public_url, upload_url, headers })
 }
 
 pub(crate) fn parse_submit(value: &JsonValue) -> Result<Submitted, String> {
@@ -515,9 +625,18 @@ fn retry_after(answer: &reqwest::Response) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
+/// What a refused call asked for: the model's request (its submission or
+/// its status), or a slot in Higgsfield's storage for a reference.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    Model,
+    Storage,
+}
+
 /// An answer of the API that refuses: its status, its words, and what the
-/// operator can do about it.
-async fn api_error(answer: reqwest::Response) -> ImageGenError {
+/// operator can do about it. A model's advice (open to the account, blocked
+/// for a while) is given only for a call of the model's.
+async fn api_error(answer: reqwest::Response, asked: Asked) -> ImageGenError {
     let status = answer.status().as_u16();
     let after = retry_after(&answer);
     let correlation = answer
@@ -533,8 +652,8 @@ async fn api_error(answer: reqwest::Response) -> ImageGenError {
     let advice = match status {
         401 => " The key was refused: /image-provider key <key id>:<key secret> stores another (the API console at open.higgsfield.ai makes keys).".to_string(),
         403 => " Higgsfield refused the account: the API's balance at open.higgsfield.ai may be empty, or the key disabled.".to_string(),
-        404 => " The model is not open to this account: /image-provider model <id> picks another.".to_string(),
-        423 => " The model is blocked for a while: try again later, or pick another with /image-provider model <id>.".to_string(),
+        404 if asked == Asked::Model => " The model is not open to this account: /image-provider model <id> picks another.".to_string(),
+        423 if asked == Asked::Model => " The model is blocked for a while: try again later, or pick another with /image-provider model <id>.".to_string(),
         429 => match after {
             Some(after) => format!(" The account's queue is full: try again in {} s.", after.as_secs()),
             None => " The account's queue is full: try again later.".to_string(),
@@ -613,10 +732,19 @@ mod tests {
     /// The values of each model's page, typed here from the page's input
     /// schema (`docs.higgsfield.ai/docs/models/<family>/<workflow>.md`,
     /// read 2026-11-24) and not from the table under test: the endpoint,
+    /// the field of its reference images and how many it takes,
     /// `resolution`'s values, `aspect_ratio`'s values, the prompt's bounds
     /// in characters, and every property the schema has.
+    /// How the page takes reference images.
+    enum PageReferences {
+        None,
+        List { field: &'static str, max: usize },
+        One { field: &'static str },
+    }
+
     struct Page {
         endpoint: &'static str,
+        references: PageReferences,
         resolutions: &'static [&'static str],
         ratios: &'static [&'static str],
         prompt: Option<(usize, usize)>,
@@ -626,6 +754,7 @@ mod tests {
     const PAGES: [Page; 4] = [
         Page {
             endpoint: "xai/grok-imagine-image-2.0",
+            references: PageReferences::List { field: "image_urls", max: 10 },
             resolutions: &["1k", "2k"],
             ratios: &["auto", "1:1", "1:2", "2:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"],
             prompt: None,
@@ -633,6 +762,7 @@ mod tests {
         },
         Page {
             endpoint: "higgsfield-ai/soul/v2/standard",
+            references: PageReferences::None,
             resolutions: &["720p", "1080p"],
             ratios: &["9:16", "16:9", "4:3", "3:4", "1:1", "2:3", "3:2"],
             prompt: None,
@@ -643,6 +773,7 @@ mod tests {
         },
         Page {
             endpoint: "ideogram/v4.0",
+            references: PageReferences::One { field: "image_url" },
             resolutions: &[],
             ratios: &[
                 "1:1", "1:2", "2:1", "2:3", "3:2", "4:5", "5:4", "9:16", "16:9", "5:8", "8:5", "3:4", "4:3", "9:22", "22:9",
@@ -653,6 +784,7 @@ mod tests {
         },
         Page {
             endpoint: "z-image/turbo",
+            references: PageReferences::None,
             resolutions: &["1k", "2k"],
             ratios: &["1:1", "2:3", "3:2", "3:4", "4:3", "7:9", "9:7", "9:16", "16:9", "21:9"],
             prompt: Some((1, 800)),
@@ -681,12 +813,14 @@ mod tests {
             };
             for prompt in &prompts {
                 for size in words.iter().copied().map(Some).chain([None, Some("4K"), Some("1k")]) {
-                    for ratio in ratios.iter().copied().map(Some).chain([None]) {
-                        let request = req(prompt, ratio, size);
+                    for (ratio, refs) in ratios.iter().copied().map(Some).chain([None]).flat_map(|ratio| [0usize, 1, 2, 4].map(move |refs| (ratio, refs))) {
+                        let mut request = req(prompt, ratio, size);
+                        request.reference_images = vec![("image/png".to_string(), vec![1u8]); refs];
                         if validate_request(page.endpoint, &request).is_err() {
                             continue;
                         }
-                        let body = request_body(model, &request);
+                        let urls: Vec<String> = (0..refs).map(|n| format!("https://cdn.example/in/{n}.png")).collect();
+                        let body = request_body(model, &request, &urls);
                         let fields = body.as_object().expect("an object");
                         for key in fields.keys() {
                             assert!(page.properties.contains(&key.as_str()), "{}: {key} is no property of its page", page.endpoint);
@@ -700,6 +834,18 @@ mod tests {
                         if let Some((least, most)) = page.prompt {
                             let n = fields["prompt"].as_str().unwrap().chars().count();
                             assert!((least..=most).contains(&n), "{}: a prompt of {n}", page.endpoint);
+                        }
+                        match page.references {
+                            PageReferences::List { field, max } => {
+                                let sent_refs = fields.get(field).map_or(0, |v| v.as_array().unwrap().len());
+                                assert!(sent_refs <= max && sent_refs == refs, "{}: {sent_refs} of {refs}", page.endpoint);
+                            }
+                            PageReferences::One { field } => {
+                                assert!(refs <= 1, "{}: {refs} references let through", page.endpoint);
+                                assert_eq!(fields.contains_key(field), refs == 1, "{}", page.endpoint);
+                                assert!(fields.get(field).is_none_or(JsonValue::is_string), "{}: {field} is a string", page.endpoint);
+                            }
+                            PageReferences::None => assert_eq!(refs, 0, "{}: a reference let through", page.endpoint),
                         }
                         sent += 1;
                     }
@@ -721,16 +867,36 @@ mod tests {
     #[test]
     fn the_body_holds_what_was_asked_and_nothing_else() {
         let grok = image_model("xai/grok-imagine-image-2.0").unwrap();
-        assert_eq!(request_body(grok, &req("a lighthouse", None, None)), json!({"prompt": "a lighthouse"}));
+        assert_eq!(request_body(grok, &req("a lighthouse", None, None), &[]), json!({"prompt": "a lighthouse"}));
         assert_eq!(
-            request_body(grok, &req("a lighthouse", Some("16:9"), Some("2K"))),
+            request_body(grok, &req("a lighthouse", Some("16:9"), Some("2K")), &[]),
             json!({"prompt": "a lighthouse", "aspect_ratio": "16:9", "resolution": "2k"})
         );
         let soul = image_model("higgsfield-ai/soul/v2/standard").unwrap();
         assert_eq!(
-            request_body(soul, &req("a portrait", Some("3:4"), Some("1080p"))),
+            request_body(soul, &req("a portrait", Some("3:4"), Some("1080p")), &[]),
             json!({"prompt": "a portrait", "aspect_ratio": "3:4", "resolution": "1080p"})
         );
+        let urls = ["https://cdn/in/1.png".to_string(), "https://cdn/in/2.png".to_string()];
+        assert_eq!(
+            request_body(grok, &req("the same, at night", None, None), &urls),
+            json!({"prompt": "the same, at night", "image_urls": ["https://cdn/in/1.png", "https://cdn/in/2.png"]})
+        );
+        let ideogram = image_model("ideogram/v4.0").unwrap();
+        assert_eq!(
+            request_body(ideogram, &req("the same, in ink", None, None), &urls[..1]),
+            json!({"prompt": "the same, in ink", "image_url": "https://cdn/in/1.png"})
+        );
+        assert_eq!(
+            parse_upload_slot(&json!({"public_url": "https://cdn/in/1.png", "upload_url": "https://storage/put", "content_type": "image/png", "upload_headers": {"Content-Type": "image/png", "x-amz-tagging": "retention=temporary"}})),
+            Ok(UploadSlot {
+                public_url: "https://cdn/in/1.png".into(),
+                upload_url: "https://storage/put".into(),
+                headers: vec![("Content-Type".into(), "image/png".into()), ("x-amz-tagging".into(), "retention=temporary".into())],
+            })
+        );
+        assert!(parse_upload_slot(&json!({"upload_url": "https://storage/put"})).is_err());
+        assert!(parse_upload_slot(&json!({"public_url": "https://cdn/in/1.png", "upload_url": "https://storage/put", "upload_headers": {"x": 1}})).is_err());
     }
 
     #[test]
@@ -1073,6 +1239,115 @@ mod tests {
             .await;
         let err = provider(&server, "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
         assert!(err.to_string().contains(&format!("the answer is {} bytes, more than the {} taken", crate::media::MEDIA_UPLOAD_MAX + 1, crate::media::MEDIA_UPLOAD_MAX)), "{err}");
+    }
+
+    /// A reference goes to Higgsfield's storage first, by the slot's own
+    /// headers and without the key, and the request names it by its public
+    /// URL; a slot whose address the client may not reach submits nothing.
+    #[tokio::test]
+    async fn references_go_to_higgsfields_storage_first_and_without_the_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/files/generate-upload-url"))
+            .and(header("authorization", "Key key-id-1:key-secret-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "public_url": format!("{}/in/1.png", server.uri()),
+                "upload_url": format!("{}/put/1", server.uri()),
+                "content_type": "image/png",
+                "upload_headers": {"Content-Type": "image/png", "x-amz-tagging": "retention=temporary"},
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/put/1"))
+            .and(header("content-type", "image/png"))
+            .and(header("x-amz-tagging", "retention=temporary"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&server)
+            .await;
+        mount_once(&server, "POST", "/xai/grok-imagine-image-2.0", queued(&server, "r-1")).await;
+        Mock::given(method("GET"))
+            .and(path("/requests/r-1/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "completed", "images": [{"url": format!("{}/out/1.png", server.uri())}]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/out/1.png")).respond_with(ResponseTemplate::new(200).set_body_bytes(png())).mount(&server).await;
+        let mut request = req("the same lighthouse, at night", None, None);
+        request.reference_images = vec![("image/png".into(), png()), ("image/png".into(), png())];
+        provider(&server, "xai/grok-imagine-image-2.0", QUICK).generate(&request).await.expect("a picture");
+        let requests = server.received_requests().await.unwrap();
+        let slots: Vec<_> = requests.iter().filter(|r| r.url.path() == "/files/generate-upload-url").collect();
+        for slot in &slots {
+            assert_eq!(serde_json::from_slice::<JsonValue>(&slot.body).unwrap(), json!({"content_type": "image/png"}));
+        }
+        for put in requests.iter().filter(|r| r.method.as_str() == "PUT") {
+            assert!(put.headers.get("authorization").is_none(), "the key went to the storage");
+            assert_eq!(put.body, png());
+        }
+        let submission = requests.iter().find(|r| r.url.path() == "/xai/grok-imagine-image-2.0").expect("submitted");
+        let body: JsonValue = serde_json::from_slice(&submission.body).unwrap();
+        let public = format!("{}/in/1.png", server.uri());
+        assert_eq!(body, json!({"prompt": "the same lighthouse, at night", "image_urls": [public, public]}));
+        // A slot whose address may not be reached: nothing is submitted.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/files/generate-upload-url"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "public_url": "https://cdn.example/in/1.png",
+                "upload_url": "http://127.0.0.1:9/put/1",
+                "upload_headers": {"Content-Type": "image/png"},
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/ideogram/v4.0")).respond_with(queued(&server, "r-2")).expect(0).mount(&server).await;
+        let mut request = req("the same, in ink", None, None);
+        request.reference_images = vec![("image/png".into(), png())];
+        let err = provider(&server, "ideogram/v4.0", QUICK).generate(&request).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "image generation transport error: Higgsfield's upload slot is refused: http://127.0.0.1:9/put/1 is not https; nothing was submitted, nothing is charged"
+        );
+    }
+
+    /// A slot's refusal is the API's, without a model's advice; a wait that
+    /// ran out while the references were sent submits nothing. With no wait
+    /// at all, the deadline has passed once the first reference is sent.
+    #[tokio::test]
+    async fn references_that_cannot_be_sent_in_time_or_at_all_submit_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/files/generate-upload-url"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"detail": "Not Found"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/xai/grok-imagine-image-2.0")).respond_with(queued(&server, "r-1")).expect(0).mount(&server).await;
+        let mut request = req("the same lighthouse, at night", None, None);
+        request.reference_images = vec![("image/png".into(), png())];
+        let err = provider(&server, "xai/grok-imagine-image-2.0", QUICK).generate(&request).await.unwrap_err();
+        assert_eq!(err.to_string(), "image API error 404: Not Found.");
+        drop(server);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/files/generate-upload-url"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "public_url": format!("{}/in/1.png", server.uri()),
+                "upload_url": format!("{}/put/1", server.uri()),
+                "upload_headers": {"Content-Type": "image/png"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT")).and(path("/put/1")).respond_with(ResponseTemplate::new(200)).expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/xai/grok-imagine-image-2.0")).respond_with(queued(&server, "r-1")).expect(0).mount(&server).await;
+        request.reference_images = vec![("image/png".into(), png()), ("image/png".into(), png())];
+        let err = provider(&server, "xai/grok-imagine-image-2.0", AT_ONCE).generate(&request).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "image API returned no image: the reference images took the whole wait; nothing was submitted, nothing is charged"
+        );
     }
 
     /// A stand-in of its own, for what a mock server cannot do: it closes

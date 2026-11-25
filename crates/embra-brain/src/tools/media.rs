@@ -264,7 +264,7 @@ fn brought_down(rect: &tiles::TileRect, image: &ingest::Normalized) -> bool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "image_generate",
-    description = "Generate an image from a text prompt with the image backend the operator configures with /image-provider: Gemini's image models (default gemini-nano-banana-2.1) or Higgsfield's (default xai/grok-imagine-image-2.0). The result is written to /embra/workspace/MEDIA/gen-<id>.<jpg|png|webp> at full resolution, in the format the backend returned, and a JSON summary {id, path, width, height, bytes, media_type, model, provider, elapsed_ms} is returned; unless return_image=false the image is ALSO returned to you as an image block so you can check it against the prompt before telling the operator. aspect_ratio: every model renders 1:1|3:2|2:3|3:4|4:3|9:16|16:9, and some render more. size, the model's own when omitted: on Gemini 1K|2K|4K, with 512 on gemini-3.1-flash-image only, and 1K only on gemini-3.1-flash-lite-image and gemini-2.5-flash-image; on Higgsfield 1K|2K on xai/grok-imagine-image-2.0 and z-image/turbo, 720p|1080p on higgsfield-ai/soul/v2/standard, and none on ideogram/v4.0, whose size is its own. A size, a ratio, a prompt's length or a reference the configured model does not take is refused before the call, and the refusal names what it takes. reference_images: up to 4 media ids or workspace image paths used as visual references or edit sources (for edits, describe the change in the prompt), on Gemini's models. A call to Higgsfield waits for its picture and can take minutes. Not configured → an explanation naming /image-provider. Side-effectful: writes a file and spends API credits.",
+    description = "Generate an image from a text prompt with the image backend the operator configures with /image-provider: Gemini's image models (default gemini-nano-banana-2.1) or Higgsfield's (default xai/grok-imagine-image-2.0). The result is written to /embra/workspace/MEDIA/gen-<id>.<jpg|png|webp> at full resolution, in the format the backend returned, and a JSON summary {id, path, width, height, bytes, media_type, model, provider, elapsed_ms} is returned; unless return_image=false the image is ALSO returned to you as an image block so you can check it against the prompt before telling the operator. aspect_ratio: every model renders 1:1|3:2|2:3|3:4|4:3|9:16|16:9, and some render more. size, the model's own when omitted: on Gemini 1K|2K|4K, with 512 on gemini-3.1-flash-image only, and 1K only on gemini-3.1-flash-lite-image and gemini-2.5-flash-image; on Higgsfield 1K|2K on xai/grok-imagine-image-2.0 and z-image/turbo, 720p|1080p on higgsfield-ai/soul/v2/standard, and none on ideogram/v4.0, whose size is its own. A size, a ratio, a prompt's length or a reference the configured model does not take is refused before the call, and the refusal names what it takes. reference_images: up to 4 media ids or workspace image paths used as visual references or edit sources (for edits, describe the change in the prompt), on Gemini's models and on Higgsfield's xai/grok-imagine-image-2.0, and one on ideogram/v4.0. A call to Higgsfield waits for its picture and can take minutes. Not configured → an explanation naming /image-provider. Side-effectful: writes a file and spends API credits.",
     is_side_effectful = true
 )]
 pub struct ImageGenerateArgs {
@@ -885,7 +885,8 @@ mod tests {
             assert!(higgsfield.contains(id) && higgsfield.contains(&said), "{id}: {said}: {desc}");
         }
         // References go where a model takes them: the clause says Gemini's
-        // models, names no Higgsfield model that takes none, and names
+        // models, names each Higgsfield model that takes one ("one on" the
+        // model that takes a single one) and none that takes none, and names
         // Higgsfield not at all while none of its models takes one.
         let clause = &desc[desc.find("reference_images: ").expect("the references' clause")..];
         let clause = &clause[..clause.find(". ").expect("the clause ends")];
@@ -895,8 +896,11 @@ mod tests {
             assert!(!clause.contains("Higgsfield"), "no Higgsfield model takes a reference: {clause}");
         }
         for model in higgsfield {
+            let one = format!("one on {}", model.id);
             match model.references {
                 References::None => assert!(!clause.contains(model.id), "{} takes none: {clause}", model.id),
+                References::Url { .. } => assert!(clause.contains(&one), "{clause}"),
+                References::Urls { .. } => assert!(clause.contains(model.id) && !clause.contains(&one), "{clause}"),
                 References::Inline => panic!("{} takes inline references", model.id),
             }
         }
