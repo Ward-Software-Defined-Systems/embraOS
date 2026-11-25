@@ -198,6 +198,7 @@ mod tests {
             aspect_ratio: Some("16:9".into()),
             size: Some("2K".into()),
             reference_images: vec![("image/jpeg".into(), vec![0xFF, 0xD8, 0xFF, 0x00])],
+            reference_weight: None,
         }
     }
 
@@ -252,6 +253,7 @@ mod tests {
                         aspect_ratio: ratio.map(str::to_string),
                         size: size.map(str::to_string),
                         reference_images: Vec::new(),
+                        reference_weight: None,
                     };
                     if validate_request(model, &request).is_err() {
                         continue;

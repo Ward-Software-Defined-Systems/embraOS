@@ -594,8 +594,9 @@ pub(crate) enum Status {
 
 /// The request's body: the prompt, the ratio and the model's size word for
 /// the size when they are asked, the references' public URLs in the model's
-/// own field, and nothing else, so the model's own defaults stand for the
-/// rest.
+/// own field, a reference's weight where the model has that setting and a
+/// reference goes with it, and nothing else, so the model's own defaults
+/// stand for the rest.
 pub(crate) fn request_body(model: &ImageModel, req: &ImageGenRequest, reference_urls: &[String]) -> JsonValue {
     let mut body = Map::new();
     body.insert("prompt".into(), json!(req.prompt));
@@ -615,6 +616,11 @@ pub(crate) fn request_body(model: &ImageModel, req: &ImageGenRequest, reference_
             }
         }
         _ => {}
+    }
+    if let (Some(weight), Some(setting)) = (req.reference_weight, model.reference_weight)
+        && !reference_urls.is_empty()
+    {
+        body.insert(setting.field.into(), json!(weight));
     }
     JsonValue::Object(body)
 }
@@ -786,6 +792,7 @@ mod tests {
             aspect_ratio: ratio.map(str::to_string),
             size: size.map(str::to_string),
             reference_images: Vec::new(),
+            reference_weight: None,
         }
     }
 
@@ -838,7 +845,8 @@ mod tests {
     /// read 2026-11-24) and not from the table under test: the endpoint,
     /// the field of its reference images and how many it takes,
     /// `resolution`'s values, `aspect_ratio`'s values, the prompt's bounds
-    /// in characters, and every property the schema has.
+    /// in characters, the weight of a reference where the page has that
+    /// setting (read 2026-11-25), and every property the schema has.
     /// How the page takes reference images.
     enum PageReferences {
         None,
@@ -852,6 +860,9 @@ mod tests {
         resolutions: &'static [&'static str],
         ratios: &'static [&'static str],
         prompt: Option<(usize, usize)>,
+        /// The field and the bounds of a reference's weight, where the page
+        /// has one: it "applies to editing requests only".
+        weight: Option<(&'static str, u32, u32)>,
         properties: &'static [&'static str],
     }
 
@@ -862,6 +873,7 @@ mod tests {
             resolutions: &["1k", "2k"],
             ratios: &["auto", "1:1", "1:2", "2:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"],
             prompt: None,
+            weight: None,
             properties: &["prompt", "quality", "image_urls", "resolution", "aspect_ratio"],
         },
         Page {
@@ -870,6 +882,7 @@ mod tests {
             resolutions: &["720p", "1080p"],
             ratios: &["9:16", "16:9", "4:3", "3:4", "1:1", "2:3", "3:2"],
             prompt: None,
+            weight: None,
             properties: &[
                 "prompt", "aspect_ratio", "resolution", "enhance_prompt", "custom_reference_id", "custom_reference_strength",
                 "style_id", "style_strength", "seed", "batch_size",
@@ -884,6 +897,7 @@ mod tests {
                 "9:23", "23:9", "3:8", "8:3", "5:12", "12:5", "1:3", "3:1",
             ],
             prompt: Some((2, 2048)),
+            weight: Some(("image_weight", 1, 100)),
             properties: &["prompt", "image_url", "aspect_ratio", "image_weight", "rendering_speed"],
         },
         Page {
@@ -892,14 +906,16 @@ mod tests {
             resolutions: &["1k", "2k"],
             ratios: &["1:1", "2:3", "3:2", "3:4", "4:3", "7:9", "9:7", "9:16", "16:9", "21:9"],
             prompt: Some((1, 800)),
+            weight: None,
             properties: &["seed", "prompt", "resolution", "aspect_ratio", "prompt_extend"],
         },
     ];
 
     /// Whatever the validator lets through reaches Higgsfield as values of
     /// the model's page: every model, every size word of the provider and
-    /// every ratio any model has, with prompts at and past each bound. And
-    /// every value of a page the tool offers is let through.
+    /// every ratio any model has, with prompts at and past each bound, and
+    /// a reference's weight at and past its bounds, with a reference and
+    /// without. And every value of a page the tool offers is let through.
     #[test]
     fn every_request_the_validator_lets_through_carries_values_of_each_models_page() {
         use crate::provider::image::{HIGGSFIELD_IMAGE_MODELS, IMAGE_MODELS};
@@ -908,6 +924,7 @@ mod tests {
         let words = ImageProviderKind::Higgsfield.size_words();
         let mut ratios: Vec<&str> = IMAGE_MODELS.iter().flat_map(|m| m.ratios.iter().copied()).collect();
         ratios.extend(["auto", "7:3", ""]);
+        const WEIGHTS: [Option<u32>; 6] = [None, Some(0), Some(1), Some(50), Some(100), Some(101)];
         let mut sent = 0;
         for page in &PAGES {
             let model = image_model(page.endpoint).expect("a row of the table");
@@ -917,9 +934,16 @@ mod tests {
             };
             for prompt in &prompts {
                 for size in words.iter().copied().map(Some).chain([None, Some("4K"), Some("1k")]) {
-                    for (ratio, refs) in ratios.iter().copied().map(Some).chain([None]).flat_map(|ratio| [0usize, 1, 2, 4].map(move |refs| (ratio, refs))) {
+                    let asked = ratios
+                        .iter()
+                        .copied()
+                        .map(Some)
+                        .chain([None])
+                        .flat_map(|ratio| [0usize, 1, 2, 4].into_iter().flat_map(move |refs| WEIGHTS.map(move |weight| (ratio, refs, weight))));
+                    for (ratio, refs, weight) in asked {
                         let mut request = req(prompt, ratio, size);
                         request.reference_images = vec![("image/png".to_string(), vec![1u8]); refs];
+                        request.reference_weight = weight;
                         if validate_request(page.endpoint, &request).is_err() {
                             continue;
                         }
@@ -951,6 +975,18 @@ mod tests {
                             }
                             PageReferences::None => assert_eq!(refs, 0, "{}: a reference let through", page.endpoint),
                         }
+                        match page.weight {
+                            Some((field, least, most)) => {
+                                let sent_weight = fields.get(field);
+                                assert_eq!(sent_weight.is_some(), weight.is_some(), "{}: a weight asked for is the weight sent", page.endpoint);
+                                if let Some(value) = sent_weight {
+                                    let n = value.as_u64().expect("an integer");
+                                    assert!((u64::from(least)..=u64::from(most)).contains(&n), "{}: a weight of {n}", page.endpoint);
+                                    assert!(refs >= 1, "{}: a weight without its reference", page.endpoint);
+                                }
+                            }
+                            None => assert!(weight.is_none(), "{}: a weight let through", page.endpoint),
+                        }
                         sent += 1;
                     }
                 }
@@ -963,6 +999,17 @@ mod tests {
             for value in page.resolutions {
                 let word = model.sizes.iter().find(|(_, v)| v == value).map(|(w, _)| *w);
                 assert!(word.is_some(), "{}: no size word sends {value}", page.endpoint);
+            }
+            // The weight of a reference: the row has the page's field and
+            // bounds, and both ends of them are let through.
+            assert_eq!(model.reference_weight.map(|w| (w.field, w.min, w.max)), page.weight, "{}", page.endpoint);
+            if let Some((_, least, most)) = page.weight {
+                for weight in [least, most] {
+                    let mut request = req("a lighthouse", None, None);
+                    request.reference_images = vec![("image/png".to_string(), vec![1u8])];
+                    request.reference_weight = Some(weight);
+                    assert!(validate_request(page.endpoint, &request).is_ok(), "{} at {weight}", page.endpoint);
+                }
             }
         }
         assert!(sent > 200, "{sent} requests were let through: the loops did not run");
@@ -990,6 +1037,20 @@ mod tests {
         assert_eq!(
             request_body(ideogram, &req("the same, in ink", None, None), &urls[..1]),
             json!({"prompt": "the same, in ink", "image_url": "https://cdn/in/1.png"})
+        );
+        // A reference's weight goes with its reference, on the model whose
+        // page has the setting, as an integer.
+        let mut weighted = req("the same, in ink", None, None);
+        weighted.reference_weight = Some(40);
+        assert_eq!(
+            request_body(ideogram, &weighted, &urls[..1]),
+            json!({"prompt": "the same, in ink", "image_url": "https://cdn/in/1.png", "image_weight": 40})
+        );
+        assert_eq!(request_body(ideogram, &weighted, &[]), json!({"prompt": "the same, in ink"}), "no reference, no weight");
+        assert_eq!(
+            request_body(grok, &weighted, &urls[..1]),
+            json!({"prompt": "the same, in ink", "image_urls": ["https://cdn/in/1.png"]}),
+            "a model without the setting is sent none"
         );
         assert_eq!(
             parse_upload_slot(&json!({"public_url": "https://cdn/in/1.png", "upload_url": "https://storage/put", "content_type": "image/png", "upload_headers": {"Content-Type": "image/png", "x-amz-tagging": "retention=temporary"}})),

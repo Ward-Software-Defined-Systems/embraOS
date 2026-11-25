@@ -264,7 +264,7 @@ fn brought_down(rect: &tiles::TileRect, image: &ingest::Normalized) -> bool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "image_generate",
-    description = "Generate an image from a text prompt with the image backend the operator configures with /image-provider: Gemini's image models (default gemini-nano-banana-2.1) or Higgsfield's (default xai/grok-imagine-image-2.0). The result is written to /embra/workspace/MEDIA/gen-<id>.<jpg|png|webp> at full resolution, in the format the backend returned, and a JSON summary {id, path, width, height, bytes, media_type, model, provider, elapsed_ms} is returned; unless return_image=false the image is ALSO returned to you as an image block so you can check it against the prompt before telling the operator. aspect_ratio: every model renders 1:1|3:2|2:3|3:4|4:3|9:16|16:9, and some render more. size, the model's own when omitted: on Gemini 1K|2K|4K, with 512 on gemini-3.1-flash-image only, and 1K only on gemini-3.1-flash-lite-image and gemini-2.5-flash-image; on Higgsfield 1K|2K on xai/grok-imagine-image-2.0 and z-image/turbo, 720p|1080p on higgsfield-ai/soul/v2/standard, and none on ideogram/v4.0, whose size is its own. A size, a ratio, a prompt's length or a reference the configured model does not take is refused before the call, and the refusal names what it takes. reference_images: up to 4 media ids or workspace image paths used as visual references or edit sources (for edits, describe the change in the prompt), on Gemini's models and on Higgsfield's xai/grok-imagine-image-2.0, and one on ideogram/v4.0. A call to Higgsfield waits for its picture and can take minutes. Not configured → an explanation naming /image-provider. Side-effectful: writes a file and spends API credits.",
+    description = "Generate an image from a text prompt with the image backend the operator configures with /image-provider: Gemini's image models (default gemini-nano-banana-2.1) or Higgsfield's (default xai/grok-imagine-image-2.0). The result is written to /embra/workspace/MEDIA/gen-<id>.<jpg|png|webp> at full resolution, in the format the backend returned, and a JSON summary {id, path, width, height, bytes, media_type, model, provider, elapsed_ms} is returned; unless return_image=false the image is ALSO returned to you as an image block so you can check it against the prompt before telling the operator. aspect_ratio: every model renders 1:1|3:2|2:3|3:4|4:3|9:16|16:9, and some render more. size, the model's own when omitted: on Gemini 1K|2K|4K, with 512 on gemini-3.1-flash-image only, and 1K only on gemini-3.1-flash-lite-image and gemini-2.5-flash-image; on Higgsfield 1K|2K on xai/grok-imagine-image-2.0 and z-image/turbo, 720p|1080p on higgsfield-ai/soul/v2/standard, and none on ideogram/v4.0, whose size is its own. A size, a ratio, a prompt's length or a reference the configured model does not take is refused before the call, and the refusal names what it takes. reference_images: up to 4 media ids or workspace image paths used as visual references or edit sources (for edits, describe the change in the prompt), on Gemini's models and on Higgsfield's xai/grok-imagine-image-2.0, and one on ideogram/v4.0. reference_weight: 1 to 100, on ideogram/v4.0 only and with its reference image: how strongly the picture keeps the reference (a lower value keeps less of it; the model's own when omitted). A call to Higgsfield waits for its picture and can take minutes. Not configured → an explanation naming /image-provider. Side-effectful: writes a file and spends API credits.",
     is_side_effectful = true
 )]
 pub struct ImageGenerateArgs {
@@ -279,6 +279,10 @@ pub struct ImageGenerateArgs {
     /// Media ids (att-/gen-/view-…) or image paths file_read can read, max 4.
     #[serde(default)]
     pub reference_images: Option<Vec<String>>,
+    /// How strongly the picture keeps the reference image, 1 to 100: on ideogram/v4.0 only, with a reference image. A lower value keeps less of it. Omitted: the model's own.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub reference_weight: Option<u32>,
     /// Return the generated image to you as an image block (default true).
     #[serde(default)]
     pub return_image: Option<bool>,
@@ -360,7 +364,14 @@ pub async fn image_generate(
     let aspect_ratio = args.aspect_ratio.clone().filter(|s| !s.trim().is_empty());
     let size = args.size.clone().filter(|s| !s.trim().is_empty());
     // Before a reference is read: a model that takes none refuses them unread.
-    if let Err(e) = image_provider::validate_options(provider.model(), &args.prompt, aspect_ratio.as_deref(), size.as_deref(), refs.len()) {
+    if let Err(e) = image_provider::validate_options(
+        provider.model(),
+        &args.prompt,
+        aspect_ratio.as_deref(),
+        size.as_deref(),
+        refs.len(),
+        args.reference_weight,
+    ) {
         return Ok(ToolOutput::text(format!("image_generate: {e}")));
     }
     let mut reference_images = Vec::new();
@@ -370,7 +381,13 @@ pub async fn image_generate(
             Err(e) => return Ok(ToolOutput::text(format!("image_generate: reference '{spec}' — {e}"))),
         }
     }
-    let req = ImageGenRequest { prompt: args.prompt.clone(), aspect_ratio, size, reference_images };
+    let req = ImageGenRequest {
+        prompt: args.prompt.clone(),
+        aspect_ratio,
+        size,
+        reference_images,
+        reference_weight: args.reference_weight,
+    };
 
     let started = std::time::Instant::now();
     let limit = provider.kind().time_limit();
@@ -684,6 +701,7 @@ mod tests {
             aspect_ratio: None,
             size: None,
             reference_images: None,
+            reference_weight: None,
             return_image: None,
         }
     }
@@ -916,9 +934,75 @@ mod tests {
         }
         let schema = (d.input_schema)();
         let properties: Vec<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(properties, ["aspect_ratio", "prompt", "reference_images", "return_image", "size"]);
+        assert_eq!(properties, ["aspect_ratio", "prompt", "reference_images", "reference_weight", "return_image", "size"]);
         let size = schema["properties"]["size"]["description"].as_str().unwrap();
         assert!(!size.contains("512px") && !size.contains("output_format"), "{size}");
+        // A reference's weight: the clause and the argument name each model
+        // whose row has the setting, with its bounds, and no other model.
+        // The argument's schema carries the least of the rows' lower bounds
+        // and no upper one: no parameter of the manifest has a `maximum`,
+        // and a keyword no provider has been sent is not tried on all of
+        // them for a hint; the bounds are checked before a call.
+        let clause = &desc[desc.find("reference_weight: ").expect("the weight's clause")..];
+        let clause = &clause[..clause.find(". ").expect("the clause ends")];
+        let argument = schema["properties"]["reference_weight"].clone();
+        let said = argument["description"].as_str().unwrap();
+        let weighted: Vec<_> = IMAGE_MODELS.iter().filter_map(|m| m.reference_weight.map(|w| (m.id, w))).collect();
+        assert!(!weighted.is_empty(), "no model has the setting: the argument and its clause go");
+        for model in IMAGE_MODELS {
+            let named = model.reference_weight.is_some();
+            assert_eq!(clause.contains(model.id), named, "{}: {clause}", model.id);
+            assert_eq!(said.contains(model.id), named, "{}: {said}", model.id);
+        }
+        for (id, weight) in &weighted {
+            let range = format!("{} to {}", weight.min, weight.max);
+            assert!(clause.contains(&range) && said.contains(&range), "{id}: {range}: {clause} / {said}");
+        }
+        let least = weighted.iter().map(|(_, w)| w.min).min().unwrap();
+        assert_eq!(argument["minimum"].as_f64(), Some(f64::from(least)), "{argument}");
+        assert!(argument.get("maximum").is_none(), "{argument}");
+        assert!(argument["type"].to_string().contains("integer"), "an integer, as the page takes it: {argument}");
+    }
+
+    /// A reference's weight reaches the model whose page has the setting,
+    /// with its reference. On any other model, and without a reference, it
+    /// is refused before a file is read and before the backend is called.
+    #[tokio::test]
+    async fn a_reference_weight_goes_with_its_reference_to_the_model_that_takes_one() {
+        use image_provider::{GeneratedImage, ImageGenResponse, ImageProviderKind};
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let stored = store
+            .put(MediaOrigin::Attached, "poster.png", "s", ingest::normalize(png_fixture(6, 6)).await.unwrap())
+            .await
+            .unwrap();
+        let answer = || Ok(ImageGenResponse { images: vec![GeneratedImage { media_type: "image/png".into(), data: png_fixture(5, 4) }], text: None });
+        let provider = FakeProvider::answering(ImageProviderKind::Higgsfield, "ideogram/v4.0", answer());
+        let mut args = gen_args("the same poster, its triangle green");
+        args.reference_images = Some(vec![stored.id.clone()]);
+        args.reference_weight = Some(40);
+        let out = image_generate(&store, &provider, args, "s").await.unwrap();
+        assert_eq!(out.images.len(), 1, "{}", out.text);
+        let seen = provider.seen.lock().unwrap().clone().expect("the backend was called");
+        assert_eq!((seen.reference_weight, seen.reference_images.len()), (Some(40), 1));
+        // As the model sends it: an integer of the schema.
+        let args: ImageGenerateArgs = serde_json::from_value(serde_json::json!({"prompt": "x y", "reference_weight": 40})).unwrap();
+        assert_eq!(args.reference_weight, Some(40));
+        // Refused before a file is read: the reference named does not exist.
+        let refusals = [
+            ("xai/grok-imagine-image-2.0", Some("/no/such/picture.png"), 40, "image_generate: invalid image request: xai/grok-imagine-image-2.0 takes no reference_weight; ideogram/v4.0 does"),
+            ("ideogram/v4.0", Some("/no/such/picture.png"), 0, "image_generate: invalid image request: reference_weight 0 is not between 1 and 100"),
+            ("ideogram/v4.0", None, 40, "image_generate: invalid image request: reference_weight says how strongly the picture keeps a reference image, and none was given"),
+        ];
+        for (model, reference, weight, words) in refusals {
+            let provider = FakeProvider::answering(ImageProviderKind::Higgsfield, model, Err(ImageGenError::NoImage("never asked".into())));
+            let mut args = gen_args("the same poster, its triangle green");
+            args.reference_images = reference.map(|path| vec![path.to_string()]);
+            args.reference_weight = Some(weight);
+            let out = image_generate(&store, &provider, args, "s").await.unwrap();
+            assert!(out.text.starts_with(words), "{model}: {}", out.text);
+            assert!(provider.seen.lock().unwrap().is_none(), "{model}: never called the backend");
+        }
     }
 
     /// A Higgsfield picture is stored in the format it came in, under its

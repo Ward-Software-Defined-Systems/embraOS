@@ -52,6 +52,15 @@ pub enum References {
     Url { field: &'static str },
 }
 
+/// A model's setting for how strongly the picture keeps a reference image:
+/// the request's field for it and its bounds, from the model's page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceWeight {
+    pub field: &'static str,
+    pub min: u32,
+    pub max: u32,
+}
+
 /// One image model and what the tool may ask of it, read from the model's
 /// own page. The tool's word for a size and the API's value for it are
 /// kept apart, since an API may write a size its own way.
@@ -68,6 +77,9 @@ pub struct ImageModel {
     /// The prompt's bounds in characters, where the model's page states
     /// them.
     pub prompt_chars: Option<(usize, usize)>,
+    /// The tool's `reference_weight`, where the model's page has such a
+    /// setting. It goes with a reference image only.
+    pub reference_weight: Option<ReferenceWeight>,
 }
 
 impl ImageModel {
@@ -88,6 +100,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ratios: ASPECT_RATIOS,
         references: References::Inline,
         prompt_chars: None,
+        reference_weight: None,
     },
     ImageModel {
         id: "gemini-3-pro-image",
@@ -96,6 +109,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ratios: ASPECT_RATIOS,
         references: References::Inline,
         prompt_chars: None,
+        reference_weight: None,
     },
     ImageModel {
         id: "gemini-3.1-flash-image",
@@ -104,6 +118,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ratios: ASPECT_RATIOS,
         references: References::Inline,
         prompt_chars: None,
+        reference_weight: None,
     },
     ImageModel {
         id: "gemini-3.1-flash-lite-image",
@@ -112,6 +127,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ratios: ASPECT_RATIOS,
         references: References::Inline,
         prompt_chars: None,
+        reference_weight: None,
     },
     ImageModel {
         id: "gemini-2.5-flash-image",
@@ -120,6 +136,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ratios: ASPECT_RATIOS,
         references: References::Inline,
         prompt_chars: None,
+        reference_weight: None,
     },
     // Higgsfield's: each model's page at docs.higgsfield.ai/docs/models/,
     // its input schema, read 2026-11-24. Each is its own endpoint, whose id
@@ -133,6 +150,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ratios: &["1:1", "1:2", "2:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"],
         references: References::Urls { field: "image_urls", max: 10 },
         prompt_chars: None,
+        reference_weight: None,
     },
     ImageModel {
         id: "higgsfield-ai/soul/v2/standard",
@@ -141,6 +159,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ratios: &["9:16", "16:9", "4:3", "3:4", "1:1", "2:3", "3:2"],
         references: References::None,
         prompt_chars: None,
+        reference_weight: None,
     },
     ImageModel {
         id: "ideogram/v4.0",
@@ -152,6 +171,11 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ],
         references: References::Url { field: "image_url" },
         prompt_chars: Some((2, 2048)),
+        // "image_weight controls preservation of the input image and applies
+        // to editing requests only; values are integers from 1 to 100" (the
+        // page's notes and its input schema, read 2026-11-25). The page
+        // states no default.
+        reference_weight: Some(ReferenceWeight { field: "image_weight", min: 1, max: 100 }),
     },
     ImageModel {
         id: "z-image/turbo",
@@ -160,6 +184,7 @@ pub const IMAGE_MODELS: &[ImageModel] = &[
         ratios: &["1:1", "2:3", "3:2", "3:4", "4:3", "7:9", "9:7", "9:16", "16:9", "21:9"],
         references: References::None,
         prompt_chars: Some((1, 800)),
+        reference_weight: None,
     },
 ];
 /// Gemini's models of `IMAGE_MODELS`, in its order (guard
@@ -318,6 +343,9 @@ pub struct ImageGenRequest {
     pub size: Option<String>,
     /// `(mime_type, bytes)` reference images for editing / style guidance.
     pub reference_images: Vec<(String, Vec<u8>)>,
+    /// How strongly the picture keeps the reference image, for a model
+    /// whose row has that setting (`ImageModel::reference_weight`).
+    pub reference_weight: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -361,7 +389,14 @@ pub trait ImageProvider: Send + Sync {
 /// checks before it reads the references, with `validate_options`.
 #[cfg(test)]
 pub fn validate_request(model_id: &str, req: &ImageGenRequest) -> Result<(), ImageGenError> {
-    validate_options(model_id, &req.prompt, req.aspect_ratio.as_deref(), req.size.as_deref(), req.reference_images.len())
+    validate_options(
+        model_id,
+        &req.prompt,
+        req.aspect_ratio.as_deref(),
+        req.size.as_deref(),
+        req.reference_images.len(),
+        req.reference_weight,
+    )
 }
 
 /// Validate a request's options against the model, the way the tool
@@ -369,13 +404,16 @@ pub fn validate_request(model_id: &str, req: &ImageGenRequest) -> Result<(), Ima
 /// things we can check locally — before the references are read
 /// (`references` is how many were asked for). Every check reads the
 /// model's row of `IMAGE_MODELS`. A size is checked twice: that it is a
-/// word of the model's provider, then that this model renders it.
+/// word of the model's provider, then that this model renders it. A
+/// reference's weight is taken where the model has that setting, with a
+/// reference and inside the setting's bounds.
 pub fn validate_options(
     model_id: &str,
     prompt: &str,
     aspect_ratio: Option<&str>,
     size: Option<&str>,
     references: usize,
+    reference_weight: Option<u32>,
 ) -> Result<(), ImageGenError> {
     if prompt.trim().is_empty() {
         return Err(ImageGenError::InvalidRequest("prompt is empty".into()));
@@ -457,7 +495,52 @@ pub fn validate_options(
             "{model_id} takes no reference image; {way}. Omit reference_images"
         )));
     }
+    if let Some(weight) = reference_weight {
+        let Some(setting) = model.reference_weight else {
+            return Err(ImageGenError::InvalidRequest(format!(
+                "{model_id} takes no reference_weight{}. Omit reference_weight",
+                who_takes_a_reference_weight(model.kind)
+            )));
+        };
+        if references == 0 {
+            return Err(ImageGenError::InvalidRequest(
+                "reference_weight says how strongly the picture keeps a reference image, and none was given. Omit it, or name the image in reference_images".into(),
+            ));
+        }
+        if weight < setting.min || weight > setting.max {
+            return Err(ImageGenError::InvalidRequest(format!(
+                "reference_weight {weight} is not between {} and {}, the range {model_id} takes",
+                setting.min, setting.max
+            )));
+        }
+    }
     Ok(())
+}
+
+/// For a model of `kind` that has no setting for a reference's weight: the
+/// models that have one and the way to them, its own provider's first.
+fn who_takes_a_reference_weight(kind: ImageProviderKind) -> String {
+    let of = |wanted: ImageProviderKind| -> Vec<&'static str> {
+        IMAGE_MODELS.iter().filter(|m| m.kind == wanted && m.reference_weight.is_some()).map(|m| m.id).collect()
+    };
+    let verb = |ids: &[&str]| if ids.len() == 1 { "does" } else { "do" };
+    let own = of(kind);
+    if !own.is_empty() {
+        return format!("; {} {} (the operator picks the model with /image-provider model <id>)", own.join(", "), verb(&own));
+    }
+    for other in ImageProviderKind::ALL {
+        let theirs = of(other);
+        if !theirs.is_empty() {
+            return format!(
+                "; {}'s {} {} (the operator picks the provider with /image-provider {})",
+                other.label(),
+                theirs.join(", "),
+                verb(&theirs),
+                other.as_str()
+            );
+        }
+    }
+    String::new()
 }
 
 /// Resolved backend choice, independent of whether a key is present —
@@ -664,6 +747,7 @@ mod tests {
             aspect_ratio: Some("16:9".into()),
             size: size.map(str::to_string),
             reference_images: Vec::new(),
+            reference_weight: None,
         }
     }
 
@@ -758,7 +842,7 @@ mod tests {
     #[test]
     fn higgsfields_models_refuse_what_their_pages_do_not_take() {
         let refused = |model: &str, prompt: &str, ratio: Option<&str>, size: Option<&str>, references: usize| {
-            validate_options(model, prompt, ratio, size, references).expect_err("refused").to_string()
+            validate_options(model, prompt, ratio, size, references, None).expect_err("refused").to_string()
         };
         const TAIL: &str = " (the operator picks the model with /image-provider model <id>).";
         assert_eq!(
@@ -778,7 +862,7 @@ mod tests {
             refused("z-image/turbo", &"é".repeat(801), None, None, 0),
             "invalid image request: the prompt is 801 characters; z-image/turbo takes 1 to 800"
         );
-        assert!(validate_options("z-image/turbo", &"é".repeat(800), None, None, 0).is_ok(), "characters, not bytes");
+        assert!(validate_options("z-image/turbo", &"é".repeat(800), None, None, 0, None).is_ok(), "characters, not bytes");
         assert_eq!(
             refused("higgsfield-ai/soul/v2/standard", "a poster", Some("21:9"), None, 0),
             "invalid image request: aspect_ratio '21:9' is not one of 9:16|16:9|4:3|3:4|1:1|2:3|3:2"
@@ -789,10 +873,55 @@ mod tests {
         );
         assert_eq!(refused("ideogram/v4.0", "a poster", None, None, 2), "invalid image request: ideogram/v4.0 takes one reference image; 2 were asked for");
         assert_eq!(refused("xai/grok-imagine-image-2.0", "a poster", None, None, 11), "invalid image request: xai/grok-imagine-image-2.0 takes at most 10 reference images; 11 were asked for");
-        assert!(validate_options("xai/grok-imagine-image-2.0", "a poster", None, None, 4).is_ok());
-        assert!(validate_options("ideogram/v4.0", "a poster", None, None, 1).is_ok());
-        assert!(validate_options("ideogram/v4.0", "a poster", Some("22:9"), None, 0).is_ok());
-        assert!(validate_options("higgsfield-ai/soul/v2/standard", "a poster", Some("3:2"), Some("1080p"), 0).is_ok());
+        assert!(validate_options("xai/grok-imagine-image-2.0", "a poster", None, None, 4, None).is_ok());
+        assert!(validate_options("ideogram/v4.0", "a poster", None, None, 1, None).is_ok());
+        assert!(validate_options("ideogram/v4.0", "a poster", Some("22:9"), None, 0, None).is_ok());
+        assert!(validate_options("higgsfield-ai/soul/v2/standard", "a poster", Some("3:2"), Some("1080p"), 0, None).is_ok());
+    }
+
+    /// The weight of a reference is a setting of one model's page. It is
+    /// taken there with a reference and inside the page's bounds, and
+    /// refused before a call everywhere else, with the model that has it:
+    /// by its id for a model of the same provider, by its provider for
+    /// another's.
+    #[test]
+    fn a_reference_weight_is_taken_where_a_models_page_has_one_and_refused_elsewhere() {
+        let weighted: Vec<&str> = IMAGE_MODELS.iter().filter(|m| m.reference_weight.is_some()).map(|m| m.id).collect();
+        assert_eq!(weighted, ["ideogram/v4.0"], "the one model whose page has the setting");
+        let ask = |model: &str, references: usize, weight: u32| validate_options(model, "a poster", None, None, references, Some(weight));
+        let refused = |model: &str, references: usize, weight: u32| ask(model, references, weight).expect_err("refused").to_string();
+        for weight in [1, 40, 100] {
+            assert!(ask("ideogram/v4.0", 1, weight).is_ok(), "{weight}");
+        }
+        for weight in [0, 101, u32::MAX] {
+            assert_eq!(
+                refused("ideogram/v4.0", 1, weight),
+                format!("invalid image request: reference_weight {weight} is not between 1 and 100, the range ideogram/v4.0 takes")
+            );
+        }
+        assert_eq!(
+            refused("ideogram/v4.0", 0, 40),
+            "invalid image request: reference_weight says how strongly the picture keeps a reference image, and none was given. Omit it, or name the image in reference_images"
+        );
+        // A model of the same provider without the setting: with a reference
+        // it takes, and with none.
+        for references in [0, 1] {
+            assert_eq!(
+                refused("xai/grok-imagine-image-2.0", references, 40),
+                "invalid image request: xai/grok-imagine-image-2.0 takes no reference_weight; ideogram/v4.0 does (the operator picks the model with /image-provider model <id>). Omit reference_weight"
+            );
+        }
+        // A model of the other provider.
+        for model in GEMINI_IMAGE_MODELS {
+            assert_eq!(
+                refused(model, 1, 40),
+                format!("invalid image request: {model} takes no reference_weight; Higgsfield's ideogram/v4.0 does (the operator picks the provider with /image-provider higgsfield). Omit reference_weight")
+            );
+        }
+        // What a model refuses of a reference comes first: the weight of a
+        // reference the model does not take is not the news.
+        assert!(refused("z-image/turbo", 1, 40).contains("z-image/turbo takes no reference image"), "the reference first");
+        assert!(refused("ideogram/v4.0", 2, 40).contains("takes one reference image"), "the count first");
     }
 
     /// Every refusal of Gemini's models, word for word as it read before
@@ -806,6 +935,7 @@ mod tests {
                 aspect_ratio: ratio.map(str::to_string),
                 size: size.map(str::to_string),
                 reference_images: Vec::new(),
+                reference_weight: None,
             };
             validate_request(model, &request).expect_err("refused").to_string()
         };
@@ -854,6 +984,7 @@ mod tests {
                         aspect_ratio: ratio.map(str::to_string),
                         size: size.map(str::to_string),
                         reference_images: vec![("image/png".into(), vec![1, 2, 3]); 4],
+                        reference_weight: None,
                     };
                     assert!(validate_request(model, &request).is_ok(), "{model} {size:?} {ratio:?}");
                 }
