@@ -72,6 +72,15 @@ pub struct MediaMeta {
     pub session: String,
     pub created_at: String,
     pub sha256: String,
+    /// The image provider that made a generated picture (`gemini`,
+    /// `higgsfield`). Absent on every other file, and on a picture generated
+    /// before the record carried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The provider's model that made a generated picture; absent as
+    /// `provider` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl MediaMeta {
@@ -208,6 +217,31 @@ impl MediaStore {
         session: &str,
         normalized: Normalized,
     ) -> Result<MediaMeta, MediaError> {
+        self.put_made(origin, name, session, normalized, None).await
+    }
+
+    /// Store a generated picture, its record naming the image provider and
+    /// the model that made it: with more than one provider the record is
+    /// the one place that says which, once the tool's answer is gone.
+    pub async fn put_generated(
+        &self,
+        name: &str,
+        session: &str,
+        normalized: Normalized,
+        provider: &str,
+        model: &str,
+    ) -> Result<MediaMeta, MediaError> {
+        self.put_made(MediaOrigin::Generated, name, session, normalized, Some((provider, model))).await
+    }
+
+    async fn put_made(
+        &self,
+        origin: MediaOrigin,
+        name: &str,
+        session: &str,
+        normalized: Normalized,
+        made_by: Option<(&str, &str)>,
+    ) -> Result<MediaMeta, MediaError> {
         self.ensure_dir().await?;
         let sha = sha256_hex(&normalized.bytes);
         let id = match origin {
@@ -234,6 +268,8 @@ impl MediaStore {
             session: session.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             sha256: sha,
+            provider: made_by.map(|(provider, _)| provider.to_string()),
+            model: made_by.map(|(_, model)| model.to_string()),
         };
         let path = self.dir.join(&file);
         // Both files through the atomic writer: a reader finds a whole image
@@ -484,6 +520,42 @@ mod tests {
         let (files, total) = store.usage().await.unwrap();
         assert_eq!(files, 1);
         assert_eq!(total, bytes.len() as u64);
+    }
+
+    /// A generated picture's record names the provider and the model that
+    /// made it. No other file's record carries the two fields at all, and a
+    /// record written before they existed reads as it did.
+    #[tokio::test]
+    async fn a_generated_pictures_record_names_who_made_it_and_no_other_record_does() {
+        let dir = tmp();
+        let store = MediaStore::at(dir.path());
+        let picture = || ingest::normalize_blocking(png_fixture(4, 3)).unwrap();
+        let made = store.put_generated("a-lighthouse.png", "main", picture(), "higgsfield", "xai/grok-imagine-image-2.0").await.unwrap();
+        assert_eq!(made.origin, MediaOrigin::Generated);
+        assert!(made.id.starts_with("gen-"));
+        assert_eq!((made.provider.as_deref(), made.model.as_deref()), (Some("higgsfield"), Some("xai/grok-imagine-image-2.0")));
+        let record = |id: &str| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(dir.path().join(format!("{id}.json"))).unwrap()).unwrap()
+        };
+        let on_disk = record(&made.id);
+        assert_eq!(on_disk["provider"], "higgsfield");
+        assert_eq!(on_disk["model"], "xai/grok-imagine-image-2.0");
+        assert_eq!(store.meta(&made.id).await.unwrap(), made, "the record reads back whole");
+        for origin in [MediaOrigin::Attached, MediaOrigin::Viewed, MediaOrigin::Generated] {
+            let plain = store.put(origin, "shot.png", "main", picture()).await.unwrap();
+            assert_eq!((plain.provider.as_deref(), plain.model.as_deref()), (None, None), "{origin:?}");
+            let on_disk = record(&plain.id);
+            assert!(on_disk.get("provider").is_none() && on_disk.get("model").is_none(), "{origin:?}: {on_disk}");
+        }
+        // A record from before the fields: it has neither, and reads.
+        let side = dir.path().join(format!("{}.json", made.id));
+        let mut older = on_disk;
+        older.as_object_mut().unwrap().remove("provider");
+        older.as_object_mut().unwrap().remove("model");
+        std::fs::write(&side, serde_json::to_vec(&older).unwrap()).unwrap();
+        let read = store.meta(&made.id).await.unwrap();
+        assert_eq!((read.provider, read.model), (None, None));
+        assert_eq!(store.get(&made.id).await.unwrap().1, png_fixture(4, 3));
     }
 
     #[tokio::test]

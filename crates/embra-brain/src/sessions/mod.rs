@@ -1585,6 +1585,8 @@ mod staged_media_tests {
             session: "s".into(),
             created_at: String::new(),
             sha256: String::new(),
+            provider: None,
+            model: None,
         }
     }
 

@@ -407,8 +407,10 @@ pub async fn image_generate(
         transformed: false,
     };
     let name = slug_from_prompt(&args.prompt, kind.ext());
+    // The picture's record names who made it: the tool's answer is gone
+    // with its turn, and the picture stays.
     let meta = store
-        .put(MediaOrigin::Generated, &name, session, full.clone())
+        .put_generated(&name, session, full.clone(), provider.kind().as_str(), provider.model())
         .await
         .map_err(|e| DispatchError::Handler(format!("image_generate: store write failed: {e}")))?;
     let path = meta.path_in(store.dir());
@@ -721,6 +723,10 @@ mod tests {
         assert!(std::path::Path::new(&r.path).exists());
         assert_eq!(std::fs::read(&r.path).unwrap(), jpeg_fixture(9, 6), "full-res bytes stored untouched");
         assert!(out.media_refs.is_empty());
+        // The picture's record names the provider and the model, as the
+        // summary does: the record is what stays.
+        let record = store.meta(summary["id"].as_str().unwrap()).await.unwrap();
+        assert_eq!((record.provider.as_deref(), record.model.as_deref()), (Some("gemini"), Some("gemini-nano-banana-2.1")));
     }
 
     /// The call with nothing but a prompt is the request the API takes:
@@ -940,6 +946,8 @@ mod tests {
             assert_eq!(summary["media_type"], media_type);
             assert!(summary["path"].as_str().unwrap().ends_with(&format!(".{ext}")), "{summary}");
             assert_eq!(std::fs::read(summary["path"].as_str().unwrap()).unwrap(), bytes, "stored as it came");
+            let record = store.meta(summary["id"].as_str().unwrap()).await.unwrap();
+            assert_eq!((record.provider.as_deref(), record.model.as_deref()), (Some("higgsfield"), Some("xai/grok-imagine-image-2.0")));
         }
     }
 

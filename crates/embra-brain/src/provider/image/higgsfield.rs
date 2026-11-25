@@ -28,6 +28,11 @@
 //!   headers and without the credential, and `public_url` goes into the
 //!   model's own field (`References::Urls` or `Url`).
 //!
+//! The log names the host a picture was fetched from and the host a
+//! reference was put to (`net::host_shown`): Higgsfield chooses both, and an
+//! operator who filters what the machine may reach has to know them. Never
+//! the address itself, whose path or query can be a signature.
+//!
 //! The credential goes to the API's own origin and nowhere else: a status
 //! or cancel URL of another origin is not followed (the URL the reference
 //! documents is built from the request id in its place), and the picture is
@@ -49,6 +54,7 @@ use super::{
     References,
 };
 use crate::net;
+use crate::proactive::{Notification, Priority};
 
 /// The API's own origin.
 pub const API_BASE: &str = "https://api.higgsfield.ai";
@@ -120,6 +126,81 @@ pub fn next_delay(previous: Duration, max: Duration) -> Duration {
     (previous + previous / 2).min(max)
 }
 
+/// Where the operator is told what a stopped call's cancel came to. The
+/// turn that made the call has ended by then, so the sentence is a notice
+/// of its own (`proactive::tell_operator`).
+pub type StopNotice = Arc<dyn Fn(Notification) + Send + Sync>;
+
+/// What a cancel came to. By the reference a cancel is answered 202 when
+/// the request is canceled and 400 once the request has started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Canceled {
+    Yes,
+    /// Too late: the request had started.
+    Started,
+    /// Another answer of the API.
+    Answered(u16),
+    /// The cancel did not arrive, with the cause.
+    Unreached(String),
+}
+
+impl Canceled {
+    fn of(answer: Result<reqwest::Response, reqwest::Error>) -> Self {
+        match answer {
+            Ok(a) if a.status().is_success() => Canceled::Yes,
+            Ok(a) if a.status().as_u16() == 400 => Canceled::Started,
+            Ok(a) => Canceled::Answered(a.status().as_u16()),
+            Err(e) => Canceled::Unreached(net::error_chain(&e)),
+        }
+    }
+
+    /// The deadline's words: the request was `last` when the wait ran out.
+    fn at_the_deadline(&self, last: &str) -> String {
+        match self {
+            Canceled::Yes => format!("it was {last} and is canceled: nothing is charged"),
+            Canceled::Started => format!(
+                "it was {last} and had started, so it can no longer be canceled: it is charged if it completes, and the Higgsfield console at open.higgsfield.ai keeps its picture for seven days"
+            ),
+            Canceled::Answered(status) => {
+                format!("it was {last}, and the cancel was answered HTTP {status}: it may still complete, and is charged if it does")
+            }
+            Canceled::Unreached(why) => {
+                format!("it was {last}, and the cancel did not reach Higgsfield ({why}): it may still complete, and is charged if it does")
+            }
+        }
+    }
+
+    /// The notice after an operator's stop: what became of the request the
+    /// stopped call had made, and whether it is charged. A request that is
+    /// canceled is information; one that may be charged is a notice.
+    pub(crate) fn after_a_stop(&self, request_id: &str) -> Notification {
+        match self {
+            Canceled::Yes => Notification::new(
+                Priority::Low,
+                format!("The stopped image call's request {request_id} is canceled at Higgsfield: nothing is charged."),
+            ),
+            Canceled::Started => Notification::new(
+                Priority::Normal,
+                format!(
+                    "The stopped image call's request {request_id} had started at Higgsfield and can no longer be canceled: it is charged if it completes, and the Higgsfield console at open.higgsfield.ai keeps its picture for seven days."
+                ),
+            ),
+            Canceled::Answered(status) => Notification::new(
+                Priority::Normal,
+                format!(
+                    "The cancel of the stopped image call's request {request_id} was answered HTTP {status} by Higgsfield: the request may still complete, and is charged if it does."
+                ),
+            ),
+            Canceled::Unreached(why) => Notification::new(
+                Priority::Normal,
+                format!(
+                    "The cancel of the stopped image call's request {request_id} did not reach Higgsfield ({why}): the request may still complete, and is charged if it does."
+                ),
+            ),
+        }
+    }
+}
+
 pub struct HiggsfieldImageProvider {
     /// `Key <key id>:<key secret>`, marked sensitive.
     authorization: HeaderValue,
@@ -136,12 +217,15 @@ pub struct HiggsfieldImageProvider {
     /// The client of the API's own calls. A provider is made for one call
     /// of `image_generate` and keeps it that long.
     http: reqwest::Client,
+    /// Where a stopped call's cancel is told.
+    on_stop: StopNotice,
 }
 
 impl HiggsfieldImageProvider {
     /// `key` is `<key id>:<key secret>`; `model` one of Higgsfield's rows of
-    /// `IMAGE_MODELS`; `base` the API's origin (`API_BASE`, or a stand-in).
-    pub fn new(key: &str, model: &str, base: &str, stand_in: bool, pacing: Pacing) -> Result<Self, ImageGenError> {
+    /// `IMAGE_MODELS`; `base` the API's origin (`API_BASE`, or a stand-in);
+    /// `on_stop` takes the notice of what a stopped call's cancel came to.
+    pub fn new(key: &str, model: &str, base: &str, stand_in: bool, pacing: Pacing, on_stop: StopNotice) -> Result<Self, ImageGenError> {
         let model = image_model(model)
             .filter(|m| m.kind == ImageProviderKind::Higgsfield)
             .ok_or_else(|| ImageGenError::NotConfigured(format!("{model} is not one of Higgsfield's image models")))?;
@@ -158,7 +242,7 @@ impl HiggsfieldImageProvider {
             .timeout(API_TIMEOUT)
             .build()
             .map_err(|e| ImageGenError::Transport(format!("an HTTP client could not be built: {e}")))?;
-        Ok(Self { authorization, model, base, stand_in, pacing, cancels_on_drop: Arc::new(AtomicUsize::new(0)), http })
+        Ok(Self { authorization, model, base, stand_in, pacing, cancels_on_drop: Arc::new(AtomicUsize::new(0)), http, on_stop })
     }
 
     /// The model's endpoint: the base and the model's id.
@@ -231,6 +315,7 @@ impl HiggsfieldImageProvider {
                 answer.status().as_u16()
             )));
         }
+        tracing::info!(target: "media", host = %net::host_shown(&reach.url), "a reference image was put to Higgsfield's storage");
         Ok(public_url)
     }
 
@@ -319,20 +404,7 @@ impl HiggsfieldImageProvider {
     /// says which it came to.
     async fn cancel_at_deadline(&self, cancel_url: &reqwest::Url, request_id: &str, last: &str) -> ImageGenError {
         let answer = self.http.post(cancel_url.clone()).header(AUTHORIZATION, self.authorization.clone()).send().await;
-        let detail = match answer {
-            Ok(a) if a.status().is_success() => format!("it was {last} and is canceled: nothing is charged"),
-            Ok(a) if a.status().as_u16() == 400 => format!(
-                "it was {last} and had started, so it can no longer be canceled: it is charged if it completes, and the Higgsfield console at open.higgsfield.ai keeps its picture for seven days"
-            ),
-            Ok(a) => format!(
-                "it was {last}, and the cancel was answered HTTP {}: it may still complete, and is charged if it does",
-                a.status().as_u16()
-            ),
-            Err(e) => format!(
-                "it was {last}, and the cancel did not reach Higgsfield ({}): it may still complete, and is charged if it does",
-                net::error_chain(&e)
-            ),
-        };
+        let detail = Canceled::of(answer).at_the_deadline(last);
         ImageGenError::StillRunning { request_id: request_id.to_string(), waited_secs: self.pacing.wait.as_secs(), detail }
     }
 
@@ -340,7 +412,8 @@ impl HiggsfieldImageProvider {
     /// named: through the one client that may reach it, capped at the media
     /// store's ceiling, and fetched once more after a network failure. A
     /// picture that cannot be fetched is paid for: the error names the
-    /// request and the address.
+    /// request and the address. A fetch that works leaves the host in the
+    /// log.
     async fn download(&self, url: &str, request_id: &str) -> Result<GeneratedImage, ImageGenError> {
         let paid = |why: &str| {
             ImageGenError::NoImage(format!(
@@ -361,6 +434,13 @@ impl HiggsfieldImageProvider {
                 Ok(answer) if !answer.status().is_success() => return Err(paid(&format!("HTTP {}", answer.status().as_u16()))),
                 Ok(answer) => {
                     let bytes = net::read_capped(answer, crate::media::MEDIA_UPLOAD_MAX).await.map_err(|e| paid(&e))?;
+                    tracing::info!(
+                        target: "media",
+                        request_id,
+                        host = %net::host_shown(&reach.url),
+                        bytes = bytes.len(),
+                        "Higgsfield's picture was fetched"
+                    );
                     let media_type = crate::media::ingest::sniff(&bytes).map_or("application/octet-stream", |kind| kind.media_type());
                     return Ok(GeneratedImage { media_type: media_type.to_string(), data: bytes });
                 }
@@ -402,11 +482,18 @@ impl ImageProvider for HiggsfieldImageProvider {
         let cancel_url = self.own_url(submitted.cancel_url.as_deref(), request_id, "cancel");
         tracing::info!(target: "media", request_id, model = self.model.id, "Higgsfield took the request");
         // From here to an end of the request or the deadline's own cancel,
-        // a call that is dropped (the operator's stop) asks for the cancel.
-        // A stop before the submission's answer leaves the request running:
-        // there is no request id to cancel by.
+        // a call that is dropped (the operator's stop) asks for the cancel
+        // and tells the operator what it came to. A stop before the
+        // submission's answer leaves the request running: there is no
+        // request id to cancel by.
         let mut guard = CancelOnDrop {
-            armed: Some((self.http.clone(), self.authorization.clone(), cancel_url.clone())),
+            armed: Some(Armed {
+                http: self.http.clone(),
+                authorization: self.authorization.clone(),
+                cancel_url: cancel_url.clone(),
+                request_id: request_id.to_string(),
+                tell: self.on_stop.clone(),
+            }),
             sent: self.cancels_on_drop.clone(),
         };
         match self.wait(&status_url, deadline).await {
@@ -453,22 +540,34 @@ enum Waited {
 
 /// Sends the cancel of a request when it is dropped armed: the call it
 /// belongs to was dropped before the request ended. One cancel at most, from
-/// a task of its own, when a runtime is there to run it.
+/// a task of its own, when a runtime is there to run it; what the cancel
+/// came to goes to the log and, as a notice, to the operator.
 struct CancelOnDrop {
-    armed: Option<(reqwest::Client, HeaderValue, reqwest::Url)>,
+    armed: Option<Armed>,
     sent: Arc<AtomicUsize>,
+}
+
+/// What the guard cancels a request with, and whom it tells.
+struct Armed {
+    http: reqwest::Client,
+    authorization: HeaderValue,
+    cancel_url: reqwest::Url,
+    request_id: String,
+    tell: StopNotice,
 }
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        let Some((http, authorization, url)) = self.armed.take() else { return };
+        let Some(Armed { http, authorization, cancel_url, request_id, tell }) = self.armed.take() else { return };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
         self.sent.fetch_add(1, Ordering::SeqCst);
         runtime.spawn(async move {
-            match http.post(url).header(AUTHORIZATION, authorization).send().await {
-                Ok(answer) => tracing::info!(target: "media", status = answer.status().as_u16(), "the stopped call's Higgsfield request was asked to cancel"),
-                Err(e) => tracing::info!(target: "media", why = %net::error_chain(&e), "the cancel of a stopped call's Higgsfield request did not reach it"),
+            let answer = http.post(cancel_url).header(AUTHORIZATION, authorization).send().await;
+            match &answer {
+                Ok(a) => tracing::info!(target: "media", request_id, status = a.status().as_u16(), "the stopped call's Higgsfield request was asked to cancel"),
+                Err(e) => tracing::info!(target: "media", request_id, why = %net::error_chain(e), "the cancel of a stopped call's Higgsfield request did not reach it"),
             }
+            tell(Canceled::of(answer).after_a_stop(&request_id));
         });
     }
 }
@@ -690,8 +789,13 @@ mod tests {
         }
     }
 
+    /// A provider that tells nobody of a stop: for a test of anything else.
+    fn silent() -> StopNotice {
+        Arc::new(|_| {})
+    }
+
     fn provider(server: &MockServer, model: &str, pacing: Pacing) -> HiggsfieldImageProvider {
-        HiggsfieldImageProvider::new(KEY, model, &server.uri(), true, pacing).expect("a provider")
+        HiggsfieldImageProvider::new(KEY, model, &server.uri(), true, pacing, silent()).expect("a provider")
     }
 
     fn png() -> Vec<u8> {
@@ -1163,36 +1267,94 @@ mod tests {
     }
 
     /// A call dropped while it waits (the operator's stop) asks for the
-    /// cancel, once.
+    /// cancel, once, and tells the operator what it came to: canceled, or
+    /// too late, the request having started.
     #[tokio::test]
-    async fn a_call_dropped_while_it_waits_asks_for_the_cancel_once() {
-        let server = MockServer::start().await;
-        let (asked, mut status_asked) = tokio::sync::mpsc::unbounded_channel();
-        let (canceled, mut cancel_asked) = tokio::sync::mpsc::unbounded_channel();
-        mount_once(&server, "POST", "/xai/grok-imagine-image-2.0", queued(&server, "r-1")).await;
-        Mock::given(method("GET"))
-            .and(path("/requests/r-1/status"))
-            .respond_with(Told { tell: asked, answer: status("queued").set_delay(Duration::from_secs(60)) })
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/requests/r-1/cancel"))
-            .and(header("authorization", "Key key-id-1:key-secret-1"))
-            .respond_with(Told { tell: canceled, answer: ResponseTemplate::new(202) })
-            .expect(1)
-            .mount(&server)
-            .await;
-        let p = Arc::new(provider(&server, "xai/grok-imagine-image-2.0", QUICK));
-        let call = tokio::spawn({
-            let p = p.clone();
-            async move { p.generate(&req("a lighthouse", None, None)).await }
-        });
-        status_asked.recv().await.expect("the status is read");
-        call.abort();
-        assert!(call.await.unwrap_err().is_cancelled());
-        // The backstop ends the test, not the behaviour: the cancel comes at once.
-        tokio::time::timeout(Duration::from_secs(60), cancel_asked.recv()).await.expect("the cancel is asked").unwrap();
-        assert_eq!(p.cancels_on_drop.load(Ordering::SeqCst), 1);
+    async fn a_call_dropped_while_it_waits_asks_for_the_cancel_once_and_says_what_it_came_to() {
+        let cases = [
+            (ResponseTemplate::new(202), "INFO", "The stopped image call's request r-1 is canceled at Higgsfield: nothing is charged."),
+            (
+                ResponseTemplate::new(400).set_body_json(json!({"detail": "already started"})),
+                "NOTICE",
+                "The stopped image call's request r-1 had started at Higgsfield and can no longer be canceled: it is charged if it completes, and the Higgsfield console at open.higgsfield.ai keeps its picture for seven days.",
+            ),
+        ];
+        for (answer, priority, words) in cases {
+            let server = MockServer::start().await;
+            let (asked, mut status_asked) = tokio::sync::mpsc::unbounded_channel();
+            let (told, mut notices) = tokio::sync::mpsc::unbounded_channel();
+            mount_once(&server, "POST", "/xai/grok-imagine-image-2.0", queued(&server, "r-1")).await;
+            Mock::given(method("GET"))
+                .and(path("/requests/r-1/status"))
+                .respond_with(Told { tell: asked, answer: status("queued").set_delay(Duration::from_secs(60)) })
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/requests/r-1/cancel"))
+                .and(header("authorization", "Key key-id-1:key-secret-1"))
+                .respond_with(answer)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let on_stop: StopNotice = Arc::new(move |notice| {
+                let _ = told.send(notice);
+            });
+            let p = Arc::new(
+                HiggsfieldImageProvider::new(KEY, "xai/grok-imagine-image-2.0", &server.uri(), true, QUICK, on_stop).expect("a provider"),
+            );
+            let call = tokio::spawn({
+                let p = p.clone();
+                async move { p.generate(&req("a lighthouse", None, None)).await }
+            });
+            status_asked.recv().await.expect("the status is read");
+            call.abort();
+            assert!(call.await.unwrap_err().is_cancelled());
+            // The backstop ends the test, not the behaviour: the cancel comes at once.
+            let notice = tokio::time::timeout(Duration::from_secs(60), notices.recv()).await.expect("the operator is told").unwrap();
+            assert_eq!((notice.priority_label(), notice.message.as_str()), (priority, words));
+            assert!(notice.act.is_none(), "a notice, and no turn of the intelligence's own");
+            assert_eq!(p.cancels_on_drop.load(Ordering::SeqCst), 1);
+            assert!(notices.try_recv().is_err(), "one cancel, one notice");
+        }
+    }
+
+    /// What a cancel came to, in the deadline's words and in the notice
+    /// after a stop, each of the four word for word. A request that is
+    /// canceled is information; one that may be charged is a notice.
+    #[test]
+    fn what_a_cancel_came_to_is_said_at_the_deadline_and_after_a_stop() {
+        let cases = [
+            (
+                Canceled::Yes,
+                "it was in_progress and is canceled: nothing is charged",
+                "INFO",
+                "The stopped image call's request r-7 is canceled at Higgsfield: nothing is charged.",
+            ),
+            (
+                Canceled::Started,
+                "it was in_progress and had started, so it can no longer be canceled: it is charged if it completes, and the Higgsfield console at open.higgsfield.ai keeps its picture for seven days",
+                "NOTICE",
+                "The stopped image call's request r-7 had started at Higgsfield and can no longer be canceled: it is charged if it completes, and the Higgsfield console at open.higgsfield.ai keeps its picture for seven days.",
+            ),
+            (
+                Canceled::Answered(503),
+                "it was in_progress, and the cancel was answered HTTP 503: it may still complete, and is charged if it does",
+                "NOTICE",
+                "The cancel of the stopped image call's request r-7 was answered HTTP 503 by Higgsfield: the request may still complete, and is charged if it does.",
+            ),
+            (
+                Canceled::Unreached("connection refused".into()),
+                "it was in_progress, and the cancel did not reach Higgsfield (connection refused): it may still complete, and is charged if it does",
+                "NOTICE",
+                "The cancel of the stopped image call's request r-7 did not reach Higgsfield (connection refused): the request may still complete, and is charged if it does.",
+            ),
+        ];
+        for (outcome, deadline, priority, stop) in cases {
+            assert_eq!(outcome.at_the_deadline("in_progress"), deadline);
+            let notice = outcome.after_a_stop("r-7");
+            assert_eq!((notice.priority_label(), notice.message.as_str()), (priority, stop));
+            assert!(notice.act.is_none());
+        }
     }
 
     /// A picture that cannot be fetched is paid for: the error names the
@@ -1431,13 +1593,13 @@ mod tests {
     #[tokio::test]
     async fn a_fetch_the_network_ends_is_made_once_more_and_two_name_the_request_and_the_address() {
         let (base, pictures, server) = dropping_stand_in(1).await;
-        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", &base, true, QUICK).unwrap();
+        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", &base, true, QUICK, silent()).unwrap();
         let out = p.generate(&req("a lighthouse", None, None)).await.expect("the second fetch");
         assert_eq!(out.images[0].data, png());
         assert_eq!(*pictures.lock().unwrap(), 2);
         server.abort();
         let (base, pictures, server) = dropping_stand_in(2).await;
-        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", &base, true, QUICK).unwrap();
+        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", &base, true, QUICK, silent()).unwrap();
         let said = p.generate(&req("a lighthouse", None, None)).await.unwrap_err().to_string();
         assert_eq!(*pictures.lock().unwrap(), 2, "two fetches, no third");
         let picture = format!("{base}/out/1.png");
@@ -1448,14 +1610,14 @@ mod tests {
 
     #[test]
     fn a_model_that_is_not_higgsfields_and_a_key_no_header_carries_are_refused() {
-        let err = HiggsfieldImageProvider::new(KEY, "gemini-nano-banana-2.1", API_BASE, false, Pacing::ADVISED).err().unwrap();
+        let err = HiggsfieldImageProvider::new(KEY, "gemini-nano-banana-2.1", API_BASE, false, Pacing::ADVISED, silent()).err().unwrap();
         assert_eq!(err.to_string(), "image provider not configured: gemini-nano-banana-2.1 is not one of Higgsfield's image models");
-        let err = HiggsfieldImageProvider::new("id:sec\nret", "z-image/turbo", API_BASE, false, Pacing::ADVISED).err().unwrap();
+        let err = HiggsfieldImageProvider::new("id:sec\nret", "z-image/turbo", API_BASE, false, Pacing::ADVISED, silent()).err().unwrap();
         assert_eq!(err.to_string(), "image provider not configured: the Higgsfield key holds a character no header can carry");
-        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", API_BASE, false, Pacing::ADVISED).unwrap();
+        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", API_BASE, false, Pacing::ADVISED, silent()).unwrap();
         assert_eq!(p.endpoint().as_str(), "https://api.higgsfield.ai/z-image/turbo");
         assert!(format!("{:?}", p.authorization).contains("Sensitive"), "the key is marked sensitive");
-        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", "http://10.0.2.2:28082/hf", true, Pacing::ADVISED).unwrap();
+        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", "http://10.0.2.2:28082/hf", true, Pacing::ADVISED, silent()).unwrap();
         assert_eq!(p.endpoint().as_str(), "http://10.0.2.2:28082/hf/z-image/turbo");
     }
 }

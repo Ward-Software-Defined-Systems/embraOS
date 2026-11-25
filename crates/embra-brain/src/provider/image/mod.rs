@@ -613,6 +613,9 @@ pub(crate) fn resolve_image_provider_with(
                 &base,
                 stand_in.is_some(),
                 higgsfield::Pacing::ADVISED,
+                // What a stopped call's cancel came to is the operator's to
+                // know: the turn that made the call has ended by then.
+                std::sync::Arc::new(crate::proactive::tell_operator),
             )?))
         }
     }
@@ -952,6 +955,19 @@ mod tests {
         // not of the provider is.
         cfg.image_model = Some("z-image/turbo".into());
         assert!(matches!(resolve_image_choice(&cfg), Err(ImageGenError::NotConfigured(_))));
+    }
+
+    /// The provider the OS builds for Higgsfield is handed the operator's
+    /// notices. Built with a sink that tells nobody, a stopped call would
+    /// cancel in silence: the construction site is read from this file.
+    #[test]
+    fn the_provider_the_os_builds_tells_the_operator_of_a_stopped_call() {
+        let source = include_str!("mod.rs");
+        let start = source.find("pub(crate) fn resolve_image_provider_with(").expect("the construction site");
+        let site = &source[start..];
+        let site = &site[..site.find("\n}\n").expect("the function ends")];
+        assert!(site.contains("higgsfield::HiggsfieldImageProvider::new("), "{site}");
+        assert!(site.contains("std::sync::Arc::new(crate::proactive::tell_operator)"), "the sink is not the operator's notices: {site}");
     }
 
     /// Every image key on the machine is collected for the outbound guard,

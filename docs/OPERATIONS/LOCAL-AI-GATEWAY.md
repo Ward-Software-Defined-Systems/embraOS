@@ -46,7 +46,7 @@ A change is saved to `SystemConfig.provider_gateway` (serde-additive; an instanc
 
 Ollama and LM Studio keep the endpoint stored in embraOS; the gateway's `[backends.<name>] upstream` is the server that answers while the gateway is on, and the stored endpoint is used again when it is off. `/model` lists the models the gateway's upstream serves.
 
-Direct, whatever `/local-ai-gateway` says: the Guardian tools (`web_search`, `http_request`, `http_get` and the connections of `websocket`), which have their own egress rules (`/guardian egress`); `image_generate` on Higgsfield's models (`api.higgsfield.ai`, and the host each picture is fetched from), since the gateway has no route for Higgsfield: it neither records nor scans those requests, and `/image-provider` says so while the gateway is on; the sentence-embedding model, which runs inside the OS and sends nothing. The wizard's key check and preset probe are direct only when its gateway step chose direct.
+Direct, whatever `/local-ai-gateway` says: the Guardian tools (`web_search`, `http_request`, `http_get` and the connections of `websocket`), which have their own egress rules (`/guardian egress`); `image_generate` on Higgsfield's models (`api.higgsfield.ai`, the host each picture is fetched from and the host a reference image is put to: Higgsfield chooses those two, and the brain's log names them at each use), since the gateway has no route for Higgsfield: it neither records nor scans those requests, and `/image-provider` says so while the gateway is on; the sentence-embedding model, which runs inside the OS and sends nothing. The wizard's key check and preset probe are direct only when its gateway step chose direct.
 
 ## Caveats
 
@@ -58,4 +58,4 @@ Direct, whatever `/local-ai-gateway` says: the Guardian tools (`web_search`, `ht
 - **A native model is not routed.** A model that runs on the embraOS machine itself (experimental, [NATIVE-MODELS.md](NATIVE-MODELS.md)) is reached on the machine's loopback whether the gateway is on or off: its requests never leave the machine, so the gateway records and scans none of them.
 - **The gateway's own limits apply.** Requests are buffered in full with a 64 MiB cap (413 above it); open streams are cut five seconds into a gateway shutdown; the unified listener's `default_backend` never sees a request from embraOS, because every one carries a prefix.
 
-*Last updated: 2026-11-24.*
+*Last updated: 2026-11-25.*

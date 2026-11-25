@@ -158,12 +158,42 @@ where
     })
 }
 
+/// The running engine's sender, for a notice that comes from outside the
+/// loops: work that outlives the turn it belongs to and has no stream of
+/// its own to answer on (a stopped image call's cancel, answered after the
+/// turn has ended). Set once, by `start_proactive_engine`.
+static OPERATOR_NOTICES: std::sync::OnceLock<mpsc::Sender<Notification>> = std::sync::OnceLock::new();
+
+/// Hands the operator a notice from outside the proactive loops, as the
+/// loops hand theirs over (`push_notification`): it never waits, and one
+/// that finds no room or no listener is logged with its text. Not for what
+/// a loop already says: a second path would say it twice.
+pub(crate) fn tell_operator(notification: Notification) {
+    hand_over(OPERATOR_NOTICES.get(), notification);
+}
+
+/// `tell_operator` with the sender given: there is none before the engine
+/// is started (a development run, a test).
+fn hand_over(tx: Option<&mpsc::Sender<Notification>>, notification: Notification) {
+    match tx {
+        Some(tx) => push_notification(tx, notification),
+        None => warn!(
+            priority = notification.priority_label(),
+            "notice not handed over (the proactive engine is not started): {}",
+            notification.message
+        ),
+    }
+}
+
 pub fn start_proactive_engine(
     db: &WardsonDbClient,
     config_tz: &str,
     boot_api_key: &str,
 ) -> mpsc::Receiver<Notification> {
     let (tx, rx) = mpsc::channel(64);
+    // The same channel for `tell_operator`. A second start in one process
+    // keeps the first sender, which is the one that is drained.
+    let _ = OPERATOR_NOTICES.set(tx.clone());
     let db = db.clone();
     let config_tz = config_tz.to_string();
 
@@ -465,6 +495,23 @@ mod tests {
         // A closed channel is the same non-event.
         drop(rx);
         push_notification(&tx, note("four"));
+    }
+
+    /// A notice from outside the loops goes into the channel the Converse
+    /// stream drains, as it is; one that finds the channel full, or no
+    /// engine at all, is dropped without a wait.
+    #[test]
+    fn a_notice_from_outside_the_loops_is_handed_over_or_dropped_and_never_waits() {
+        let (tx, mut rx) = mpsc::channel(1);
+        hand_over(Some(&tx), Notification::new(Priority::Normal, "the stopped request had started"));
+        let got = rx.try_recv().expect("handed over");
+        assert_eq!((got.priority_label(), got.message.as_str()), ("NOTICE", "the stopped request had started"));
+        assert!(got.act.is_none(), "a notice asks for no turn");
+        hand_over(Some(&tx), Notification::new(Priority::Low, "one"));
+        hand_over(Some(&tx), Notification::new(Priority::Low, "two")); // no room: dropped, not awaited
+        assert_eq!(rx.try_recv().unwrap().message, "one");
+        assert!(rx.try_recv().is_err());
+        hand_over(None, Notification::new(Priority::Low, "nobody listens"));
     }
 
     #[test]

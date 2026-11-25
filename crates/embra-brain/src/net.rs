@@ -554,6 +554,17 @@ pub(crate) fn url_shown(url: &reqwest::Url) -> String {
     shown.to_string()
 }
 
+/// A URL's host, and its port when the URL names one: what a log line says
+/// of an address an API handed back. Never the address's path or query,
+/// which can carry a signature that opens the file.
+pub(crate) fn host_shown(url: &reqwest::Url) -> String {
+    match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => format!("{host}:{port}"),
+        (Some(host), None) => host.to_string(),
+        (None, _) => "no host".to_string(),
+    }
+}
+
 /// The client for one URL an API handed back. The URL is `https` and
 /// carries no user or password, and its host is an address, or a name
 /// whose every address is, that `embra_guardian::caps::is_blocked_ip`
@@ -618,6 +629,18 @@ fn direct_client(pin: Option<(&str, &[std::net::SocketAddr])>, timeout: std::tim
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A log line names the host an API's address is on and nothing of the
+    /// address's path or query: a storage URL is signed there.
+    #[test]
+    fn a_log_line_names_the_host_of_an_address_and_never_its_path_or_query() {
+        let host = |url: &str| host_shown(&reqwest::Url::parse(url).unwrap());
+        assert_eq!(host("https://cdn.example.com/out/7f3a/p.png?X-Amz-Signature=abc123&X-Amz-Expires=3600#frag"), "cdn.example.com");
+        assert_eq!(host("https://storage.example.com:8443/put/1?sig=s3cret"), "storage.example.com:8443");
+        assert_eq!(host("https://user:pw@[2001:db8::1]/x"), "[2001:db8::1]");
+        assert_eq!(host("http://10.0.2.2:28083/out/1.png"), "10.0.2.2:28083");
+        assert_eq!(host("data:text/plain,x"), "no host");
+    }
 
     /// #36: a long-lived client is one for each reading of the roots,
     /// however many turns and tools ask for it, and a reload makes the next
