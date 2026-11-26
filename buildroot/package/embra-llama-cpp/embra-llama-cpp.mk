@@ -39,7 +39,7 @@
 #
 ################################################################################
 
-EMBRA_LLAMA_CPP_VERSION = 1.0.0
+EMBRA_LLAMA_CPP_VERSION = 1.1.0
 EMBRA_LLAMA_CPP_SITE = https://github.com/ggml-org/llama.cpp/archive/refs/tags
 EMBRA_LLAMA_CPP_SOURCE = v$(EMBRA_LLAMA_CPP_VERSION).tar.gz
 EMBRA_LLAMA_CPP_LICENSE = MIT, BSD-2-Clause (xxhash)

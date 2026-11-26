@@ -1,6 +1,6 @@
 # Native models (experimental)
 
-A native model is a language model that runs on the machine itself. The image carries llama.cpp's server (`/usr/bin/llama-server`, llama.cpp v1.0.0); embrad runs it for one model on DATA, on loopback alone, and the brain reaches it as a third OpenAI-compatible preset beside Ollama and LM Studio. A turn on a native model sends nothing off the machine and takes no key.
+A native model is a language model that runs on the machine itself. The image carries llama.cpp's server (`/usr/bin/llama-server`, llama.cpp v1.1.0); embrad runs it for one model on DATA, on loopback alone, and the brain reaches it as a third OpenAI-compatible preset beside Ollama and LM Studio. A turn on a native model sends nothing off the machine and takes no key.
 
 **Experimental.** Every surface that names a native model says so. This is what it means:
 
@@ -19,7 +19,7 @@ What has been run, and on which machines, is in [VALIDATION-STATUS.md](../VALIDA
 | Qwen3.5 9B | `qwen3.5-9b` | `Qwen3.5-9B-Q4_K_M.gguf`, 5,831,992,608 bytes | `mmproj-Qwen3.5-9B-F16.gguf`, 918,165,952 bytes | `William-WSDS/Qwen3.5-9B-GGUF` at revision `50e35c8389019e081813e4095bf93edcb45b4df5` |
 | Qwen3.8 27B | `qwen3.8-27b` | `Qwen3.8-27B-Q4_K_M.gguf`, 17,005,351,136 bytes | `mmproj-Qwen3.8-27B-F16.gguf`, 927,607,008 bytes | `William-WSDS/Qwen3.8-27B-GGUF` at revision `ddee62e887833f1494f8a4a4829de841959a94ab` |
 
-All three are Apache-2.0. The files are this project's own conversions of Qwen's repositories (`Qwen/Qwen3.5-4B`, `Qwen/Qwen3.5-9B`, `Qwen/Qwen3.8-27B`): converted to GGUF and quantised to Q4_K_M with llama.cpp v1.0.0, the version the image's model server is built from. Each repository's card names the revision it was made from, the commands and the hashes. An image file holds its weights as F16: llama.cpp v1.0.0 multiplies that format in vector code on x86 and on Arm processors, and BF16, the format of Qwen's own files, on x86 alone. The catalogue is compiled into the image (`embra_boot::native_model::CATALOGUE`): each model is two files of one revision of a repository, the model and what it reads images through, each with its size and its sha256. A file that is not those bytes is not kept, and nothing else is loaded: no other model, no other quantisation, no file of the operator's own.
+All three are Apache-2.0. The files are this project's own conversions of Qwen's repositories (`Qwen/Qwen3.5-4B`, `Qwen/Qwen3.5-9B`, `Qwen/Qwen3.8-27B`): converted to GGUF and quantised to Q4_K_M with llama.cpp v1.0.0, the version the image's model server was built from when they were made. Each repository's card names the revision it was made from, the commands and the hashes. An image file holds its weights as F16: llama.cpp v1.0.0 multiplies that format in vector code on x86 and on Arm processors, and BF16, the format of Qwen's own files, on x86 alone. The catalogue is compiled into the image (`embra_boot::native_model::CATALOGUE`): each model is two files of one revision of a repository, the model and what it reads images through, each with its size and its sha256. A file that is not those bytes is not kept, and nothing else is loaded: no other model, no other quantisation, no file of the operator's own.
 
 ## What a model needs
 
@@ -116,4 +116,4 @@ embrad starts a model only from a file whose record still describes it; nothing 
 
 A release from before native models does not know the provider `native`. Started on a configuration that names it (its slot chosen in the boot menu after the newer release was configured), it takes the provider for Anthropic, and a turn is refused for the missing key until `/provider` there names a provider that release has. Nothing of the native settings is lost by that boot: the newer release finds the model, its window and its `/effort` as they were, and the model's file where it was.
 
-*Last updated: 2026-11-24.*
+*Last updated: 2026-11-26.*
