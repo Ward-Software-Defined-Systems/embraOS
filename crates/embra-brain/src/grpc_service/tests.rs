@@ -2629,7 +2629,7 @@ mod key_setup_model_step_tests {
         let Some(Ok(ConversationResponse { response_type: Some(conversation_response::ResponseType::Setup(prompt)) })) = rx.recv().await else {
             panic!("a selector")
         };
-        assert_eq!(prompt.options, ["qwen3.5-9b", "qwen3.5-4b", "qwen3.8-27b"], "the model kept loaded first");
+        assert_eq!(prompt.options, ["qwen3.5-9b", "qwen3.5-4b", "qwen3.8-27b", "inkling-2-mini"], "the model kept loaded first");
         assert_eq!(prompt.default_value, "qwen3.5-9b");
         assert!(pending.lock().await.as_ref().is_some_and(|state| state.model_only && state.native.is_some()));
 
@@ -2641,7 +2641,7 @@ mod key_setup_model_step_tests {
         assert_eq!(said.msg_type, SystemMessageType::Error as i32);
         assert_eq!(
             said.content,
-            "'qwen3.5-27b' is not a native model. The catalogue (experimental): qwen3.5-4b, qwen3.5-9b, qwen3.8-27b. /model alone picks from the list."
+            "'qwen3.5-27b' is not a native model. The catalogue (experimental): qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini. /model alone picks from the list."
         );
         assert!(pending.lock().await.is_none());
         let writes = db_server.received_requests().await.unwrap().iter().filter(|r| r.method != wiremock::http::Method::GET).count();

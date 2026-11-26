@@ -1,95 +1,746 @@
-PROPRIETARY LICENSE
+embraOS PROPRIETARY LICENSE
+
+Version 2.0, November 26, 2026
 
 Copyright (c) 2026 Ward Software Defined Systems LLC. All rights reserved.
 
-NOTICE: This repository contains proprietary software and documentation
-owned by Ward Software Defined Systems LLC ("WSDS"). By accessing this
-repository, you agree to the following terms.
+NOTICE: embraOS and the other materials in this repository are proprietary
+software and documentation owned by Ward Software Defined Systems LLC
+("WSDS"). They are made available for evaluation and other non-commercial
+use. They are not open source software.
+
+BY ACCESSING, DOWNLOADING, CLONING, BUILDING, INSTALLING, STARTING, OR
+USING ANY PART OF THE MATERIALS, OR BY CONFIRMING YOUR ACCEPTANCE WHERE AN
+INSTALLER, THE SOFTWARE, OR WSDS ASKS FOR IT, YOU AGREE TO THIS LICENSE.
+IF YOU DO NOT AGREE, DO NOT DOWNLOAD, BUILD, INSTALL, OR USE THE
+MATERIALS.
+
+READ SECTIONS 7 THROUGH 12 CAREFULLY. embraOS IS EXPERIMENTAL. IT TAKES
+CONTROL OF THE MACHINE IT IS INSTALLED ON, ERASES THE DISK IT IS INSTALLED
+TO, AND RUNS AN AI SYSTEM THAT CAN ACT ON ITS OWN. THOSE SECTIONS DESCRIBE
+RISKS THAT YOU ASSUME, DISCLAIM ALL WARRANTIES, LIMIT THE LIABILITY OF
+WSDS, AND RELEASE CLAIMS AGAINST WSDS.
 
 1. DEFINITIONS
 
-   "Software" means all source code, binaries, container images, build
-   scripts, configuration files, and any other machine-readable materials
-   in this repository.
+   "Software" means all source code, binaries, build scripts,
+   configuration files, disk images, installer media, virtual machine
+   images, container images, update packages, and any other
+   machine-readable materials that WSDS makes available in this repository
+   or through any other channel, including release downloads, the
+   Software's own updater, archives, and mirrors. It includes every copy,
+   including a copy installed or running on a machine.
 
-   "Documentation" means all design documents, architecture specifications,
-   research materials, diagrams, technical writing, and any other
-   human-readable materials in this repository, including but not limited
-   to files in the docs/ directory and any markdown files (.md).
+   "Documentation" means all design documents, architecture
+   specifications, research materials, diagrams, technical writing, and
+   any other human-readable materials that WSDS makes available with the
+   Software, including but not limited to files in the docs/ directory and
+   any markdown files (.md).
 
-   "Materials" means the Software and Documentation collectively.
+   "Materials" means the Software and Documentation collectively, in any
+   form and wherever you obtained them.
+
+   "Non-Commercial Use" means either of the following, when it is not part
+   of the operations of a business and is not offered to others as a
+   product or service: (a) personal use by an individual, including
+   personal evaluation, non-commercial experimentation, and hobby use; or
+   (b) use by an Academic Institution, or by its students, faculty, or
+   staff in that role, for teaching, study, or non-commercial research. A
+   Non-Commercial Use may be continuous. Keeping an installation running
+   around the clock for one of these purposes does not make it a
+   commercial or production use, and an Academic Institution's use does
+   not become commercial because the institution charges tuition or
+   receives grant funding.
+
+   "Academic Institution" means a college, university, or other
+   degree-granting institution of higher education, or a non-profit
+   research institution.
+
+   "Third-Party Component" means software, firmware, microcode, fonts,
+   data, model files, or any other item that someone other than WSDS owns
+   and that is included in, built into, or distributed with the Software.
+   Examples are the Linux kernel, GRUB, BusyBox, Git, OpenSSH, OpenSSL,
+   curl, wpa_supplicant, eudev, Mesa, WPE WebKit, cog, llama.cpp, the
+   linux-firmware collection, Intel and AMD processor microcode, the Rust
+   toolchain, the sentence-embedding model inside an image, xterm.js, and
+   the open source Rust crates the Software is built from.
+
+   "Third-Party Model" means an AI model that someone other than WSDS
+   owns, with its weights, parameters, tokenizer, and related files, that
+   the Software can download, import, load, or connect to at your
+   direction. It includes the model as its licensor published it and as
+   WSDS or anyone else has converted, quantized, or otherwise modified it.
+   A model file that ships inside an image of the Software is a
+   Third-Party Component.
+
+   "Native Model" means a Third-Party Model that the Software runs on your
+   Hardware itself.
+
+   "Model Terms" means, for a Third-Party Model, the license, the
+   acceptable use policy, and any other terms that its licensor applies to
+   it, as the licensor changes them from time to time.
+
+   "Third-Party Service" means a service that WSDS does not operate and
+   that the Software can connect to, such as a model provider or model
+   server, a search, media, or code-hosting service, a model repository, a
+   download or update host, or a time server.
+
+   "Intelligence" means an AI system instance that the Software runs, with
+   its sealed identity, memory, sessions, and tools.
+
+   "Output" means anything that an Intelligence or a model generates or
+   does, including text, code, images, decisions, tool calls, scheduled
+   jobs, and actions taken on your Hardware, in your accounts, or on other
+   systems.
+
+   "Operator Content" means content that you create or supply for use with
+   the Software, such as identity and knowledge files, memories, sessions,
+   workspace files, settings, credentials, certificates, and dynamic tools
+   that you write or approve. It does not include any part of the
+   Materials.
+
+   "Hardware" means any physical or virtual machine on which you install
+   or run the Software, and any device, storage, network, or other
+   equipment attached to it or reachable from it.
+
+   "System" means the Materials together with every Third-Party Component,
+   Third-Party Model, and Third-Party Service used with them, every
+   Intelligence the Software runs, and all Output.
+
+   "WSDS Parties" means WSDS and its owners, members, managers, officers,
+   employees, contractors, agents, successors, and assigns.
+
+   "You" means the individual who accesses or uses the Materials and any
+   organization on whose behalf that individual does so.
 
 2. GRANT OF RIGHTS
 
-   Subject to the restrictions below, WSDS grants you a limited,
-   non-exclusive, non-transferable, revocable right to:
+   Subject to the restrictions below and to your compliance with this
+   License, WSDS grants you a limited, non-exclusive, non-transferable,
+   non-sublicensable, revocable right to:
 
    a. View, read, and reference the Materials for informational and
       educational purposes
-   b. Download, build, and run the Software for personal evaluation
-      and non-commercial experimentation
-   c. Share links to this repository (but not the Materials themselves)
+   b. Download, build, install, and run the Software, on Hardware that you
+      own or are authorized to use for this purpose, for Non-Commercial
+      Use
+   c. Make the copies of the Materials that are reasonably necessary to do
+      what (a) and (b) allow, including backups, provided that every copy
+      keeps all notices
+   d. Create Operator Content, add it to your own build or installation of
+      the Software in the ways the Documentation describes, and use it
+      with the Software for the purposes in (b)
+   e. Share links to this repository (but not the Materials themselves)
 
    This grant does not extend to any commercial, production, or
-   revenue-generating use. This repository being publicly accessible
-   does not constitute a grant of any rights beyond those stated above.
+   revenue-generating use. This repository being publicly accessible does
+   not constitute a grant of any rights beyond those stated above. The
+   Materials are licensed, not sold, and WSDS reserves every right that
+   this License does not expressly grant. As between you and WSDS, your
+   Operator Content remains yours.
 
 3. RESTRICTIONS
 
-   Without a separate written license agreement from WSDS, you may not:
+   Except as Section 2 expressly allows, and without a separate written
+   license agreement from WSDS, you may not:
 
    a. Use the Materials for any commercial or production purpose
    b. Copy, reproduce, or duplicate the Materials in whole or in part
-   c. Modify, adapt, translate, or create derivative works based on
-      the Materials
-   d. Distribute, sublicense, lease, lend, or transfer the Materials
-      to any third party
-   e. Sell, offer for sale, or otherwise commercialize the Materials
-      or any product or service based on the Materials
-   f. Reverse engineer, decompile, or disassemble any compiled portions
-      of the Software
-   g. Remove, alter, or obscure any copyright, trademark, or other
-      proprietary notices contained in the Materials
+   c. Modify, adapt, translate, or create derivative works based on the
+      Materials
+   d. Distribute, sublicense, lease, lend, or transfer the Materials to
+      any third party
+   e. Sell, offer for sale, or otherwise commercialize the Materials or
+      any product or service based on the Materials
+   f. Reverse engineer, decompile, or disassemble any compiled portions of
+      the Software, except to the extent that applicable law allows it
+      despite this restriction
+   g. Remove, alter, or obscure any copyright, trademark, license, or
+      other proprietary notices contained in the Materials
    h. Use the Materials to train machine learning models or AI systems
       without explicit written permission from WSDS
+   i. Use the System in violation of any applicable law, any Model Terms,
+      or the terms of any Third-Party Service
+   j. Put the System to any High-Risk Use (Section 8)
 
-4. CONTRIBUTIONS
+4. THIRD-PARTY COMPONENTS AND OPEN SOURCE SOFTWARE
 
-   Any contributions submitted to this repository (via pull request,
-   issue, or other mechanism) are subject to a Contributor License
-   Agreement (CLA). By submitting a contribution, you agree to assign
-   all intellectual property rights in that contribution to WSDS.
+   a. Separate licenses. Each Third-Party Component is licensed to you by
+      its owner under its own license, and not by WSDS under this License.
+      That license, and not Sections 2 and 3, governs your use of the
+      component. Nothing in this License limits any right that a
+      Third-Party Component's license gives you in that component.
 
-5. TRADEMARKS
+   b. Notices. The license texts and notices of Third-Party Components are
+      found in each component's own source, in the images of the Software
+      where a component's license calls for it, and in any notices that
+      WSDS publishes with a release.
 
-   "embraOS", "Embra", and "Ward Software Defined Systems" are
-   trademarks of Ward Software Defined Systems LLC. Nothing in this
-   license grants permission to use these marks.
+   c. Source code. Some Third-Party Components are under licenses, such as
+      the GNU General Public License and the GNU Lesser General Public
+      License, that entitle you to their source code. For three years
+      after WSDS last distributes a release of the Software, WSDS will
+      provide to anyone who asks a complete machine-readable copy of the
+      corresponding source code of those components in that release, for
+      no more than the cost to WSDS of physically delivering it. Send the
+      request to info@wsds.io and name the release.
 
-6. NO WARRANTY
+   d. Firmware and microcode. The device firmware and processor microcode
+      included with the Software are supplied by their vendors in binary
+      form under the vendors' own terms. WSDS did not write them. Those
+      terms may restrict copying, changing, or reverse engineering those
+      files.
 
-   THE MATERIALS ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
-   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
-   NONINFRINGEMENT. IN NO EVENT SHALL WSDS BE LIABLE FOR ANY CLAIM,
-   DAMAGES, OR OTHER LIABILITY ARISING FROM THE MATERIALS.
+   e. WSDS code under other terms. The copy of WardSONDB in
+      crates/wardsondb is licensed under the Apache License, Version 2.0,
+      as the LICENSE file in that directory states, and not under this
+      License. Each patch under buildroot/patches is licensed under the
+      license of the project it changes. Any other file in this repository
+      that carries its own license notice is licensed under that notice.
 
-7. LICENSING INQUIRIES
+5. THIRD-PARTY MODELS AND MODEL TERMS
 
-   For commercial licensing, partnership opportunities, or other
-   inquiries regarding the use of these Materials, contact:
+   a. Not licensed by WSDS. Every Third-Party Model is licensed to you by
+      its licensor under its Model Terms. WSDS grants you no rights in any
+      Third-Party Model.
+
+   b. You accept the Model Terms. Read a model's Model Terms before you
+      install, import, load, select, or use it. By doing any of those
+      things through the Software, you accept that model's Model Terms,
+      and you agree with WSDS to comply with them, including every
+      acceptable use policy, use restriction, and notice or disclosure
+      requirement in them. If you do not accept a model's Model Terms, do
+      not install or use that model.
+
+   c. Schedule A. Schedule A names Native Models that a release of the
+      Software may offer, says where their Model Terms are found, and sets
+      out additional terms for particular models. Schedule A is part of
+      this License. It is provided for your convenience and may be
+      incomplete or out of date. The licensor's current Model Terms
+      control.
+
+   d. People you let use a model. If you let anyone else use a Third-Party
+      Model through your installation of the Software, or through anything
+      you build with it, you must require them to comply with the Model
+      Terms, you must give them every disclosure the Model Terms require,
+      and you are responsible for their compliance.
+
+   e. Converted files. WSDS may convert a Third-Party Model's files to
+      another file format or numerical precision and make the converted
+      files available. Converted files are modified versions of the
+      licensor's model and remain subject to its Model Terms. WSDS claims
+      no ownership of the underlying model. Conversion and quantization
+      can change how a model behaves and can reduce its accuracy. Unless a
+      licensor says otherwise, it has not tested or approved the files
+      WSDS makes available.
+
+   f. Your choice and your responsibility. Whether to use a Third-Party
+      Model is your decision. You are responsible for that decision, for
+      how the model is used on your Hardware, and for its Output. WSDS
+      does not control any Third-Party Model, makes no promise about one,
+      and has no obligation to monitor how you use one.
+
+   g. Changes. A licensor may change its Model Terms or withdraw a model.
+      WSDS may add, change, or remove any model in the Software's
+      catalogue, and may stop making any model's files available, at any
+      time and without notice.
+
+   h. No affiliation. Unless WSDS states otherwise in writing, WSDS is not
+      affiliated with, endorsed by, or sponsored by the licensor of any
+      Third-Party Model. A licensor is not a party to this License. The
+      names of models and of their makers belong to their owners.
+
+   i. Order of precedence. If this License and a model's Model Terms
+      conflict about that model, the Model Terms control as to that model.
+      Sections 7 through 12 apply to every Third-Party Model and to its
+      Output.
+
+   j. Models reached through a service. A model that you reach through a
+      Third-Party Service is subject to that service's terms as well
+      (Section 6).
+
+6. THIRD-PARTY SERVICES
+
+   a. Your accounts, their terms. A Third-Party Service may require your
+      own account, key, or server. The provider's terms and privacy policy
+      govern your use of it, and you are responsible for complying with
+      them.
+
+   b. Charges. You are responsible for everything a Third-Party Service
+      charges. An Intelligence can make many requests in a single turn,
+      can run scheduled jobs while you are away, and may use model
+      settings that increase usage. Charges can build up quickly and
+      without further confirmation from you.
+
+   c. Your data leaves your Hardware. What you or an Intelligence send to
+      a Third-Party Service, which can include conversations, memories,
+      files, images, and tool results, is transmitted to that service and
+      handled under its terms. WSDS is not responsible for what a
+      Third-Party Service does with it.
+
+   d. Connections the Software makes. The Software also connects to
+      Third-Party Services on its own, as the Documentation describes: for
+      example to set the clock, to check whether a newer release has been
+      published, and to download files that you ask for. Those services
+      receive your network address and the technical details of the
+      request.
+
+   e. No responsibility. WSDS does not control Third-Party Services and is
+      not responsible for their availability, accuracy, security, charges,
+      or conduct.
+
+7. THE AI SYSTEM, OUTPUT, AND YOUR RESPONSIBILITY AS OPERATOR
+
+   a. You are dealing with an AI system. An Intelligence is software
+      driven by an AI model. It is not a person, and it is not a licensed
+      professional of any kind.
+
+   b. Output can be wrong. Output may be inaccurate, incomplete,
+      misleading, biased, offensive, or unsafe, and may state false things
+      with confidence. Do not rely on Output without checking it yourself.
+      Output is not medical, legal, financial, security, or other
+      professional advice.
+
+   c. An Intelligence can act. An Intelligence can use tools to act
+      without asking you first. Depending on the release and on what you
+      configure, it can read and change files, run Git operations and work
+      with code-hosting accounts, send requests to websites and other
+      network services, connect to other machines over SSH, scan ports,
+      schedule jobs that run unattended, generate media, propose and run
+      tools that it writes, and send data to Third-Party Services. Those
+      actions can be mistaken, destructive, irreversible, or costly.
+      Content that an Intelligence reads, such as a web page, a file, or a
+      message, can be written to make it act against your interests.
+
+   d. Safeguards are not guarantees. The Software's safeguards, including
+      the sealed identity, the Guardian and its replicant check,
+      sandboxing, path and network restrictions, and the redaction of
+      credentials, are meant to reduce some risks. They do not remove
+      them. Some are experimental, and some do not operate in every
+      configuration.
+
+   e. You are the operator. You are responsible for: (i) supervising every
+      Intelligence you run; (ii) the credentials, keys, accounts, network
+      access, and other access you give it, and everything done with them;
+      (iii) your Operator Content; (iv) who can reach your installation
+      and its console; (v) all Output and every use made of it; and (vi)
+      making sure that your use of the System is lawful where you are.
+
+   f. Experimental features. A feature marked experimental, preview, or
+      under evaluation may be incomplete, may not work, and may change or
+      be removed at any time.
+
+8. PHYSICAL HARDWARE AND ASSUMPTION OF RISK
+
+   embraOS is an operating system. Installed on a machine, it takes
+   control of that machine. It replaces whatever was on the disk you
+   choose, starts in place of any other operating system, loads device
+   drivers, device firmware, and processor microcode, and manages the
+   machine's storage, network, and display. It offers no shell and no
+   administrator login from which a problem could be repaired in the usual
+   way.
+
+   YOU UNDERSTAND AND ACCEPT THE FOLLOWING RISKS, AMONG OTHERS:
+
+   a. Data loss. The installer erases everything on the disk you select.
+      Installing, updating, restoring, or resetting the Software, or a
+      failure or a loss of power during any of those, can permanently
+      destroy data, including an Intelligence's identity, memory, and
+      workspace. Selecting the wrong disk cannot be undone.
+
+   b. Limited validation. The Software has been run on a small number of
+      machines and hypervisors. On any other Hardware it may fail to
+      start, may work incorrectly, or may not support some devices.
+
+   c. Stress on Hardware. The Software can keep a machine's processor,
+      memory, storage, and power supply under heavy load for long periods,
+      particularly while a Native Model runs. That can cause high
+      temperatures, instability, shutdowns, faster wear, shorter component
+      life, higher energy use, and failure, especially in small, fanless,
+      poorly ventilated, battery-powered, or older machines.
+
+   d. Firmware settings and startup. The Software needs UEFI firmware with
+      Secure Boot turned off. Changing firmware settings or replacing an
+      operating system can leave a machine unable to start, can affect
+      other operating systems on it, and may affect the manufacturer's
+      warranty or support.
+
+   e. Updates and recovery. The Software's update, rollback, backup, and
+      restore features may fail. A failed or interrupted update can leave
+      a machine unable to start.
+
+   f. Network exposure and security. The Software listens for connections
+      on the machine's network interfaces, includes no firewall, and does
+      not currently encrypt the data it stores. It is experimental
+      software, and you should not expose it to an untrusted network or
+      directly to the internet. Anyone who reaches the machine with its
+      console access token, or who has physical access to it, may be able
+      to control the Intelligence and reach everything the Intelligence
+      can reach.
+
+   g. Other equipment. If you connect the Hardware to other devices,
+      systems, or networks, or give an Intelligence access to them, the
+      Software and the Intelligence can affect them.
+
+   HIGH-RISK USE. The System is not designed, tested, or intended for any
+   use in which a failure, an error, or wrong Output could lead to death,
+   personal injury, or serious physical, environmental, or property damage
+   ("High-Risk Use"). High-Risk Use includes operating medical devices or
+   life-support systems, emergency services, vehicles, aircraft,
+   industrial or building control systems, critical infrastructure, and
+   weapons. You may not put the System to any High-Risk Use.
+
+   YOUR PRECAUTIONS. Before you install the Software on a physical
+   machine, you are responsible for: backing up anything you want to keep;
+   confirming which disk will be erased; using only Hardware that you own
+   or have permission to erase and reconfigure; providing adequate
+   cooling, ventilation, and power; not leaving the Hardware running
+   unattended where overheating or a failure could cause harm; securing
+   the network it is on; and checking the checksums and signatures of what
+   you download.
+
+   ASSUMPTION OF RISK. TO THE FULLEST EXTENT PERMITTED BY LAW, YOU
+   KNOWINGLY AND VOLUNTARILY ASSUME ALL RISK OF LOSS, DAMAGE, AND INJURY
+   ARISING FROM INSTALLING OR RUNNING THE SOFTWARE ON ANY HARDWARE AND
+   FROM THE ACTIONS AND OUTPUT OF ANY INTELLIGENCE OR MODEL, WHETHER OR
+   NOT THE RISK IS DESCRIBED ABOVE.
+
+9. NO WARRANTY
+
+   THE SYSTEM IS PROVIDED "AS IS" AND "AS AVAILABLE," WITH ALL FAULTS,
+   WITHOUT WARRANTY OF ANY KIND. TO THE FULLEST EXTENT PERMITTED BY LAW,
+   WSDS DISCLAIMS ALL WARRANTIES, WHETHER EXPRESS, IMPLIED, OR STATUTORY,
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+   FOR A PARTICULAR PURPOSE, TITLE, NONINFRINGEMENT, ACCURACY, AND QUIET
+   ENJOYMENT, AND ANY WARRANTY ARISING FROM A COURSE OF DEALING OR USAGE
+   OF TRADE.
+
+   WSDS DOES NOT WARRANT THAT THE SYSTEM WILL WORK ON YOUR HARDWARE, THAT
+   IT WILL BE UNINTERRUPTED, SECURE, OR FREE OF ERRORS OR HARMFUL
+   COMPONENTS, THAT IT WILL NOT DAMAGE YOUR HARDWARE OR LOSE YOUR DATA, OR
+   THAT ANY OUTPUT WILL BE ACCURATE, SAFE, OR LAWFUL. NO ADVICE OR
+   INFORMATION FROM WSDS, FROM THE DOCUMENTATION, OR FROM AN INTELLIGENCE
+   CREATES A WARRANTY. YOU USE THE SYSTEM AT YOUR OWN RISK.
+
+10. LIMITATION OF LIABILITY
+
+   TO THE FULLEST EXTENT PERMITTED BY LAW:
+
+   a. NO WSDS PARTY WILL BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
+      CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF
+      DATA, LOSS OF USE, LOSS OF PROFITS OR REVENUE, COST OF SUBSTITUTE
+      GOODS OR SERVICES, CHARGES OF A THIRD-PARTY SERVICE, DAMAGE TO OR
+      FAILURE OF HARDWARE OR OTHER PROPERTY, OR HARM CAUSED BY OUTPUT OR
+      BY THE ACTIONS OF AN INTELLIGENCE, ARISING OUT OF OR RELATING TO THE
+      SYSTEM OR THIS LICENSE.
+
+   b. THE TOTAL LIABILITY OF ALL WSDS PARTIES FOR ALL CLAIMS ARISING OUT
+      OF OR RELATING TO THE SYSTEM OR THIS LICENSE WILL NOT EXCEED THE
+      GREATER OF (i) THE AMOUNT YOU PAID WSDS FOR THE MATERIALS IN THE
+      TWELVE MONTHS BEFORE THE CLAIM AROSE AND (ii) ONE HUNDRED U.S.
+      DOLLARS (US $100).
+
+   c. THESE LIMITS APPLY TO EVERY THEORY OF LIABILITY, WHETHER CONTRACT,
+      TORT (INCLUDING NEGLIGENCE), STRICT LIABILITY, PRODUCT LIABILITY, OR
+      ANY OTHER, EVEN IF A WSDS PARTY HAS BEEN TOLD THAT THE DAMAGE WAS
+      POSSIBLE, AND EVEN IF A REMEDY FAILS OF ITS ESSENTIAL PURPOSE.
+
+   d. UNDER THIS LICENSE THE MATERIALS ARE MADE AVAILABLE WITHOUT CHARGE.
+      THESE LIMITS ARE AN ESSENTIAL BASIS OF THIS LICENSE, AND WSDS WOULD
+      NOT MAKE THE MATERIALS AVAILABLE WITHOUT THEM.
+
+   e. NOTHING IN THIS LICENSE EXCLUDES OR LIMITS ANY LIABILITY THAT CANNOT
+      BE EXCLUDED OR LIMITED UNDER APPLICABLE LAW, INCLUDING LIABILITY FOR
+      FRAUD OR FOR WILLFUL INJURY. SOME JURISDICTIONS DO NOT ALLOW CERTAIN
+      EXCLUSIONS OR LIMITS. IN THOSE JURISDICTIONS THE EXCLUSIONS AND
+      LIMITS ABOVE APPLY ONLY AS FAR AS THE LAW ALLOWS.
+
+11. RELEASE OF CLAIMS
+
+   TO THE FULLEST EXTENT PERMITTED BY LAW, YOU, FOR YOURSELF AND FOR YOUR
+   HEIRS, SUCCESSORS, ASSIGNS, AND ANYONE CLAIMING THROUGH YOU, RELEASE
+   AND FOREVER DISCHARGE THE WSDS PARTIES FROM ALL CLAIMS, DEMANDS,
+   DAMAGES, LOSSES, LIABILITIES, COSTS, AND CAUSES OF ACTION OF EVERY
+   KIND, KNOWN OR UNKNOWN, SUSPECTED OR UNSUSPECTED, THAT ARISE OUT OF OR
+   RELATE TO:
+
+   a. YOUR DOWNLOADING, BUILDING, INSTALLING, RUNNING, OR USING THE
+      SYSTEM;
+   b. LOSS OF OR DAMAGE TO HARDWARE, TO OTHER EQUIPMENT OR PROPERTY, OR TO
+      DATA OR SOFTWARE, INCLUDING AN ERASED DISK, A MACHINE THAT WILL NOT
+      START, A FAILED UPDATE, OVERHEATING, AND THE FAILURE OF A COMPONENT;
+   c. ANY THIRD-PARTY COMPONENT, THIRD-PARTY MODEL, OR THIRD-PARTY
+      SERVICE, INCLUDING ITS CHARGES;
+   d. ANY OUTPUT, AND ANY ACTION OF AN INTELLIGENCE OR A MODEL, INCLUDING
+      AN ACTION TAKEN WITH CREDENTIALS OR ACCESS THAT YOU PROVIDED;
+   e. UNAUTHORIZED ACCESS TO YOUR HARDWARE, NETWORK, ACCOUNTS, OR DATA;
+      AND
+   f. PERSONAL INJURY OR PROPERTY DAMAGE CONNECTED WITH ANY OF THE ABOVE.
+
+   YOU AGREE NOT TO SUE ANY WSDS PARTY ON A CLAIM RELEASED HERE.
+
+   UNKNOWN CLAIMS. YOU UNDERSTAND THAT YOU MAY LATER DISCOVER CLAIMS OR
+   FACTS THAT YOU DO NOT NOW KNOW OF OR SUSPECT, AND YOU INTEND THIS
+   RELEASE TO COVER THEM ALL THE SAME. YOU EXPRESSLY WAIVE THE PROTECTION
+   OF CALIFORNIA CIVIL CODE SECTION 1542, WHICH WOULD OTHERWISE KEEP A
+   GENERAL RELEASE FROM REACHING CLAIMS THAT THE PERSON GIVING IT DID NOT
+   KNOW OF OR SUSPECT AT THE TIME AND THAT WOULD HAVE MATERIALLY AFFECTED
+   THE DECISION TO GIVE IT, AND YOU WAIVE THE PROTECTION OF ANY SIMILAR
+   LAW OF ANY OTHER JURISDICTION.
+
+   WHAT IS NOT RELEASED. THIS SECTION DOES NOT RELEASE (i) ANY CLAIM THAT
+   CANNOT BE RELEASED UNDER APPLICABLE LAW, WHICH MAY INCLUDE CLAIMS FOR
+   FRAUD, WILLFUL INJURY, GROSS NEGLIGENCE, OR VIOLATION OF LAW, OR (ii)
+   ANY OBLIGATION THAT WSDS EXPRESSLY TAKES ON IN THIS LICENSE.
+
+12. INDEMNIFICATION
+
+   To the fullest extent permitted by law, you will defend, indemnify, and
+   hold harmless the WSDS Parties from and against every claim, demand,
+   action, or proceeding brought by a third party, and all resulting
+   damages, liabilities, penalties, costs, and expenses (including
+   reasonable attorneys' fees), arising out of or relating to: (a) your
+   installation or use of the System; (b) any Output or action of an
+   Intelligence or a model that you run, including anything it does to
+   another person's systems, accounts, data, or property; (c) your
+   Operator Content; (d) your breach of this License, of any Model Terms,
+   or of the terms of any Third-Party Service; or (e) your violation of
+   any law or of anyone's rights.
+
+   WSDS may take over the defense of any such claim at its own expense,
+   and you will cooperate. You may not settle a claim in a way that binds
+   a WSDS Party without the written consent of WSDS.
+
+13. FEEDBACK AND CONTRIBUTIONS
+
+   WSDS is not accepting contributions of code or documentation from
+   outside WSDS at this time. If that changes, a contribution will be
+   accepted only under a separate written contributor agreement.
+
+   If you give WSDS ideas, suggestions, bug reports, or other feedback
+   about the Materials ("Feedback"), in an issue or in any other way, you
+   grant WSDS a perpetual, irrevocable, worldwide, royalty-free, fully
+   paid, transferable, and sublicensable license to use, copy, modify, and
+   incorporate the Feedback in the Materials and in any other product or
+   service, for any purpose, without payment, attribution, or any other
+   obligation to you. Do not put into Feedback anything that is
+   confidential or that you do not have the right to share.
+
+14. TRADEMARKS
+
+   "embraOS", "Embra", and "Ward Software Defined Systems" are trademarks
+   of Ward Software Defined Systems LLC. Nothing in this License grants
+   permission to use these marks. All other names and marks belong to
+   their owners, and their appearance in the Materials does not imply any
+   endorsement or affiliation.
+
+15. TERM AND TERMINATION
+
+   This License applies from the time you first access or use the
+   Materials until it ends. It ends automatically, without notice, if you
+   breach it. WSDS may also end it, and may revoke access to this
+   repository or to any release, at any time, for any reason, without
+   notice.
+
+   When this License ends you must stop using the Materials and destroy
+   every copy you have, including installed copies and images. Section 2
+   ends with this License. Every other Section survives.
+
+16. CHANGES TO THIS LICENSE
+
+   WSDS may change this License. The version that accompanies a release
+   governs that release, and the version at the head of this repository
+   governs the repository's current contents. When you download, install,
+   or update to a later release, you accept the version that accompanies
+   it. Schedule A changes as models are added to or removed from the
+   Software's catalogue.
+
+17. EXPORT AND LEGAL COMPLIANCE
+
+   The Software includes encryption and may be subject to the export
+   control and sanctions laws of the United States and of other countries.
+   You must comply with those laws. You represent that you are not located
+   in, and are not a resident or national of, a country or region under
+   comprehensive United States sanctions, and that you are not on any
+   United States government list of prohibited or restricted parties.
+
+   You are responsible for complying with every other law that applies to
+   your use of the System, including laws on privacy, data protection,
+   access to computers, radio equipment, and artificial intelligence.
+
+18. GOVERNING LAW AND VENUE
+
+   This License shall be governed by and construed in accordance with the
+   laws of the State of California, without regard to its conflict of law
+   provisions. The United Nations Convention on Contracts for the
+   International Sale of Goods does not apply.
+
+   Any dispute arising out of or relating to this License or the System
+   must be brought only in the Superior Court of California, County of
+   Contra Costa, or the United States District Court for the Northern
+   District of California, and you and WSDS consent to the jurisdiction
+   of, and venue in, those courts. WSDS may seek an injunction in any
+   court to protect its intellectual property. If you are a consumer, this
+   Section does not take away any protection that the mandatory law of the
+   place where you live gives you.
+
+19. GENERAL
+
+   a. Entire agreement. This License, with Schedule A, is the whole
+      agreement between you and WSDS about the Materials and replaces any
+      earlier terms. A separate written license agreement signed by WSDS
+      controls over this License where the two conflict.
+
+   b. Severability. If a court finds any part of this License
+      unenforceable, that part is to be enforced as far as the law allows,
+      and the rest stays in effect.
+
+   c. No waiver. A failure or delay by WSDS in enforcing any part of this
+      License does not waive it.
+
+   d. Assignment. You may not assign or transfer this License. WSDS may.
+
+   e. Who may enforce. Each WSDS Party may enforce Sections 9 through 12.
+      Apart from that, and from the source code offer in Section 4, no one
+      other than you and WSDS has rights under this License.
+
+   f. Eligibility and authority. You must be at least 18 years old and
+      able to enter into a binding contract. If you accept this License
+      for an organization, you state that you have the authority to bind
+      it.
+
+   g. No support. WSDS has no obligation to support, maintain, update, or
+      fix the Materials, or to keep any release, update source, or model
+      file available.
+
+   h. United States Government users. The Software is commercial computer
+      software and the Documentation is commercial computer software
+      documentation. Government users receive only the rights in this
+      License.
+
+   i. Interpretation. "Including" means "including but not limited to."
+      Headings are for convenience only.
+
+20. LICENSING INQUIRIES
+
+   For commercial licensing, partnership opportunities, or other inquiries
+   regarding the use of these Materials, contact:
 
    Ward Software Defined Systems LLC
    Email: info@wsds.io
    Web:   https://wsds.io
 
-8. TERMINATION
 
-   WSDS reserves the right to revoke access to this repository at
-   any time, for any reason, without notice.
+SCHEDULE A: THIRD-PARTY MODEL TERMS FOR NATIVE MODELS
 
-9. GOVERNING LAW
+As of November 26, 2026
 
-   This license shall be governed by and construed in accordance with
-   the laws of the State of California, without regard to its
-   conflict of law provisions.
+A.1 ABOUT NATIVE MODELS
+
+   Native Models are an experimental feature. The files that WSDS makes
+   available for a Native Model are modified from the licensor's own:
+   converted to the file format the Software's model server reads and, in
+   most cases, quantized. Unless a licensor says otherwise, it has not
+   tested or approved them.
+
+   A Native Model, and a small or quantized one in particular, answers
+   more slowly and with less judgment than a large hosted model. It is
+   more likely to state false information, to misuse or invent tool calls,
+   and to follow instructions hidden in content it reads. WSDS has not
+   vetted the Native Models against the Software's full set of tools, and
+   the Guardian's replicant check does not run while a Native Model leads
+   an Intelligence. Supervise an Intelligence that a Native Model leads,
+   and do not give it access that you cannot afford to have misused.
+
+A.2 MODELS AND WHERE THEIR TERMS ARE FOUND
+
+   A release of the Software may offer some or all of the models below.
+
+   Qwen3.5 4B, Qwen3.5 9B, and Qwen3.8 27B
+   Source:      Qwen/Qwen3.5-4B, Qwen/Qwen3.5-9B, and Qwen/Qwen3.8-27B on
+                huggingface.co
+   License:     Apache License, Version 2.0
+
+   Inkling 2 Mini
+   Licensor:    Thinking Machines Lab, Inc. ("Thinking Machines")
+   Source:      thinkingmachines/Inkling-2-Mini on huggingface.co
+   License:     Apache License, Version 2.0
+   Use policy:  Model Acceptable Use Policy (the "Model AUP"), last
+                updated July 15, 2026, as of the date above:
+                https://thinkingmachines.ai/model-acceptable-use-policy/
+   More terms:  Section A.3
+
+   The text of the Apache License, Version 2.0, is at:
+   https://www.apache.org/licenses/LICENSE-2.0
+
+   A model that you reach through a Third-Party Service, or add in any
+   other way, is not listed here. You are responsible for finding and
+   following its Model Terms.
+
+A.3 INKLING 2 MINI: ADDITIONAL TERMS
+
+   These terms apply if you install, import, load, or use Inkling 2 Mini
+   through the Software.
+
+   1. The Model AUP applies. By its own terms the Model AUP governs the
+      models Thinking Machines releases, both as released and in any
+      modified form. The files WSDS makes available for Inkling 2 Mini are
+      a modified form, and so is anything you derive from the model.
+
+   2. You accept it. By installing, importing, loading, or using Inkling 2
+      Mini through the Software, you accept the Model AUP and agree with
+      WSDS to comply with it, as Thinking Machines publishes it at the
+      time of your use, together with the Apache License, Version 2.0.
+      Read the Model AUP first. If you do not accept it, do not install or
+      use Inkling 2 Mini.
+
+   3. Prohibited uses. You may not use Inkling 2 Mini, or let it be used,
+      for anything the Model AUP prohibits. Among other things, the Model
+      AUP prohibits using the model for unlawful activity; to harm,
+      exploit, or sexualize children; to help with violence, weapons, or
+      attacks on computer systems or infrastructure; to harass, defraud,
+      deceive, unlawfully surveil, or discriminate against people; to make
+      fully automated decisions that affect a person's rights; to give
+      medical, legal, or financial services without the required license
+      or human oversight; and to defeat a model's or a system's safety
+      measures. This summary is incomplete and is given for convenience
+      only. The Model AUP controls.
+
+   4. People you let use it. If you let anyone else use Inkling 2 Mini
+      through your installation of the Software, or through anything you
+      build with it, you must require them to comply with the Model AUP,
+      and you are responsible for their compliance.
+
+   5. Disclosures you must give. Anyone who offers the model to end users
+      takes on the Model AUP's disclosure duties. You must tell those
+      users what is known about the AI system's significant limitations
+      and risks. You must also tell them that an AI system is answering,
+      where the law requires that or where knowing it matters to how they
+      understand the exchange.
+
+   6. Known limitations and risks. The Inkling 2 Mini model card describes
+      limitations that include stating false information as fact, getting
+      caught in repetitive reasoning, using tools unreliably, taking
+      destructive actions without asking for confirmation, and weaker
+      results outside English. It recommends against relying on the model
+      for medical, legal, or safety-critical decisions without further
+      validation and human oversight, and it recommends running agents in
+      a sandbox and requiring confirmation before destructive actions.
+      Read the model card for the current list. Section A.1 applies as
+      well: in the Software, an Intelligence that this model leads has the
+      Software's tools, and the replicant check does not run.
+
+   7. The Model AUP can change. Thinking Machines may revise the Model AUP
+      at any time, and it treats anyone who keeps using the model after a
+      revision as having accepted the revision. You are responsible for
+      checking the current version at the address in Section A.2.
+
+   8. What WSDS may do. WSDS may remove Inkling 2 Mini from the Software's
+      catalogue or stop making its files available at any time. A
+      violation of the Model AUP through the Software is a breach of this
+      License (Section 15), and Section 12 applies to it.
+
+   9. No affiliation. Thinking Machines is not a party to this License and
+      has not endorsed, tested, or approved the Software or the files WSDS
+      makes available. "Inkling" and "Thinking Machines" are names that
+      belong to Thinking Machines.

@@ -37,6 +37,9 @@ pub enum SetupStep {
     /// A native model's file is being installed (experimental): a question
     /// that takes text, so that a command can be typed while it runs.
     ModelInstall,
+    /// Terms the operator accepts or does not: the policy a native model
+    /// comes with. A selector whose first option accepts nothing.
+    Terms,
     Timezone,
     Confirm,
 }
@@ -521,7 +524,11 @@ impl AppState {
     /// before the generic ApiKey/Anthropic/Gemini fallback.
     pub fn infer_setup_step(prompt: &str) -> SetupStep {
         let lower = prompt.to_lowercase();
-        if lower.contains("provider")
+        // First: a notice that is accepted or not may use any other step's
+        // words on its way to its question.
+        if lower.contains("do you accept") {
+            SetupStep::Terms
+        } else if lower.contains("provider")
             || (lower.contains("which") && (lower.contains("gemini") || lower.contains("claude")))
         {
             SetupStep::Provider
@@ -573,6 +580,7 @@ impl AppState {
                 SetupStep::BearerToken => "Enter bearer token (or press Enter for no auth)...",
                 SetupStep::ModelSelect => "↑/↓ to choose model, Enter to confirm",
                 SetupStep::ModelInstall => "Enter for progress, or cancel to stop it...",
+                SetupStep::Terms => "↑/↓ to choose, Enter to answer",
                 SetupStep::Timezone => "Enter timezone (or press Enter for default)...",
                 SetupStep::Confirm => "Enter 1 to confirm or 2 to restart...",
             },
@@ -730,6 +738,24 @@ mod native_render_tests {
             AppState::infer_setup_step("qwen3.5-9b is being installed. Press Enter for how far it is, or answer cancel to stop it and choose again:"),
             SetupStep::ModelInstall
         );
+    }
+
+    /// The question about the terms a native model comes with is a step of
+    /// its own, whatever words its notice uses on the way: a notice names a
+    /// model and its maker, and the header and the input's hint are the
+    /// question's. (The brain asks it: `native_model::terms_question`.)
+    #[test]
+    fn infer_setup_step_recognizes_a_question_about_terms_whatever_its_notice_says() {
+        let question = "Inkling 2 Mini is a model of Thinking Machines Lab, Inc. It is licensed\nunder the Apache License 2.0 and comes with Thinking Machines' Model\nAcceptable Use Policy.\n\nDo you accept the Model Acceptable Use Policy for Inkling 2 Mini on this machine?";
+        assert_eq!(AppState::infer_setup_step(question), SetupStep::Terms);
+        // The words of other steps before the question change nothing.
+        assert_eq!(
+            AppState::infer_setup_step("Which model or provider, under what name and API key? Do you accept the terms?"),
+            SetupStep::Terms
+        );
+        let mut app = AppState::new();
+        app.mode = AppMode::Setup(SetupState { step: SetupStep::Terms });
+        assert_eq!(app.input_placeholder(), "↑/↓ to choose, Enter to answer");
     }
 
     #[test]

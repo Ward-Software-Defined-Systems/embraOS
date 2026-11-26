@@ -231,6 +231,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
                 SetupStep::Endpoint => "Endpoint",
                 SetupStep::BearerToken => "Bearer",
                 SetupStep::ModelSelect | SetupStep::ModelInstall => "Model",
+                SetupStep::Terms => "Terms",
                 SetupStep::Timezone => "Timezone",
                 SetupStep::Confirm => "Confirm",
             };

@@ -1671,7 +1671,7 @@ async fn handle_turn(
             // before dispatching to the regular handler.
             {
                 let cancelled = pending_openai_compat_setup.lock().await.take();
-                if cancelled.is_some() {
+                if let Some(cancelled) = cancelled {
                     let is_reentry = cmd.command == "/provider"
                         && cmd.args.contains("--setup");
                     if !is_reentry {
@@ -1679,7 +1679,7 @@ async fn handle_turn(
                             .send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::System(
                                     SystemMessage {
-                                        content: "OpenAI-compat setup cancelled.".to_string(),
+                                        content: setup_cancelled_words(&cancelled.step),
                                         msg_type: SystemMessageType::Info as i32,
                                     },
                                 )),

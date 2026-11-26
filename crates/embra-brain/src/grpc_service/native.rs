@@ -6,10 +6,17 @@
 //! model loaded (`pick_native_model`), after its file was downloaded and
 //! checked when it is not on the machine.
 //!
-//! `/native` itself: the models' files and the jobs on them, which are the
-//! machine's matters and are answered before a session too, and what the
-//! stored configuration keeps loaded (`use`, `off`, `context`), in a
-//! session.
+//! `/native` itself: the models' files, the jobs on them and the terms a
+//! model comes with, which are the machine's matters and are answered
+//! before a session too, and what the stored configuration keeps loaded
+//! (`use`, `off`, `context`), in a session.
+//!
+//! A model that comes with a policy on its use is neither installed nor
+//! loaded before the operator accepted that policy on the machine
+//! (`native_model::terms_refusal`; `/native terms`, `/native accept`). A
+//! command that names such a model is told so with the policy's notice; the
+//! model question asks (`provider_setup.rs`, the wizard). The updater and
+//! embrad hold the same rule for every way in.
 
 use super::*;
 use crate::native_model::jobs::{JobEnd, JobEvent, JobKind, Jobs};
@@ -111,6 +118,12 @@ pub(super) async fn load_native_model(
     db: &Arc<WardsonDbClient>,
     env: &Env,
 ) -> Result<(config::SystemConfig, Loaded), String> {
+    // Whatever led here: no configuration names a model whose terms are
+    // not accepted on this machine. The callers say it with the policy's
+    // notice before they come this far (`pick_native_model`).
+    if !contract::terms_settled(model, &env.terms()) {
+        return Err(contract::terms_open_words(model).unwrap_or_else(|| format!("the terms of {} are not accepted on this machine", model.id)));
+    }
     let mut cfg = config::load_config(db).await.map_err(|e| format!("the configuration could not be read ({e})"))?;
     let changed = cfg.openai_compat.native_model != model.id;
     if changed {
@@ -210,6 +223,11 @@ pub(super) async fn pick_native_model(
     db: &Arc<WardsonDbClient>,
     hands: &NativeHands,
 ) {
+    // A model that comes with a policy on its use: its notice, and the way
+    // to accept it, before anything is installed or loaded.
+    if let Some(refusal) = native_model::terms_refusal(model, &hands.env, "loaded") {
+        return say(tx, refusal, SystemMessageType::Error).await;
+    }
     if contract::installed(model, &hands.env.models) == Installed::Verified {
         load_and_say(model, tx, db, hands, true).await;
         return;
@@ -317,7 +335,9 @@ pub(super) async fn handle_native_model_command(
 /// The words are the model's family's (`native::Dialect`): a family
 /// without levels thinks or does not, and its stored word for "off" is the
 /// level `low`, so that the one set of levels stays the configuration's; a
-/// family with levels takes its own, and no other word reaches the server.
+/// family with levels takes its own, and no other word reaches the server;
+/// a family whose template has no switch is at its least level where the
+/// others are off, and is told so.
 pub(super) fn apply_native_effort(args: &str, oc: &mut config::OpenAiCompatConfig) -> (bool, String, SystemMessageType) {
     let Some(model) = non_empty(&oc.native_model) else {
         return (false, config::PresetNotReady::NoModel(OpenAiCompatPreset::Native).to_string(), SystemMessageType::Error);
@@ -364,25 +384,34 @@ fn native_effort(family: contract::Family, model: &str, args: &str, oc: &mut con
     };
     // Levels of its own: the template refuses any other word, so none is stored.
     let levels = dialect.levels.join(", ");
+    // What off comes to: no thinking, or the least level of a family whose
+    // template has no switch.
+    let off_is = match dialect.least {
+        None => "/effort off answers without thinking first".to_string(),
+        Some(least) => format!("/effort off is its least ({least}): it has no switch, and thinks a little even then"),
+    };
     let how = format!(
-        "This native model (experimental) thinks at one of its levels ({levels}): /effort <level> sets one, /effort on is its own ({own}), and /effort off answers without thinking first."
+        "This native model (experimental) thinks at one of its levels ({levels}): /effort <level> sets one, /effort on is its own ({own}), and {off_is}."
     );
     match word.as_str() {
         "" => {
-            let now = match thinking(family, oc.effort_for_preset(OpenAiCompatPreset::Native)) {
-                Thinks::Off => "off".to_string(),
-                Thinks::On(None) => format!("on at the model's own level, {own} (the default)"),
-                Thinks::On(Some(level)) => format!("on at {level}"),
+            let now = match (thinking(family, oc.effort_for_preset(OpenAiCompatPreset::Native)), dialect.least) {
+                (Thinks::Off, None) => "off".to_string(),
+                (Thinks::Off, Some(least)) => format!("at its least ({least})"),
+                (Thinks::On(None), _) => format!("on at the model's own level, {own} (the default)"),
+                (Thinks::On(Some(level)), _) => format!("on at {level}"),
             };
             (false, format!("Thinking is {now} for {model}. {how} A change takes effect on your next message."), SystemMessageType::Info)
         }
-        "off" => {
+        off if off == "off" || off == dialect.off => {
             oc.set_effort(OpenAiCompatPreset::Native, Some(dialect.off.to_string()));
-            (
-                true,
-                format!("Thinking is off for {model}: it answers without thinking first. /effort on brings it back. {next}"),
-                SystemMessageType::Info,
-            )
+            let said = match dialect.least {
+                None => format!("Thinking is off for {model}: it answers without thinking first. /effort on brings it back. {next}"),
+                Some(least) => format!(
+                    "Thinking is at its least ({least}) for {model}: it has no switch, and thinks a little before it answers even then. /effort on brings its own level back. {next}"
+                ),
+            };
+            (true, said, SystemMessageType::Info)
         }
         "on" | "reset" => {
             oc.set_effort(OpenAiCompatPreset::Native, None);
@@ -409,20 +438,23 @@ fn catalogue_ids() -> String {
 /// What `/native help` answers.
 pub(super) fn native_usage() -> String {
     format!(
-        "Usage: /native | /native install <model> | /native import | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n  \
+        "Usage: /native | /native install <model> | /native import | /native use <model> | /native off | /native context [<tokens>|reset] | /native terms [<model>] | /native accept <model> | /native remove <model> | /native cancel\n  \
          A native model (experimental) runs on this machine; the catalogue: {}. /native shows the models, what is kept loaded, the model server and the job that runs. \
          install downloads a model's two files, the model file and the file it reads images through, and checks them; \
          import says how a file comes in through the web console, for a machine that cannot reach the source. \
          use loads a model, installing it first when it is not there, and off frees its memory: \
          both whichever provider leads the session, and /provider native switches to a loaded model. \
-         context is the window the loaded model is given. remove deletes a model's files. cancel stops the job that runs.",
+         context is the window the loaded model is given. \
+         terms shows the licence each model keeps and the policy on its use a model comes with, and accept accepts such a policy on this machine: \
+         a model that comes with one is installed, imported and loaded after that. \
+         remove deletes a model's files. cancel stops the job that runs.",
         catalogue_ids()
     )
 }
 
 /// What `/native use`, `off` and `context` answer before a session: they
 /// change the stored configuration, which the setup is still writing.
-pub(super) const NATIVE_NOT_BEFORE_A_SESSION: &str = "Not run before setup is complete: /native use, off and context change the stored configuration, and the setup's own question chooses the model. /native, /native install, /native import, /native remove and /native cancel are answered now.";
+pub(super) const NATIVE_NOT_BEFORE_A_SESSION: &str = "Not run before setup is complete: /native use, off and context change the stored configuration, and the setup's own question chooses the model. /native, /native install, /native import, /native terms, /native accept, /native remove and /native cancel are answered now.";
 
 /// What `/native import` answers. The upload itself is the web console's
 /// (`PUT /api/models/<id>`, embra-web's `models.rs`): the brain holds
@@ -449,6 +481,7 @@ pub(super) fn import_instructions() -> String {
         "A model's files come in through the web console, from a browser on another machine (experimental): in the sidebar, /native with the action import, then a file. \
          It is for a machine that cannot reach the catalogue's source. A model has two files, each sent by itself: {}. \
          The machine tells which file of which model it is by its name and size, checks it against the catalogue's sha256 while it arrives, and keeps nothing of a file that is not the catalogue's. \
+         A model that comes with a policy on its use is taken after that policy is accepted on this machine (/native terms <model>, /native accept <model>). \
          A model runs once its model file is there and reads images once its image file is. /native use <model> loads it then.",
         files.join("; ")
     )
@@ -463,6 +496,10 @@ pub(super) enum MachineAction {
     Install(&'static NativeModel),
     /// How a model's file comes in by upload: said, not done here.
     Import,
+    /// The terms the models come with, or one model's in full.
+    Terms(Option<&'static NativeModel>),
+    /// The operator's acceptance of the policy a model comes with.
+    Accept(&'static NativeModel),
     Remove(&'static NativeModel),
     Cancel,
 }
@@ -516,6 +553,10 @@ pub(super) fn parse_native(args: &str) -> NativeAction {
         "cancel" => alone(NativeAction::Machine(MachineAction::Cancel)),
         "off" => alone(NativeAction::Stored(StoredAction::Off)),
         "install" => model(|m| NativeAction::Machine(MachineAction::Install(m))),
+        "accept" => model(|m| NativeAction::Machine(MachineAction::Accept(m))),
+        // Every model's, or one model's in full.
+        "terms" if first.is_none() => NativeAction::Machine(MachineAction::Terms(None)),
+        "terms" => model(|m| NativeAction::Machine(MachineAction::Terms(Some(m)))),
         "remove" => model(|m| NativeAction::Machine(MachineAction::Remove(m))),
         "use" => model(|m| NativeAction::Stored(StoredAction::Use(m))),
         "context" => match (first, more) {
@@ -556,11 +597,13 @@ pub(super) async fn show_native(env: &Env, jobs: &Jobs, cfg: Option<&config::Sys
     lines.push(match wanted {
         Ok(Some(wanted)) => {
             let thinking = cfg.map(|cfg| {
-                use crate::provider::openai_compat::native::{Thinks, thinking};
-                match thinking(wanted.model.family, cfg.openai_compat.native_effort_by_model.get(wanted.model.id).map(String::as_str)) {
-                    Thinks::Off => ", thinking off".to_string(),
-                    Thinks::On(None) => ", thinking on".to_string(),
-                    Thinks::On(Some(level)) => format!(", thinking on at {level}"),
+                use crate::provider::openai_compat::native::{Thinks, dialect, thinking};
+                let stored = cfg.openai_compat.native_effort_by_model.get(wanted.model.id).map(String::as_str);
+                match (thinking(wanted.model.family, stored), dialect(wanted.model.family).least) {
+                    (Thinks::Off, None) => ", thinking off".to_string(),
+                    (Thinks::Off, Some(least)) => format!(", thinking at its least ({least})"),
+                    (Thinks::On(None), _) => ", thinking on".to_string(),
+                    (Thinks::On(Some(level)), _) => format!(", thinking on at {level}"),
                 }
             });
             let leads = cfg.is_some_and(|cfg| ProviderKind::from_str(&cfg.api_provider) == Some(ProviderKind::Native));
@@ -594,7 +637,15 @@ pub(super) async fn show_native(env: &Env, jobs: &Jobs, cfg: Option<&config::Sys
 }
 
 /// Start a job on a model's file and follow it for the console that asked.
+/// An install of a model whose terms are not accepted on this machine is
+/// not started: the console is shown the policy's notice and the way to
+/// accept it. (The updater would refuse the same install.)
 async fn start_job(kind: JobKind, model: &'static NativeModel, tx: &mpsc::Sender<Result<ConversationResponse, Status>>, env: &Env, jobs: &Jobs) {
+    if kind == JobKind::Install
+        && let Some(refusal) = native_model::terms_refusal(model, env, "installed")
+    {
+        return say(tx, refusal, SystemMessageType::Error).await;
+    }
     let events = match jobs.start(env, kind, model) {
         Ok(events) => events,
         Err(running) => {
@@ -680,6 +731,17 @@ async fn machine_action(
         MachineAction::Show => say(tx, show_native(env, jobs, cfg).await, SystemMessageType::Info).await,
         MachineAction::Help => say(tx, native_usage(), SystemMessageType::Info).await,
         MachineAction::Import => say(tx, import_instructions(), SystemMessageType::Info).await,
+        MachineAction::Terms(None) => say(tx, native_model::terms_of_all(env), SystemMessageType::Info).await,
+        MachineAction::Terms(Some(model)) => say(tx, native_model::terms_of_one(model, env), SystemMessageType::Info).await,
+        MachineAction::Accept(model) => match native_model::accept_by_command(model, env) {
+            Ok(said) => {
+                say(tx, said, SystemMessageType::Info).await;
+                // embrad starts a model that waited for this at its next
+                // look, and the provider's line follows it.
+                crate::provider::health::request_probe();
+            }
+            Err(why) => say(tx, format!("Not accepted: {why}. Nothing was changed."), SystemMessageType::Error).await,
+        },
         MachineAction::Install(model) => start_job(JobKind::Install, model, tx, env, jobs).await,
         MachineAction::Remove(model) => start_job(JobKind::Remove, model, tx, env, jobs).await,
         MachineAction::Cancel => {
@@ -846,6 +908,22 @@ mod tests {
         by_id("qwen3.5-9b").unwrap()
     }
 
+    /// The catalogue's model that comes with a policy on its use.
+    fn inkling() -> &'static NativeModel {
+        by_id("inkling-2-mini").unwrap()
+    }
+
+    /// The question a console is asked next.
+    async fn asked(rx: &mut mpsc::Receiver<Result<ConversationResponse, Status>>) -> SetupPrompt {
+        let frame = tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.expect("something is asked").expect("the console is attached").unwrap();
+        match frame.response_type {
+            Some(conversation_response::ResponseType::Setup(prompt)) => prompt,
+            other => panic!("not a question: {other:?}"),
+        }
+    }
+
+    const INKLING_OPEN: &str = "inkling-2-mini comes with its maker's Model Acceptable Use Policy, which is not accepted on this machine: /native terms inkling-2-mini shows it, and /native accept inkling-2-mini accepts it";
+
     /// A database that holds a configuration on `provider` with
     /// `native_model` kept loaded, and takes its saves.
     async fn config_db(provider: &str, native_model: &str) -> MockServer {
@@ -906,13 +984,13 @@ mod tests {
         let oc = config_of("anthropic", serde_json::json!({})).openai_compat;
         let (prompt, state) = native_model_selection(Some("qwen3.5-9b"), &oc, hands(&env));
         assert_eq!(prompt.field_type, SetupFieldType::Selector as i32);
-        assert_eq!(prompt.options, ["qwen3.5-9b", "qwen3.5-4b", "qwen3.8-27b"], "the model kept loaded first");
+        assert_eq!(prompt.options, ["qwen3.5-9b", "qwen3.5-4b", "qwen3.8-27b", "inkling-2-mini"], "the model kept loaded first");
         assert_eq!(prompt.default_value, "qwen3.5-9b");
         // Each model with what it takes when it is loaded: the 4B as it
         // stands here, without its image file; the 9B as an install brings it.
         assert_eq!(
             prompt.prompt,
-            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): not installed, downloaded first, about 7.8 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded."
+            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): not installed, downloaded first, about 7.8 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded; inkling-2-mini is Inkling 2 Mini (Q4_K_M, 16668 MB, with its maker's Model Acceptable Use Policy): not installed, downloaded first, about 19.1 GB of memory when loaded."
         );
         // The machine's memory beside them, when the kernel says it; and a
         // window stored for a model is the one its figure is for.
@@ -921,7 +999,7 @@ mod tests {
         let (with_machine, _) = native_model_selection(None, &narrowed, hands(&env));
         assert_eq!(
             with_machine.prompt,
-            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 3.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): not installed, downloaded first, about 7.8 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded. This machine has 12.6 GB of memory, 11.5 GB of it free for a model now."
+            "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 3.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): not installed, downloaded first, about 7.8 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded; inkling-2-mini is Inkling 2 Mini (Q4_K_M, 16668 MB, with its maker's Model Acceptable Use Policy): not installed, downloaded first, about 19.1 GB of memory when loaded. This machine has 12.6 GB of memory, 11.5 GB of it free for a model now."
         );
         std::fs::remove_dir_all(&env.proc).unwrap();
         assert!(matches!(state.preset, OpenAiCompatPreset::Native) && state.model_only && state.native.is_some());
@@ -929,7 +1007,7 @@ mod tests {
 
         // None kept loaded: the catalogue's own order.
         let (prompt, _) = native_model_selection(None, &oc, hands(&env));
-        assert_eq!(prompt.options, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b"]);
+        assert_eq!(prompt.options, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b", "inkling-2-mini"]);
         // Every model of the catalogue is offered, and each is a name `/model` takes.
         for model in &contract::CATALOGUE {
             assert!(prompt.options.iter().any(|id| id == model.id), "{}", model.id);
@@ -938,7 +1016,7 @@ mod tests {
         }
         assert_eq!(
             native_model_choice("qwen3.5-27b").unwrap_err(),
-            "'qwen3.5-27b' is not a native model. The catalogue (experimental): qwen3.5-4b, qwen3.5-9b, qwen3.8-27b. /model alone picks from the list."
+            "'qwen3.5-27b' is not a native model. The catalogue (experimental): qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini. /model alone picks from the list."
         );
 
         // A download that stopped, and a file nobody checked.
@@ -1263,6 +1341,51 @@ mod tests {
         assert!(said.starts_with("Thinking is on for qwen3.5-4b. A native model has no levels (experimental)"), "{said}");
     }
 
+    /// A model whose family has no switch for thinking: `/effort off` and the
+    /// family's own word for its least level both store that level and say
+    /// what it comes to; the levels of other providers are levels of its
+    /// own, and nothing but the family's words is stored.
+    #[test]
+    fn effort_on_a_native_model_without_a_switch_says_what_its_least_comes_to() {
+        let mut oc = config::OpenAiCompatConfig::default();
+        oc.set_model(OpenAiCompatPreset::Native, "inkling-2-mini");
+        let stored = |oc: &config::OpenAiCompatConfig| oc.effort_for_preset(OpenAiCompatPreset::Native).map(str::to_string);
+        let run = |args: &str, oc: &mut config::OpenAiCompatConfig| native_effort(contract::Family::Inkling2, "inkling-2-mini", args, oc);
+
+        let (changed, said, kind) = run("", &mut oc);
+        assert_eq!((changed, kind), (false, SystemMessageType::Info));
+        assert_eq!(
+            said,
+            "Thinking is on at the model's own level, high (the default) for inkling-2-mini. This native model (experimental) thinks at one of its levels (minimal, low, medium, high, xhigh, max): /effort <level> sets one, /effort on is its own (high), and /effort off is its least (none): it has no switch, and thinks a little even then. A change takes effect on your next message."
+        );
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+            let (changed, said, kind) = run(level, &mut oc);
+            assert_eq!((changed, kind), (true, SystemMessageType::Info));
+            assert_eq!(said, format!("Thinking is on for inkling-2-mini at {level}. Takes effect on your next message."));
+            assert_eq!(stored(&oc).as_deref(), Some(level));
+        }
+        for off in ["off", "none", "NONE"] {
+            let (changed, said, kind) = run(off, &mut oc);
+            assert_eq!((changed, kind), (true, SystemMessageType::Info), "{off}");
+            assert_eq!(
+                said,
+                "Thinking is at its least (none) for inkling-2-mini: it has no switch, and thinks a little before it answers even then. /effort on brings its own level back. Takes effect on your next message."
+            );
+            assert_eq!(stored(&oc).as_deref(), Some("none"));
+        }
+        assert!(run("", &mut oc).1.starts_with("Thinking is at its least (none) for inkling-2-mini. "));
+        for back in ["on", "reset"] {
+            let (changed, said, _) = run(back, &mut oc);
+            assert!(changed);
+            assert_eq!(said, "Thinking is on for inkling-2-mini at its own level, high (the default). Takes effect on your next message.");
+            assert_eq!(stored(&oc), None);
+        }
+        let (changed, said, kind) = run("sometimes", &mut oc);
+        assert_eq!((changed, kind), (false, SystemMessageType::Error));
+        assert!(said.starts_with("'sometimes' is not on, off or a level. "), "{said}");
+        assert_eq!(stored(&oc), None, "a word that is none of its own stores nothing");
+    }
+
     #[test]
     fn native_is_read_into_its_forms() {
         use {MachineAction as M, StoredAction as S};
@@ -1275,6 +1398,9 @@ mod tests {
         assert_eq!(parse_native("import"), machine(M::Import));
         assert_eq!(parse_native("import qwen3.5-4b"), NativeAction::Refused("/native import takes nothing after it. /native help shows the forms.".into()));
         assert_eq!(parse_native("install qwen3.5-4b"), machine(M::Install(four())));
+        assert_eq!(parse_native("terms"), machine(M::Terms(None)));
+        assert_eq!(parse_native("Terms INKLING-2-MINI"), machine(M::Terms(Some(inkling()))));
+        assert_eq!(parse_native("accept inkling-2-mini"), machine(M::Accept(inkling())));
         assert_eq!(parse_native("remove QWEN3.5-9B"), machine(M::Remove(nine())));
         assert_eq!(parse_native("cancel"), machine(M::Cancel));
         assert_eq!(parse_native("use qwen3.5-9b"), stored(S::Use(nine())));
@@ -1284,9 +1410,12 @@ mod tests {
         assert_eq!(parse_native("context 65,536"), stored(S::Context(ContextAction::Set(65_536))));
         assert_eq!(parse_native("Context Reset"), stored(S::Context(ContextAction::Reset)));
         for (bad, why) in [
-            ("install", "/native install takes one model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b."),
-            ("use qwen3.5-4b qwen3.5-9b", "/native use takes one model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b."),
-            ("remove qwen3.5-27b", "'qwen3.5-27b' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b."),
+            ("install", "/native install takes one model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini."),
+            ("use qwen3.5-4b qwen3.5-9b", "/native use takes one model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini."),
+            ("remove qwen3.5-27b", "'qwen3.5-27b' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini."),
+            ("accept", "/native accept takes one model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini."),
+            ("accept all", "'all' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini."),
+            ("terms inkling-2-mini now", "/native terms takes one model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini."),
             ("off now", "/native off takes nothing after it."),
             ("list all", "/native list takes nothing after it."),
             ("context many", "'many' is not a number of tokens."),
@@ -1298,12 +1427,12 @@ mod tests {
         }
         // Every model of the catalogue is a model each form takes, and the usage names it.
         for model in &contract::CATALOGUE {
-            for verb in ["install", "use", "remove"] {
+            for verb in ["install", "use", "remove", "terms", "accept"] {
                 assert!(!matches!(parse_native(&format!("{verb} {}", model.id)), NativeAction::Refused(_)), "{verb} {}", model.id);
             }
             assert!(native_usage().contains(model.id), "{}", model.id);
         }
-        assert!(native_usage().starts_with("Usage: /native | /native install <model> | /native import | /native use <model> | /native off | /native context [<tokens>|reset] | /native remove <model> | /native cancel\n"));
+        assert!(native_usage().starts_with("Usage: /native | /native install <model> | /native import | /native use <model> | /native off | /native context [<tokens>|reset] | /native terms [<model>] | /native accept <model> | /native remove <model> | /native cancel\n"));
     }
 
     /// `/native import` says how and where from, and prints no address of
@@ -1622,5 +1751,203 @@ mod tests {
         assert_eq!(told(&mut rx).await, "No model job runs.");
         handle_native_before_a_session("import", &tx, &env, &jobs).await;
         assert_eq!(told(&mut rx).await, import_instructions());
+    }
+
+    /// The terms a model comes with are the machine's matter, shown and
+    /// accepted before a session too. A model that comes with a policy on
+    /// its use is not installed before the policy is accepted here: the
+    /// console is shown the policy's notice word for word and the command
+    /// that accepts it, and no job is started. `/native accept` records the
+    /// acceptance with the policy's date; a model with its licence alone
+    /// has nothing to accept, and nothing is written for it.
+    #[tokio::test]
+    async fn a_models_terms_are_shown_and_accepted_with_a_command_before_a_session_too() {
+        let (root, mut env) = machine("native-terms");
+        env.updater = updater(&root, &root.join("never"));
+        let jobs = Jobs::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        let notice = inkling().use_policy.expect("it comes with a policy").notice;
+
+        handle_native_before_a_session("terms", &tx, &env, &jobs).await;
+        assert_eq!(
+            told(&mut rx).await,
+            "The licences and terms of the native models (experimental):\n  \
+             qwen3.5-4b  Qwen3.5 4B: Apache-2.0; nothing beside its licence.\n  \
+             qwen3.5-9b  Qwen3.5 9B: Apache-2.0; nothing beside its licence.\n  \
+             qwen3.8-27b  Qwen3.8 27B: Apache-2.0; nothing beside its licence.\n  \
+             inkling-2-mini  Inkling 2 Mini: Apache-2.0, with its maker's Model Acceptable Use Policy (https://thinkingmachines.ai/model-acceptable-use-policy/, of July 15, 2026): \
+             not accepted on this machine. /native terms inkling-2-mini shows it, and /native accept inkling-2-mini accepts it."
+        );
+        handle_native_before_a_session("terms inkling-2-mini", &tx, &env, &jobs).await;
+        assert_eq!(
+            told(&mut rx).await,
+            format!(
+                "{notice}\n\nOn this machine the Model Acceptable Use Policy of July 15, 2026 is not accepted: /native accept inkling-2-mini accepts it, and until then inkling-2-mini is neither installed, imported nor loaded here."
+            )
+        );
+        handle_native_before_a_session("terms qwen3.5-4b", &tx, &env, &jobs).await;
+        let alone = "qwen3.5-4b (Qwen3.5 4B) comes with its licence alone, Apache-2.0: there is nothing to accept.";
+        assert_eq!(told(&mut rx).await, alone);
+
+        // Not installed, and no job: the notice, and the way.
+        handle_native_before_a_session("install inkling-2-mini", &tx, &env, &jobs).await;
+        assert_eq!(told(&mut rx).await, format!("{notice}\n\nNot installed: {INKLING_OPEN}. Nothing was changed."));
+        assert!(jobs.running().is_none() && jobs.last().is_none(), "no job was started");
+
+        // Accepted with the command: recorded, with the notice that was accepted.
+        handle_native_before_a_session("accept inkling-2-mini", &tx, &env, &jobs).await;
+        assert_eq!(
+            told(&mut rx).await,
+            format!(
+                "{notice}\n\nAccepted on this machine and recorded: the Model Acceptable Use Policy of July 15, 2026, which Inkling 2 Mini comes with. /native install inkling-2-mini downloads the model, /native use inkling-2-mini loads it, and an upload of its files is taken."
+            )
+        );
+        let contract::Terms::Accepted(accepted) = contract::terms_of(inkling(), &env.terms()) else { panic!("the acceptance was recorded") };
+        assert_eq!((accepted.policy.as_str(), accepted.reviewed.as_str(), accepted.by.as_str()), ("Model Acceptable Use Policy", "July 15, 2026", "command"));
+        assert!(accepted.at > 1_700_000_000, "the time it was given: {}", accepted.at);
+        // Again: nothing is written a second time.
+        handle_native_before_a_session("accept inkling-2-mini", &tx, &env, &jobs).await;
+        let again = told(&mut rx).await;
+        assert!(
+            again.starts_with("The Model Acceptable Use Policy that inkling-2-mini comes with is accepted on this machine already (20") && again.ends_with(" UTC, with /native accept). Nothing was changed."),
+            "{again}"
+        );
+        assert_eq!(contract::terms_of(inkling(), &env.terms()), contract::Terms::Accepted(accepted));
+        handle_native_before_a_session("terms inkling-2-mini", &tx, &env, &jobs).await;
+        let stands = told(&mut rx).await;
+        assert!(
+            stands.starts_with(&format!("{notice}\n\nOn this machine the Model Acceptable Use Policy of July 15, 2026 is accepted (20")) && stands.ends_with(" UTC, with /native accept)."),
+            "{stands}"
+        );
+        handle_native_before_a_session("terms", &tx, &env, &jobs).await;
+        assert!(told(&mut rx).await.contains(", of July 15, 2026): accepted on this machine (20"));
+
+        // The licence alone: nothing to accept, and nothing written.
+        handle_native_before_a_session("accept qwen3.5-4b", &tx, &env, &jobs).await;
+        assert_eq!(told(&mut rx).await, alone);
+        assert!(!contract::terms_path(&env.terms(), four()).exists());
+
+        // The install is started now.
+        handle_native_before_a_session("install inkling-2-mini", &tx, &env, &jobs).await;
+        assert!(told(&mut rx).await.starts_with("Installing inkling-2-mini: its model file (16668 MB) and its image file (609 MB) are downloaded and checked"));
+        jobs.stop();
+    }
+
+    /// A command that would load a model whose terms are not accepted on
+    /// this machine (`/native use`, `/model <name>`) loads nothing: no
+    /// configuration names the model and embrad is asked for nothing,
+    /// whatever stands on DATA. A record that does not count is said. With
+    /// the acceptance the model is loaded as any other.
+    #[tokio::test]
+    async fn a_command_loads_no_model_whose_terms_are_not_accepted() {
+        let (_root, env) = machine("terms-load");
+        // Its files are there: a STATE from before the acceptance.
+        install(inkling(), &env);
+        let db_server = config_db("anthropic", "").await;
+        let db = Arc::new(WardsonDbClient::from_url(&db_server.uri()));
+        let (tx, mut rx) = mpsc::channel(16);
+        let notice = inkling().use_policy.expect("it comes with a policy").notice;
+
+        pick_native_model(inkling(), &tx, &db, &hands(&env)).await;
+        assert_eq!(told(&mut rx).await, format!("{notice}\n\nNot loaded: {INKLING_OPEN}. Nothing was changed."));
+        // Whatever led there: the load itself names no such model.
+        assert_eq!(load_native_model(inkling(), &db, &env).await.unwrap_err(), INKLING_OPEN);
+        assert!(saved_models(&db_server).await.is_empty(), "no configuration was saved");
+        assert!(!env.settings.exists(), "nothing was asked of embrad");
+
+        // An acceptance of another date of the policy is not this release's, and is said.
+        std::fs::create_dir_all(env.terms()).unwrap();
+        std::fs::write(contract::terms_path(&env.terms(), inkling()), "policy=Model Acceptable Use Policy\nreviewed=March 1, 2026\nat=5\nby=command\n").unwrap();
+        pick_native_model(inkling(), &tx, &db, &hands(&env)).await;
+        assert_eq!(
+            told(&mut rx).await,
+            format!(
+                "{notice}\n\nNot loaded: {INKLING_OPEN}. Its record: the acceptance recorded is of the Model Acceptable Use Policy of March 1, 2026, and this release read the Model Acceptable Use Policy of July 15, 2026. Nothing was changed."
+            )
+        );
+        assert!(saved_models(&db_server).await.is_empty());
+
+        // Accepted: loaded as any installed model.
+        native_model::accept_terms(inkling(), &env, native_model::ACCEPTED_BY_COMMAND).unwrap().expect("a record");
+        pick_native_model(inkling(), &tx, &db, &hands(&env)).await;
+        assert_eq!(told(&mut rx).await, "inkling-2-mini is asked for (experimental): embrad loads it within seconds. Switch to it with /provider native when ready.");
+        assert_eq!(saved_models(&db_server).await, ["inkling-2-mini"]);
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(Wanted::new(inkling()))));
+        // A model with its licence alone never meets the question.
+        assert_eq!(native_model::terms_refusal(four(), &env, "loaded"), None);
+        assert_eq!(native_model::terms_question(four(), &env), None);
+    }
+
+    /// The model question (`/model`, `/provider --setup native`): a pick of
+    /// a model that comes with a policy on its use is followed by the
+    /// policy's notice and a question. The refusing answer is the first
+    /// option, which Enter sends; it, an empty answer and a word of the
+    /// operator's own end the flow with nothing changed. The accepting
+    /// option's own words are recorded, and the pick goes on.
+    #[tokio::test]
+    async fn the_model_question_asks_for_a_models_terms_and_goes_on_only_when_they_are_accepted() {
+        let (_root, env) = machine("terms-question");
+        install(inkling(), &env);
+        install(four(), &env);
+        let db_server = config_db("anthropic", "").await;
+        let db = Arc::new(WardsonDbClient::from_url(&db_server.uri()));
+        let pending = Arc::new(Mutex::new(None));
+        let (tx, mut rx) = mpsc::channel(16);
+        let oc = config_of("anthropic", serde_json::json!({})).openai_compat;
+        let policy = inkling().use_policy.expect("it comes with a policy");
+
+        for answer in ["I do not accept", "", "yes", "accept", "I accept"] {
+            let (_, mut state) = native_model_selection(None, &oc, hands(&env));
+            let outcome = handle_pending_openai_compat_step(&mut state, "inkling-2-mini", &tx, &db, &pending).await;
+            assert!(matches!(outcome, SetupStepOutcome::Advance), "{answer:?}: the flow waits for the answer");
+            let question = asked(&mut rx).await;
+            assert_eq!(question.field_type, SetupFieldType::Selector as i32);
+            assert_eq!(question.prompt, format!("{}\n\nDo you accept the Model Acceptable Use Policy for Inkling 2 Mini on this machine?", policy.notice));
+            assert_eq!(question.options, ["I do not accept", "I accept the Model Acceptable Use Policy"], "the refusing answer first: Enter alone accepts nothing");
+            assert_eq!(question.default_value, "", "no default");
+            assert!(matches!(&state.step, OpenAiCompatSetupStep::AwaitingNativeTerms { model } if model == "inkling-2-mini"));
+
+            let outcome = handle_pending_openai_compat_step(&mut state, answer, &tx, &db, &pending).await;
+            assert!(matches!(outcome, SetupStepOutcome::Error), "{answer:?}: the flow ends");
+            assert_eq!(
+                told(&mut rx).await,
+                "Not accepted: inkling-2-mini was neither installed nor loaded, and nothing was changed. /native terms inkling-2-mini shows its terms again.",
+                "{answer:?}"
+            );
+            assert!(!contract::terms_settled(inkling(), &env.terms()), "{answer:?}");
+            assert!(saved_models(&db_server).await.is_empty() && !env.settings.exists(), "{answer:?}");
+        }
+
+        // A command where the answer was awaited ends the flow, and says that nothing was accepted.
+        let (_, mut state) = native_model_selection(None, &oc, hands(&env));
+        assert!(matches!(handle_pending_openai_compat_step(&mut state, "inkling-2-mini", &tx, &db, &pending).await, SetupStepOutcome::Advance));
+        asked(&mut rx).await;
+        assert_eq!(
+            setup_cancelled_words(&state.step),
+            "The question about the terms of inkling-2-mini was left for a command: nothing was accepted, and nothing was changed."
+        );
+        assert_eq!(setup_cancelled_words(&OpenAiCompatSetupStep::AwaitingEndpoint), "OpenAI-compat setup cancelled.");
+
+        // Accepted: recorded where it was given, and the pick goes on.
+        let (_, mut state) = native_model_selection(None, &oc, hands(&env));
+        assert!(matches!(handle_pending_openai_compat_step(&mut state, "inkling-2-mini", &tx, &db, &pending).await, SetupStepOutcome::Advance));
+        asked(&mut rx).await;
+        let outcome = handle_pending_openai_compat_step(&mut state, "I accept the Model Acceptable Use Policy", &tx, &db, &pending).await;
+        assert!(matches!(outcome, SetupStepOutcome::Complete));
+        assert_eq!(told(&mut rx).await, "Accepted on this machine and recorded, for inkling-2-mini.");
+        assert_eq!(told(&mut rx).await, "inkling-2-mini is asked for (experimental): embrad loads it within seconds. Switch to it with /provider native when ready.");
+        let contract::Terms::Accepted(accepted) = contract::terms_of(inkling(), &env.terms()) else { panic!("the acceptance was recorded") };
+        assert_eq!((accepted.reviewed.as_str(), accepted.by.as_str()), ("July 15, 2026", "question"));
+        assert_eq!(saved_models(&db_server).await, ["inkling-2-mini"]);
+        assert_eq!(contract::read_settings(&env.settings), Ok(Some(Wanted::new(inkling()))));
+
+        // Accepted once: the next pick of it is asked nothing.
+        let (_, mut state) = native_model_selection(None, &oc, hands(&env));
+        assert!(matches!(handle_pending_openai_compat_step(&mut state, "inkling-2-mini", &tx, &db, &pending).await, SetupStepOutcome::Complete));
+        assert!(told(&mut rx).await.starts_with("inkling-2-mini is asked for"));
+        // And a model with its licence alone never is.
+        let (_, mut state) = native_model_selection(None, &oc, hands(&env));
+        assert!(matches!(handle_pending_openai_compat_step(&mut state, "qwen3.5-4b", &tx, &db, &pending).await, SetupStepOutcome::Complete));
+        assert!(told(&mut rx).await.starts_with("qwen3.5-4b is asked for"));
     }
 }

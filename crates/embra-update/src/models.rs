@@ -53,6 +53,24 @@ fn settings_path(roots: &Roots) -> PathBuf {
     roots.state().join("native-model").join("settings")
 }
 
+/// The operator's acceptances of the models' terms: `native::TERMS_DIR` in
+/// the OS.
+fn terms_dir(roots: &Roots) -> PathBuf {
+    native::terms_dir(&settings_path(roots))
+}
+
+/// A model that comes with a policy on its use is brought onto a machine
+/// only after the operator accepted that policy there (the brain records
+/// it: `/native accept`, or the wizard's question). Every way a file comes
+/// in passes here: a download and an upload are both this program's. `None`
+/// when nothing stands in the way.
+fn terms_refusal(roots: &Roots, model: &NativeModel) -> Option<Outcome> {
+    if native::terms_settled(model, &terms_dir(roots)) {
+        return None;
+    }
+    native::terms_open_words(model).map(|words| Outcome::Refused(format!("refused: {words}; nothing was changed")))
+}
+
 fn mb(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
 }
@@ -367,18 +385,25 @@ fn model_words(model: &NativeModel, models: &Path) -> String {
 }
 
 /// `model-list`: a line a model of the catalogue, then DATA's free space.
+/// A model's licence stands with the policy on its use, when it comes with
+/// one, and a policy that is not accepted on this machine is said.
 pub fn list_command(roots: &Roots, out: &mut impl Write) -> Outcome {
     let models = models_dir(roots);
+    let terms = terms_dir(roots);
     for model in &native::CATALOGUE {
+        let open = match native::terms_settled(model, &terms) {
+            true => String::new(),
+            false => format!("; its terms are not accepted here (/native terms {})", model.id),
+        };
         let _ = writeln!(
             out,
-            "{}  {} ({}, {} MB and {} MB for images, {}): {}",
+            "{}  {} ({}, {} MB and {} MB for images, {}): {}{open}",
             model.id,
             model.label,
             model.quantisation,
             mb(model.bytes),
             mb(model.images.bytes),
-            model.licence,
+            model.licence_words(),
             model_words(model, &models)
         );
     }
@@ -395,6 +420,9 @@ pub fn import_command(roots: &Roots, model: &NativeModel, part: Part, source: im
 }
 
 pub fn import_with(roots: &Roots, model: &NativeModel, part: Part, mut source: impl Read, out: &mut impl Write, limits: &Limits) -> Outcome {
+    if let Some(refused) = terms_refusal(roots, model) {
+        return refused;
+    }
     let models = models_dir(roots);
     let _lock = match job_lock(&models) {
         Ok(lock) => lock,
@@ -569,6 +597,9 @@ pub fn install_command(roots: &Roots, model: &NativeModel, out: &mut impl Write)
 /// file that does not come leaves the model installed, and the failure says
 /// that it reads text alone until an install brings it.
 pub fn install_from(roots: &Roots, model: &NativeModel, url_of: &dyn Fn(Part) -> String, out: &mut impl Write, limits: &Limits) -> Outcome {
+    if let Some(refused) = terms_refusal(roots, model) {
+        return refused;
+    }
     let models = models_dir(roots);
     let _lock = match job_lock(&models) {
         Ok(lock) => lock,
@@ -878,6 +909,62 @@ mod tests {
         let os = Roots::os();
         assert_eq!(models_dir(&os), Path::new(native::MODELS_DIR));
         assert_eq!(settings_path(&os), Path::new(native::SETTINGS_PATH));
+        assert_eq!(terms_dir(&os), Path::new(native::TERMS_DIR));
+    }
+
+    /// A stand-in model that comes with a policy on its use.
+    fn with_terms(model: NativeModel) -> NativeModel {
+        let policy = native::UsePolicy { name: "Tiny Use Policy", url: "https://example.invalid/policy", reviewed: "January 2, 2026", notice: "Tiny comes with a policy." };
+        NativeModel { use_policy: Some(policy), ..model }
+    }
+
+    /// A model that comes with a policy on its use is brought in by no way
+    /// before the operator accepted that policy on the machine: an upload is
+    /// refused before its first byte is read and a download before anybody
+    /// is asked, and nothing is written. With the acceptance recorded both
+    /// go on. A model with its licence alone never meets the question.
+    #[test]
+    fn a_model_whose_terms_are_not_accepted_is_neither_imported_nor_downloaded() {
+        let roots = temp_roots("model-terms");
+        populate(&roots);
+        let model = with_terms(tiny("tiny", CONTENT));
+        let models = models_dir(&roots);
+        let refusal = "refused: tiny comes with its maker's Tiny Use Policy, which is not accepted on this machine: /native terms tiny shows it, and /native accept tiny accepts it; nothing was changed";
+
+        // A source that fails the test when it is read: the refusal comes first.
+        struct Never;
+        impl Read for Never {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("the upload was read before the terms were looked at")
+            }
+        }
+        for part in Part::ALL {
+            assert_eq!(words(&import_with(&roots, &model, part, Never, &mut Vec::new(), &LIMITS)), ("refused", refusal), "{part:?}");
+        }
+        assert_eq!(words(&install_from(&roots, &model, &|_| NOBODY.to_string(), &mut Vec::new(), &LIMITS)), ("refused", refusal));
+        assert!(!model.dir(&models).exists(), "nothing was made for the model");
+        assert_eq!(native::installed(&model, &models), Installed::No);
+
+        // An acceptance of another date of the policy is not this release's.
+        fs::create_dir_all(terms_dir(&roots)).unwrap();
+        fs::write(native::terms_path(&terms_dir(&roots), &model), "policy=Tiny Use Policy\nreviewed=June 1, 2025\nat=1\nby=console\n").unwrap();
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, Never, &mut Vec::new(), &LIMITS)), ("refused", refusal));
+
+        // Accepted: the same upload is taken, and the image file after it.
+        native::accept_terms(&model, &terms_dir(&roots), 1_764_183_000, "console").unwrap().unwrap();
+        assert_eq!(words(&import_with(&roots, &model, Part::Model, CONTENT, &mut Vec::new(), &LIMITS)), ("done", ""));
+        assert_eq!(words(&import_with(&roots, &model, Part::Images, IMAGES, &mut Vec::new(), &LIMITS)), ("done", ""));
+        assert_eq!(native::installed(&model, &models), Installed::Verified);
+        // And an install finds both there: the question was passed, nobody is asked.
+        assert_eq!(
+            words(&install_from(&roots, &model, &|_| NOBODY.to_string(), &mut Vec::new(), &LIMITS)),
+            ("nothing", "tiny is installed and verified; nothing to do")
+        );
+
+        // The licence alone: no record, and nothing asked for.
+        let plain = tiny("plain", CONTENT);
+        assert_eq!(words(&import_with(&roots, &plain, Part::Model, CONTENT, &mut Vec::new(), &LIMITS)), ("done", ""));
+        fs::remove_dir_all(&roots.parent).unwrap();
     }
 
     #[test]
@@ -1114,8 +1201,22 @@ mod tests {
         assert_eq!(lines[0], "qwen3.5-4b  Qwen3.5 4B (Q4_K_M, 2685 MB and 641 MB for images, Apache-2.0): incomplete, 5 of 2685 MB are there");
         assert_eq!(lines[1], "qwen3.5-9b  Qwen3.5 9B (Q4_K_M, 5561 MB and 875 MB for images, Apache-2.0): installed, not usable: the file was never checked (installing the model again checks it, and replaces a file that is not this release's)");
         assert_eq!(lines[2], "qwen3.8-27b  Qwen3.8 27B (Q4_K_M, 16217 MB and 884 MB for images, Apache-2.0): not installed");
-        assert!(lines[3].starts_with("DATA has ") && lines[3].ends_with(" MB free"), "{said}");
-        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            lines[3],
+            "inkling-2-mini  Inkling 2 Mini (Q4_K_M, 16668 MB and 609 MB for images, Apache-2.0, with its maker's Model Acceptable Use Policy): not installed; its terms are not accepted here (/native terms inkling-2-mini)"
+        );
+        assert!(lines[4].starts_with("DATA has ") && lines[4].ends_with(" MB free"), "{said}");
+        assert_eq!(lines.len(), 5);
+        // Accepted: the line says how the files stand and nothing of the terms.
+        let inkling = native::by_id("inkling-2-mini").unwrap();
+        native::accept_terms(inkling, &terms_dir(&roots), 1_764_183_000, "console").unwrap().unwrap();
+        let mut out = Vec::new();
+        assert_eq!(words(&list_command(&roots, &mut out)).0, "done");
+        let said = String::from_utf8(out).unwrap();
+        assert_eq!(
+            said.lines().nth(3).unwrap(),
+            "inkling-2-mini  Inkling 2 Mini (Q4_K_M, 16668 MB and 609 MB for images, Apache-2.0, with its maker's Model Acceptable Use Policy): not installed"
+        );
         assert_eq!(state_words(Target::of(&tiny("tiny", CONTENT), Part::Model), &models), "not installed");
         fs::remove_dir_all(&roots.parent).unwrap();
     }

@@ -65,6 +65,12 @@ impl Env {
         }
     }
 
+    /// Where the operator's acceptances of the models' terms are kept:
+    /// beside the settings, on STATE (`contract::TERMS_DIR` on the machine).
+    pub(crate) fn terms(&self) -> PathBuf {
+        contract::terms_dir(&self.settings)
+    }
+
     /// What is asked for, and what embrad says. A status that cannot be
     /// read is no status: a turn is never held back by a record's glitch.
     pub(crate) fn records(&self) -> (Result<Option<Wanted>, String>, Option<Status>) {
@@ -239,8 +245,11 @@ pub(crate) fn catalogue_question(current: Option<&str>, env: &Env, window_of: &d
     let stands: Vec<String> = contract::CATALOGUE
         .iter()
         .map(|m| {
+            // A policy on a model's use is named where the model is
+            // offered; the pick asks for its acceptance (`terms_question`).
+            let policy = m.use_policy.map(|policy| format!(", with its maker's {}", policy.name)).unwrap_or_default();
             format!(
-                "{} is {} ({}, {} MB): {}, about {} GB of memory when loaded",
+                "{} is {} ({}, {} MB{policy}): {}, about {} GB of memory when loaded",
                 m.id,
                 m.label,
                 m.quantisation,
@@ -254,6 +263,157 @@ pub(crate) fn catalogue_question(current: Option<&str>, env: &Env, window_of: &d
         .map(|machine| format!(" This machine has {} GB of memory, {} GB of it free for a model now.", gb(machine.total), gb(machine.free)))
         .unwrap_or_default();
     (format!("Select a native model (experimental). {}.{machine}", stands.join("; ")), ids)
+}
+
+// ── A model's terms ──────────────────────────────────────────────────────
+//
+// A model that comes with a policy on its use (`contract::UsePolicy`) is
+// installed, imported and loaded on a machine only after the operator
+// accepted that policy there. The updater and embrad hold the rule for
+// every way in (`model-install`, `model-import`, the keeper's start); here
+// are the words the brain says and the record it writes.
+
+/// The answer to the question about a model's terms that accepts nothing.
+/// It is the question's first option: a console's selector stands on its
+/// first option, so Enter alone accepts nothing.
+pub(crate) const TERMS_DECLINE: &str = "I do not accept";
+
+/// Where an acceptance was given, as its record says: a `/native accept`.
+pub(crate) const ACCEPTED_BY_COMMAND: &str = "command";
+/// The model question of `/model` and of `/provider --setup native`.
+pub(crate) const ACCEPTED_AT_THE_QUESTION: &str = "question";
+/// The first boot's model question.
+pub(crate) const ACCEPTED_AT_THE_WIZARD: &str = "wizard";
+
+/// The answer that accepts `policy`.
+pub(crate) fn terms_accept_option(policy: &contract::UsePolicy) -> String {
+    format!("I accept the {}", policy.name)
+}
+
+/// The question about the terms `model` comes with, when it comes with a
+/// policy that is not accepted on this machine: the policy's notice word
+/// for word, then the question, and the two answers, the refusing one
+/// first. `None` when nothing is open: the model comes with its licence
+/// alone, or its policy is accepted here.
+pub(crate) fn terms_question(model: &contract::NativeModel, env: &Env) -> Option<(String, Vec<String>)> {
+    let policy = model.use_policy?;
+    if contract::terms_settled(model, &env.terms()) {
+        return None;
+    }
+    Some((
+        format!("{}\n\nDo you accept the {} for {} on this machine?", policy.notice, policy.name, model.label),
+        vec![TERMS_DECLINE.to_string(), terms_accept_option(&policy)],
+    ))
+}
+
+/// Whether `answer` to [`terms_question`] accepts: the accepting option's
+/// own words and nothing else. An empty answer, a word of the operator's
+/// own and the refusing option all accept nothing.
+pub(crate) fn terms_answer_accepts(model: &contract::NativeModel, answer: &str) -> bool {
+    model.use_policy.is_some_and(|policy| answer.trim().eq_ignore_ascii_case(&terms_accept_option(&policy)))
+}
+
+/// Record the operator's acceptance of `model`'s terms, given now on the
+/// surface `by`. `Ok(None)` for a model that comes with its licence alone.
+pub(crate) fn accept_terms(model: &contract::NativeModel, env: &Env, by: &str) -> Result<Option<contract::Accepted>, String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    contract::accept_terms(model, &env.terms(), now, by)
+        .map_err(|e| format!("the acceptance could not be written to {} ({e})", contract::terms_path(&env.terms(), model).display()))
+}
+
+/// What a command that would install or load `model` answers while its
+/// terms are open: the policy's notice word for word, then what was not
+/// done (`not_done`: "installed", "loaded") with the two commands. `None`
+/// when nothing is open.
+pub(crate) fn terms_refusal(model: &contract::NativeModel, env: &Env, not_done: &str) -> Option<String> {
+    let policy = model.use_policy?;
+    let contract::Terms::Open(why) = contract::terms_of(model, &env.terms()) else { return None };
+    let open = contract::terms_open_words(model)?;
+    // A record that is there and does not count is said: one of another
+    // date of the policy, or one that is not valid.
+    let record = if why == contract::NO_ACCEPTANCE { String::new() } else { format!(" Its record: {why}.") };
+    Some(format!("{}\n\nNot {not_done}: {open}.{record} Nothing was changed.", policy.notice))
+}
+
+/// When an acceptance was given, for a line that shows it.
+fn accepted_when(accepted: &contract::Accepted) -> String {
+    match chrono::DateTime::from_timestamp(i64::try_from(accepted.at).unwrap_or(i64::MAX), 0) {
+        Some(at) => at.format("%Y-%m-%d %H:%M UTC").to_string(),
+        None => format!("{} s after 1970", accepted.at),
+    }
+}
+
+/// Where an acceptance was given, in words: the record's own word when it
+/// is none of the brain's.
+fn accepted_where(accepted: &contract::Accepted) -> String {
+    match accepted.by.as_str() {
+        ACCEPTED_BY_COMMAND => "with /native accept".to_string(),
+        ACCEPTED_AT_THE_QUESTION => "at the model question".to_string(),
+        ACCEPTED_AT_THE_WIZARD => "at the first boot's model question".to_string(),
+        other => format!("by {other}"),
+    }
+}
+
+/// `/native terms <model>`: the terms `model` comes with and how they stand
+/// on this machine. A policy's notice is shown word for word.
+pub(crate) fn terms_of_one(model: &contract::NativeModel, env: &Env) -> String {
+    let Some(policy) = model.use_policy else {
+        return format!("{} ({}) comes with its licence alone, {}: there is nothing to accept.", model.id, model.label, model.licence);
+    };
+    let stands = match contract::terms_of(model, &env.terms()) {
+        contract::Terms::Accepted(accepted) => format!("accepted ({}, {})", accepted_when(&accepted), accepted_where(&accepted)),
+        contract::Terms::Open(why) => {
+            let record = if why == contract::NO_ACCEPTANCE { String::new() } else { format!(" ({why})") };
+            format!(
+                "not accepted{record}: /native accept {} accepts it, and until then {} is neither installed, imported nor loaded here",
+                model.id, model.id
+            )
+        }
+        contract::Terms::None => "nothing to accept".to_string(),
+    };
+    format!("{}\n\nOn this machine the {} of {} is {stands}.", policy.notice, policy.name, policy.reviewed)
+}
+
+/// `/native terms`: a line a model of the catalogue, its licence with the
+/// policy on its use and how that stands on this machine.
+pub(crate) fn terms_of_all(env: &Env) -> String {
+    let mut lines = vec!["The licences and terms of the native models (experimental):".to_string()];
+    for model in &contract::CATALOGUE {
+        let stands = match (model.use_policy, contract::terms_of(model, &env.terms())) {
+            (None, _) | (_, contract::Terms::None) => "; nothing beside its licence".to_string(),
+            (Some(policy), contract::Terms::Accepted(accepted)) => {
+                format!(" ({}, of {}): accepted on this machine ({})", policy.url, policy.reviewed, accepted_when(&accepted))
+            }
+            (Some(policy), contract::Terms::Open(_)) => format!(
+                " ({}, of {}): not accepted on this machine. /native terms {} shows it, and /native accept {} accepts it",
+                policy.url, policy.reviewed, model.id, model.id
+            ),
+        };
+        lines.push(format!("  {}  {}: {}{stands}.", model.id, model.label, model.licence_words()));
+    }
+    lines.join("\n")
+}
+
+/// `/native accept <model>`: the acceptance recorded, and what is said.
+/// `Err` is why nothing was recorded.
+pub(crate) fn accept_by_command(model: &contract::NativeModel, env: &Env) -> Result<String, String> {
+    let Some(policy) = model.use_policy else {
+        return Ok(format!("{} ({}) comes with its licence alone, {}: there is nothing to accept.", model.id, model.label, model.licence));
+    };
+    if let contract::Terms::Accepted(accepted) = contract::terms_of(model, &env.terms()) {
+        return Ok(format!(
+            "The {} that {} comes with is accepted on this machine already ({}, {}). Nothing was changed.",
+            policy.name,
+            model.id,
+            accepted_when(&accepted),
+            accepted_where(&accepted)
+        ));
+    }
+    accept_terms(model, env, ACCEPTED_BY_COMMAND)?;
+    Ok(format!(
+        "{}\n\nAccepted on this machine and recorded: the {} of {}, which {} comes with. /native install {} downloads the model, /native use {} loads it, and an upload of its files is taken.",
+        policy.notice, policy.name, policy.reviewed, model.label, model.id, model.id
+    ))
 }
 
 /// Ask for no model, when the record asks for one: the wizard's way back

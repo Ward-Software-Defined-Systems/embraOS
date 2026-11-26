@@ -416,8 +416,18 @@ impl Keeper {
     /// Whether the model's file can be started from: verified, as the record
     /// beside it says. The error is the sentence the status carries: what is
     /// wrong with the file, or that a job is at it (`native::job_running`).
+    ///
+    /// Before the file, the model's terms: a model that comes with a policy
+    /// on its use is loaded only where the operator accepted it
+    /// (`native::terms_of`: the brain records it, beside the settings).
+    /// A STATE that was restored from before the acceptance has the files
+    /// on DATA and no record: the server is not started, and the status
+    /// says the two commands. An acceptance is found at the next tick.
     fn file_of(&self, wanted: &Wanted) -> Result<(), String> {
         let id = wanted.model.id;
+        if !native::terms_settled(wanted.model, &native::terms_dir(&self.paths.settings)) {
+            return Err(native::terms_open_words(wanted.model).unwrap_or_else(|| format!("the terms of {id} are not accepted on this machine")));
+        }
         let at_work = native::job_running(&self.paths.models);
         match native::installed(wanted.model, &self.paths.models) {
             Installed::Verified => Ok(()),
@@ -677,13 +687,18 @@ mod tests {
         /// has the catalogue's size and no bytes on disk (a hole): a start
         /// compares the size and the time and reads nothing.
         fn install(&self) {
-            std::fs::create_dir_all(MODEL.dir(&self.paths.models)).unwrap();
-            let path = MODEL.file_path(&self.paths.models);
+            self.install_model(MODEL);
+        }
+
+        /// The same for any model of the catalogue.
+        fn install_model(&self, model: &'static native::NativeModel) {
+            std::fs::create_dir_all(model.dir(&self.paths.models)).unwrap();
+            let path = model.file_path(&self.paths.models);
             let file = std::fs::File::create(&path).unwrap();
-            file.set_len(MODEL.bytes).unwrap();
-            let record = native::Verified::of(MODEL, &file.metadata().unwrap());
-            native::write_verified(&MODEL.verified_path(&self.paths.models), &record).unwrap();
-            assert_eq!(native::installed(MODEL, &self.paths.models), Installed::Verified);
+            file.set_len(model.bytes).unwrap();
+            let record = native::Verified::of(model, &file.metadata().unwrap());
+            native::write_verified(&model.verified_path(&self.paths.models), &record).unwrap();
+            assert_eq!(native::installed(model, &self.paths.models), Installed::Verified);
         }
 
         fn server_does(&self, behaviour: &str) {
@@ -1109,6 +1124,48 @@ mod tests {
         rig.started(1).await;
         let status = rig.status();
         assert_eq!((status.state, status.reason.as_str()), (ServiceState::Loading, ""));
+        keeper.stop().await;
+    }
+
+    /// A model that comes with a policy on its use is not loaded where the
+    /// operator has not accepted it, whatever stands on DATA: a STATE from
+    /// before the acceptance, or a record of another date of the policy.
+    /// The status carries the two commands, and the acceptance is found at
+    /// the next tick with no change of the settings.
+    #[tokio::test]
+    async fn a_model_whose_terms_are_not_accepted_is_not_started() {
+        let _children = crate::supervisor::test_support::CHILDREN.lock().await;
+        let rig = Rig::new("terms", "exec sleep 30");
+        let inkling = native::by_id("inkling-2-mini").unwrap();
+        rig.install_model(inkling);
+        rig.want(Some(&Wanted::new(inkling)));
+        let mut keeper = rig.keeper();
+        let open = "inkling-2-mini comes with its maker's Model Acceptable Use Policy, which is not accepted on this machine: /native terms inkling-2-mini shows it, and /native accept inkling-2-mini accepts it";
+
+        keeper.tick().await;
+        let status = rig.status();
+        assert_eq!((status.state, status.model, status.reason.as_str()), (ServiceState::Unavailable, Some(inkling), open));
+        // An acceptance of the policy at another date is not one of this release's reading.
+        let terms = native::terms_dir(&rig.paths.settings);
+        std::fs::create_dir_all(&terms).unwrap();
+        std::fs::write(native::terms_path(&terms, inkling), "policy=Model Acceptable Use Policy\nreviewed=March 1, 2026\nat=5\nby=console\n").unwrap();
+        keeper.tick().await;
+        assert_eq!(rig.status().reason, open);
+        assert_eq!(rig.starts(), 0, "nothing was started");
+
+        // Accepted: the next tick starts the server, and the settings were not touched.
+        native::accept_terms(inkling, &terms, 1_764_183_000, "console").unwrap().unwrap();
+        keeper.tick().await;
+        rig.started(1).await;
+        let status = rig.status();
+        assert_eq!((status.state, status.model, status.reason.as_str()), (ServiceState::Loading, Some(inkling), ""));
+        keeper.stop().await;
+
+        // A model with its licence alone never meets the question.
+        rig.want(Some(&Wanted::new(MODEL)));
+        keeper.tick().await;
+        rig.started(2).await;
+        assert_eq!(rig.status().state, ServiceState::Loading);
         keeper.stop().await;
     }
 

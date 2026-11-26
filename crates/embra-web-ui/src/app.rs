@@ -279,11 +279,11 @@ const SPECS: &[Spec] = &[
         fields: &[sel("Action",
             &["(show status)", "anthropic", "gemini", "ollama", "lm_studio", "native"], false)] },
     Spec { cmd: "/model", title: "Model",
-        note: "Anthropic or Gemini: pick a model. Ollama / LM Studio: keep the first choice to pick from the models the server lists. A native model (experimental): pick one, or keep the first choice for the catalogue; a model that is not installed is downloaded first. Takes effect on your next message.",
+        note: "Anthropic or Gemini: pick a model. Ollama / LM Studio: keep the first choice to pick from the models the server lists. A native model (experimental): pick one, or keep the first choice for the catalogue; a model that is not installed is downloaded first. Inkling 2 Mini comes with its maker's Model Acceptable Use Policy, which is accepted on this machine first (/native terms shows it). Takes effect on your next message.",
         join: " ", guided: false,
         fields: &[sel("Model",
             &["(show, or pick from a list)", "opus-5.5", "opus-5", "opus-4.8", "fable-5.1", "fable-5",
-              "gemini-3.1-pro", "gemini-4-argon", "qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b"], false)] },
+              "gemini-3.1-pro", "gemini-4-argon", "qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b", "inkling-2-mini"], false)] },
     Spec { cmd: "/local-ai-gateway", title: "Provider gateway",
         note: "Route every provider request through WSDS Local AI Gateway's unified listener. Blank = show. A URL is stored and turned on once the listener answers with its x-local-ai-gateway header; 'on' (checked the same way), 'off' (keeps the URL), 'reset'.",
         join: " ", guided: false,
@@ -314,19 +314,19 @@ const SPECS: &[Spec] = &[
         fields: &[Field { label: "API key", ph: "AIza… or <key id>:<key secret> (blank = status, 'remove' = delete)",
             req: false, secret: true, choices: &[] }] },
     Spec { cmd: "/effort", title: "Effort",
-        note: "Set the active provider's effort (next message), or show current. Anthropic default max; Gemini high; local presets send the value verbatim (Qwen3.8: low/medium/xhigh). A native model (experimental): off answers without thinking first and reset thinks first (on Qwen3.5 low is off too); Qwen3.8 27B takes low, medium and xhigh.",
+        note: "Set the active provider's effort (next message), or show current. Anthropic default max; Gemini high; local presets send the value verbatim (Qwen3.8: low/medium/xhigh). A native model (experimental): off answers without thinking first and reset thinks first (on Qwen3.5 low is off too); Qwen3.8 27B takes low, medium and xhigh; Inkling 2 Mini takes minimal, low, medium, high, xhigh and max, and has no switch: off is its least level, at which it still thinks a little.",
         join: " ", guided: false,
         fields: &[sel("Effort",
-            &["(show current)", "low", "medium", "high", "xhigh", "max", "off", "reset"], false)] },
+            &["(show current)", "minimal", "low", "medium", "high", "xhigh", "max", "off", "reset"], false)] },
     Spec { cmd: "/model-wait", title: "Model wait",
         note: "How long embraOS waits while Ollama, LM Studio or a native model sends nothing: before an answer begins, and again between the pieces of it. Blank = show current; a number of minutes sets it for the three of them; 'reset' = the default, 120 minutes. Esc ends a wait.",
         join: " ", guided: false,
         fields: &[t("Minutes / reset", "blank = show current", false)] },
     Spec { cmd: "/native", title: "Native models (experimental)",
-        note: "A model that runs on this machine. Blank = the models' files, what is kept loaded, the model server and the job that runs. install downloads a model's two files (the model, and what it reads images through) and checks them; import uploads one of them from this browser, for a machine that cannot reach the source (the machine tells which model's which file it is and checks it); use loads a model (installing it first when needed) and off frees its memory, whichever provider leads the session; context is the loaded model's window, a number of tokens or reset; remove deletes a model's files; cancel stops the job that runs.",
+        note: "A model that runs on this machine. Blank = the models' files, what is kept loaded, the model server and the job that runs. install downloads a model's two files (the model, and what it reads images through) and checks them; import uploads one of them from this browser, for a machine that cannot reach the source (the machine tells which model's which file it is and checks it); use loads a model (installing it first when needed) and off frees its memory, whichever provider leads the session; context is the loaded model's window, a number of tokens or reset; terms shows the licence each model keeps and the policy on its use a model comes with (blank = every model), and accept accepts such a policy on this machine: a model that comes with one is installed, imported and loaded after that; remove deletes a model's files; cancel stops the job that runs.",
         join: " ", guided: false,
-        fields: &[sel("Action", &["(show)", "install", NATIVE_IMPORT, "use", "off", "context", "remove", "cancel"], false),
-            t("Model (install, use, remove) or tokens (context)", "qwen3.5-4b · qwen3.5-9b · qwen3.8-27b · 32768 · reset", false)] },
+        fields: &[sel("Action", &["(show)", "install", NATIVE_IMPORT, "use", "off", "context", "terms", "accept", "remove", "cancel"], false),
+            t("Model (install, use, terms, accept, remove) or tokens (context)", "qwen3.5-4b · qwen3.5-9b · qwen3.8-27b · inkling-2-mini · 32768 · reset", false)] },
     Spec { cmd: "/provider --setup", title: "Provider setup (guided)",
         note: "Pick a provider, then answer the prompts in the console below. native (experimental) asks which model to load.",
         join: " ", guided: true,
@@ -1306,6 +1306,14 @@ mod tests {
         assert!(spec.fields[0].choices.contains(&NATIVE_IMPORT));
         assert_eq!(spec.fields[0].choices[0], "(show)", "the form opens on the status, not on the upload");
         assert!(spec.note.contains("import uploads one of them from this browser"), "{}", spec.note);
+        // The terms a model comes with are shown and accepted from the form
+        // too: an upload of such a model's file is refused until then.
+        for action in ["terms", "accept"] {
+            assert!(spec.fields[0].choices.contains(&action), "{action}");
+            assert_eq!(build(spec, &[action.to_string(), "inkling-2-mini".to_string()]).as_deref(), Some(format!("/native {action} inkling-2-mini").as_str()));
+        }
+        assert_eq!(build(spec, &["terms".to_string(), String::new()]).as_deref(), Some("/native terms"), "blank = every model");
+        assert!(spec.note.contains("accept accepts such a policy on this machine"), "{}", spec.note);
         assert!(spec.note.contains("a model's two files (the model, and what it reads images through)"), "{}", spec.note);
         assert!(spec.title.contains("experimental"));
     }

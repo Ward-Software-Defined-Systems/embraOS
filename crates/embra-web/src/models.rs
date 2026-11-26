@@ -14,9 +14,16 @@
 //! told. `GET /api/models` lists the catalogue with each file's name and
 //! size, so that a page can tell which model's which file a picked file is.
 //!
+//! A model that comes with a policy on its use is taken after the operator
+//! accepted that policy on the machine: the brain records it (`/native
+//! accept <model>`), and both routes refuse before the first byte until
+//! then, as the updater does. `GET /api/models` says each model's licence
+//! with that policy and how its terms stand.
+//!
 //! The file is several gigabytes: it is streamed to the updater as it
-//! arrives and never held. The routes read DATA themselves and reach no
-//! service; the brain is not asked, and loads nothing (`/native use` does).
+//! arrives and never held. The routes read DATA and the acceptances
+//! themselves and reach no service; the brain is not asked, and loads
+//! nothing (`/native use` does).
 
 use std::path::Path;
 use std::process::Stdio;
@@ -38,6 +45,8 @@ use crate::state::AppState;
 
 /// Where the OS keeps the models' files.
 pub const MODELS_ROOT: &str = native::MODELS_DIR;
+/// Where the OS keeps the operator's acceptances of the models' terms.
+pub const MODEL_TERMS: &str = native::TERMS_DIR;
 /// How long the updater has to finish once the upload's last byte was handed
 /// to it: the file's sync, its rename, its record. It hashed as it wrote.
 const FINISH_TIMEOUT: Duration = Duration::from_secs(600);
@@ -59,16 +68,28 @@ fn stands(model: &NativeModel, part: Part, models: &Path) -> &'static str {
     }
 }
 
+/// How a model's terms stand on this machine, for the list: `none` when it
+/// comes with its licence alone.
+fn terms_word(model: &NativeModel, terms: &Path) -> &'static str {
+    match native::terms_of(model, terms) {
+        native::Terms::None => "none",
+        native::Terms::Accepted(_) => "accepted",
+        native::Terms::Open(_) => "not accepted",
+    }
+}
+
 /// `GET /api/models`: the catalogue, with what a page needs to tell which
 /// model's which file a file is (each file's name and its size) and how each
 /// stands. A model's own keys are its model file's; `images` is its image
-/// file.
+/// file. `licence` is the model's licence with the policy on its use, when
+/// it comes with one, and `terms` how that policy stands here.
 pub async fn api_models_list(State(st): State<AppState>) -> Response {
     let models: Vec<_> = native::CATALOGUE
         .iter()
         .map(|m| {
             json!({
                 "id": m.id, "label": m.label, "file": m.file, "bytes": m.bytes, "url": m.url(), "state": stands(m, Part::Model, &st.models_root),
+                "licence": m.licence_words(), "terms": terms_word(m, &st.model_terms),
                 "images": { "file": m.images.file, "bytes": m.images.bytes, "url": m.url_of(Part::Images), "state": stands(m, Part::Images, &st.models_root) },
             })
         })
@@ -86,16 +107,23 @@ fn other(part: Part) -> Part {
 
 /// Why an upload of `bytes` for the model `id` is refused before it starts,
 /// if it is; else the model and which of its two files the upload is, as
-/// its size says. `free` is what DATA has, and `job_runs` whether a model
-/// job holds the lock now (an install, an upload, a removal). The updater's
+/// its size says. `terms` is where the operator's acceptances are kept,
+/// `free` is what DATA has, and `job_runs` whether a model job holds the
+/// lock now (an install, an upload, a removal). The updater's
 /// `model-import` holds the same rules; what it finds in the file comes
 /// after the last byte.
-pub fn upload_refusal(models: &Path, id: &str, bytes: Option<u64>, free: u64, job_runs: bool) -> Result<(&'static NativeModel, Part), Refusal> {
+pub fn upload_refusal(models: &Path, terms: &Path, id: &str, bytes: Option<u64>, free: u64, job_runs: bool) -> Result<(&'static NativeModel, Part), Refusal> {
     let refuse = |status, error: String| Err(Refusal { status, error });
     let Some(model) = native::by_id(id) else {
         let shown: String = id.chars().take(60).collect();
         return refuse(StatusCode::NOT_FOUND, format!("{shown:?} is not a native model of this release (experimental): {}", catalogue_ids()));
     };
+    // A model that comes with a policy on its use: nothing of it is taken
+    // before the operator accepted that policy on this machine.
+    if !native::terms_settled(model, terms) {
+        let open = native::terms_open_words(model).unwrap_or_else(|| format!("the terms of {} are not accepted on this machine", model.id));
+        return refuse(StatusCode::FORBIDDEN, format!("{open}; nothing was uploaded"));
+    }
     let there = |part: Part| native::installed_part(model, part, models) == Installed::Verified;
     if Part::ALL.into_iter().all(there) {
         return refuse(
@@ -154,9 +182,10 @@ pub fn upload_refusal(models: &Path, id: &str, bytes: Option<u64>, free: u64, jo
 
 /// The refusal known before the first byte, with the room DATA was read to
 /// have: the handlers read it, a test names it.
-fn precheck(models: &Path, id: &str, bytes: Option<u64>, free: std::io::Result<u64>) -> Result<(&'static NativeModel, Part), Refusal> {
+fn precheck(st: &AppState, id: &str, bytes: Option<u64>, free: std::io::Result<u64>) -> Result<(&'static NativeModel, Part), Refusal> {
+    let models = &st.models_root;
     match free {
-        Ok(free) => upload_refusal(models, id, bytes, free, native::job_running(models)),
+        Ok(free) => upload_refusal(models, &st.model_terms, id, bytes, free, native::job_running(models)),
         Err(e) => Err(Refusal { status: StatusCode::INTERNAL_SERVER_ERROR, error: format!("the room on DATA could not be read: {e}") }),
     }
 }
@@ -174,7 +203,7 @@ fn check_model(st: &AppState, id: &str, bytes: Option<u64>, free: std::io::Resul
     if st.model_upload.try_lock().is_err() {
         return json_error(StatusCode::CONFLICT, BUSY.to_string());
     }
-    match precheck(&st.models_root, id, bytes, free) {
+    match precheck(st, id, bytes, free) {
         Ok((model, part)) => (StatusCode::OK, Json(json!({ "ok": true, "model": model.id, "part": part.words(), "file": model.part(part).file }))).into_response(),
         Err(r) => json_error(r.status, r.error),
     }
@@ -271,7 +300,7 @@ async fn put_model(st: &AppState, id: &str, headers: &HeaderMap, body: Body, fre
     let Ok(one_at_a_time) = st.model_upload.clone().try_lock_owned() else {
         return refuse(headers, body, StatusCode::CONFLICT, BUSY.to_string()).await;
     };
-    let (model, part) = match precheck(&st.models_root, id, bytes, free) {
+    let (model, part) = match precheck(st, id, bytes, free) {
         Ok(found) => found,
         Err(r) => {
             // The door is not held while a refused body is read and dropped.
@@ -345,8 +374,15 @@ mod tests {
     fn state(root: &Path, updater: &Path) -> AppState {
         let (mut st, _input) = AppState::stub();
         st.models_root = Arc::from(root);
+        st.model_terms = Arc::from(terms(root).as_path());
         st.updater = Arc::from(updater);
         st
+    }
+
+    /// Where a test's machine keeps the acceptances of the models' terms:
+    /// beside its models, and empty until a test accepts.
+    fn terms(root: &Path) -> PathBuf {
+        root.with_extension("terms")
     }
 
     /// The headers of an upload that says the catalogue's size for the 4B.
@@ -376,15 +412,15 @@ mod tests {
         let (root, _) = scratch("refusal", "");
         let model = four();
         let room = model.bytes + RESERVE_BYTES;
-        let taken = |bytes: u64, free: u64| upload_refusal(&root, FOUR, Some(bytes), free, false).map(|(m, part)| (m.id, part));
+        let taken = |bytes: u64, free: u64| upload_refusal(&root, &terms(&root), FOUR, Some(bytes), free, false).map(|(m, part)| (m.id, part));
         assert_eq!(taken(model.bytes, room), Ok((FOUR, Part::Model)), "the file and the reserve fit exactly");
         // The size says which of the model's two files an upload is.
         assert_eq!(taken(model.images.bytes, model.images.bytes + RESERVE_BYTES), Ok((FOUR, Part::Images)));
 
-        let refused = |id: &str, bytes: Option<u64>, free: u64, job: bool| upload_refusal(&root, id, bytes, free, job).unwrap_err();
+        let refused = |id: &str, bytes: Option<u64>, free: u64, job: bool| upload_refusal(&root, &terms(&root), id, bytes, free, job).unwrap_err();
         let r = refused("qwen3.5-27b", Some(1), u64::MAX, false);
         assert_eq!(r.status, StatusCode::NOT_FOUND);
-        assert_eq!(r.error, "\"qwen3.5-27b\" is not a native model of this release (experimental): qwen3.5-4b, qwen3.5-9b, qwen3.8-27b");
+        assert_eq!(r.error, "\"qwen3.5-27b\" is not a native model of this release (experimental): qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini");
         for traversal in ["../etc", "a/b", "", ".hidden"] {
             assert_eq!(refused(traversal, Some(1), u64::MAX, false).status, StatusCode::NOT_FOUND, "{traversal:?}: an id is a catalogue's or nothing");
         }
@@ -427,11 +463,11 @@ mod tests {
             assert_eq!(r.error, "qwen3.5-4b is installed and checked already, both of its files; /native remove qwen3.5-4b first, to put them in again");
         }
         // The other model is not touched by it.
-        assert_eq!(upload_refusal(&root, "qwen3.5-9b", Some(nine.bytes), u64::MAX, false).map(|(m, part)| (m.id, part)), Ok(("qwen3.5-9b", Part::Model)));
+        assert_eq!(upload_refusal(&root, &terms(&root), "qwen3.5-9b", Some(nine.bytes), u64::MAX, false).map(|(m, part)| (m.id, part)), Ok(("qwen3.5-9b", Part::Model)));
         // The image file alone, and the model file is the one named.
         let (root, _) = scratch("refusal-images", "");
         install(model, Part::Images, &root);
-        let r = upload_refusal(&root, FOUR, Some(model.images.bytes), u64::MAX, false).unwrap_err();
+        let r = upload_refusal(&root, &terms(&root), FOUR, Some(model.images.bytes), u64::MAX, false).unwrap_err();
         assert_eq!(
             r.error,
             "the image file of qwen3.5-4b is installed and checked already; its model file (Qwen3.5-4B-Q4_K_M.gguf, 2815884544 bytes) is the one that is not"
@@ -597,6 +633,53 @@ mod tests {
         let (status, said) = answer(put_model(&st, FOUR, &sized(four().bytes), Body::from(vec![1u8; 10]), ROOMY()).await).await;
         assert_eq!((status, said["error"].as_str()), (StatusCode::CONFLICT, Some(BUSY)));
         drop(held);
+    }
+
+    /// A model that comes with a policy on its use takes no file before the
+    /// operator accepted that policy on this machine: the check and the
+    /// upload are both told so before the first byte, with the two
+    /// commands, whatever else could be said of the upload, and the updater
+    /// is not run. With the acceptance recorded the upload is taken as any
+    /// other. The list says each model's licence and how its terms stand.
+    #[tokio::test]
+    async fn a_model_whose_terms_are_not_accepted_takes_no_upload() {
+        let (root, script) = scratch("terms", TAKES_IT_IN);
+        let st = state(&root, &script);
+        let inkling = native::by_id("inkling-2-mini").unwrap();
+        let open = "inkling-2-mini comes with its maker's Model Acceptable Use Policy, which is not accepted on this machine: /native terms inkling-2-mini shows it, and /native accept inkling-2-mini accepts it; nothing was uploaded";
+        // Either of its files, a size that is no file's, no size, no room, a job that runs.
+        for (bytes, free, job) in [(Some(inkling.bytes), u64::MAX, false), (Some(inkling.images.bytes), u64::MAX, false), (Some(1234), u64::MAX, false), (None, u64::MAX, false), (Some(inkling.bytes), 0, true)] {
+            let r = upload_refusal(&root, &terms(&root), inkling.id, bytes, free, job).unwrap_err();
+            assert_eq!((r.status, r.error.as_str()), (StatusCode::FORBIDDEN, open), "{bytes:?}");
+        }
+        let (status, said) = answer(check_model(&st, inkling.id, Some(inkling.bytes), ROOMY())).await;
+        assert_eq!((status, said["error"].as_str()), (StatusCode::FORBIDDEN, Some(open)));
+        let (status, said) = answer(put_model(&st, inkling.id, &sized(inkling.images.bytes), Body::from(vec![1u8; 10]), ROOMY()).await).await;
+        assert_eq!((status, said["error"].as_str()), (StatusCode::FORBIDDEN, Some(open)));
+        assert!(!root.join("args").exists(), "the updater was not run");
+        // An acceptance of another date of the policy is not this release's.
+        std::fs::create_dir_all(terms(&root)).unwrap();
+        std::fs::write(native::terms_path(&terms(&root), inkling), "policy=Model Acceptable Use Policy\nreviewed=March 1, 2026\nat=5\nby=command\n").unwrap();
+        let (status, _) = answer(check_model(&st, inkling.id, Some(inkling.bytes), ROOMY())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let listed = |body: &Value, at: usize| (body["models"][at]["id"].as_str().map(str::to_string), body["models"][at]["licence"].as_str().map(str::to_string), body["models"][at]["terms"].as_str().map(str::to_string));
+        let row = |id: &str, licence: &str, terms: &str| (Some(id.to_string()), Some(licence.to_string()), Some(terms.to_string()));
+        let (_, body) = answer(api_models_list(State(st.clone())).await).await;
+        assert_eq!(listed(&body, 0), row(FOUR, "Apache-2.0", "none"));
+        assert_eq!(listed(&body, 3), row("inkling-2-mini", "Apache-2.0, with its maker's Model Acceptable Use Policy", "not accepted"));
+
+        // Accepted: the check passes, and the upload is handed to the updater.
+        native::accept_terms(inkling, &terms(&root), 1_764_183_000, "command").unwrap().expect("a record");
+        let (status, said) = answer(check_model(&st, inkling.id, Some(inkling.bytes), ROOMY())).await;
+        assert_eq!(status, StatusCode::OK, "{said}");
+        let (status, said) = answer(put_model(&st, inkling.id, &sized(inkling.images.bytes), Body::from(vec![1u8; 10]), ROOMY()).await).await;
+        assert_eq!(status, StatusCode::CREATED, "{said}");
+        assert_eq!(std::fs::read_to_string(root.join("args")).unwrap().trim(), "model-import inkling-2-mini images");
+        let (_, body) = answer(api_models_list(State(st)).await).await;
+        assert_eq!(listed(&body, 3), row("inkling-2-mini", "Apache-2.0, with its maker's Model Acceptable Use Policy", "accepted"));
+        // A model with its licence alone never meets the question.
+        assert!(upload_refusal(&root, &terms(&root), FOUR, Some(four().bytes), u64::MAX, false).is_ok());
     }
 
     #[test]

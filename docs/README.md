@@ -23,7 +23,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 - [OPERATIONS/UPDATES-AND-BACKUPS.md](OPERATIONS/UPDATES-AND-BACKUPS.md) — The two OS slots and GRUB's A/B state, the in-OS backups (`/backup`, the boot menu), restoring, and the signed OS update.
 - [OPERATIONS/TOOL-REFERENCE.md](OPERATIONS/TOOL-REFERENCE.md) — All 121 built-in tools by category, plus workspace/GitHub/SSH safety notes.
 - [OPERATIONS/LOCAL-AI-GATEWAY.md](OPERATIONS/LOCAL-AI-GATEWAY.md) — Routing every provider through WSDS Local AI Gateway with `/local-ai-gateway`: what goes through, what stays direct, what the gateway records and blocks; under evaluation for vendoring.
-- [OPERATIONS/NATIVE-MODELS.md](OPERATIONS/NATIVE-MODELS.md) — Native models (experimental): a model that runs on the machine itself. The three models and what they need, a model's files, `/native`, a native model as the provider, the `native_ask` tool, the model server.
+- [OPERATIONS/NATIVE-MODELS.md](OPERATIONS/NATIVE-MODELS.md) — Native models (experimental): a model that runs on the machine itself. The four models and what they need, a model's files, the terms a model comes with and their acceptance, `/native`, a native model as the provider, the `native_ask` tool, the model server.
 
 ## Local models — `LOCAL-MODELS/`
 

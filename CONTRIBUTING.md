@@ -25,4 +25,4 @@ Be respectful and constructive in all interactions. We reserve the right to clos
 
 ## License
 
-By opening an issue, you agree that any ideas or suggestions may be incorporated into the project under the [project license](LICENSE).
+By opening an issue you give Feedback as Section 13 of the [project license](LICENSE) defines it: WSDS may use your ideas, suggestions and reports in the project and elsewhere, without obligation to you. Do not include anything confidential, or anything you have no right to share.

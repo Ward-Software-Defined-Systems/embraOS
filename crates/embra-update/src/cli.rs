@@ -19,11 +19,14 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
                                                                  and the installer's own question) into the other slot of the installation
                                                                  the disk holds, STATE and DATA kept
   grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it
-  model-list                                                     the native models (experimental) and how each one's files stand on DATA
+  model-list                                                     the native models (experimental), the licence of each with the policy on its use it comes with, and how each
+                                                                 one's files stand on DATA
   model-install <model>                                          download a model's two files from the catalogue's source, the model file and the file it reads images through, check
-                                                                 each and install it; a stopped download is resumed, and a file that is installed is left alone
+                                                                 each and install it; a stopped download is resumed, and a file that is installed is left alone. Refused for a
+                                                                 model that comes with a policy on its use until the operator accepted it on this machine (/native accept)
   model-import <model> [images]                                  check one of a model's files read from standard input against the catalogue and install it: the model file, or
-                                                                 with the word images the file it reads images through (the web console's upload)
+                                                                 with the word images the file it reads images through (the web console's upload). Refused before a byte is
+                                                                 read for a model whose policy is not accepted on this machine
   model-verify <model>                                           hash an installed model's files again: the catalogue's file gets its record, any other is removed
   model-remove <model>                                           remove a model's files from DATA";
 
@@ -289,13 +292,13 @@ mod tests {
         assert_eq!(p("model-install qwen3.5-4b"), Ok(Command::ModelInstall { model: four }));
         assert_eq!(p("model-import qwen3.5-4b"), Ok(Command::ModelImport { model: four, part: Part::Model }));
         assert_eq!(p("model-import qwen3.5-4b images"), Ok(Command::ModelImport { model: four, part: Part::Images }));
-        assert_eq!(p("model-import images").unwrap_err(), "not a native model: \"images\" (qwen3.5-4b, qwen3.5-9b, qwen3.8-27b)");
-        assert_eq!(p("model-import qwen3.5-4b weights").unwrap_err(), "model-import takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b");
-        assert_eq!(p("model-install qwen3.5-4b images").unwrap_err(), "model-install takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b", "an install brings both files");
+        assert_eq!(p("model-import images").unwrap_err(), "not a native model: \"images\" (qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini)");
+        assert_eq!(p("model-import qwen3.5-4b weights").unwrap_err(), "model-import takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini");
+        assert_eq!(p("model-install qwen3.5-4b images").unwrap_err(), "model-install takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini", "an install brings both files");
         assert_eq!(p("model-verify qwen3.5-4b"), Ok(Command::ModelVerify { model: four }));
         assert_eq!(p("model-remove qwen3.5-9b"), Ok(Command::ModelRemove { model: native_model::by_id("qwen3.5-9b").unwrap() }));
-        assert_eq!(p("model-import").unwrap_err(), "model-import needs a native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b");
-        assert_eq!(p("model-verify qwen3.5-4b qwen3.5-9b").unwrap_err(), "model-verify takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b");
+        assert_eq!(p("model-import").unwrap_err(), "model-import needs a native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini");
+        assert_eq!(p("model-verify qwen3.5-4b qwen3.5-9b").unwrap_err(), "model-verify takes one native model: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini");
         for not_one in ["../etc", "qwen3.5-4b/..", "Qwen3.5-4B", "qwen3.5-27b", "Qwen3.5-4B-Q4_K_M.gguf"] {
             assert!(p(&format!("model-remove {not_one}")).unwrap_err().starts_with("not a native model: "), "{not_one}");
         }

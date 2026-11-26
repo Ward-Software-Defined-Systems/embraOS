@@ -13,7 +13,7 @@
 //! a check, a removal): a lock on a file in it, which the updater takes and
 //! any reader can ask about.
 //!
-//! Three records, one `key=value` a line. Each has one parser, and a record
+//! Four records, one `key=value` a line. Each has one parser, and a record
 //! is taken whole or not at all: a line the parser does not accept refuses
 //! the record, and the reason is a sentence for the operator.
 //!
@@ -21,6 +21,11 @@
 //! /embra/state/native-model/settings        the brain writes, embrad follows
 //!     model=qwen3.5-4b
 //!     context=65536
+//! /embra/state/native-model/terms/<model>   the brain writes; the updater, embrad and the
+//!     policy=Model Acceptable Use Policy    web console read. The operator accepted the
+//!     reviewed=July 15, 2026                terms the model's maker releases it with, as
+//!     at=1764183000                         the catalogue read them; without the record
+//!     by=command                            such a model is not installed, imported or loaded
 //! /run/embra/native-model-status            embrad writes, the brain reads
 //!     state=ready
 //!     model=qwen3.5-4b
@@ -79,6 +84,11 @@ pub const MODELS_DIR: &str = "/embra/data/models";
 pub const SETTINGS_DIR: &str = "/embra/state/native-model";
 /// The settings: the model embrad keeps loaded.
 pub const SETTINGS_PATH: &str = "/embra/state/native-model/settings";
+/// The operator's acceptances of the models' terms, a record a model: beside
+/// the settings, so on STATE and in its snapshots.
+pub const TERMS_DIR: &str = "/embra/state/native-model/terms";
+/// The directory's name beside the settings.
+const TERMS_SUBDIR: &str = "terms";
 /// What embrad made of the settings.
 pub const STATUS_PATH: &str = "/run/embra/native-model-status";
 /// What the model server printed since this boot.
@@ -93,10 +103,13 @@ pub const DEFAULT_CONTEXT: u32 = 65_536;
 /// The smallest window a model can be given. The server runs with less, and
 /// nothing embraOS sends fits under it; 0 would mean the model's own largest.
 pub const SMALLEST_CONTEXT: u32 = 1_024;
-/// The tokens of an image for the catalogue's models: what their server asks
-/// for at least ("Qwen-VL models require at minimum 1024 image tokens"), and
-/// at most as well. Measured with the 4B: small text misread at the
-/// server's own default, read right at this.
+/// The tokens of an image for the catalogue's models: what the Qwen models'
+/// server asks for at least ("Qwen-VL models require at minimum 1024 image
+/// tokens"), and at most as well. Measured with the 4B: small text misread
+/// at the server's own default, read right at this. For Inkling 2 Mini it
+/// is the most alone: its server reads an image at the image's own size and
+/// scales none up, so a small image is fewer tokens (a screenshot of 1,280
+/// by 800 is 672).
 pub const IMAGE_TOKENS: u32 = 1_024;
 
 /// The name of a model's verification record, in the model's directory.
@@ -145,7 +158,7 @@ pub struct CatalogueFile {
 }
 
 /// What the model server keeps in use with a model, in MiB, as measured:
-/// llama.cpp 1.0.0 as the image builds it for x86-64, started with embrad's
+/// llama.cpp as the image builds it for x86-64, started with embrad's
 /// arguments on the build server. It is the server's own memory when it has
 /// loaded the model, and the part of the model's file it goes on reading
 /// from. The server's resident memory right after a load is more than that
@@ -157,6 +170,23 @@ pub struct CatalogueFile {
 /// answers had been asked for. It came out the same to 2 MiB for two files
 /// of one model that are quantised differently. The window's part lies on
 /// one line to 2 MiB over 32,768, 65,536 and 131,072 tokens.
+///
+/// The figure holds nothing the server keeps of a prompt: it is read with
+/// the prompt cache off and no checkpoints kept (`--cache-ram 0
+/// --ctx-checkpoints 0`). With embrad's own limits the method's three short
+/// prompts stay in the server, 101 MiB each on the 4B, and that is the
+/// growth [`NativeModel::growth_mib`] counts.
+///
+/// The three Qwen models were measured with llama.cpp 1.0.0. With 1.1.0,
+/// which the image builds now, each of their figures came out 22 to 26 MiB
+/// higher at every window, and the lines stayed as they are.
+///
+/// A model that is a mixture of experts reads, of the part of its file it
+/// reads in place, the experts a token is routed to, so two short answers
+/// reach a part of it alone. Inkling 2 Mini's figure was read after 48
+/// answers on subjects far apart, when the file's part had stopped growing:
+/// 5,480 MiB after the two answers, 7,235 after six, 7,414 after 48 and
+/// less than 1 MiB more for each of the last ten.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Memory {
     /// In use when the model is loaded with a window of 32,768 tokens,
@@ -171,13 +201,36 @@ pub struct Memory {
     /// One position the server keeps of a prompt to return to (a
     /// checkpoint): the model's recurrent state, as the server says its
     /// size when it loads the model (50.25 MiB for the 4B and the 9B,
-    /// 149.62 MiB for the 27B).
+    /// 149.62 MiB for the 27B). Inkling 2 Mini's is its recurrent state
+    /// (3.66 MiB) and the caches of the layers that attend to a window of
+    /// 1,024 tokens: 163.67 MiB for a position past that window, as the
+    /// server says when it keeps one.
     pub checkpoint: u32,
     /// What a prompt the server keeps for later takes for every 1,024
     /// tokens of it: the attention cache of that many tokens (32 MiB with
     /// the eight attention layers of the 4B and the 9B, 64 MiB with the
-    /// 27B's sixteen).
+    /// 27B's sixteen, 32 MiB with the eight passes of Inkling 2 Mini's
+    /// layers that attend to the whole prompt).
     pub state_per_1024: u32,
+}
+
+/// The terms a model's maker releases it with beside its licence: a policy
+/// on its use. The operator accepts them on a machine before the model is
+/// first installed, imported or loaded there (LICENSE, Section 5 and
+/// Schedule A), and the acceptance is a record on STATE ([`Accepted`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsePolicy {
+    /// The policy's name, as its maker calls it.
+    pub name: &'static str,
+    /// Where its maker publishes it.
+    pub url: &'static str,
+    /// The policy's own date ("last updated") as it was read when the
+    /// catalogue took the model. An acceptance is of the policy of that
+    /// date: a release that read a later one asks again.
+    pub reviewed: &'static str,
+    /// What the operator is shown before accepting, word for word: one
+    /// constant a model, so that a change of wording is one edit.
+    pub notice: &'static str,
 }
 
 /// The family a model is of: how its server is told to think, and with
@@ -190,6 +243,10 @@ pub enum Family {
     /// Thinking is on or off, and when on at one of the levels of effort
     /// the model's chat template names; it refuses any other word.
     Qwen38,
+    /// Thinking has no switch: the model always thinks, at one of the levels
+    /// of effort its chat template names, down to a least at which it still
+    /// thinks a little. It refuses any other word.
+    Inkling2,
 }
 
 /// A model of the catalogue: two files of one revision of a repository.
@@ -216,10 +273,11 @@ pub struct NativeModel {
     pub sha256: &'static str,
     /// The file the model reads images through, of the same revision.
     pub images: CatalogueFile,
-    /// How many tokens the model server makes of an image, whatever its
-    /// size: the server's own figure for these models is too few for small
-    /// text (it says so when it loads one), and without a ceiling a large
-    /// image is four times the tokens and six times the wait.
+    /// How many tokens the model server makes of an image at most, and for
+    /// a model whose server scales a small image up, at least as well: the
+    /// server's own figure for the Qwen models is too few for small text
+    /// (it says so when it loads one), and without a ceiling a large image
+    /// is four times the tokens and six times the wait.
     pub image_tokens: u32,
     /// The repository under [`DOWNLOAD_BASE`].
     pub repository: &'static str,
@@ -227,9 +285,13 @@ pub struct NativeModel {
     pub revision: &'static str,
     /// The licence of the weights.
     pub licence: &'static str,
+    /// The policy on its use that its maker releases it with, when there is
+    /// one beside the licence.
+    pub use_policy: Option<UsePolicy>,
     /// The window it is given when the operator names none.
     pub default_context: u32,
-    /// The largest window the model was trained for.
+    /// The largest window the model was trained for, as its own
+    /// configuration gives it.
     pub largest_context: u32,
     /// What the model server takes with it, as measured.
     pub memory: Memory,
@@ -243,16 +305,60 @@ pub const CHECKPOINTS_MAX: u64 = 32;
 
 /// The maker of the Qwen models, as a model of theirs is told.
 const QWEN: &str = "Alibaba's Qwen family";
+/// The maker of Inkling, as the model is told.
+const THINKING_MACHINES: &str = "Thinking Machines Lab";
 
-/// The native models: this project's own conversions of Qwen's weights
-/// (William, 2026-11-23: "converting Qwen's weights ourselves and
-/// uploading"), published under `William-WSDS`, each repository with a card
-/// that names the source revision, the commands and the hashes. Each is
-/// Qwen's own repository at one revision, converted to GGUF and quantised
-/// to Q4_K_M with llama.cpp 1.0.0, the version the image's model server is
-/// built from. Each file was hashed where it was made; the hub's own record
-/// of each published file says the same size and sha256, and a second
+/// What the operator is shown before Inkling 2 Mini is first installed,
+/// imported or loaded on a machine. The wording is the operator's licence
+/// review's (2026-11-26) and stays in step with LICENSE, Schedule A, Section
+/// A.3: it is changed there first, and here as it is given.
+const INKLING_2_MINI_NOTICE: &str = "\
+Inkling 2 Mini is a model of Thinking Machines Lab, Inc. It is licensed
+under the Apache License 2.0 and comes with Thinking Machines' Model
+Acceptable Use Policy:
+https://thinkingmachines.ai/model-acceptable-use-policy/
+By installing or using it you accept that policy, and you answer for
+anyone you let use it through this machine (LICENSE, Section 5 and
+Schedule A).
+
+Known limitations, from its model card: it can state false information
+as fact, get caught in repetitive reasoning, use tools unreliably, and
+delete or overwrite files without asking. Do not rely on it for medical,
+legal or safety-critical decisions. The replicant check does not run
+while a native model leads.";
+
+/// Thinking Machines' policy for the models it releases, as read on
+/// 2026-11-26 (the page's "Last updated July 15, 2026").
+const THINKING_MACHINES_POLICY: UsePolicy = UsePolicy {
+    name: "Model Acceptable Use Policy",
+    url: "https://thinkingmachines.ai/model-acceptable-use-policy/",
+    reviewed: "July 15, 2026",
+    notice: INKLING_2_MINI_NOTICE,
+};
+
+/// The native models: this project's own conversions of their makers'
+/// weights (William, 2026-11-23: "converting Qwen's weights ourselves and
+/// uploading"; 2026-11-26, of Inkling 2 Mini: "let's move forward with
+/// making Inkling a native model option"), published under `William-WSDS`,
+/// each repository with a card that names the source revision, the commands
+/// and the hashes. Each is the maker's own repository at one revision,
+/// converted to GGUF and quantised to Q4_K_M with the llama.cpp the image's
+/// model server was built from when it was made: 1.0.0 for the three Qwen
+/// models, and 1.1.0 for Inkling 2 Mini, whose architecture 1.0.0 does not
+/// know. Each file was hashed where it was made; the hub's own record of
+/// each published file says the same size and sha256, and a second
 /// conversion gave the same bytes.
+///
+/// Inkling 2 Mini's maker publishes the weights already quantised: the
+/// experts at four bits and at eight, and nothing at full precision. The
+/// converter expands them and the quantiser writes them a second time, as
+/// Q4_K where that format fits and as Q8_0 and Q5_0 where it does not (the
+/// down-projection experts have 1,152 columns, which its blocks of 256 do
+/// not divide). A file that keeps the maker's own four-bit experts is
+/// closer to the checkpoint (a mean KL divergence of 0.0055 against this
+/// file's 0.0245, on 10,240 tokens) and reads a prompt 30 % slower on an
+/// x86 processor with AVX2; the pinned llama.cpp's converter cannot write
+/// one.
 ///
 /// An image file holds its weights as F16, and not as BF16, the format Qwen
 /// stores them in. llama.cpp 1.0.0 has vector code for F16 weights on Arm
@@ -264,7 +370,7 @@ const QWEN: &str = "Alibaba's Qwen family";
 /// AVX2 half a minute. With AVX2 the two formats take the same time. F16
 /// cannot hold the smallest values of BF16: of a projector's values 0.03 to
 /// 0.05 % differ between the two, by 3e-8 at most.
-pub const CATALOGUE: [NativeModel; 3] = [
+pub const CATALOGUE: [NativeModel; 4] = [
     NativeModel {
         id: "qwen3.5-4b",
         label: "Qwen3.5 4B",
@@ -283,6 +389,7 @@ pub const CATALOGUE: [NativeModel; 3] = [
         repository: "William-WSDS/Qwen3.5-4B-GGUF",
         revision: "da4c4c82f253530032349f4b0d146153a8def63e",
         licence: "Apache-2.0",
+        use_policy: None,
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
         memory: Memory { at_32768: 3_780, per_32768: 1_025, images: 646, first_image: 315, checkpoint: 51, state_per_1024: 33 },
@@ -305,6 +412,7 @@ pub const CATALOGUE: [NativeModel; 3] = [
         repository: "William-WSDS/Qwen3.5-9B-GGUF",
         revision: "50e35c8389019e081813e4095bf93edcb45b4df5",
         licence: "Apache-2.0",
+        use_policy: None,
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
         memory: Memory { at_32768: 6_039, per_32768: 1_026, images: 880, first_image: 353, checkpoint: 51, state_per_1024: 33 },
@@ -327,11 +435,35 @@ pub const CATALOGUE: [NativeModel; 3] = [
         repository: "William-WSDS/Qwen3.8-27B-GGUF",
         revision: "ddee62e887833f1494f8a4a4829de841959a94ab",
         licence: "Apache-2.0",
+        use_policy: None,
         // The same window as the others (William, 2026-11-23: "keep the 27B
         // default the same").
         default_context: DEFAULT_CONTEXT,
         largest_context: 262_144,
         memory: Memory { at_32768: 17_586, per_32768: 2_050, images: 889, first_image: 587, checkpoint: 150, state_per_1024: 65 },
+    },
+    NativeModel {
+        id: "inkling-2-mini",
+        label: "Inkling 2 Mini",
+        maker: THINKING_MACHINES,
+        family: Family::Inkling2,
+        file: "Inkling-2-Mini-Q4_K_M.gguf",
+        quantisation: "Q4_K_M",
+        bytes: 17_478_094_272,
+        sha256: "d873097c2b3daac06bf3881d0cc19a141c24226d596485031eb8125f677633b7",
+        images: CatalogueFile {
+            file: "mmproj-Inkling-2-Mini-F16.gguf",
+            bytes: 639_348_512,
+            sha256: "13d35746643982d977c5ffdb593e987768dd355b8b5531c3103d51f3f0b21df7",
+        },
+        image_tokens: IMAGE_TOKENS,
+        repository: "William-WSDS/Inkling-2-Mini-GGUF",
+        revision: "e8984e8cea919d6ce98eb7bc2597903307bc0393",
+        licence: "Apache-2.0",
+        use_policy: Some(THINKING_MACHINES_POLICY),
+        default_context: DEFAULT_CONTEXT,
+        largest_context: 1_048_576,
+        memory: Memory { at_32768: 17_887, per_32768: 1_025, images: 614, first_image: 154, checkpoint: 164, state_per_1024: 32 },
     },
 ];
 
@@ -441,6 +573,15 @@ impl NativeModel {
         self.verified_of(Part::Model, models)
     }
 
+    /// The licence as a listing shows it: with the policy on its use, when
+    /// the model comes with one.
+    pub fn licence_words(&self) -> String {
+        match self.use_policy {
+            Some(policy) => format!("{}, with its maker's {}", self.licence, policy.name),
+            None => self.licence.to_string(),
+        }
+    }
+
     /// A window this model can be given. The error is a sentence for the
     /// operator.
     pub fn context_ok(&self, context: u32) -> Result<u32, String> {
@@ -489,7 +630,12 @@ fn write_whole(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
+    // The record's whole name with `.tmp` after it, never its extension
+    // replaced: a record named after a model (`qwen3.5-4b`) has a dot in
+    // its name, and two such models would share one temporary file.
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
     let mut file = std::fs::File::create(&tmp)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
@@ -617,6 +763,134 @@ pub fn read_settings(path: &Path) -> Result<Option<Wanted>, String> {
 /// Writes the settings whole; `None` writes a record that names no model.
 pub fn write_settings(path: &Path, wanted: Option<&Wanted>) -> std::io::Result<()> {
     write_whole(path, &settings_text(wanted))
+}
+
+// ---------------------------------------------------------------------------
+// A model's terms: the brain writes the operator's acceptance; the updater,
+// embrad and the web console read it, and each refuses the model without it.
+
+/// The operator's acceptance, on this machine, of the terms a model comes
+/// with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Accepted {
+    /// The policy's name.
+    pub policy: String,
+    /// The policy's own date the acceptance is of ([`UsePolicy::reviewed`]).
+    pub reviewed: String,
+    /// When it was given, in seconds since 1970.
+    pub at: u64,
+    /// Where it was given, in a word of the surface that took it: the brain
+    /// writes `command`, `question` or `wizard`.
+    pub by: String,
+}
+
+/// A value an acceptance's line carries: printable ASCII on one line, with
+/// no blank at either end.
+fn terms_value_ok(text: &str) -> bool {
+    !text.is_empty() && text.len() <= SHOWN && text.trim() == text && text.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
+}
+
+impl Accepted {
+    /// The record's text.
+    pub fn to_text(&self) -> String {
+        format!("policy={}\nreviewed={}\nat={}\nby={}\n", self.policy, self.reviewed, self.at, self.by)
+    }
+}
+
+/// Parses an acceptance: its four fields, each once.
+pub fn parse_accepted(text: &str) -> Result<Accepted, String> {
+    let (mut policy, mut reviewed, mut at, mut by) = (None, None, None, None);
+    for (key, value, shown) in fields(text)? {
+        match key {
+            "policy" | "reviewed" | "by" if !terms_value_ok(value) => return Err(format!("{shown}: not a value of the record")),
+            "policy" => once(&mut policy, value.to_string(), &shown)?,
+            "reviewed" => once(&mut reviewed, value.to_string(), &shown)?,
+            "by" => once(&mut by, value.to_string(), &shown)?,
+            "at" => once(&mut at, value.parse::<u64>().map_err(|_| format!("{shown}: not a time"))?, &shown)?,
+            _ => return Err(format!("{shown}: not a field this release knows")),
+        }
+    }
+    match (policy, reviewed, at, by) {
+        (Some(policy), Some(reviewed), Some(at), Some(by)) => Ok(Accepted { policy, reviewed, at, by }),
+        _ => Err("the record lacks one of policy, reviewed, at and by".to_string()),
+    }
+}
+
+/// What [`Terms::Open`] says when the machine holds no record at all: the
+/// ordinary case, which a surface need not explain further.
+pub const NO_ACCEPTANCE: &str = "no acceptance is recorded";
+
+/// How a model's terms stand on a machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Terms {
+    /// The model comes with its licence alone: there is nothing to accept.
+    None,
+    /// Its maker's policy is accepted here, as the catalogue read it.
+    Accepted(Accepted),
+    /// Its policy is not accepted here. The sentence says how the record
+    /// stands: none, one of another date of the policy, or one that is not
+    /// valid.
+    Open(String),
+}
+
+/// Where the acceptances are kept on a machine whose settings are at
+/// `settings`: in a directory beside them ([`TERMS_DIR`] in the OS).
+pub fn terms_dir(settings: &Path) -> PathBuf {
+    settings.parent().unwrap_or(Path::new(SETTINGS_DIR)).join(TERMS_SUBDIR)
+}
+
+/// A model's acceptance record in that directory.
+pub fn terms_path(terms: &Path, model: &NativeModel) -> PathBuf {
+    terms.join(model.id)
+}
+
+/// How `model`'s terms stand in the directory `terms`. A record counts when
+/// it is of the model's policy at the date the catalogue read it: a policy
+/// read anew is accepted anew.
+pub fn terms_of(model: &NativeModel, terms: &Path) -> Terms {
+    let Some(policy) = model.use_policy else { return Terms::None };
+    let record = match read_record(&terms_path(terms, model), "the acceptance of the model's terms") {
+        Ok(Some(text)) => parse_accepted(&text),
+        Ok(None) => return Terms::Open(NO_ACCEPTANCE.to_string()),
+        Err(reason) => Err(reason),
+    };
+    match record {
+        Ok(accepted) if accepted.policy == policy.name && accepted.reviewed == policy.reviewed => Terms::Accepted(accepted),
+        Ok(accepted) => Terms::Open(format!(
+            "the acceptance recorded is of the {} of {}, and this release read the {} of {}",
+            accepted.policy, accepted.reviewed, policy.name, policy.reviewed
+        )),
+        Err(reason) => Terms::Open(format!("the acceptance's record is not valid ({reason})")),
+    }
+}
+
+/// Whether nothing stands between `model` and its use on this machine as
+/// far as its terms go: it has none of its own, or they are accepted.
+pub fn terms_settled(model: &NativeModel, terms: &Path) -> bool {
+    !matches!(terms_of(model, terms), Terms::Open(_))
+}
+
+/// Record the operator's acceptance of `model`'s terms, given at `at`
+/// (seconds since 1970) on the surface `by`: a word that would not stand in
+/// a record's line is written as `unnamed`. `None` for a model that comes
+/// with its licence alone: nothing is written.
+pub fn accept_terms(model: &NativeModel, terms: &Path, at: u64, by: &str) -> std::io::Result<Option<Accepted>> {
+    let Some(policy) = model.use_policy else { return Ok(None) };
+    let by = if terms_value_ok(by) { by } else { "unnamed" };
+    let accepted = Accepted { policy: policy.name.to_string(), reviewed: policy.reviewed.to_string(), at, by: by.to_string() };
+    write_whole(&terms_path(terms, model), &accepted.to_text())?;
+    Ok(Some(accepted))
+}
+
+/// What every surface says of a model whose terms are not accepted on the
+/// machine, after its own first words: whose policy it is, and the two
+/// commands. `None` for a model that comes with its licence alone.
+pub fn terms_open_words(model: &NativeModel) -> Option<String> {
+    let policy = model.use_policy?;
+    Some(format!(
+        "{} comes with its maker's {}, which is not accepted on this machine: /native terms {} shows it, and /native accept {} accepts it",
+        model.id, policy.name, model.id, model.id
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,6 +1316,21 @@ mod tests {
         assert_eq!(four.growth_mib(DEFAULT_CONTEXT, false), 32 * 51 + 3_796);
         assert_eq!(four.growth_mib(DEFAULT_CONTEXT, true), 32 * 51 + 3_796 + 315);
         assert_eq!(big.growth_mib(DEFAULT_CONTEXT, true), 32 * 150 + 9_111 + 587);
+        // Inkling 2 Mini, a mixture of experts: its own memory, measured
+        // (10,473, 11,499 and 13,550 MiB), and the 7,414 MiB of its file it
+        // reads in place once every expert was read. Its window's part is
+        // the small models', and its image file adds 614 MiB.
+        let inkling = by_id("inkling-2-mini").unwrap();
+        assert_eq!([32_768, 65_536, 131_072].map(|window| inkling.loaded_mib(window, false)), [17_887, 18_912, 20_962]);
+        assert_eq!(inkling.loaded_mib(DEFAULT_CONTEXT, true), 19_526);
+        // Less than the 27B at every window, though its file is the larger.
+        assert!(inkling.loaded_mib(DEFAULT_CONTEXT, false) < big.loaded_mib(DEFAULT_CONTEXT, false) && inkling.bytes > big.bytes);
+        // A position it keeps is its recurrent state and the caches of the
+        // layers that attend to a window of 1,024 tokens (163.67 MiB), and
+        // a kept prompt 32 MiB for every 1,024 tokens.
+        assert_eq!(inkling.cache_mib(65_536), 165 + 32 * 164 + 64 * 32);
+        assert_eq!(inkling.cache_mib(65_536), 7_461);
+        assert_eq!(inkling.growth_mib(DEFAULT_CONTEXT, true), 32 * 164 + 7_461 + 154);
         for model in &CATALOGUE {
             assert!(model.memory.at_32768 as u64 > model.bytes / (1024 * 1024), "{}: more than its file", model.id);
             assert!(model.loaded_mib(model.largest_context, true) > model.loaded_mib(model.default_context, true));
@@ -1063,7 +1352,7 @@ mod tests {
     #[test]
     fn the_catalogue_pins_two_files_of_one_revision_per_model() {
         let ids: Vec<&str> = CATALOGUE.iter().map(|m| m.id).collect();
-        assert_eq!(ids, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b"]);
+        assert_eq!(ids, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b", "inkling-2-mini"]);
         for model in &CATALOGUE {
             assert_eq!(by_id(model.id), Some(model));
             // The id is a directory's name and the name the server answers to.
@@ -1071,6 +1360,7 @@ mod tests {
             assert!(file_name_ok(model.file) && model.file.ends_with(".gguf"), "{}", model.file);
             assert!(hex(model.sha256, 64), "{}: sha256", model.id);
             assert!(hex(model.revision, 40), "{}: a revision is a commit, never a branch", model.id);
+            assert!(model.revision.bytes().any(|b| b != b'0'), "{}: the revision is the published one, never a stand-in", model.id);
             assert!(model.bytes > 1 << 30, "{}", model.id);
             assert_eq!(model.default_context, DEFAULT_CONTEXT);
             assert!(model.context_ok(model.default_context).is_ok());
@@ -1080,7 +1370,12 @@ mod tests {
                 format!("https://huggingface.co/{}/resolve/{}/{}", model.repository, model.revision, model.file)
             );
             assert!(!model.label.is_empty() && !model.licence.is_empty() && !model.quantisation.is_empty());
-            assert_eq!(model.maker, "Alibaba's Qwen family");
+            // Whose model it is, as the model is told: its family's maker.
+            let maker = match model.family {
+                Family::Qwen35 | Family::Qwen38 => "Alibaba's Qwen family",
+                Family::Inkling2 => "Thinking Machines Lab",
+            };
+            assert_eq!(model.maker, maker);
             // Our own conversion, in a repository of the model's own, and
             // each file named after the model: no two files of the
             // catalogue have one name.
@@ -1103,9 +1398,11 @@ mod tests {
             );
             assert_eq!(model.image_tokens, IMAGE_TOKENS);
         }
-        assert_eq!(CATALOGUE.map(|m| m.bytes), [2_815_884_544, 5_831_992_608, 17_005_351_136]);
-        assert_eq!(CATALOGUE.map(|m| m.images.bytes), [672_423_488, 918_165_952, 927_607_008]);
-        assert_eq!(CATALOGUE.map(|m| m.family), [Family::Qwen35, Family::Qwen35, Family::Qwen38]);
+        assert_eq!(CATALOGUE.map(|m| m.bytes), [2_815_884_544, 5_831_992_608, 17_005_351_136, 17_478_094_272]);
+        assert_eq!(CATALOGUE.map(|m| m.images.bytes), [672_423_488, 918_165_952, 927_607_008, 639_348_512]);
+        assert_eq!(CATALOGUE.map(|m| m.family), [Family::Qwen35, Family::Qwen35, Family::Qwen38, Family::Inkling2]);
+        // The window each was trained for, as its own configuration gives it.
+        assert_eq!(CATALOGUE.map(|m| m.largest_context), [262_144, 262_144, 262_144, 1_048_576]);
         // No two files of the catalogue have one size: an upload that names
         // no model is told apart by its size as well.
         let mut sizes: Vec<u64> = CATALOGUE.iter().flat_map(|m| Part::ALL.map(|part| m.part(part).bytes)).collect();
@@ -1518,9 +1815,112 @@ mod tests {
             accepted += usize::from(matches!(parse_settings(sample), Ok(Some(_))));
             accepted += usize::from(parse_status(sample).is_ok());
             accepted += usize::from(parse_verified(sample).is_ok());
+            accepted += usize::from(parse_accepted(sample).is_ok());
         }
         // One sample is a whole status with CRLF line ends; nothing else forms a record.
         assert_eq!(accepted, 1, "of {} samples", samples.len());
+    }
+
+    /// A model that comes with a policy on its use is open on a machine
+    /// until the operator's acceptance is recorded there, of the policy at
+    /// the date the catalogue read it. A model with its licence alone has
+    /// nothing to accept, and nothing is written for it.
+    #[test]
+    fn a_models_terms_are_settled_by_a_record_of_the_policy_as_the_catalogue_read_it() {
+        let state = crate::net::tests::scratch("native-terms");
+        let settings = state.join("native-model").join("settings");
+        let terms = terms_dir(&settings);
+        assert_eq!(terms, state.join("native-model").join("terms"));
+        assert_eq!(terms_dir(Path::new(SETTINGS_PATH)), Path::new(TERMS_DIR), "beside the settings, in the OS too");
+        let (four, inkling) = (by_id("qwen3.5-4b").unwrap(), by_id("inkling-2-mini").unwrap());
+        assert_eq!(terms_path(&terms, inkling), terms.join("inkling-2-mini"));
+
+        // The licence alone: settled, and an acceptance writes nothing.
+        assert_eq!(terms_of(four, &terms), Terms::None);
+        assert!(terms_settled(four, &terms) && terms_open_words(four).is_none());
+        assert_eq!(accept_terms(four, &terms, 1, "console").unwrap(), None);
+        assert!(!terms.exists(), "nothing was written for a model without a policy");
+
+        // A policy: open until it is accepted here.
+        assert_eq!(terms_of(inkling, &terms), Terms::Open("no acceptance is recorded".to_string()));
+        assert!(!terms_settled(inkling, &terms));
+        assert_eq!(
+            terms_open_words(inkling).as_deref(),
+            Some("inkling-2-mini comes with its maker's Model Acceptable Use Policy, which is not accepted on this machine: /native terms inkling-2-mini shows it, and /native accept inkling-2-mini accepts it")
+        );
+        let accepted = accept_terms(inkling, &terms, 1_764_183_000, "wizard").unwrap().unwrap();
+        assert_eq!(
+            accepted,
+            Accepted { policy: "Model Acceptable Use Policy".into(), reviewed: "July 15, 2026".into(), at: 1_764_183_000, by: "wizard".into() }
+        );
+        assert_eq!(
+            std::fs::read_to_string(terms_path(&terms, inkling)).unwrap(),
+            "policy=Model Acceptable Use Policy\nreviewed=July 15, 2026\nat=1764183000\nby=wizard\n"
+        );
+        assert_eq!(parse_accepted(&accepted.to_text()), Ok(accepted.clone()));
+        assert_eq!(terms_of(inkling, &terms), Terms::Accepted(accepted));
+        assert!(terms_settled(inkling, &terms));
+        // A model's name may carry a dot: its record is written under its
+        // whole name, and nothing is left beside it.
+        let dotted = NativeModel { id: "tiny3.5-1b", use_policy: inkling.use_policy, ..CATALOGUE[0] };
+        assert!(!terms_settled(&dotted, &terms));
+        accept_terms(&dotted, &terms, 3, "command").unwrap().unwrap();
+        assert!(terms_settled(&dotted, &terms));
+        let mut names: Vec<String> = std::fs::read_dir(&terms).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["inkling-2-mini", "tiny3.5-1b"], "one record a model, and no temporary file");
+        // A word that would not stand in the record's line is not written.
+        assert_eq!(accept_terms(inkling, &terms, 2, "a\nb").unwrap().unwrap().by, "unnamed");
+
+        // An acceptance of the policy at another date is not one of this release's reading.
+        std::fs::write(terms_path(&terms, inkling), "policy=Model Acceptable Use Policy\nreviewed=March 1, 2026\nat=5\nby=console\n").unwrap();
+        assert_eq!(
+            terms_of(inkling, &terms),
+            Terms::Open("the acceptance recorded is of the Model Acceptable Use Policy of March 1, 2026, and this release read the Model Acceptable Use Policy of July 15, 2026".to_string())
+        );
+        // A record that is not whole, or carries a line it does not know, settles nothing.
+        for (record, part) in [
+            ("policy=Model Acceptable Use Policy\nreviewed=July 15, 2026\nat=5\n", "lacks one of policy, reviewed, at and by"),
+            ("policy=Model Acceptable Use Policy\nreviewed=July 15, 2026\nat=soon\nby=console\n", "not a time"),
+            ("policy=Model Acceptable Use Policy\nreviewed=July 15, 2026\nat=5\nby=console\nby=wizard\n", "named twice"),
+            ("policy=Model Acceptable Use Policy\nreviewed=July 15, 2026\nat=5\nby=console\nsigned=yes\n", "not a field this release knows"),
+            ("policy=\nreviewed=July 15, 2026\nat=5\nby=console\n", "not a value of the record"),
+            ("accepted\n", "not a line of the record"),
+            ("", "lacks one of policy, reviewed, at and by"),
+        ] {
+            std::fs::write(terms_path(&terms, inkling), record).unwrap();
+            let Terms::Open(why) = terms_of(inkling, &terms) else { panic!("{record:?} settled the terms") };
+            assert!(why.starts_with("the acceptance's record is not valid (") && why.contains(part), "{record:?}: {why}");
+            assert!(!terms_settled(inkling, &terms));
+        }
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    /// What a model's terms are, in the catalogue: the Qwen models come with
+    /// their licence alone, Inkling 2 Mini with its maker's policy. The
+    /// notice is what a console shows: plain text of the installer's width,
+    /// naming the policy's address, the maker and where the licence passes
+    /// the terms on.
+    #[test]
+    fn a_policy_on_a_models_use_is_named_with_its_licence_and_its_notice_fits_a_console() {
+        for model in &CATALOGUE {
+            match (model.family, model.use_policy) {
+                (Family::Qwen35 | Family::Qwen38, None) => assert_eq!(model.licence_words(), "Apache-2.0"),
+                (Family::Inkling2, Some(policy)) => {
+                    assert_eq!(model.licence_words(), "Apache-2.0, with its maker's Model Acceptable Use Policy");
+                    assert_eq!((policy.name, policy.reviewed), ("Model Acceptable Use Policy", "July 15, 2026"));
+                    assert_eq!(policy.url, "https://thinkingmachines.ai/model-acceptable-use-policy/");
+                    assert!(terms_value_ok(policy.name) && terms_value_ok(policy.reviewed), "both go into a record's line");
+                    let notice = policy.notice;
+                    assert!(notice.is_ascii() && notice.lines().all(|line| line.len() <= 74 && line.trim_end() == line), "{notice}");
+                    assert!(!notice.starts_with('\n') && !notice.ends_with('\n'));
+                    for must in [policy.url, model.label, "Thinking Machines Lab, Inc.", "Apache License 2.0", "LICENSE, Section 5 and", "Schedule A", "Known limitations"] {
+                        assert!(notice.contains(must), "{must}: {notice}");
+                    }
+                }
+                (family, policy) => panic!("{}: {family:?} with {policy:?}", model.id),
+            }
+        }
     }
 
     #[test]

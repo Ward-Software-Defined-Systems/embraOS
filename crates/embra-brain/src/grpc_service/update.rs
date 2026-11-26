@@ -684,7 +684,7 @@ mod backup_tests {
         assert_eq!(door.take(command("/native", "help")).await, None);
         assert_eq!(said(&mut rx), vec![super::super::native::native_usage()], "/native is answered as in a session");
         assert_eq!(door.take(command("/native", "install qwen3.5-27b")).await, None);
-        assert_eq!(said(&mut rx), vec!["'qwen3.5-27b' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b. /native help shows the forms.".to_string()]);
+        assert_eq!(said(&mut rx), vec!["'qwen3.5-27b' is not a native model; the catalogue: qwen3.5-4b, qwen3.5-9b, qwen3.8-27b, inkling-2-mini. /native help shows the forms.".to_string()]);
         for stored in ["use qwen3.5-4b", "off", "context 32768"] {
             assert_eq!(door.take(command("/native", stored)).await, None);
             assert_eq!(said(&mut rx), vec![super::super::native::NATIVE_NOT_BEFORE_A_SESSION.to_string()], "{stored}");

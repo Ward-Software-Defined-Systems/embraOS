@@ -417,8 +417,15 @@ const NATIVE_PROGRESS: &str = "progress";
 /// seal is permanent, and the way to an identity this model does not write.
 pub fn native_notice() -> String {
     let models: Vec<&str> = native::CATALOGUE.iter().map(|m| m.label).collect();
+    // The terms the models come with, beside the licence each keeps: a
+    // policy on a model's use is named here and asked for at the pick.
+    let terms: String = native::CATALOGUE
+        .iter()
+        .filter_map(|m| m.use_policy.map(|policy| format!(" {} also comes with its maker's {} ({}), which you are asked to accept when you pick it.", m.label, policy.name, policy.url)))
+        .collect();
     format!(
         "A native model (experimental) runs on this machine's own processor: {}. They answer slower than a hosted model, and the smaller ones with less judgement. \
+         Each keeps its maker's licence.{terms} \
          The model you pick leads Learning Mode, where this intelligence's identity is written with you and sealed, and the seal is permanent. \
          An identity written beforehand can be imported instead: Learning Mode offers the graphs in Imported_Intelligence before it begins. \
          A provider can be added later with /provider --setup.",
@@ -480,6 +487,37 @@ pub async fn run_native_subflow(
             send_system(tx, format!("'{answer}' is not a native model."), SystemMessageType::Error).await;
             continue;
         };
+        // A model that comes with a policy on its use: the policy's notice
+        // and the question, before anything is downloaded or loaded. The
+        // accepting option's own words are recorded and the pick goes on;
+        // any other answer leaves the model and asks the model question
+        // again.
+        if let Some((prompt, options)) = crate::native_model::terms_question(model, env) {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                        field_type: SetupFieldType::Selector as i32,
+                        prompt,
+                        options,
+                        // No default: an empty answer accepts nothing.
+                        default_value: String::new(),
+                    })),
+                }))
+                .await;
+            let answer = response_rx
+                .recv()
+                .await
+                .ok_or_else(|| anyhow!("setup channel closed during the question about the native model's terms"))?;
+            if !crate::native_model::terms_answer_accepts(model, &answer) {
+                send_system(tx, format!("Not accepted: {} was not picked, and nothing was changed. Pick another model, or go back to a provider.", model.id), SystemMessageType::Info).await;
+                continue;
+            }
+            if let Err(why) = crate::native_model::accept_terms(model, env, crate::native_model::ACCEPTED_AT_THE_WIZARD) {
+                send_system(tx, format!("Not accepted: {why}. Nothing was changed. Pick again, or pick another model."), SystemMessageType::Error).await;
+                continue;
+            }
+            send_system(tx, format!("Accepted on this machine and recorded, for {}.", model.id), SystemMessageType::Info).await;
+        }
         // A machine that is short of memory for the model is told before
         // anything is downloaded or loaded. The window cannot be made
         // smaller before a session, and this model leads Learning Mode: when
@@ -1298,7 +1336,7 @@ mod tests {
             assert_eq!(said(&mut resp_rx).await, native_notice());
             let asked = question(&mut resp_rx).await;
             assert_eq!(asked.field_type, SetupFieldType::Selector as i32);
-            assert_eq!(asked.options, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b", NATIVE_BACK], "the catalogue, then the way back");
+            assert_eq!(asked.options, ["qwen3.5-4b", "qwen3.5-9b", "qwen3.8-27b", "inkling-2-mini", NATIVE_BACK], "the catalogue, then the way back");
             assert_eq!(asked.default_value, "qwen3.5-4b");
             assert!(
                 asked.prompt.starts_with("Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): not installed, downloaded first, about 5.3 GB of memory when loaded; "),
@@ -1332,7 +1370,7 @@ mod tests {
             user_tx.send("cancel".to_string()).await.unwrap();
             assert_eq!(said(&mut resp_rx).await, "Stopping the install of qwen3.5-9b.");
             assert_eq!(said(&mut resp_rx).await, "The install of qwen3.5-9b was stopped. What arrived is kept, and the next install goes on from it.");
-            assert_eq!(question(&mut resp_rx).await.options.len(), 4);
+            assert_eq!(question(&mut resp_rx).await.options.len(), 5);
             assert_eq!(native::read_settings(&env.settings), Ok(None));
 
             // Picked again, and this time the file comes.
@@ -1376,7 +1414,7 @@ mod tests {
             let asked = question(&mut resp_rx).await;
             assert_eq!(
                 asked.prompt,
-                "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): installed, about 6.9 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded. This machine has 7.5 GB of memory, 6.3 GB of it free for a model now."
+                "Select a native model (experimental). qwen3.5-4b is Qwen3.5 4B (Q4_K_M, 2685 MB): installed, about 4.7 GB of memory when loaded; qwen3.5-9b is Qwen3.5 9B (Q4_K_M, 5561 MB): installed, about 6.9 GB of memory when loaded; qwen3.8-27b is Qwen3.8 27B (Q4_K_M, 16217 MB): not installed, downloaded first, about 20.0 GB of memory when loaded; inkling-2-mini is Inkling 2 Mini (Q4_K_M, 16668 MB, with its maker's Model Acceptable Use Policy): not installed, downloaded first, about 19.1 GB of memory when loaded. This machine has 7.5 GB of memory, 6.3 GB of it free for a model now."
             );
             // The 9B takes more at its load than the machine has free: said, and asked again.
             user_tx.send("qwen3.5-9b".to_string()).await.unwrap();
@@ -1493,12 +1531,73 @@ mod tests {
     fn the_native_notice_says_what_the_model_leads_and_names_the_identity_import() {
         let notice = native_notice();
         assert!(
-            notice.starts_with("A native model (experimental) runs on this machine's own processor: Qwen3.5 4B, Qwen3.5 9B or Qwen3.8 27B. They answer slower than a hosted model, and the smaller ones with less judgement. "),
+            notice.starts_with("A native model (experimental) runs on this machine's own processor: Qwen3.5 4B, Qwen3.5 9B, Qwen3.8 27B or Inkling 2 Mini. They answer slower than a hosted model, and the smaller ones with less judgement. "),
             "{notice}"
         );
         for must in ["leads Learning Mode", "the seal is permanent", "can be imported instead", "Imported_Intelligence", "/provider --setup"] {
             assert!(notice.contains(must), "{must}: {notice}");
         }
+        // The terms the models come with: the licence each keeps, and a
+        // policy on a model's use with the model it is of.
+        assert!(
+            notice.contains(
+                " Each keeps its maker's licence. Inkling 2 Mini also comes with its maker's Model Acceptable Use Policy (https://thinkingmachines.ai/model-acceptable-use-policy/), which you are asked to accept when you pick it. "
+            ),
+            "{notice}"
+        );
+        for model in &native::CATALOGUE {
+            assert_eq!(notice.contains(&format!("{} also comes with", model.label)), model.use_policy.is_some(), "{}", model.id);
+        }
+    }
+
+    /// A model that comes with a policy on its use: the wizard shows the
+    /// policy's notice and asks, before anything is installed or loaded.
+    /// The refusing answer is the first option, which Enter sends; it, an
+    /// empty answer and a word of the operator's own leave the model
+    /// unpicked, and the model question is asked again. The accepting
+    /// option's own words are recorded on the machine, and the pick goes on
+    /// as any other.
+    #[tokio::test]
+    async fn the_native_answer_asks_for_a_models_terms_before_it_installs_or_loads_it() {
+        let (_root, env) = machine("wizard-terms");
+        let inkling = native::by_id("inkling-2-mini").unwrap();
+        // Its files are on the machine: nothing is downloaded here.
+        install(inkling, &env);
+        let jobs = Jobs::default();
+        let policy = inkling.use_policy.expect("it comes with a policy");
+        let (resp_tx, mut resp_rx) = mpsc::channel(64);
+        let (user_tx, mut user_rx) = mpsc::channel(8);
+        let operator = async {
+            assert_eq!(said(&mut resp_rx).await, native_notice());
+            question(&mut resp_rx).await;
+            for answer in ["I do not accept", "", "yes", "accept"] {
+                user_tx.send("inkling-2-mini".to_string()).await.unwrap();
+                let asked = question(&mut resp_rx).await;
+                assert_eq!(asked.field_type, SetupFieldType::Selector as i32);
+                assert_eq!(asked.prompt, format!("{}\n\nDo you accept the Model Acceptable Use Policy for Inkling 2 Mini on this machine?", policy.notice));
+                assert_eq!(asked.options, ["I do not accept", "I accept the Model Acceptable Use Policy"], "the refusing answer first: Enter alone accepts nothing");
+                assert_eq!(asked.default_value, "", "no default");
+                user_tx.send(answer.to_string()).await.unwrap();
+                assert_eq!(
+                    said(&mut resp_rx).await,
+                    "Not accepted: inkling-2-mini was not picked, and nothing was changed. Pick another model, or go back to a provider.",
+                    "{answer:?}"
+                );
+                assert_eq!(question(&mut resp_rx).await.options.len(), 5, "the model question again");
+                assert!(!native::terms_settled(inkling, &env.terms()), "{answer:?}");
+                assert_eq!(native::read_settings(&env.settings), Ok(None), "{answer:?}: nothing was asked of embrad");
+            }
+            user_tx.send("inkling-2-mini".to_string()).await.unwrap();
+            question(&mut resp_rx).await;
+            user_tx.send("I accept the Model Acceptable Use Policy".to_string()).await.unwrap();
+            assert_eq!(said(&mut resp_rx).await, "Accepted on this machine and recorded, for inkling-2-mini.");
+            assert_eq!(said(&mut resp_rx).await, "inkling-2-mini is installed. embrad loads it now, while the setup goes on.");
+        };
+        let (picked, ()) = tokio::join!(run_native_subflow(&resp_tx, &mut user_rx, &env, &jobs), operator);
+        assert_eq!(picked.unwrap().map(|m| m.id), Some("inkling-2-mini"));
+        let native::Terms::Accepted(accepted) = native::terms_of(inkling, &env.terms()) else { panic!("the acceptance was recorded") };
+        assert_eq!((accepted.policy.as_str(), accepted.reviewed.as_str(), accepted.by.as_str()), ("Model Acceptable Use Policy", "July 15, 2026", "wizard"));
+        assert_eq!(native::read_settings(&env.settings), Ok(Some(native::Wanted::new(inkling))));
     }
 
     /// A listener that identifies itself is stored, on, with its version

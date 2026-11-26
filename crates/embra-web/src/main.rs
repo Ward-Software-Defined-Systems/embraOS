@@ -111,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         updater: Arc::from(std::path::Path::new(backups::UPDATER)),
         backup_upload: Arc::new(tokio::sync::Mutex::new(())),
         models_root: Arc::from(std::path::Path::new(models::MODELS_ROOT)),
+        model_terms: Arc::from(std::path::Path::new(models::MODEL_TERMS)),
         model_upload: Arc::new(tokio::sync::Mutex::new(())),
         trust_addr: cfg.trust_addr.clone(),
     };

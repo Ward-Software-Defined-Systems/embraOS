@@ -537,6 +537,16 @@ mod tests {
         }
         // The word that switches thinking off is the family's.
         assert_eq!((dialect(Family::Qwen35).off, dialect(Family::Qwen38).off), ("low", "off"));
+        // A family without a switch: its levels as the operator set them, and its
+        // word for off is its least level, which the request then carries.
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+            assert_eq!(level_of(Family::Inkling2, Some(level), true), Some(level));
+        }
+        for no_level in [None, Some("none"), Some("off"), Some("extreme")] {
+            assert_eq!(level_of(Family::Inkling2, no_level, true), None, "{no_level:?}");
+        }
+        assert_eq!(level_of(Family::Inkling2, Some("medium"), false), None, "a call that does not think has no level");
+        assert_eq!((dialect(Family::Inkling2).off, dialect(Family::Inkling2).least), ("none", Some("none")));
     }
 
     /// A PNG of one colour, as a file a call can name.

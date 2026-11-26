@@ -1,11 +1,13 @@
 //! What a native model's request differs in (experimental). The model
-//! server is llama.cpp's and the models are Qwen3.5: the request is the
-//! presets' own, with these differences.
+//! server is llama.cpp's and the models are of a few families
+//! ([`Dialect`]): the request is the presets' own, with these differences.
 //!
 //! - Thinking is switched on every request (`chat_template_kwargs`): the
 //!   server's own default is on, and a request that says nothing thinks. It
-//!   is on unless the operator's `/effort` is `low`. `reasoning_effort` is
-//!   not sent: the model has no levels.
+//!   is on unless the operator's `/effort` is the family's word for off. A
+//!   `reasoning_effort` is sent only to a family whose template has levels,
+//!   and only a word of that template's own. A family whose template has no
+//!   switch is asked for its least level in place of off.
 //! - The sampling is the model card's for the thinking state, sent with the
 //!   request: the server's defaults are its own, not the model's.
 //! - The reasoning of an earlier step of the turn goes back as
@@ -55,6 +57,10 @@ pub(crate) struct Dialect {
     /// The stored `/effort` word that switches thinking off. Any other, and
     /// none, leaves it on (William, 2026-11-22: on by default).
     pub(crate) off: &'static str,
+    /// The level a family is asked for when thinking is off and its template
+    /// has no switch: the template's least, at which the model still thinks
+    /// a little. None for a family that can stop thinking.
+    pub(crate) least: Option<&'static str>,
 }
 
 /// Qwen3.5's model card (read 2026-11-22, the same for the 4B and the 9B;
@@ -67,6 +73,7 @@ const QWEN35: Dialect = Dialect {
     levels: &[],
     own_level: None,
     off: "low",
+    least: None,
 };
 
 /// Qwen3.8's model card and chat template (read 2026-11-23): thinking is
@@ -78,6 +85,28 @@ const QWEN38: Dialect = Dialect {
     levels: &["low", "medium", "xhigh"],
     own_level: Some("xhigh"),
     off: "off",
+    least: None,
+};
+
+/// Inkling 2's model card and chat template (read 2026-11-25, and tried on
+/// the build server with llama.cpp v1.1.0). The template writes the depth of
+/// thinking as a number from a word: `none` 0.0, `minimal` 0.1, `low` 0.2,
+/// `medium` 0.7, `high` 0.9, `xhigh` and `max` 0.99; `high` when none is
+/// named. It has no switch (`enable_thinking` is read by nothing in it), and
+/// the card says of the least: "Setting reasoning effort to its minimum does
+/// not fully disable reasoning". So off is the level `none`, and the model
+/// thinks a little even then. Any other word is answered HTTP 500 by the
+/// template ("Unknown reasoning_effort"). The card's sampling is a
+/// temperature (1.0, its generation configuration) and nothing else: the
+/// rest is the model server's own, which is what the model was tried with
+/// in two sessions it led.
+const INKLING2: Dialect = Dialect {
+    thinking: Sampling { temperature: 1.0, top_p: 0.95, top_k: 40, min_p: 0.05, presence_penalty: 0.0 },
+    direct: Sampling { temperature: 1.0, top_p: 0.95, top_k: 40, min_p: 0.05, presence_penalty: 0.0 },
+    levels: &["minimal", "low", "medium", "high", "xhigh", "max"],
+    own_level: Some("high"),
+    off: "none",
+    least: Some("none"),
 };
 
 /// What a family takes.
@@ -85,6 +114,7 @@ pub(crate) fn dialect(family: Family) -> &'static Dialect {
     match family {
         Family::Qwen35 => &QWEN35,
         Family::Qwen38 => &QWEN38,
+        Family::Inkling2 => &INKLING2,
     }
 }
 
@@ -130,13 +160,15 @@ pub(crate) fn thinks(family: Family, effort: Option<&str>) -> bool {
 
 /// Give a request a native model's shape: the thinking switch, the card's
 /// sampling for it, the level of effort when the family has levels and the
-/// operator named one, and the reading progress asked for.
+/// operator named one (or, with thinking off, the least level of a family
+/// that has no switch), and the reading progress asked for.
 pub(super) fn shape(body: &mut OpenAIChatRequest, family: Family, effort: Option<&str>) {
     let dialect = dialect(family);
     let thinks = thinking(family, effort);
     body.reasoning_effort = match thinks {
         Thinks::On(Some(level)) => Some(level.to_string()),
-        Thinks::On(None) | Thinks::Off => None,
+        Thinks::On(None) => None,
+        Thinks::Off => dialect.least.map(str::to_string),
     };
     body.return_progress = Some(true);
     body.chat_template_kwargs = Some(json!({ "enable_thinking": thinks != Thinks::Off }));
@@ -316,6 +348,55 @@ mod tests {
         assert!(off.get("reasoning_effort").is_none());
         assert_eq!(off["chat_template_kwargs"], json!({"enable_thinking": false}));
         assert_eq!((off["temperature"].as_f64(), off["presence_penalty"].as_f64()), (Some(0.7), Some(1.5)));
+    }
+
+    /// The third family has no switch: each of its levels is sent as it
+    /// is, off is its least level and is sent as that word, no word is the
+    /// template's own, and a word the template does not know never leaves.
+    #[test]
+    fn a_family_without_a_switch_is_asked_for_its_least_and_no_unknown_word() {
+        let d = dialect(Family::Inkling2);
+        assert_eq!((d.levels, d.own_level, d.off, d.least), (&["minimal", "low", "medium", "high", "xhigh", "max"][..], Some("high"), "none", Some("none")));
+        // The two families before it can stop thinking: they have no least.
+        assert_eq!((dialect(Family::Qwen35).least, dialect(Family::Qwen38).least), (None, None));
+        for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+            assert_eq!(thinking(Family::Inkling2, Some(level)), Thinks::On(Some(level)));
+        }
+        for off in ["none", " none ", "off"] {
+            assert_eq!(thinking(Family::Inkling2, Some(off)), Thinks::Off, "{off:?}");
+        }
+        for no_level in [None, Some("extreme"), Some(""), Some("HIGH"), Some("0.5")] {
+            assert_eq!(thinking(Family::Inkling2, no_level), Thinks::On(None), "{no_level:?}");
+        }
+
+        let shaped = |effort: Option<&str>| {
+            let mut body = request();
+            body.reasoning_effort = Some("extreme".to_string());
+            shape(&mut body, Family::Inkling2, effort);
+            serde_json::to_value(&body).unwrap()
+        };
+        // Every word the template knows, and only those, as the request's `reasoning_effort`.
+        let known = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+        for (stored, sent) in [("minimal", "minimal"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh"), ("max", "max"), ("none", "none"), ("off", "none")] {
+            let body = shaped(Some(stored));
+            assert_eq!(body["reasoning_effort"], sent, "{stored}");
+            assert!(known.contains(&body["reasoning_effort"].as_str().unwrap()));
+            // The card's temperature, with the server's own sampling beside it, whatever the level.
+            assert_eq!(
+                (body["temperature"].as_f64(), body["top_p"].as_f64(), body["top_k"].as_u64(), body["min_p"].as_f64(), body["presence_penalty"].as_f64()),
+                (Some(1.0), Some(0.95), Some(40), Some(0.05), Some(0.0)),
+                "{stored}"
+            );
+            assert_eq!(body["return_progress"], json!(true));
+        }
+        // No word, and a word that is none of the template's: nothing is sent, and the template takes its own.
+        for effort in [None, Some("extreme"), Some("")] {
+            let body = shaped(effort);
+            assert!(body.get("reasoning_effort").is_none(), "{effort:?}: {body}");
+            assert_eq!(body["chat_template_kwargs"], json!({"enable_thinking": true}));
+        }
+        // The switch still travels (the template reads nothing of it): one shape of request for every family.
+        assert_eq!(shaped(Some("none"))["chat_template_kwargs"], json!({"enable_thinking": false}));
     }
 
     fn request() -> OpenAIChatRequest {

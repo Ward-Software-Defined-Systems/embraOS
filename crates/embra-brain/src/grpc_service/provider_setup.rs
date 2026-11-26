@@ -45,6 +45,26 @@ pub enum OpenAiCompatSetupStep {
         bearer: Option<String>,
         models: Vec<String>,
     },
+    /// The native model that was picked comes with a policy on its use that
+    /// is not accepted on this machine: its notice was shown, and the
+    /// answer is awaited (`native_model::terms_question`). The accepting
+    /// option's own words go on to the pick; any other answer ends the flow
+    /// with nothing changed.
+    AwaitingNativeTerms {
+        model: String,
+    },
+}
+
+/// What a console is told when a command arrives while a step of the flow
+/// waits for its answer: the flow ends there. A question about a model's
+/// terms that was left for a command accepted nothing, and says so.
+pub(super) fn setup_cancelled_words(step: &OpenAiCompatSetupStep) -> String {
+    match step {
+        OpenAiCompatSetupStep::AwaitingNativeTerms { model } => {
+            format!("The question about the terms of {model} was left for a command: nothing was accepted, and nothing was changed.")
+        }
+        _ => "OpenAI-compat setup cancelled.".to_string(),
+    }
 }
 
 /// Outcome of one state-machine step. `Advance` reinstates the state
@@ -1029,9 +1049,70 @@ pub(super) async fn handle_pending_openai_compat_step(
                     .await;
                 return reset_to_endpoint_step(state, tx).await;
             };
+            // A native model that comes with a policy on its use: the
+            // policy's notice and the question, before the pick goes on.
+            if let Some((prompt, options)) = native_terms_question(state, &chosen) {
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                            field_type: SetupFieldType::Selector as i32,
+                            prompt,
+                            options,
+                            // No default: an empty answer accepts nothing.
+                            default_value: String::new(),
+                        })),
+                    }))
+                    .await;
+                state.step = OpenAiCompatSetupStep::AwaitingNativeTerms { model: chosen };
+                return SetupStepOutcome::Advance;
+            }
             complete_openai_compat_setup(state, endpoint, bearer, chosen, tx, db, pending).await
         }
+
+        OpenAiCompatSetupStep::AwaitingNativeTerms { model } => {
+            let say = |content: String, kind: SystemMessageType| async move {
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(SystemMessage { content, msg_type: kind as i32 })),
+                    }))
+                    .await;
+            };
+            let picked = super::native::native_model_choice(&model).ok().zip(state.native.as_ref());
+            let Some((picked, hands)) = picked else {
+                say(format!("'{model}' is not a native model of the catalogue. Run /model again to pick from the list."), SystemMessageType::Error).await;
+                return SetupStepOutcome::Error;
+            };
+            if !crate::native_model::terms_answer_accepts(picked, trimmed) {
+                say(
+                    format!(
+                        "Not accepted: {} was neither installed nor loaded, and nothing was changed. /native terms {} shows its terms again.",
+                        picked.id, picked.id
+                    ),
+                    SystemMessageType::Info,
+                )
+                .await;
+                return SetupStepOutcome::Error;
+            }
+            if let Err(why) = crate::native_model::accept_terms(picked, &hands.env, crate::native_model::ACCEPTED_AT_THE_QUESTION) {
+                say(format!("Not accepted: {why}. Nothing was changed."), SystemMessageType::Error).await;
+                return SetupStepOutcome::Error;
+            }
+            say(format!("Accepted on this machine and recorded, for {}.", picked.id), SystemMessageType::Info).await;
+            complete_openai_compat_setup(state, String::new(), None, model, tx, db, pending).await
+        }
     }
+}
+
+/// The question about the terms of the native model `chosen` at the model
+/// step, when the flow is a native model's and that model comes with a
+/// policy that is not accepted on this machine.
+fn native_terms_question(state: &OpenAiCompatSetupState, chosen: &str) -> Option<(String, Vec<String>)> {
+    let hands = state.native.as_ref()?;
+    if state.preset != crate::provider::openai_compat::OpenAiCompatPreset::Native {
+        return None;
+    }
+    let model = super::native::native_model_choice(chosen).ok()?;
+    crate::native_model::terms_question(model, &hands.env)
 }
 
 /// Run probe_models against the gathered endpoint+bearer; on success,
