@@ -16,6 +16,15 @@
 //! [`GATEWAY_HEADER`] with the gateway's version, and `/local-ai-gateway
 //! <url>` and `on` read it from `GET {url}/v1/models` before a change is
 //! saved.
+//!
+//! Higgsfield's image API is no provider of [`ProviderKind`], and it goes
+//! through the gateway too, under [`HIGGSFIELD_PREFIX`]
+//! ([`higgsfield_base`]). That route came with the gateway's 0.2.0
+//! ([`HIGGSFIELD_SINCE`]): an older gateway knows no such prefix and would
+//! hand the request, with its key, to its default backend. So a call of
+//! Higgsfield's asks the gateway who it is first, every time, and sends
+//! nothing to one that does not say 0.2.0 or later
+//! (`provider::image::higgsfield`).
 
 use crate::config::{ProviderGateway, SystemConfig};
 use crate::provider::ProviderKind;
@@ -26,6 +35,15 @@ pub(crate) const GATEWAY_HEADER: &str = "x-local-ai-gateway";
 
 /// The whole of the identification request: connect, TLS and the answer.
 const IDENTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The gateway's forced-route prefix of Higgsfield's API. Its model ids
+/// begin with a vendor's name (`xai/…`), so the gateway routes nothing to
+/// it by model, and the prefix is the only way in.
+pub(crate) const HIGGSFIELD_PREFIX: &str = "higgsfield";
+
+/// The first version of the gateway that has that route: major, minor,
+/// patch.
+pub(crate) const HIGGSFIELD_SINCE: (u64, u64, u64) = (0, 2, 0);
 
 /// What a refused certificate means here, and what fixes it. First the
 /// `/ca` command, on the running machine: the brain trusts an imported
@@ -64,6 +82,11 @@ pub(crate) fn prefix(kind: ProviderKind) -> Option<&'static str> {
     }
 }
 
+/// The gateway while one is stored and on.
+pub(crate) fn in_force(gateway: Option<&ProviderGateway>) -> Option<&ProviderGateway> {
+    gateway.filter(|g| g.enabled && !g.url.trim().is_empty())
+}
+
 /// The base every request of `kind` is built on: `"{url}/{prefix}"` while a
 /// gateway is stored and on, `direct` otherwise (the provider's own host, or
 /// the preset's stored endpoint).
@@ -72,12 +95,47 @@ pub(crate) fn base_for(
     kind: ProviderKind,
     direct: &str,
 ) -> String {
-    match (gateway, prefix(kind)) {
-        (Some(g), Some(prefix)) if g.enabled && !g.url.trim().is_empty() => {
-            format!("{}/{}", g.url.trim().trim_end_matches('/'), prefix)
-        }
+    match (in_force(gateway), prefix(kind)) {
+        (Some(g), Some(prefix)) => under(g, prefix),
         _ => direct.to_string(),
     }
+}
+
+/// `"{url}/{prefix}"` of a gateway.
+fn under(gateway: &ProviderGateway, prefix: &str) -> String {
+    format!("{}/{}", gateway.url.trim().trim_end_matches('/'), prefix)
+}
+
+/// The base of Higgsfield's API through a gateway in force:
+/// `"{url}/higgsfield"`.
+pub(crate) fn higgsfield_base(gateway: &ProviderGateway) -> String {
+    under(gateway, HIGGSFIELD_PREFIX)
+}
+
+/// Whether a gateway that says `version` has the route of Higgsfield's API:
+/// [`HIGGSFIELD_SINCE`] or later. A version this cannot read (no
+/// `major.minor` of digits at its start, a `v` before them allowed) is
+/// none that has it.
+pub(crate) fn routes_higgsfield(version: &str) -> bool {
+    let mut parts = version.trim().trim_start_matches(['v', 'V']).split('.').map(|part| {
+        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u64>().ok()
+    });
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), Some(minor)) => (major, minor, parts.next().flatten().unwrap_or(0)) >= HIGGSFIELD_SINCE,
+        _ => false,
+    }
+}
+
+/// What a call of Higgsfield's is told when the gateway in force is from
+/// before the route.
+pub(crate) fn no_higgsfield_route(url: &str, version: &str) -> String {
+    let (major, minor, patch) = HIGGSFIELD_SINCE;
+    format!(
+        "the provider gateway at {url} says it is WSDS Local AI Gateway {version}, and the route of Higgsfield's API \
+         came with {major}.{minor}.{patch}: an older gateway would hand the request and its key to another backend, \
+         so nothing was sent. Update the gateway, or turn it off for this machine with /local-ai-gateway off"
+    )
 }
 
 /// `host[:port]` of a base URL, for the probe's endpoint label:
@@ -239,9 +297,15 @@ fn identify_hint(url: &str, cause: &str, date_hint: Option<String>) -> String {
 /// drop-in directory, and one refused on its dates names the clock. The
 /// caller saves nothing on an `Err`.
 pub(crate) async fn identify(url: &str) -> Result<String, String> {
+    identify_within(url, IDENTIFY_TIMEOUT).await
+}
+
+/// [`identify`] within `timeout`: a call that has a deadline of its own
+/// asks inside it.
+pub(crate) async fn identify_within(url: &str, timeout: std::time::Duration) -> Result<String, String> {
     let target = format!("{}/v1/models", url.trim_end_matches('/'));
     let client = crate::net::builder()
-        .timeout(IDENTIFY_TIMEOUT)
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("http client: {e}"))?;
     let resp = client.get(&target).send().await.map_err(|e| {
@@ -303,8 +367,22 @@ fn stranded_note(cfg: &SystemConfig, way_back: &str) -> String {
 const WAY_BACK_ON: &str = ", or /local-ai-gateway on brings the gateway back";
 const WAY_BACK_URL: &str = ", or /local-ai-gateway <url> stores a gateway again";
 
-const PREFIX_LIST: &str =
-    "Anthropic at /anthropic, Gemini at /gemini, Ollama at /ollama, LM Studio at /lmstudio";
+const PREFIX_LIST: &str = "Anthropic at /anthropic, Gemini at /gemini, Ollama at /ollama, LM Studio at /lmstudio, \
+     and Higgsfield's image API at /higgsfield (a gateway from 0.2.0 on)";
+
+/// What `Set` and `On` add when the listener that identified itself is from
+/// before Higgsfield's route and Higgsfield is the image provider: its
+/// calls are refused while this gateway is on.
+fn higgsfield_note(cfg: &SystemConfig, version: Option<&str>) -> String {
+    let selected = cfg.image_provider.as_deref() == Some(crate::provider::image::ImageProviderKind::Higgsfield.as_str());
+    match version {
+        Some(version) if selected && !routes_higgsfield(version) => format!(
+            " This gateway is {version}, from before Higgsfield's route: image_generate, whose provider here is \
+             Higgsfield, is refused while it is on."
+        ),
+        _ => String::new(),
+    }
+}
 
 fn plain_http_note(url: &str) -> &'static str {
     if url.starts_with("http://") {
@@ -340,20 +418,21 @@ pub(crate) fn apply(
             Ok(format!(
                 "Provider gateway set and on: {url}{}. Every provider request goes through it \
                  from your next message: {PREFIX_LIST}. The health probe runs through it now; \
-                 /status shows the result.{}",
+                 /status shows the result.{}{}",
                 identified(version),
-                plain_http_note(url)
+                plain_http_note(url),
+                higgsfield_note(cfg, version)
             ))
         }
         GatewayAction::On => match cfg.provider_gateway.as_mut() {
             Some(g) => {
                 g.enabled = true;
+                let (url, note) = (g.url.clone(), higgsfield_note(cfg, version));
                 Ok(format!(
-                    "Provider gateway on: {}{}. Every provider request goes through it from your \
-                     next message; the health probe runs through it now.{}",
-                    g.url,
+                    "Provider gateway on: {url}{}. Every provider request goes through it from your \
+                     next message; the health probe runs through it now.{}{note}",
                     identified(version),
-                    plain_http_note(&g.url)
+                    plain_http_note(&url)
                 ))
             }
             None => Err(
@@ -446,6 +525,60 @@ mod tests {
 
     fn cfg() -> SystemConfig {
         crate::config::tests_support::minimal_cfg()
+    }
+
+    /// Higgsfield's image API has a route of its own on the gateway, which
+    /// came with the gateway's 0.2.0. Its base is the gateway's URL and the
+    /// prefix; a version from 0.2.0 on has the route, and one this cannot
+    /// read has not. `Set` and `On` name the route among the others, and
+    /// say so when the gateway that answered is from before it and
+    /// Higgsfield is the image provider of this machine.
+    #[test]
+    fn higgsfields_route_is_a_prefix_of_its_own_and_came_with_a_later_gateway() {
+        assert_eq!(higgsfield_base(&gw("https://gw.example:4000/", true)), "https://gw.example:4000/higgsfield");
+        assert_eq!(higgsfield_base(&gw(" http://10.0.0.5:4000 ", true)), "http://10.0.0.5:4000/higgsfield");
+        for (version, routes) in [
+            ("0.2.0", true),
+            ("0.2", true),
+            ("0.2.7", true),
+            ("0.10.0", true),
+            ("1.0.0", true),
+            ("v0.2.0", true),
+            (" 0.2.0-dev ", true),
+            ("0.2.0+build.5", true),
+            ("0.1.0", false),
+            ("0.1.99", false),
+            ("0.1", false),
+            ("0", false),
+            ("", false),
+            ("dev", false),
+            ("two", false),
+            (".2.0", false),
+        ] {
+            assert_eq!(routes_higgsfield(version), routes, "{version:?}");
+        }
+        assert!(in_force(Some(&gw("http://gw:4000", true))).is_some());
+        assert!(in_force(Some(&gw("http://gw:4000", false))).is_none() && in_force(Some(&gw(" ", true))).is_none() && in_force(None).is_none());
+
+        let mut c = cfg();
+        let msg = apply(&mut c, &parse_action("gw.example").unwrap(), Some("0.2.0")).unwrap();
+        assert!(msg.contains("LM Studio at /lmstudio, and Higgsfield's image API at /higgsfield (a gateway from 0.2.0 on)."), "{msg}");
+        assert!(!msg.contains("from before Higgsfield's route"), "{msg}");
+        // An older gateway, and Gemini the image provider (the default): nothing to say.
+        let msg = apply(&mut c, &GatewayAction::On, Some("0.1.0")).unwrap();
+        assert!(!msg.contains("from before Higgsfield's route"), "{msg}");
+        // An older gateway, and Higgsfield the image provider.
+        c.image_provider = Some("higgsfield".into());
+        let note = " This gateway is 0.1.0, from before Higgsfield's route: image_generate, whose provider here is Higgsfield, is refused while it is on.";
+        assert!(apply(&mut c, &GatewayAction::On, Some("0.1.0")).unwrap().ends_with(note));
+        assert!(apply(&mut c, &parse_action("gw.example").unwrap(), Some("0.1.0")).unwrap().ends_with(note));
+        assert!(!apply(&mut c, &GatewayAction::On, Some("0.2.0")).unwrap().contains("from before"));
+        assert!(!apply(&mut c, &GatewayAction::On, None).unwrap().contains("from before"), "a version that was not asked is no verdict");
+        assert_eq!(
+            no_higgsfield_route("http://gw:4000", "0.1.0"),
+            "the provider gateway at http://gw:4000 says it is WSDS Local AI Gateway 0.1.0, and the route of Higgsfield's API came with 0.2.0: an older gateway would hand the request and its key to another backend, so nothing was sent. Update the gateway, or turn it off for this machine with /local-ai-gateway off"
+        );
+        assert!(status_line(&c).contains("Higgsfield's image API at /higgsfield (a gateway from 0.2.0 on)"));
     }
 
     #[test]

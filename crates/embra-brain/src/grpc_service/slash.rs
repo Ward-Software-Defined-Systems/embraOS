@@ -1968,10 +1968,13 @@ pub(super) fn image_provider_step(cfg: &mut config::SystemConfig, args: &str, ke
     let say = |text: String| ImageProviderStep::Say { text, error: false };
     let refuse = |text: String| ImageProviderStep::Say { text, error: true };
     let selected = cfg.image_provider.as_deref().and_then(ImageProviderKind::parse).unwrap_or(ImageProviderKind::Gemini);
-    let gateway_on = cfg.provider_gateway.as_ref().is_some_and(|g| g.enabled && !g.url.trim().is_empty());
+    let gateway_on = crate::provider::gateway::in_force(cfg.provider_gateway.as_ref()).is_some();
+    // Gemini's image endpoint goes through the gateway as its chat does.
+    // Higgsfield's route there came with a later gateway, which is worth
+    // its sentence: an older one is sent nothing.
     let direct = |kind: ImageProviderKind| {
         if kind == ImageProviderKind::Higgsfield && gateway_on {
-            " Higgsfield is reached directly, not through the provider gateway, which neither routes nor records its requests."
+            " Higgsfield is reached through the provider gateway, at its /higgsfield route: a gateway from 0.2.0 on has it, and an older one is sent nothing. The picture itself, and a reference image, go between this machine and the hosts Higgsfield names."
         } else {
             ""
         }
@@ -2535,7 +2538,7 @@ mod slash_catalogue_tests {
         };
         assert_eq!((cfg.image_provider.as_deref(), cfg.image_model.as_deref()), (Some("higgsfield"), None));
         assert!(text.starts_with("Image provider set to higgsfield (model xai/grok-imagine-image-2.0). image_generate uses it on its next call. The model gemini-3-pro-image is not one of Higgsfield's and is cleared. Its key: NOT set — /image-provider key <key id>:<key secret>"), "{text}");
-        assert!(!text.contains("reached directly"), "no gateway, no note: {text}");
+        assert!(!text.contains("provider gateway"), "no gateway, no note: {text}");
         // A model of the other provider is refused with the way; one of its own is kept.
         let refused = image_provider_step(&mut cfg, "model gemini-3-pro-image", &keys);
         assert_eq!(
@@ -2559,19 +2562,19 @@ mod slash_catalogue_tests {
         let stored = |kind: ImageProviderKind| kind == Higgsfield;
         let held = ImageKeyFacts { source: &none, stored: &stored };
         assert!(say(image_provider_step(&mut cfg, "key", &held)).starts_with("Dedicated image-generation key of Higgsfield: SET. Set with /image-provider key <key id>:<key secret>"));
-        // With the gateway on, Higgsfield is said to go direct.
+        // With the gateway on, Higgsfield is said to go through it.
         cfg.provider_gateway = Some(crate::config::ProviderGateway { url: "http://gw:4000".into(), enabled: true });
         let from_state = |kind: ImageProviderKind| (kind == Higgsfield).then_some("state");
         let held = ImageKeyFacts { source: &from_state, stored: &stored };
         let status = say(image_provider_step(&mut cfg, "", &held));
-        assert!(status.contains("model z-image/turbo, key SET (dedicated image key on STATE). Higgsfield is reached directly, not through the provider gateway"), "{status}");
+        assert!(status.contains("model z-image/turbo, key SET (dedicated image key on STATE). Higgsfield is reached through the provider gateway, at its /higgsfield route: a gateway from 0.2.0 on has it"), "{status}");
         // Back to Gemini: Higgsfield's model is cleared, Gemini's key shape is asked.
         assert!(matches!(image_provider_step(&mut cfg, "gemini", &keys), ImageProviderStep::Save { .. }));
         assert_eq!((cfg.image_provider.as_deref(), cfg.image_model.as_deref()), (Some("gemini"), None));
         let refused = image_provider_step(&mut cfg, &format!("key {pair}"), &keys);
         assert!(matches!(&refused, ImageProviderStep::Say { text, error: true } if text.starts_with("That is not a Gemini key") && !text.contains("hf-secret-1")), "{refused:?}");
         assert_eq!(image_provider_step(&mut cfg, "key AIzaSy-0123456789", &keys), ImageProviderStep::WriteKey { kind: Gemini, key: "AIzaSy-0123456789".into() });
-        assert!(!say(image_provider_step(&mut cfg, "", &held)).contains("reached directly"), "Gemini goes through the gateway");
+        assert!(!say(image_provider_step(&mut cfg, "", &held)).contains("/higgsfield route"), "the sentence is Higgsfield's");
         let cleared = image_provider_step(&mut cfg, "clear", &keys);
         assert_eq!(cleared, ImageProviderStep::Save { text: "Image provider settings cleared (back to the defaults: gemini / gemini-nano-banana-2.1; the key files are untouched).".into() });
         assert_eq!((cfg.image_provider.as_deref(), cfg.image_model.as_deref()), (None, None));

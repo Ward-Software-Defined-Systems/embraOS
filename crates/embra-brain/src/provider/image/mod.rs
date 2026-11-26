@@ -376,6 +376,11 @@ pub enum ImageGenError {
     /// The request was still running at the provider's deadline.
     #[error("the request {request_id} did not finish within {waited_secs} s: {detail}")]
     StillRunning { request_id: String, waited_secs: u64, detail: String },
+    /// The provider gateway in front of the provider refused the request
+    /// itself: the provider was not asked. `body` is the gateway's words
+    /// and what to do there.
+    #[error("the provider gateway answered {status} itself, and the image provider was not asked: {body}")]
+    Gateway { status: u16, body: String },
 }
 
 #[async_trait::async_trait]
@@ -687,20 +692,33 @@ pub(crate) fn resolve_image_provider_with(
             choice.model,
             interactions_url(cfg),
         ))),
-        // Never through the provider gateway, which has no route for it.
         ImageProviderKind::Higgsfield => {
-            let base = stand_in.clone().unwrap_or_else(|| higgsfield::API_BASE.to_string());
+            let (base, route) = higgsfield_route(cfg, stand_in);
             Ok(Box::new(higgsfield::HiggsfieldImageProvider::new(
                 &key,
                 &choice.model,
                 &base,
-                stand_in.is_some(),
+                route,
                 higgsfield::Pacing::ADVISED,
                 // What a stopped call's cancel came to is the operator's to
                 // know: the turn that made the call has ended by then.
                 std::sync::Arc::new(crate::proactive::tell_operator),
             )?))
         }
+    }
+}
+
+/// Where Higgsfield's API is reached, and how: a stand-in when one is named
+/// (`EMBRA_HIGGSFIELD_BASE`, the hook of a test rig, which is the whole
+/// route); the provider gateway's route of the API while a gateway is on,
+/// as every provider's requests go through it then; else the API's own
+/// origin.
+pub(crate) fn higgsfield_route(cfg: &SystemConfig, stand_in: Option<String>) -> (String, higgsfield::Route) {
+    use crate::provider::gateway;
+    match (stand_in, gateway::in_force(cfg.provider_gateway.as_ref())) {
+        (Some(base), _) => (base, higgsfield::Route::StandIn),
+        (None, Some(g)) => (gateway::higgsfield_base(g), higgsfield::Route::Gateway { url: g.url.trim().trim_end_matches('/').to_string() }),
+        (None, None) => (higgsfield::API_BASE.to_string(), higgsfield::Route::Direct),
     }
 }
 
@@ -734,6 +752,27 @@ mod gateway_tests {
         );
         cfg.provider_gateway.as_mut().unwrap().enabled = false;
         assert_eq!(super::interactions_url(&cfg), DIRECT);
+    }
+
+    /// Higgsfield's API is reached at its own origin, through the provider
+    /// gateway's route of it while a gateway is on (the URL as stored, a
+    /// trailing slash or not), and at a stand-in whenever one is named: the
+    /// stand-in is a test rig's whole route, gateway or not.
+    #[test]
+    fn higgsfields_api_follows_the_gateway_when_on() {
+        use super::higgsfield::Route;
+        let mut cfg = crate::config::tests_support::minimal_cfg();
+        assert_eq!(super::higgsfield_route(&cfg, None), ("https://api.higgsfield.ai".to_string(), Route::Direct));
+        cfg.provider_gateway = Some(crate::config::ProviderGateway { url: "https://gw.example:4000/".into(), enabled: true });
+        assert_eq!(
+            super::higgsfield_route(&cfg, None),
+            ("https://gw.example:4000/higgsfield".to_string(), Route::Gateway { url: "https://gw.example:4000".to_string() })
+        );
+        assert_eq!(super::higgsfield_route(&cfg, Some("http://10.0.2.2:28090".into())), ("http://10.0.2.2:28090".to_string(), Route::StandIn));
+        cfg.provider_gateway.as_mut().unwrap().enabled = false;
+        assert_eq!(super::higgsfield_route(&cfg, None).1, Route::Direct, "a gateway that is off routes nothing");
+        cfg.provider_gateway = Some(crate::config::ProviderGateway { url: "  ".into(), enabled: true });
+        assert_eq!(super::higgsfield_route(&cfg, None).1, Route::Direct, "a gateway with no URL routes nothing");
     }
 }
 

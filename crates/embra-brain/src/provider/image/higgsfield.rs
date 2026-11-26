@@ -33,11 +33,25 @@
 //! operator who filters what the machine may reach has to know them. Never
 //! the address itself, whose path or query can be a signature.
 //!
-//! The credential goes to the API's own origin and nowhere else: a status
-//! or cancel URL of another origin is not followed (the URL the reference
-//! documents is built from the request id in its place), and the picture is
-//! fetched by `net::public_url_client` (https, public addresses, pinned, no
-//! credential). Every value a request carries is read from the model's page
+//! The credential goes to the API's own base and nowhere else: a status
+//! or cancel URL that is not under it is not followed (the URL the
+//! reference documents is built from the request id in its place), and the
+//! picture is fetched by `net::public_url_client` (https, public addresses,
+//! pinned, no credential).
+//!
+//! While the provider gateway is on (`/local-ai-gateway`) the base is the
+//! gateway's route of this API, `{url}/higgsfield` (`Route::Gateway`), as
+//! every provider's is its own prefix there. The gateway forwards each call
+//! with the key it came with, moves the two job URLs of a submission's
+//! answer to its own address, so the status reads and the cancel pass
+//! through it, and answers a request it refuses itself in this API's error
+//! shape (`GATEWAY_REFUSALS`). The picture's address and a reference's
+//! storage are still hosts of Higgsfield's choosing, reached directly. The
+//! route came with the gateway's 0.2.0, and an older gateway would hand the
+//! request with its key to another backend: a call asks the gateway who it
+//! is before anything with the key in it (`gateway_has_the_route`).
+//!
+//! Every value a request carries is read from the model's page
 //! (`IMAGE_MODELS`); the guard `every_request_the_validator_lets_through_carries_values_of_each_models_page`
 //! holds them against the pages' lists, typed into it from the pages.
 
@@ -58,6 +72,37 @@ use crate::proactive::{Notification, Priority};
 
 /// The API's own origin.
 pub const API_BASE: &str = "https://api.higgsfield.ai";
+
+/// How the API is reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// At its own origin.
+    Direct,
+    /// Through the provider gateway whose URL this is: the base is its
+    /// route of the API (`gateway::higgsfield_base`).
+    Gateway { url: String },
+    /// A stand-in for the API (`EMBRA_HIGGSFIELD_BASE`): its origin is also
+    /// taken as it is for a picture's address and a reference's storage.
+    StandIn,
+}
+
+/// The codes of the errors the gateway answers itself, in this API's shape
+/// (`{"detail": {"code", "message"}}`): its `ProxyError::code` as of 0.2.0.
+/// The API's own errors carry codes too (`account_queue_full`), and what to
+/// do about one differs by who refused.
+pub(crate) const GATEWAY_REFUSALS: [&str; 11] = [
+    "dlp_blocked",
+    "backend_disabled",
+    "upstream_unreachable",
+    "credential_mismatch",
+    "format_not_served",
+    "request_too_large",
+    "request_unreadable",
+    "response_build_failed",
+    "unsupported_method",
+    "upgrade_failed",
+    "upgrade_to_cloud_unsupported",
+];
 
 /// One call to the API: a submission, a status read, a cancel.
 const API_TIMEOUT: Duration = Duration::from_secs(10);
@@ -205,11 +250,13 @@ pub struct HiggsfieldImageProvider {
     /// `Key <key id>:<key secret>`, marked sensitive.
     authorization: HeaderValue,
     model: &'static ImageModel,
-    /// The API's origin, with a path that ends in `/`.
+    /// The API's base, with a path that ends in `/`: its origin, or the
+    /// gateway's route of it.
     base: reqwest::Url,
-    /// The base is a stand-in (`EMBRA_HIGGSFIELD_BASE`): its origin is also
-    /// taken as it is for a picture's address.
-    stand_in: bool,
+    route: Route,
+    /// One more origin a picture's address and a reference's storage may
+    /// have, beside the public ones: a stand-in's own.
+    also: Option<reqwest::Url>,
     pacing: Pacing,
     /// How many cancels a dropped call's guard has sent: none but after a
     /// stop.
@@ -223,9 +270,10 @@ pub struct HiggsfieldImageProvider {
 
 impl HiggsfieldImageProvider {
     /// `key` is `<key id>:<key secret>`; `model` one of Higgsfield's rows of
-    /// `IMAGE_MODELS`; `base` the API's origin (`API_BASE`, or a stand-in);
-    /// `on_stop` takes the notice of what a stopped call's cancel came to.
-    pub fn new(key: &str, model: &str, base: &str, stand_in: bool, pacing: Pacing, on_stop: StopNotice) -> Result<Self, ImageGenError> {
+    /// `IMAGE_MODELS`; `base` the API's base by `route` (`API_BASE`, the
+    /// gateway's route, or a stand-in); `on_stop` takes the notice of what
+    /// a stopped call's cancel came to.
+    pub fn new(key: &str, model: &str, base: &str, route: Route, pacing: Pacing, on_stop: StopNotice) -> Result<Self, ImageGenError> {
         let model = image_model(model)
             .filter(|m| m.kind == ImageProviderKind::Higgsfield)
             .ok_or_else(|| ImageGenError::NotConfigured(format!("{model} is not one of Higgsfield's image models")))?;
@@ -242,7 +290,25 @@ impl HiggsfieldImageProvider {
             .timeout(API_TIMEOUT)
             .build()
             .map_err(|e| ImageGenError::Transport(format!("an HTTP client could not be built: {e}")))?;
-        Ok(Self { authorization, model, base, stand_in, pacing, cancels_on_drop: Arc::new(AtomicUsize::new(0)), http, on_stop })
+        let also = (route == Route::StandIn).then(|| base.clone());
+        Ok(Self { authorization, model, base, route, also, pacing, cancels_on_drop: Arc::new(AtomicUsize::new(0)), http, on_stop })
+    }
+
+    /// Through a gateway: the gateway says who it is, and its version has
+    /// the route of this API, before anything that carries the key is sent
+    /// to it. Asked at every call, without the key: the gateway behind a
+    /// URL can be another one tomorrow.
+    async fn gateway_has_the_route(&self) -> Result<(), ImageGenError> {
+        let Route::Gateway { url } = &self.route else { return Ok(()) };
+        let version = crate::provider::gateway::identify_within(url, API_TIMEOUT).await.map_err(|why| {
+            ImageGenError::Transport(format!(
+                "the provider gateway did not say who it is, and the Higgsfield key goes to no listener that has not: {why} Nothing was sent, nothing is charged"
+            ))
+        })?;
+        if !crate::provider::gateway::routes_higgsfield(&version) {
+            return Err(ImageGenError::NotConfigured(crate::provider::gateway::no_higgsfield_route(url, &version)));
+        }
+        Ok(())
     }
 
     /// The model's endpoint: the base and the model's id.
@@ -250,18 +316,23 @@ impl HiggsfieldImageProvider {
         self.base.join(self.model.id).expect("a model's id joins the base")
     }
 
-    /// The URL the API named for this request when it is of the API's own
-    /// origin (a relative one is taken against the base); else the one the
-    /// reference documents, built from the request id.
+    /// The URL the API named for this request when it is under the API's
+    /// own base: of its origin, and on a path that begins with the base's (a
+    /// relative one is taken against the base). Else the one the reference
+    /// documents, built from the request id. Through a gateway the base's
+    /// path is the gateway's route of this API, and a URL beside it on the
+    /// same listener is another backend's: the gateway moves the two URLs
+    /// under its route, and one it left on Higgsfield's own host is not
+    /// followed out of it.
     fn own_url(&self, named: Option<&str>, request_id: &str, what: &str) -> reqwest::Url {
         if let Some(named) = named {
             match self.base.join(named) {
-                Ok(url) if net::same_origin(&url, &self.base) => return url,
+                Ok(url) if net::same_origin(&url, &self.base) && url.path().starts_with(self.base.path()) => return url,
                 _ => tracing::warn!(
                     target: "media",
                     request_id,
                     named = %net::url_shown(&reqwest::Url::parse(named).unwrap_or_else(|_| self.base.clone())),
-                    "Higgsfield named a {what} URL of another origin; the request's own is used"
+                    "Higgsfield named a {what} URL that is not under the API's base; the request's own is used"
                 ),
             }
         }
@@ -289,7 +360,7 @@ impl HiggsfieldImageProvider {
             .await
             .map_err(|e| ImageGenError::Transport(format!("Higgsfield's upload slot: {}", net::error_chain(&e))))?;
         if !answer.status().is_success() {
-            return Err(api_error(answer, Asked::Storage).await);
+            return Err(api_error(answer, Asked::Storage, &self.route).await);
         }
         let bytes_read = net::read_capped(answer, API_ANSWER_MAX)
             .await
@@ -297,8 +368,7 @@ impl HiggsfieldImageProvider {
         let slot: JsonValue = serde_json::from_slice(&bytes_read)
             .map_err(|e| ImageGenError::Transport(format!("Higgsfield's upload slot is not JSON ({e})")))?;
         let UploadSlot { public_url, upload_url, headers } = parse_upload_slot(&slot).map_err(ImageGenError::Transport)?;
-        let also = self.stand_in.then_some(&self.base);
-        let reach = net::public_url_client(&upload_url, also, UPLOAD_TIMEOUT)
+        let reach = net::public_url_client(&upload_url, self.also.as_ref(), UPLOAD_TIMEOUT)
             .await
             .map_err(|e| ImageGenError::Transport(format!("Higgsfield's upload slot is refused: {e}; nothing was submitted, nothing is charged")))?;
         let mut put = reach.client.put(reach.url.clone()).body(bytes.to_vec());
@@ -338,7 +408,7 @@ impl HiggsfieldImageProvider {
                 Ok(answer) if answer.status().is_server_error() && attempt == 1 => {
                     last = format!("HTTP {}", answer.status().as_u16());
                 }
-                Ok(answer) if !answer.status().is_success() => return Err(api_error(answer, Asked::Model).await),
+                Ok(answer) if !answer.status().is_success() => return Err(api_error(answer, Asked::Model, &self.route).await),
                 Ok(answer) => {
                     let bytes = net::read_capped(answer, API_ANSWER_MAX)
                         .await
@@ -377,7 +447,7 @@ impl HiggsfieldImageProvider {
                     }
                     tracing::info!(target: "media", status = answer.status().as_u16(), "Higgsfield answered a status read with an error; read again");
                 }
-                Ok(answer) if !answer.status().is_success() => return Waited::Failed(api_error(answer, Asked::Model).await),
+                Ok(answer) if !answer.status().is_success() => return Waited::Failed(api_error(answer, Asked::Model, &self.route).await),
                 Ok(answer) => {
                     let read = net::read_capped(answer, API_ANSWER_MAX)
                         .await
@@ -422,8 +492,7 @@ impl HiggsfieldImageProvider {
                 "the picture of Higgsfield's request {request_id} could not be fetched from {url}: {why}. It is paid for: the address works for seven days, and the Higgsfield console at open.higgsfield.ai keeps it"
             ))
         };
-        let also = self.stand_in.then_some(&self.base);
-        let reach = net::public_url_client(url, also, DOWNLOAD_TIMEOUT).await.map_err(|e| paid(&e))?;
+        let reach = net::public_url_client(url, self.also.as_ref(), DOWNLOAD_TIMEOUT).await.map_err(|e| paid(&e))?;
         let mut last = String::new();
         for attempt in 1..=2 {
             match reach.client.get(reach.url.clone()).send().await {
@@ -465,6 +534,9 @@ impl ImageProvider for HiggsfieldImageProvider {
 
     async fn generate(&self, req: &ImageGenRequest) -> Result<ImageGenResponse, ImageGenError> {
         let deadline = Instant::now() + self.pacing.wait;
+        // Through a gateway, the gateway is asked who it is first: inside
+        // the wait, and before the key is in anything that is sent.
+        self.gateway_has_the_route().await?;
         // Each reference goes to Higgsfield's storage first; the request
         // names it by its public URL. Nothing is submitted, and nothing is
         // charged, when one cannot be sent or the wait ran out meanwhile: an
@@ -741,10 +813,28 @@ enum Asked {
     Storage,
 }
 
+/// The code of an error's `detail`, when it is an object that has one.
+pub(crate) fn detail_code(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<JsonValue>(body).ok()?.get("detail")?.get("code")?.as_str().map(str::to_string)
+}
+
+/// What to do about a refusal the provider gateway made itself.
+fn gateway_advice(code: &str) -> &'static str {
+    match code {
+        "dlp_blocked" => " Its data-loss prevention found something in the request that its policy keeps from a cloud provider; the rule is named above, and its Security tab shows the finding. Nothing is charged.",
+        "backend_disabled" => " Higgsfield is turned off in the gateway's configuration ([backends.higgsfield] enabled). Nothing is charged.",
+        "upstream_unreachable" => " The gateway could not reach Higgsfield: try again later. A request it had already handed on may have been taken, and is charged if it completes.",
+        "credential_mismatch" => " The gateway took the key for another provider's. Nothing is charged.",
+        _ => " Nothing is charged for a request the gateway did not hand on.",
+    }
+}
+
 /// An answer of the API that refuses: its status, its words, and what the
 /// operator can do about it. A model's advice (open to the account, blocked
-/// for a while) is given only for a call of the model's.
-async fn api_error(answer: reqwest::Response, asked: Asked) -> ImageGenError {
+/// for a while) is given only for a call of the model's. Through a gateway,
+/// a refusal with one of the gateway's own codes is the gateway's: it is
+/// said as such, with what to do there.
+async fn api_error(answer: reqwest::Response, asked: Asked, route: &Route) -> ImageGenError {
     let status = answer.status().as_u16();
     let after = retry_after(&answer);
     let correlation = answer
@@ -752,11 +842,16 @@ async fn api_error(answer: reqwest::Response, asked: Asked) -> ImageGenError {
         .get("x-correlation-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let detail = match net::read_capped(answer, API_ANSWER_MAX).await {
-        Ok(bytes) => detail_text(&bytes),
-        Err(e) => e,
+    let (detail, code) = match net::read_capped(answer, API_ANSWER_MAX).await {
+        Ok(bytes) => (detail_text(&bytes), detail_code(&bytes)),
+        Err(e) => (e, None),
     };
     let detail = if detail.is_empty() { format!("HTTP {status}") } else { detail };
+    if let (Route::Gateway { .. }, Some(code)) = (route, code.as_deref())
+        && GATEWAY_REFUSALS.contains(&code)
+    {
+        return ImageGenError::Gateway { status, body: format!("{detail} ({code}).{}", gateway_advice(code)) };
+    }
     let advice = match status {
         401 => " The key was refused: /image-provider key <key id>:<key secret> stores another (the API console at open.higgsfield.ai makes keys).".to_string(),
         403 => " Higgsfield refused the account: the API's balance at open.higgsfield.ai may be empty, or the key disabled.".to_string(),
@@ -805,7 +900,7 @@ mod tests {
     }
 
     fn provider(server: &MockServer, model: &str, pacing: Pacing) -> HiggsfieldImageProvider {
-        HiggsfieldImageProvider::new(KEY, model, &server.uri(), true, pacing, silent()).expect("a provider")
+        HiggsfieldImageProvider::new(KEY, model, &server.uri(), Route::StandIn, pacing, silent()).expect("a provider")
     }
 
     fn png() -> Vec<u8> {
@@ -1364,7 +1459,7 @@ mod tests {
                 let _ = told.send(notice);
             });
             let p = Arc::new(
-                HiggsfieldImageProvider::new(KEY, "xai/grok-imagine-image-2.0", &server.uri(), true, QUICK, on_stop).expect("a provider"),
+                HiggsfieldImageProvider::new(KEY, "xai/grok-imagine-image-2.0", &server.uri(), Route::StandIn, QUICK, on_stop).expect("a provider"),
             );
             let call = tokio::spawn({
                 let p = p.clone();
@@ -1666,13 +1761,13 @@ mod tests {
     #[tokio::test]
     async fn a_fetch_the_network_ends_is_made_once_more_and_two_name_the_request_and_the_address() {
         let (base, pictures, server) = dropping_stand_in(1).await;
-        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", &base, true, QUICK, silent()).unwrap();
+        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", &base, Route::StandIn, QUICK, silent()).unwrap();
         let out = p.generate(&req("a lighthouse", None, None)).await.expect("the second fetch");
         assert_eq!(out.images[0].data, png());
         assert_eq!(*pictures.lock().unwrap(), 2);
         server.abort();
         let (base, pictures, server) = dropping_stand_in(2).await;
-        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", &base, true, QUICK, silent()).unwrap();
+        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", &base, Route::StandIn, QUICK, silent()).unwrap();
         let said = p.generate(&req("a lighthouse", None, None)).await.unwrap_err().to_string();
         assert_eq!(*pictures.lock().unwrap(), 2, "two fetches, no third");
         let picture = format!("{base}/out/1.png");
@@ -1683,14 +1778,196 @@ mod tests {
 
     #[test]
     fn a_model_that_is_not_higgsfields_and_a_key_no_header_carries_are_refused() {
-        let err = HiggsfieldImageProvider::new(KEY, "gemini-nano-banana-2.1", API_BASE, false, Pacing::ADVISED, silent()).err().unwrap();
+        let err = HiggsfieldImageProvider::new(KEY, "gemini-nano-banana-2.1", API_BASE, Route::Direct, Pacing::ADVISED, silent()).err().unwrap();
         assert_eq!(err.to_string(), "image provider not configured: gemini-nano-banana-2.1 is not one of Higgsfield's image models");
-        let err = HiggsfieldImageProvider::new("id:sec\nret", "z-image/turbo", API_BASE, false, Pacing::ADVISED, silent()).err().unwrap();
+        let err = HiggsfieldImageProvider::new("id:sec\nret", "z-image/turbo", API_BASE, Route::Direct, Pacing::ADVISED, silent()).err().unwrap();
         assert_eq!(err.to_string(), "image provider not configured: the Higgsfield key holds a character no header can carry");
-        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", API_BASE, false, Pacing::ADVISED, silent()).unwrap();
+        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", API_BASE, Route::Direct, Pacing::ADVISED, silent()).unwrap();
         assert_eq!(p.endpoint().as_str(), "https://api.higgsfield.ai/z-image/turbo");
         assert!(format!("{:?}", p.authorization).contains("Sensitive"), "the key is marked sensitive");
-        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", "http://10.0.2.2:28082/hf", true, Pacing::ADVISED, silent()).unwrap();
+        let p = HiggsfieldImageProvider::new(KEY, "z-image/turbo", "http://10.0.2.2:28082/hf", Route::StandIn, Pacing::ADVISED, silent()).unwrap();
         assert_eq!(p.endpoint().as_str(), "http://10.0.2.2:28082/hf/z-image/turbo");
+    }
+
+    const GATEWAY: &str = "x-local-ai-gateway";
+
+    /// A provider that reaches the API through the provider gateway whose
+    /// unified listener `gateway` is.
+    fn through(gateway: &str, model: &str, pacing: Pacing) -> HiggsfieldImageProvider {
+        let route = Route::Gateway { url: gateway.to_string() };
+        HiggsfieldImageProvider::new(KEY, model, &format!("{gateway}/higgsfield"), route, pacing, silent()).expect("a provider")
+    }
+
+    /// The gateway says who it is: its header on its own model list.
+    async fn says_it_is(gateway: &MockServer, version: &str) {
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).insert_header(GATEWAY, version).set_body_json(json!({"object": "list", "data": []})))
+            .mount(gateway)
+            .await;
+    }
+
+    fn has_the_key(request: &Request) -> bool {
+        request.headers.get("authorization").is_some()
+    }
+
+    /// While the provider gateway is on, every call of the API goes under
+    /// the gateway's route of it, after the gateway said who it is: the
+    /// submission, and the status read at the address the gateway moved it
+    /// to. The question that comes first carries no key. The picture is
+    /// fetched from the host Higgsfield names, without the key and not
+    /// through the gateway.
+    #[tokio::test]
+    async fn through_the_gateway_every_call_of_the_api_goes_under_its_route() {
+        let gateway = MockServer::start().await;
+        let pictures = MockServer::start().await;
+        says_it_is(&gateway, "0.2.0").await;
+        Mock::given(method("POST"))
+            .and(path("/higgsfield/z-image/turbo"))
+            .and(header("authorization", "Key key-id-1:key-secret-1"))
+            .respond_with(ResponseTemplate::new(200).insert_header(GATEWAY, "0.2.0").set_body_json(json!({
+                "status": "queued", "request_id": "r-1",
+                "status_url": format!("{}/higgsfield/requests/r-1/status", gateway.uri()),
+                "cancel_url": format!("{}/higgsfield/requests/r-1/cancel", gateway.uri()),
+            })))
+            .mount(&gateway)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/higgsfield/requests/r-1/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "completed", "images": [{"url": format!("{}/out/1.png", pictures.uri())}]})))
+            .mount(&gateway)
+            .await;
+        Mock::given(method("GET")).and(path("/out/1.png")).respond_with(ResponseTemplate::new(200).set_body_bytes(png())).mount(&pictures).await;
+        let mut p = through(&gateway.uri(), "z-image/turbo", QUICK);
+        assert_eq!(p.also, None, "through a gateway a picture's address is a public one and no other");
+        // The picture's host of this test stands for a host of Higgsfield's choosing.
+        p.also = Some(reqwest::Url::parse(&pictures.uri()).unwrap());
+        let out = p.generate(&req("a lighthouse", None, None)).await.expect("a picture");
+        assert_eq!(out.images.len(), 1);
+
+        let asked = gateway.received_requests().await.unwrap();
+        let places: Vec<String> = asked.iter().map(|r| format!("{} {}", r.method, r.url.path())).collect();
+        assert_eq!(places, ["GET /v1/models", "POST /higgsfield/z-image/turbo", "GET /higgsfield/requests/r-1/status"]);
+        assert!(!has_the_key(&asked[0]), "the gateway is asked who it is without the key");
+        assert!(asked[1..].iter().all(has_the_key));
+        let fetched = pictures.received_requests().await.unwrap();
+        assert_eq!(fetched.len(), 1);
+        assert!(!has_the_key(&fetched[0]), "the picture is fetched without the key");
+    }
+
+    /// A gateway from before the route would hand the request, with its
+    /// key, to another backend; one that does not say who it is may be
+    /// anything. Neither is sent the key, and the answer says why.
+    #[tokio::test]
+    async fn a_gateway_without_the_route_or_without_a_name_is_sent_nothing_with_the_key() {
+        // From before the route.
+        let old = MockServer::start().await;
+        says_it_is(&old, "0.1.0").await;
+        let err = through(&old.uri(), "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "image provider not configured: the provider gateway at {} says it is WSDS Local AI Gateway 0.1.0, and the route of Higgsfield's API came with 0.2.0: an older gateway would hand the request and its key to another backend, so nothing was sent. Update the gateway, or turn it off for this machine with /local-ai-gateway off",
+                old.uri()
+            )
+        );
+        // A listener that answers without the gateway's header.
+        let nameless = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/v1/models")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []}))).mount(&nameless).await;
+        let err = through(&nameless.uri(), "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
+        let said = err.to_string();
+        assert!(said.starts_with("image generation transport error: the provider gateway did not say who it is, and the Higgsfield key goes to no listener that has not: "), "{said}");
+        assert!(said.contains("without the x-local-ai-gateway header") && said.ends_with("Nothing was sent, nothing is charged"), "{said}");
+        for server in [&old, &nameless] {
+            let asked = server.received_requests().await.unwrap();
+            assert_eq!(asked.iter().map(|r| r.url.path().to_string()).collect::<Vec<_>>(), ["/v1/models"], "the question, and nothing after it");
+            assert!(!asked.iter().any(has_the_key));
+        }
+        // Nothing answers at all (a port no test listens on): a reference image is not sent either.
+        let mut with_reference = req("a lighthouse", None, None);
+        with_reference.reference_images = vec![("image/png".to_string(), png())];
+        let err = through("http://127.0.0.1:1", "xai/grok-imagine-image-2.0", QUICK).generate(&with_reference).await.unwrap_err();
+        assert!(err.to_string().contains("the provider gateway did not say who it is"), "{err}");
+    }
+
+    /// Through a gateway the two job URLs are followed where the gateway
+    /// moved them, under its route of the API. One beside the route on the
+    /// same listener would be another backend's, and one left on
+    /// Higgsfield's own host (the gateway's `rewrite_job_urls` off) would
+    /// leave the gateway: in both places the request's own URL under the
+    /// route is used.
+    #[test]
+    fn through_the_gateway_a_job_url_is_followed_under_its_route_only() {
+        let p = through("https://gw.example:4000", "z-image/turbo", QUICK);
+        assert_eq!(p.endpoint().as_str(), "https://gw.example:4000/higgsfield/z-image/turbo");
+        let under = "https://gw.example:4000/higgsfield/requests/r-1/status";
+        assert_eq!(p.own_url(Some(under), "r-1", "status").as_str(), under, "where the gateway moved it");
+        for elsewhere in [
+            "https://gw.example:4000/requests/r-1/status",
+            "https://gw.example:4000/openai/requests/r-1/status",
+            "https://gw.example:4000/higgsfield-ai/requests/r-1/status",
+            "/requests/r-1/status",
+            "https://api.higgsfield.ai/requests/r-1/status",
+            "http://gw.example:4000/higgsfield/requests/r-1/status",
+            "https://gw.example:4001/higgsfield/requests/r-1/status",
+        ] {
+            assert_eq!(p.own_url(Some(elsewhere), "r-1", "status").as_str(), under, "{elsewhere}");
+        }
+        assert_eq!(p.own_url(None, "r-1", "cancel").as_str(), "https://gw.example:4000/higgsfield/requests/r-1/cancel");
+    }
+
+    /// A request the gateway refuses itself comes back in the API's error
+    /// shape with a code of the gateway's own. It is said as the gateway's,
+    /// with what to do there, and never with the advice that is about a
+    /// Higgsfield account. A refusal of the API's that passed through keeps
+    /// its own words, and off the gateway the same body is the API's.
+    #[tokio::test]
+    async fn a_refusal_of_the_gateways_own_is_said_as_the_gateways() {
+        let blocked = json!({"detail": {"code": "dlp_blocked", "message": "request blocked by gateway DLP policy (rule aws_access_key)"}});
+        let gateway = MockServer::start().await;
+        says_it_is(&gateway, "0.2.1").await;
+        Mock::given(method("POST"))
+            .and(path("/higgsfield/z-image/turbo"))
+            .respond_with(ResponseTemplate::new(403).insert_header("x-gateway-blocked", "dlp").set_body_json(blocked.clone()))
+            .mount(&gateway)
+            .await;
+        let err = through(&gateway.uri(), "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
+        assert!(matches!(&err, ImageGenError::Gateway { status: 403, .. }), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "the provider gateway answered 403 itself, and the image provider was not asked: request blocked by gateway DLP policy (rule aws_access_key) (dlp_blocked). Its data-loss prevention found something in the request that its policy keeps from a cloud provider; the rule is named above, and its Security tab shows the finding. Nothing is charged."
+        );
+
+        // Higgsfield turned off in the gateway: a 503 of the gateway's, after the one repeat a 5xx gets.
+        let off = MockServer::start().await;
+        says_it_is(&off, "0.2.0").await;
+        Mock::given(method("POST"))
+            .and(path("/higgsfield/z-image/turbo"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({"detail": {"code": "backend_disabled", "message": "the higgsfield backend is disabled"}})))
+            .mount(&off)
+            .await;
+        let err = through(&off.uri(), "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
+        let said = err.to_string();
+        assert!(said.starts_with("the provider gateway answered 503 itself") && said.contains("(backend_disabled). Higgsfield is turned off in the gateway's configuration"), "{said}");
+
+        // A refusal of the API's own, passed through: its words, and its advice.
+        let full = MockServer::start().await;
+        says_it_is(&full, "0.2.0").await;
+        Mock::given(method("POST"))
+            .and(path("/higgsfield/z-image/turbo"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30").set_body_json(json!({"detail": {"code": "account_queue_full", "message": "Too many queued generations for this account"}})))
+            .mount(&full)
+            .await;
+        let err = through(&full.uri(), "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
+        assert!(matches!(&err, ImageGenError::Api { status: 429, body } if body.starts_with("Too many queued generations for this account. The account's queue is full: try again in 30 s.")), "{err:?}");
+
+        // Off the gateway, a body with that code is the API's.
+        let direct = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/z-image/turbo")).respond_with(ResponseTemplate::new(403).set_body_json(blocked)).mount(&direct).await;
+        let err = provider(&direct, "z-image/turbo", QUICK).generate(&req("a lighthouse", None, None)).await.unwrap_err();
+        assert!(matches!(&err, ImageGenError::Api { status: 403, .. }), "{err:?}");
+        assert_eq!(detail_code(br#"{"detail":"Invalid credentials"}"#), None);
+        assert_eq!(detail_code(br#"{"detail":[{"msg":"x"}]}"#), None);
+        assert_eq!(GATEWAY_REFUSALS.len(), 11);
     }
 }
