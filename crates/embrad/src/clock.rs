@@ -1258,6 +1258,22 @@ mod tests {
         assert_eq!(Timestamp::from_system(UNIX_EPOCH - Duration::from_secs(3)), Timestamp { secs: -3, nanos: 0 });
     }
 
+    /// An address of the loopback where a datagram is refused at once, for
+    /// as long as the socket that comes with it lives. That socket holds
+    /// the port and is connected to another peer, so it takes nobody
+    /// else's datagram and the kernel answers that the port is closed. A
+    /// port that was only bound and freed could be given, before the test
+    /// used it, to the listener of a test that runs beside this one: the
+    /// datagram went to that listener, which said nothing, and the refusal
+    /// this test waits for was a wait.
+    fn closed_port() -> (UdpSocket, SocketAddr) {
+        let held = UdpSocket::bind("127.0.0.1:0").unwrap();
+        // No socket of a test is bound to a port below 1024.
+        held.connect("127.0.0.1:1").unwrap();
+        let address = held.local_addr().unwrap();
+        (held, address)
+    }
+
     /// A UDP listener on the loopback that answers each request with what
     /// `reply` makes of its nonce (nothing for `None`), `times` times.
     fn server(times: usize, reply: impl Fn(u64) -> Vec<Vec<u8>> + Send + 'static) -> SocketAddr {
@@ -1300,10 +1316,7 @@ mod tests {
         let noisy = server(1, |nonce| (0..20).map(|_| answer(nonce ^ 1, REAL).to_vec()).collect());
         assert_eq!(exchange(noisy, Duration::from_millis(200), nonce()).unwrap_err().reason, "no answer within 0.2 s");
 
-        let closed = {
-            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-            socket.local_addr().unwrap()
-        };
+        let (_held, closed) = closed_port();
         let miss = exchange(closed, Duration::from_secs(5), nonce()).unwrap_err();
         assert!(!miss.stop && !miss.reason.contains("no answer within"), "the refusal, not the wait: {miss:?}");
     }
@@ -1830,10 +1843,7 @@ mod tests {
         assert!(started.elapsed() >= REPLY_WAIT && started.elapsed() < FETCH_WAIT, "the silent server had its short wait and no more: {:?}", started.elapsed());
         // Nobody answers: every server is named once, with its reason.
         let silent = server(1, |_| Vec::new());
-        let closed = {
-            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-            socket.local_addr().unwrap()
-        };
+        let (_held, closed) = closed_port();
         let status = sync_at_boot_from(&Fake::at(BUILT), Some(&[at(silent, "dhcp"), at(closed, "default")]), None, Some(BUILT), None);
         let Sync::Failed { server, reason } = &status.sync else { panic!("{:?}", status.sync) };
         assert_eq!(*server, format!("{silent}, {closed}"));

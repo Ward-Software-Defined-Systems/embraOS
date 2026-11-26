@@ -565,9 +565,13 @@ mod tests {
     async fn an_interrupted_upload_ends_the_updater_and_leaves_nothing() {
         let (root, updater) = scratch("interrupted", WRITES_ON);
         let st = state(&root, &updater);
+        // More than a pipe holds: the write ends only once the stand-in
+        // reads, and by then it is its one process, `cat`. With less, the
+        // interruption could end the shell while the `mkdir` it had started
+        // still ran, and the directory appeared after everything was
+        // cleared away.
         let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
-            Ok(Bytes::from(vec![1u8; 4096])),
-            Ok(Bytes::from(vec![2u8; 4096])),
+            Ok(Bytes::from(vec![1u8; 200_000])),
             Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "the browser went away")),
         ];
         let resp = api_backup_put(State(st.clone()), UrlPath("half".into()), sized(1 << 20), Body::from_stream(stream::iter(chunks))).await;
