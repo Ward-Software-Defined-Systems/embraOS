@@ -125,6 +125,11 @@ pub const UPGRADE_KEY: &str = "embra.upgrade";
 /// `embra.downgrade=1`: an upgrade in place may write a release older than
 /// the one installed.
 pub const DOWNGRADE_KEY: &str = "embra.downgrade";
+/// `embra.license=accept`: the operator who wrote the kernel line accepts
+/// the licence the medium carries. An unattended install or upgrade
+/// (`embra.install=<disk>`, `embra.upgrade=<disk>`) needs it, since it
+/// asks nothing.
+pub const LICENSE_KEY: &str = "embra.license";
 
 /// What embrad runs: the services, or one maintenance job from the boot
 /// menu (`embra.mode=update|backup|restore`), or the installer from the
@@ -380,6 +385,13 @@ impl Cmdline {
     pub fn allow_downgrade(&self) -> bool {
         self.last(DOWNGRADE_KEY) == Some("1")
     }
+
+    /// `embra.license=accept`: the licence the medium carries is accepted
+    /// on the kernel line. The word `accept` and nothing else, as its last
+    /// occurrence says.
+    pub fn license_accepted(&self) -> bool {
+        self.last(LICENSE_KEY) == Some("accept")
+    }
 }
 
 /// A bare device name (`vda`, `sda`, `nvme0n1`): lowercase letters and digits.
@@ -625,6 +637,12 @@ mod install_tests {
         assert!(!Cmdline::parse("embra.upgrade=vda embra.downgrade=yes").allow_downgrade(), "1 and nothing else");
         assert!(!Cmdline::parse("embra.upgrade=vda").allow_downgrade());
         assert_eq!(Cmdline::parse("embra.install=vda").upgrade_disk(), None);
+        // The licence's acceptance beside them: the word accept and nothing else, the last occurrence.
+        assert!(Cmdline::parse("embra.mode=install embra.install=vda embra.license=accept").license_accepted());
+        for line in ["embra.install=vda", "embra.license=1", "embra.license=yes", "embra.license=ACCEPT", "embra.license=", "embra.license=accept embra.license=no"] {
+            assert!(!Cmdline::parse(line).license_accepted(), "{line}");
+        }
+        assert!(Cmdline::parse("embra.license=no embra.license=accept").license_accepted(), "the last occurrence");
     }
 }
 

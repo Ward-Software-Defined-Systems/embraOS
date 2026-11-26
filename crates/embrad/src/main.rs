@@ -147,6 +147,7 @@ fn main() -> Result<()> {
                 install: cmdline.install_disk(),
                 upgrade: cmdline.upgrade_disk(),
                 allow_downgrade: cmdline.allow_downgrade(),
+                accept_license: cmdline.license_accepted(),
             };
             modes::run_maintenance(m, knobs);
             if pid == 1 {

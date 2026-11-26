@@ -145,6 +145,10 @@ pub struct InstallKnobs<'a> {
     pub upgrade: Option<&'a str>,
     /// `embra.downgrade=1`: an upgrade in place may write an older release.
     pub allow_downgrade: bool,
+    /// `embra.license=accept`: the licence the medium carries is accepted
+    /// on the kernel line. An unattended install or upgrade is refused by
+    /// the installer without it.
+    pub accept_license: bool,
 }
 
 /// The installer's arguments: the medium, the consoles, and the target disk
@@ -152,7 +156,9 @@ pub struct InstallKnobs<'a> {
 /// asks. `embra.upgrade=<disk>` is an upgrade in place (`--upgrade`), which
 /// the installer never turns into a clean install; `embra.install=<disk>`
 /// is the clean install. A line that names both gets the upgrade, the one
-/// that erases nothing.
+/// that erases nothing. `embra.license=accept` goes on as `--accept-license`
+/// whatever else the line names: an unattended run needs it, and at the
+/// installer's own questions it answers the first.
 pub fn install_args(knobs: InstallKnobs<'_>) -> Vec<String> {
     let mut args: Vec<String> = ["install", "--console", "--media", INSTALL_MEDIA].iter().map(|s| s.to_string()).collect();
     if let Some(disk) = knobs.upgrade {
@@ -162,6 +168,9 @@ pub fn install_args(knobs: InstallKnobs<'_>) -> Vec<String> {
     }
     if knobs.allow_downgrade {
         args.push("--allow-downgrade".to_string());
+    }
+    if knobs.accept_license {
+        args.push("--accept-license".to_string());
     }
     args
 }
@@ -317,7 +326,7 @@ mod install_args_tests {
     fn an_upgrade_knob_asks_for_an_upgrade_in_place_and_wins_over_the_install_knob() {
         let upgrade = InstallKnobs { upgrade: Some("vda"), ..Default::default() };
         assert_eq!(install_args(upgrade), ["install", "--console", "--media", "/run/embra/media", "--upgrade", "--disk", "vda", "--yes"]);
-        let both = InstallKnobs { install: Some("sda"), upgrade: Some("vda"), allow_downgrade: true };
+        let both = InstallKnobs { install: Some("sda"), upgrade: Some("vda"), allow_downgrade: true, accept_license: false };
         assert_eq!(
             install_args(both),
             ["install", "--console", "--media", "/run/embra/media", "--upgrade", "--disk", "vda", "--yes", "--allow-downgrade"],
@@ -326,5 +335,23 @@ mod install_args_tests {
         // The switch alone leaves the installer asking; it reads it at its own question.
         let asked = InstallKnobs { allow_downgrade: true, ..Default::default() };
         assert_eq!(install_args(asked), ["install", "--console", "--media", "/run/embra/media", "--allow-downgrade"]);
+    }
+
+    /// The licence's acceptance on the kernel line goes to the installer as
+    /// its own flag, beside a disk knob and without one. Without it an
+    /// unattended run gets no such flag, and the installer refuses it.
+    #[test]
+    fn the_licences_acceptance_on_the_kernel_line_reaches_the_installer() {
+        let clean = InstallKnobs { install: Some("vda"), accept_license: true, ..Default::default() };
+        assert_eq!(install_args(clean), ["install", "--console", "--media", "/run/embra/media", "--disk", "vda", "--yes", "--accept-license"]);
+        let upgrade = InstallKnobs { upgrade: Some("vda"), allow_downgrade: true, accept_license: true, ..Default::default() };
+        assert_eq!(
+            install_args(upgrade),
+            ["install", "--console", "--media", "/run/embra/media", "--upgrade", "--disk", "vda", "--yes", "--allow-downgrade", "--accept-license"]
+        );
+        let asked = InstallKnobs { accept_license: true, ..Default::default() };
+        assert_eq!(install_args(asked), ["install", "--console", "--media", "/run/embra/media", "--accept-license"]);
+        let without = InstallKnobs { install: Some("vda"), ..Default::default() };
+        assert!(!install_args(without).iter().any(|arg| arg == "--accept-license"));
     }
 }

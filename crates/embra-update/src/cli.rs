@@ -14,10 +14,11 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
   apply [--yes] [--console] [--allow-downgrade] [--source <url>] [--tag <v…>]   write the release into the inactive slot and stage it
   status                                                         the booted, active and pending slots and what each holds
   rollback                                                       make the other slot the default again
-  install --media <dir> [--disk <name>] [--yes] [--upgrade] [--allow-downgrade] [--console] [--force]
+  install --media <dir> [--disk <name>] [--yes] [--upgrade] [--allow-downgrade] [--accept-license] [--console] [--force]
                                                                  write embraOS from the installation medium to a local disk, or (--upgrade,
                                                                  and the installer's own question) into the other slot of the installation
-                                                                 the disk holds, STATE and DATA kept
+                                                                 the disk holds, STATE and DATA kept. The licence is shown and asked about
+                                                                 first; --accept-license accepts it on the command line, and --yes needs it
   grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it
   model-list                                                     the native models (experimental), the licence of each with the policy on its use it comes with, and how each
                                                                  one's files stand on DATA
@@ -41,7 +42,7 @@ pub enum Command {
     Apply { source: Option<String>, tag: Option<String>, yes: bool, console: bool, allow_downgrade: bool },
     Status,
     Rollback,
-    Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool, upgrade: bool, allow_downgrade: bool },
+    Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool, upgrade: bool, allow_downgrade: bool, accept_license: bool },
     GrowData { console: bool },
     ModelList,
     ModelInstall { model: &'static NativeModel },
@@ -112,6 +113,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut media: Option<String> = None;
     let mut disk: Option<String> = None;
     let mut upgrade = false;
+    let mut accept_license = false;
     let mut i = 0;
     while i < rest.len() {
         let a = rest[i].as_str();
@@ -134,6 +136,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--media" => media = Some(value("--media")?),
             "--disk" => disk = Some(value("--disk")?),
             "--upgrade" => upgrade = true,
+            "--accept-license" => accept_license = true,
             s if s.starts_with("--") => return Err(format!("unknown flag {s}")),
             s => positionals.push(s.to_string()),
         }
@@ -201,7 +204,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             if !positionals.is_empty() {
                 return Err(format!("install takes no positional: {}", positionals.join(" ")));
             }
-            Ok(Command::Install { media, disk, yes, console, force, upgrade, allow_downgrade })
+            Ok(Command::Install { media, disk, yes, console, force, upgrade, allow_downgrade, accept_license })
         }
         "model-list" => {
             if !positionals.is_empty() {
@@ -261,13 +264,17 @@ mod tests {
         assert!(p("snapshot --console").unwrap().console() && p("apply --console").unwrap().console() && !p("status").unwrap().console());
         assert_eq!(
             p("install --media /run/embra/media --disk vda --yes --console"),
-            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: true, force: false, upgrade: false, allow_downgrade: false })
+            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: true, force: false, upgrade: false, allow_downgrade: false, accept_license: false })
         );
         assert_eq!(
             p("install --media /run/embra/media --upgrade --disk vda --yes --allow-downgrade"),
-            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: false, force: false, upgrade: true, allow_downgrade: true })
+            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: false, force: false, upgrade: true, allow_downgrade: true, accept_license: false })
         );
         assert!(!p("install --media /run/embra/media").unwrap().console());
+        assert_eq!(
+            p("install --media /run/embra/media --disk vda --yes --accept-license"),
+            Ok(Command::Install { media: "/run/embra/media".into(), disk: Some("vda".into()), yes: true, console: false, force: false, upgrade: false, allow_downgrade: false, accept_license: true })
+        );
         assert!(p("install").unwrap_err().contains("--media"));
         assert!(p("install --media /m --disk /dev/sda").unwrap_err().contains("not a disk name"));
         assert!(p("install --media /m sda").unwrap_err().contains("no positional"));

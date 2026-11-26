@@ -10,6 +10,16 @@
 //! The operator is asked twice, the disk's number and then its name, unless
 //! `--yes --disk`.
 //!
+//! Before the disks are listed the installer shows what the OS is licensed
+//! under and asks (`license_question`): `accept` goes on, `license` shows
+//! the whole text a screen at a time and asks again, and any other answer,
+//! or none, ends the run with nothing changed. An upgrade in place is asked
+//! the same: the medium may carry a later text than the installation's. An
+//! unattended run asks nothing and needs the acceptance on its command line
+//! (`--accept-license`, from `embra.license=accept` on the kernel line).
+//! The installer keeps no record of an acceptance: an upgrade writes
+//! nothing to STATE.
+//!
 //! An upgrade in place leaves the partitions, STATE and DATA as they are: the
 //! medium's squashfs goes into the slot that is not the default, the ESP's
 //! loader and `grub.cfg` are replaced with the medium's while `grubenv`
@@ -204,6 +214,101 @@ pub struct Wanted<'a> {
     pub upgrade: bool,
     /// `--allow-downgrade`: an upgrade in place may write an older release.
     pub allow_downgrade: bool,
+    /// `--accept-license`: the licence is accepted on the command line
+    /// (`embra.license=accept` on the kernel line). An unattended run needs
+    /// it; with it nothing is asked about the licence.
+    pub accept_license: bool,
+}
+
+/// What the installer shows before it asks about the licence. The wording
+/// is the operator's licence review's (2026-11-26) and is used as written:
+/// changed there first, and here as it is given. `{version}` is where the
+/// text's version line goes, and the last paragraph is the question.
+const LICENSE_NOTICE: &str = "\
+embraOS is licensed, not sold, under the embraOS Proprietary License,
+{version}. It is for personal and academic
+non-commercial use; commercial use needs a separate license.
+
+Installing erases the disk you choose. embraOS is experimental and is
+provided as is, without warranty. By accepting you take on the risks of
+running it on this machine, and you release Ward Software Defined Systems
+LLC from claims, as Sections 7 to 12 of the license describe.
+
+Type \"license\" to read the full text, \"accept\" to accept it and go on,
+or q to reboot without installing:";
+
+/// How many lines of the licence a screen shows at a time: under the 24
+/// rows of a serial terminal, with the line that asks for more.
+const LICENSE_PAGE: usize = 20;
+const _: () = assert!(LICENSE_PAGE + 1 < 24, "a screen of the licence and its prompt fit a serial terminal's 24 rows");
+
+/// The licence's text a screen at a time: Enter shows the next, `q` or no
+/// answer stops the reading.
+fn show_license(text: &str, op: &mut Operator) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut shown = 0;
+    while shown < lines.len() {
+        let end = (shown + LICENSE_PAGE).min(lines.len());
+        for line in &lines[shown..end] {
+            op.line(line);
+        }
+        shown = end;
+        if shown == lines.len() {
+            break;
+        }
+        match op.ask(&format!("-- line {shown} of {}; Enter for more, q to stop reading: ", lines.len())) {
+            Some(answer) if !answer.trim().eq_ignore_ascii_case("q") => {}
+            _ => break,
+        }
+    }
+    op.line("");
+}
+
+/// The licence, before a disk is listed or anything is written. `text` is
+/// the licence in the medium's root filesystem
+/// (`embra_boot::license::PATH`), which the image build holds to the
+/// repository's `LICENSE` byte for byte. `Err` is the refusal, and nothing
+/// was changed.
+///
+/// An operator at the console is shown the notice and asked: `accept` goes
+/// on, `license` shows the whole text and asks again, any other answer or
+/// none refuses. An unattended run (`--yes`) asks nothing: it needs
+/// `--accept-license`, and is refused without it. With `--accept-license`
+/// nothing is asked of an attended run either: whoever wrote the command
+/// line accepted there.
+pub fn license_question(text: std::io::Result<String>, wanted: Wanted<'_>, op: &mut Operator) -> Result<(), Outcome> {
+    let missing = |why: String| {
+        Outcome::Refused(format!("refused: the license text of this medium cannot be shown ({why}: {}); nothing was changed", embra_boot::license::PATH))
+    };
+    let text = text.map_err(|e| missing(e.to_string()))?;
+    let Some(version) = embra_boot::license::version_line(&text) else {
+        return Err(missing("it is not the embraOS license's text".to_string()));
+    };
+    if wanted.accept_license {
+        op.line(&format!("The embraOS Proprietary License, {version}, is accepted on the command line (embra.license=accept)."));
+        return Ok(());
+    }
+    if wanted.yes {
+        return Err(Outcome::Refused(
+            "refused: an unattended install or upgrade needs embra.license=accept on the kernel line (--accept-license): the license is the file LICENSE on the medium; nothing was changed".into(),
+        ));
+    }
+    let notice = LICENSE_NOTICE.replace("{version}", version);
+    // The notice's last line is the question's own.
+    let (said, question) = notice.rsplit_once('\n').unwrap_or(("", notice.as_str()));
+    loop {
+        for line in said.lines() {
+            op.line(line);
+        }
+        let Some(answer) = op.ask(&format!("{question} ")) else {
+            return Err(Outcome::Refused("install: nobody answered the license question; nothing was changed".into()));
+        };
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "accept" => return Ok(()),
+            "license" | "licence" => show_license(&text, op),
+            _ => return Err(Outcome::Refused("install: the license was not accepted; nothing was changed".into())),
+        }
+    }
 }
 
 /// What the chosen disk holds, read before anything is asked or written.
@@ -588,6 +693,11 @@ pub fn install_command(media: &Path, wanted: Wanted<'_>, force: bool, op: &mut O
     let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
     let source = mount_source(&mounts, &media.to_string_lossy());
     op.line(&format!("Installation medium: {} at {}", source.as_deref().unwrap_or("?"), media.display()));
+    // The licence, before a disk is listed: the installer runs from the
+    // medium's root filesystem, whose copy of the text this is.
+    if let Err(refused) = license_question(std::fs::read_to_string(embra_boot::license::PATH), wanted, op) {
+        return refused;
+    }
     let found = disks::list(Path::new("/sys/block"), &mounts, source.as_deref(), layout::MIN_DISK_MIB * layout::MIB);
     let disk = match pick_disk(&found, wanted.disk, wanted.yes, op) {
         Ok(d) => d,
@@ -1006,6 +1116,179 @@ mod tests {
         (out, op.transcript())
     }
 
+    /// The repository's licence: the text an image carries (the image build
+    /// holds its root filesystem's copy to this file).
+    const LICENSE_TEXT: &str = include_str!("../../../LICENSE");
+
+    fn license_version() -> &'static str {
+        embra_boot::license::version_line(LICENSE_TEXT).expect("the licence has a version line")
+    }
+
+    /// What an operator at the console reads before the question, with the
+    /// question's own line as the prompt: the operator's wording, word for
+    /// word, with the text's version line in its place.
+    fn license_notice() -> String {
+        format!(
+            "embraOS is licensed, not sold, under the embraOS Proprietary License,\n\
+             {}. It is for personal and academic\n\
+             non-commercial use; commercial use needs a separate license.\n\
+             \n\
+             Installing erases the disk you choose. embraOS is experimental and is\n\
+             provided as is, without warranty. By accepting you take on the risks of\n\
+             running it on this machine, and you release Ward Software Defined Systems\n\
+             LLC from claims, as Sections 7 to 12 of the license describe.\n\
+             \n\
+             Type \"license\" to read the full text, \"accept\" to accept it and go on,\n\
+             or q to reboot without installing: ",
+            license_version()
+        )
+    }
+
+    /// The licence question as an operator answers it, and its transcript.
+    fn asked_license(wanted: Wanted<'_>, answers: &[&str]) -> (Result<(), String>, String) {
+        let mut op = Operator::scripted(answers);
+        let out = license_question(Ok(LICENSE_TEXT.to_string()), wanted, &mut op).map_err(|o| match o {
+            Outcome::Refused(why) => why,
+            _ => "an outcome other than a refusal".to_string(),
+        });
+        (out, op.transcript())
+    }
+
+    /// The installer shows the notice and asks before a disk is listed. The
+    /// word accept goes on, and nothing but the notice was written to the
+    /// console.
+    #[test]
+    fn the_license_is_shown_first_and_accept_goes_on() {
+        for word in ["accept", " accept ", "ACCEPT"] {
+            let (out, said) = asked_license(Wanted::default(), &[word]);
+            assert_eq!(out, Ok(()), "{word:?}");
+            assert_eq!(said, license_notice(), "{word:?}");
+        }
+        // An upgrade in place is asked the same.
+        let (out, said) = asked_license(Wanted { upgrade: true, ..Default::default() }, &["accept"]);
+        assert_eq!((out, said), (Ok(()), license_notice()));
+        // The notice as it is written: plain text of a console's width, the
+        // version line in its one place, the question last.
+        assert_eq!(LICENSE_NOTICE.matches("{version}").count(), 1);
+        assert!(LICENSE_NOTICE.is_ascii() && LICENSE_NOTICE.lines().all(|line| line.len() <= 74 && line.trim_end() == line), "{LICENSE_NOTICE}");
+        assert!(license_notice().lines().all(|line| line.len() <= 74 + 1), "with the version line in place");
+        assert!(LICENSE_NOTICE.ends_with("or q to reboot without installing:"));
+        for must in ["licensed, not sold", "personal and academic", "Installing erases the disk you choose", "Ward Software Defined Systems", "Sections 7 to 12"] {
+            assert!(LICENSE_NOTICE.contains(must), "{must}");
+        }
+    }
+
+    /// Any other answer, and no answer, end the run before a disk is listed:
+    /// the refusal says that nothing was changed, and the question was
+    /// asked once.
+    #[test]
+    fn any_other_answer_to_the_license_question_and_none_refuse_and_change_nothing() {
+        for answer in ["q", "Q", "", "y", "yes", "no", "accept it", "1", "vda"] {
+            let (out, said) = asked_license(Wanted::default(), &[answer, "accept"]);
+            assert_eq!(out, Err("install: the license was not accepted; nothing was changed".to_string()), "{answer:?}");
+            assert_eq!(said, license_notice(), "{answer:?}: asked once, and the next line was not read");
+        }
+        let (out, said) = asked_license(Wanted::default(), &[]);
+        assert_eq!(out, Err("install: nobody answered the license question; nothing was changed".to_string()));
+        assert_eq!(said, license_notice());
+    }
+
+    /// The word license shows the whole text, a screen at a time, and the
+    /// question is asked again; q stops the reading, and so does a console
+    /// nobody answers at.
+    #[test]
+    fn license_shows_the_whole_text_a_screen_at_a_time_and_asks_again() {
+        let lines: Vec<&str> = LICENSE_TEXT.lines().collect();
+        let screens = lines.len().div_ceil(LICENSE_PAGE);
+        assert!(screens > 3, "the text is longer than a few screens: {} lines", lines.len());
+        // Enter at every screen but the last, then accept.
+        let mut answers = vec!["license"];
+        answers.extend(std::iter::repeat_n("", screens - 1));
+        answers.push("accept");
+        let (out, said) = asked_license(Wanted::default(), &answers);
+        assert_eq!(out, Ok(()));
+        let mut at = 0;
+        for line in &lines {
+            let found = said[at..].find(&format!("{line}\n")).unwrap_or_else(|| panic!("the line {line:?} is not shown, in order"));
+            at += found + line.len() + 1;
+        }
+        assert_eq!(said.matches("; Enter for more, q to stop reading: ").count(), screens - 1, "a prompt after every screen but the last");
+        assert!(said.contains(&format!("-- line {LICENSE_PAGE} of {}; Enter for more, q to stop reading: ", lines.len())), "{}", &said[..said.len().min(2400)]);
+        assert_eq!(said.matches("or q to reboot without installing: ").count(), 2, "the question, the text, the question again");
+        assert!(said.starts_with(&license_notice()) && said.ends_with(&license_notice()));
+
+        // q stops the reading after the first screen; the other spelling asks for the text too.
+        let (out, said) = asked_license(Wanted::default(), &["licence", "q", "accept"]);
+        assert_eq!(out, Ok(()));
+        assert_eq!(said.matches("; Enter for more, q to stop reading: ").count(), 1);
+        let last = lines.iter().rev().find(|line| !line.trim().is_empty()).expect("a last line");
+        assert!(said.contains(lines[0]) && !said.contains(last), "the first screen and not the last");
+        // Nobody at the console: the reading stops, and the question's own refusal follows.
+        let (out, said) = asked_license(Wanted::default(), &["license"]);
+        assert_eq!(out, Err("install: nobody answered the license question; nothing was changed".to_string()));
+        assert_eq!(said.matches("; Enter for more, q to stop reading: ").count(), 1);
+        // The text read twice, then declined.
+        let (out, _) = asked_license(Wanted::default(), &["license", "q", "license", "q", "q"]);
+        assert_eq!(out, Err("install: the license was not accepted; nothing was changed".to_string()));
+    }
+
+    /// An unattended run asks nothing: without the acceptance on its
+    /// command line it is refused before anything is read from a console,
+    /// with the knob's name; with it, it says in one line what was accepted
+    /// and goes on. The same for an upgrade in place.
+    #[test]
+    fn an_unattended_run_needs_the_acceptance_on_its_command_line_and_asks_nothing() {
+        let refusal = "refused: an unattended install or upgrade needs embra.license=accept on the kernel line (--accept-license): the license is the file LICENSE on the medium; nothing was changed";
+        for wanted in [
+            Wanted { disk: Some("vda"), yes: true, ..Default::default() },
+            Wanted { disk: Some("vda"), yes: true, upgrade: true, ..Default::default() },
+            Wanted { yes: true, ..Default::default() },
+        ] {
+            // An answer is there to be read, and is not.
+            let (out, said) = asked_license(wanted, &["accept"]);
+            assert_eq!(out, Err(refusal.to_string()));
+            assert_eq!(said, "", "nothing was shown or asked");
+        }
+        let accepted_line = format!("The embraOS Proprietary License, {}, is accepted on the command line (embra.license=accept).\n", license_version());
+        for wanted in [
+            Wanted { disk: Some("vda"), yes: true, accept_license: true, ..Default::default() },
+            Wanted { disk: Some("vda"), yes: true, upgrade: true, accept_license: true, ..Default::default() },
+            // At the installer's own questions the flag answers the first.
+            Wanted { accept_license: true, ..Default::default() },
+        ] {
+            let (out, said) = asked_license(wanted, &[]);
+            assert_eq!(out, Ok(()));
+            assert_eq!(said, accepted_line);
+        }
+    }
+
+    /// A medium whose licence cannot be read, or whose file is another
+    /// text, installs nothing: what is accepted is a text that was shown.
+    #[test]
+    fn a_medium_without_the_licences_text_installs_nothing() {
+        let refused = |text: std::io::Result<String>, wanted: Wanted<'_>| {
+            let mut op = Operator::scripted(&["accept"]);
+            let out = match license_question(text, wanted, &mut op) {
+                Err(Outcome::Refused(why)) => why,
+                _ => panic!("not refused"),
+            };
+            assert_eq!(op.transcript(), "", "nothing was shown or asked");
+            out
+        };
+        let accepted = Wanted { disk: Some("vda"), yes: true, accept_license: true, ..Default::default() };
+        for wanted in [Wanted::default(), accepted] {
+            let why = refused(Err(std::io::Error::from(std::io::ErrorKind::NotFound)), wanted);
+            assert!(
+                why.starts_with("refused: the license text of this medium cannot be shown (") && why.ends_with(": /usr/share/licenses/embraos/LICENSE); nothing was changed"),
+                "{why}"
+            );
+            assert_eq!(
+                refused(Ok("Another text\n\nVersion 9\n".to_string()), wanted),
+                "refused: the license text of this medium cannot be shown (it is not the embraOS license's text: /usr/share/licenses/embraos/LICENSE); nothing was changed"
+            );
+        }
+    }
+
     #[test]
     fn the_installer_phases_run_in_order_and_stop_at_the_first_failure() {
         let mut rec = Recording { phases: vec![], fail_at: None };
@@ -1244,7 +1527,7 @@ mod tests {
 
     #[test]
     fn an_unattended_upgrade_asks_nothing_and_never_becomes_a_clean_install() {
-        let unattended = Wanted { disk: Some("vda"), yes: true, upgrade: true, allow_downgrade: false };
+        let unattended = Wanted { disk: Some("vda"), yes: true, upgrade: true, allow_downgrade: false, accept_license: false };
         let (out, text) = planned(&found(installed(release("0.23.0", "old0000000"))), unattended, &[]);
         assert_eq!(out, Ok(Plan::Upgrade { target: Slot::B }));
         assert!(!text.contains('?'), "nothing asked: {text}");
@@ -1267,7 +1550,7 @@ mod tests {
         }
 
         // `--upgrade` without `--yes` goes straight to the upgrade's own confirmation.
-        let asked = Wanted { disk: Some("vda"), yes: false, upgrade: true, allow_downgrade: false };
+        let asked = Wanted { disk: Some("vda"), yes: false, upgrade: true, allow_downgrade: false, accept_license: false };
         let found = found(installed(release("0.23.0", "old0000000")));
         let (out, text) = planned(&found, asked, &["y"]);
         assert_eq!(out, Ok(Plan::Upgrade { target: Slot::B }));
@@ -1278,7 +1561,7 @@ mod tests {
     #[test]
     fn an_unattended_clean_install_stays_one_on_a_disk_that_holds_an_installation() {
         // `embra.install=<disk>` erased the disk before the upgrade existed, and still does.
-        let unattended = Wanted { disk: Some("vda"), yes: true, upgrade: false, allow_downgrade: false };
+        let unattended = Wanted { disk: Some("vda"), yes: true, upgrade: false, allow_downgrade: false, accept_license: false };
         let (out, text) = planned(&found(installed(release("0.23.0", "old0000000"))), unattended, &[]);
         assert_eq!(out, Ok(Plan::Clean));
         assert!(!text.contains('?'), "nothing asked: {text}");

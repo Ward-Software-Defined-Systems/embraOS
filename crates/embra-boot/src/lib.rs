@@ -9,7 +9,8 @@
 //! reads the release stamp's build time), and what an installer needs: the
 //! layout, the medium, the disks. The native models (experimental) have
 //! their contract here too: the catalogue, and the records embrad, the brain
-//! and the updater pass each other. No runtime
+//! and the updater pass each other. So has the licence the OS is released
+//! under: where its text is in the root filesystem, and its version line. No runtime
 //! and no dependency but `libc`: embra-init runs it from the initramfs,
 //! before anything else exists.
 
@@ -20,6 +21,7 @@ pub mod disks;
 pub mod esp;
 pub mod grubenv;
 pub mod layout;
+pub mod license;
 pub mod loopdev;
 pub mod media;
 pub mod names;

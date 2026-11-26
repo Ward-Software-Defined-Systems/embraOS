@@ -617,10 +617,33 @@ EOF
     echo "probe-time firmware: the $want files that ${drivers// /, } name and the rootfs holds are all in /boot/firmware.cpio.gz"
 }
 
+# license_version_line <file>: the text's version line, its third ("Version
+# 2.0, November 26, 2026"): what the installer and the OS name the text by,
+# beside its sha256. Empty when the third line is not one.
+license_version_line() { sed -n '3s/^\(Version [0-9][^[:cntrl:]]*\)$/\1/p' "$1"; }
+
+# assert_license_text <target dir>: the root filesystem carries the
+# repository's LICENSE byte for byte, where the installer and the OS read it,
+# and the text has the shape both read: its title on the first line and its
+# version on the third. An image whose copy is missing or is another text is
+# rejected: an acceptance names the text it was shown.
+assert_license_text() {
+    local tgt="$1" lic="usr/share/licenses/embraos/LICENSE" version
+    [ -s LICENSE ] || reject_image "the repository's LICENSE is missing: the licence text travels with every image"
+    [ "$(sed -n '1p' LICENSE)" = "embraOS PROPRIETARY LICENSE" ] \
+        || reject_image "the first line of LICENSE is not \"embraOS PROPRIETARY LICENSE\": the installer and the OS show this file as the licence"
+    version="$(license_version_line LICENSE)"
+    [ -n "$version" ] || reject_image "the third line of LICENSE is not its version line (\"Version <number>, <date>\"): the installer and the OS name the text by it"
+    [ -s "$tgt/$lic" ] || reject_image "/$lic is missing from the rootfs: the licence text travels with every image (post_build.sh installs it)"
+    cmp -s LICENSE "$tgt/$lic" || reject_image "/$lic in the rootfs is not the repository's LICENSE: the installer and the OS would show another text"
+    echo "licence: /$lic is the repository's LICENSE ($version; sha256 $(sha256_of LICENSE))"
+}
+
 assert_rootfs_invariants() {
     local triple="${1:-}"
     assert_target_is_clean
     [ -n "$triple" ] && assert_kernel_fragments_applied "$triple"
+    assert_license_text "$BUILDROOT_DIR/output/target"
     assert_firmware_families
     assert_firmware_present "$BUILDROOT_DIR/output/target"
     # Post-Buildroot assert. Both ways this package can fail are SILENT: a package
@@ -1277,9 +1300,10 @@ sha256_of() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1
 # onto the hypervisors of that architecture. It carries this build's kernel,
 # the repository's
 # initramfs (the same embra-init as the slot), rootfs.squashfs, the disk's
-# ESP tree (what the installer copies onto the target's ESP) and
+# ESP tree (what the installer copies onto the target's ESP),
 # /embraos/install.manifest (install.v1: the release, the rootfs's size and
-# sha256), and boots a second GRUB image: the disk's module list plus
+# sha256) and /LICENSE, the repository's licence, where it can be read before
+# the medium is booted; it boots a second GRUB image: the disk's module list plus
 # iso9660, part_msdos, search_fs_file and chain, with an early config that
 # finds the medium by its manifest and loads /boot/grub/grub.cfg from it
 # (board/embraos/grub-installer.cfg.in, rendered here). The FAT image is
@@ -1338,6 +1362,10 @@ write_installer_iso() {
     cp "$br/output/target/boot/firmware.cpio.gz" "$tree/boot/firmware.cpio.gz"
     cp "$images/rootfs.squashfs" "$tree/embraos/rootfs.squashfs"
     cp -r "$images/efi-part/EFI" "$tree/embraos/esp/EFI"
+    # The licence at the medium's root: it can be read before the medium is
+    # booted. The same file as the root filesystem's (assert_license_text).
+    [ -s LICENSE ] || { echo "ERROR: installer ISO: the repository's LICENSE is missing" >&2; rm -rf "$stage"; return 1; }
+    cp LICENSE "$tree/LICENSE"
 
     # The menu.
     local version
@@ -1412,6 +1440,9 @@ write_installer_iso() {
     cmp -s "$stage/manifest.read" "$tree/embraos/install.manifest" \
         || { echo "ERROR: installer ISO: the manifest read back from $iso differs" >&2; rm -rf "$stage"; return 1; }
     grep -q "^ROOTFS_SHA256=$sq_sha\$" "$stage/manifest.read" || { rm -rf "$stage"; return 1; }
+    "$xorriso" -osirrox on -indev "$iso" -extract /LICENSE "$stage/license.read" > /dev/null 2>&1
+    cmp -s "$stage/license.read" LICENSE \
+        || { echo "ERROR: installer ISO: /LICENSE read back from $iso is missing or is not the repository's LICENSE" >&2; rm -rf "$stage"; return 1; }
     mv "$iso" "$out/embraos.iso"
     echo "installer ISO in $out: embraos.iso ($(( $(file_size "$out/embraos.iso") / 1048576 )) MiB; a DVD through El Torito, a USB stick through its GPT; the loader $efi_bytes bytes in a $efi_mib MiB FAT)"
     rm -rf "$stage"

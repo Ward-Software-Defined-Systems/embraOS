@@ -286,7 +286,7 @@ if [ -n "${EMBRA_ISO:-}" ]; then
         cdrom) MEDIA_ARGS=(-device virtio-scsi-pci,id=scsi-medium -drive "file=$EMBRA_ISO,format=raw,if=none,id=medium,media=cdrom,readonly=on" -device scsi-cd,drive=medium,bus=scsi-medium.0,bootindex=0) ;;
         usb)   MEDIA_ARGS=(-device qemu-xhci,id=xhci-medium -drive "file=$EMBRA_ISO,format=raw,if=none,id=medium,snapshot=on" -device usb-storage,drive=medium,bus=xhci-medium.0,bootindex=0) ;;
     esac
-    echo "  Installer: $EMBRA_ISO as ${EMBRA_ISO_AS:-cdrom}; the target disk is $IMAGE ($DISK_FMT, ${EMBRA_DISK_IF:-virtio}); embra.install=<disk> on the knobs makes it unattended"
+    echo "  Installer: $EMBRA_ISO as ${EMBRA_ISO_AS:-cdrom}; the target disk is $IMAGE ($DISK_FMT, ${EMBRA_DISK_IF:-virtio}); embra.install=<disk> with embra.license=accept on the knobs makes it unattended"
 fi
 
 if [ "$EMBRA_BOOT" = "direct" ]; then

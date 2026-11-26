@@ -205,6 +205,14 @@ for f in usr/sbin/wpa_supplicant usr/sbin/usb_modeswitch lib/firmware/regulatory
     }
 done
 [ -d "${TARGET_DIR}/usr/share/usb_modeswitch" ] || { echo "ERROR: /usr/share/usb_modeswitch is missing (BR2_PACKAGE_USB_MODESWITCH_DATA)" >&2; exit 1; }
+# embraOS's own licence travels with every release. The installer shows this
+# file before it writes anything, and a running OS shows it and names it by
+# its version line and its sha256: all three read it here, and it is the
+# repository's LICENSE byte for byte (assert_license_text,
+# scripts/lib/image-common.sh; the path is embra_boot::license::PATH).
+[ -s "${REPO_ROOT}/LICENSE" ] || { echo "ERROR: ${REPO_ROOT}/LICENSE is missing: the licence text travels with the image" >&2; exit 1; }
+install -D -m 0644 "${REPO_ROOT}/LICENSE" "${TARGET_DIR}/usr/share/licenses/embraos/LICENSE"
+
 # The model server of native models (experimental) is a package of both
 # defconfigs, and its licence texts travel with it; the image scripts read
 # all of its files back after the build (assert_native_model_runtime,
