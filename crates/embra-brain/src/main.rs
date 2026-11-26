@@ -24,6 +24,7 @@ mod proactive;
 mod migrations;
 mod config;
 mod learning;
+mod license;
 mod knowledge;
 mod identity_graph;
 mod grpc_service;

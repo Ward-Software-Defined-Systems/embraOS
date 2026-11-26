@@ -281,6 +281,7 @@ impl Rig {
             pending_openai_compat_setup: Arc::new(Mutex::new(None)),
             pending_session_delete: Arc::new(Mutex::new(None)),
             pending_backup_restore: Arc::new(Mutex::new(None)),
+            license: license::Gate::without_a_text(),
         };
         let (stop_tx, stop_rx) = watch::channel(0u64);
         Self { server, script, history, meta, traces, config, ctx, stop_tx, stop_rx }
@@ -404,6 +405,22 @@ impl Rig {
             .expect("the turn returns without an error of its own");
         drop(tx);
         reader.await.expect("the reader ends with the turn")
+    }
+
+    /// A request as a console sends it in the operational loop, the
+    /// licence's gate first (`console_request`): the frames it was sent.
+    async fn console(&self, request: ConversationRequest) -> Vec<ResponseType> {
+        let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+        let reader = tokio::spawn(async move {
+            let mut frames = Vec::new();
+            while let Some(frame) = rx.recv().await {
+                frames.push(frame.expect("a frame").response_type.expect("a typed frame"));
+            }
+            frames
+        });
+        console_request(request, &tx, &self.ctx, "UTC", "", &self.stop_rx).await;
+        drop(tx);
+        reader.await.expect("the reader ends with the request")
     }
 
     /// The model calls the server received, as their JSON bodies.
@@ -1565,6 +1582,70 @@ async fn a_console_that_attaches_while_a_turn_runs_is_told_and_is_sent_the_reply
         "the turn's saved reply, which ends the busy state: {second:?}"
     );
     assert_eq!(rig.asked().await.len(), 1, "the attach asked the model nothing beside the running turn");
+}
+
+/// The licence's question on a configured machine, through the loop's own
+/// step for a request a console sent. While the text this release carries
+/// is not accepted there, a message reaches no model and is not saved, a
+/// command waits, and an attach attaches the session, starts no briefing
+/// and is followed by the question. Once it is accepted an attach briefs as
+/// it did, and a message is a turn.
+#[tokio::test]
+async fn a_console_reaches_no_model_until_the_license_is_accepted() {
+    let mut rig = Rig::new().await;
+    session_is_there(&rig).await;
+    // A sealed instance with a conversation from before: an attach of one briefs.
+    let sealed = Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(200)).mount_as_scoped(&rig.server).await;
+    let earlier = json!([{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "an earlier reply"}]);
+    rig.history.doc.lock().unwrap()["turns"] = earlier.clone();
+    let (root, the_license) = crate::license::test_support::machine("console-request", true);
+    rig.ctx.license = license::Gate::of(Arc::new(the_license));
+    let message = |text: &str| ConversationRequest {
+        request_type: Some(conversation_request::RequestType::UserMessage(UserMessage { content: text.to_string(), ..Default::default() })),
+    };
+    let command = |command: &str| ConversationRequest {
+        request_type: Some(conversation_request::RequestType::SlashCommand(SlashCommand { command: command.to_string(), args: String::new() })),
+    };
+    let asks = |frames: &[ResponseType]| {
+        matches!(frames.last(), Some(ResponseType::Setup(p)) if p.options == ["I do not accept", "Show the full text", "I accept the license"] && p.default_value.is_empty())
+    };
+    let briefing_begun = async || rig.ctx.session_mgr.read().await.briefing_attempt_recent(SESSION, std::time::Duration::from_secs(3600));
+
+    // A message, a command and an attach while the licence is open.
+    let frames = rig.console(message("what did I miss?")).await;
+    assert_eq!(said(&frames), [license::NOT_SENT_ON]);
+    assert!(asks(&frames), "{frames:?}");
+    let frames = rig.console(command("/status")).await;
+    assert_eq!(said(&frames), [crate::license::command_waits("/status")]);
+    let frames = rig.console(attach_to(SESSION)).await;
+    assert!(said(&frames).iter().any(|m| m.starts_with("Session 'main' attached")), "the attach went through: {frames:?}");
+    assert!(asks(&frames), "the question follows the attach: {frames:?}");
+    assert!(!briefing_begun().await, "an attach starts no briefing while the licence is open");
+    let frames = rig.console(message("I do not accept")).await;
+    assert_eq!(said(&frames), [crate::license::NOT_ACCEPTED]);
+    assert!(rig.asked().await.is_empty(), "no model was asked anything");
+    assert_eq!(rig.history.now()["turns"], earlier, "nothing was saved");
+
+    // The accepting answer: recorded, and no turn of its own.
+    let frames = rig.console(message("I accept the license")).await;
+    assert_eq!(said(&frames).len(), 1, "{frames:?}");
+    assert!(said(&frames)[0].starts_with("Accepted on this machine and recorded: "), "{frames:?}");
+    assert!(rig.asked().await.is_empty());
+
+    // An attach briefs as it did. (The briefing itself has no soul to read
+    // on this rig and ends there; that it was begun is the attach's part.)
+    let frames = rig.console(attach_to(SESSION)).await;
+    assert!(!frames.iter().any(|f| matches!(f, ResponseType::Setup(_))), "asked once: {frames:?}");
+    assert!(briefing_begun().await, "the attach after the answer briefs");
+    assert!(rig.asked().await.is_empty());
+
+    // And a message is a turn: on this rig's unsealed instance again, where a turn reaches the model.
+    drop(sealed);
+    rig.then(says("Nothing happened while you were away."));
+    let frames = rig.console(message("what did I miss?")).await;
+    assert_eq!(dones(&frames), ["Nothing happened while you were away."], "{frames:?}");
+    assert_eq!(rig.asked().await.len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]

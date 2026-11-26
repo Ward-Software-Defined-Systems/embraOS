@@ -40,6 +40,9 @@ pub enum SetupStep {
     /// Terms the operator accepts or does not: the policy a native model
     /// comes with. A selector whose first option accepts nothing.
     Terms,
+    /// The licence the OS is released under: the first boot's first
+    /// question. A selector whose first option accepts nothing.
+    License,
     Timezone,
     Confirm,
 }
@@ -527,7 +530,8 @@ impl AppState {
         // First: a notice that is accepted or not may use any other step's
         // words on its way to its question.
         if lower.contains("do you accept") {
-            SetupStep::Terms
+            // The licence's own question names it; any other is a model's terms.
+            if lower.contains("do you accept the embraos proprietary license") { SetupStep::License } else { SetupStep::Terms }
         } else if lower.contains("provider")
             || (lower.contains("which") && (lower.contains("gemini") || lower.contains("claude")))
         {
@@ -580,7 +584,7 @@ impl AppState {
                 SetupStep::BearerToken => "Enter bearer token (or press Enter for no auth)...",
                 SetupStep::ModelSelect => "↑/↓ to choose model, Enter to confirm",
                 SetupStep::ModelInstall => "Enter for progress, or cancel to stop it...",
-                SetupStep::Terms => "↑/↓ to choose, Enter to answer",
+                SetupStep::Terms | SetupStep::License => "↑/↓ to choose, Enter to answer",
                 SetupStep::Timezone => "Enter timezone (or press Enter for default)...",
                 SetupStep::Confirm => "Enter 1 to confirm or 2 to restart...",
             },
@@ -755,6 +759,24 @@ mod native_render_tests {
         );
         let mut app = AppState::new();
         app.mode = AppMode::Setup(SetupState { step: SetupStep::Terms });
+        assert_eq!(app.input_placeholder(), "↑/↓ to choose, Enter to answer");
+    }
+
+    /// The first boot's first question, about the licence the OS is
+    /// released under, is a step of its own: its notice names an AI system
+    /// and a company on the way, and a model's terms name a licence too.
+    /// (The brain asks it: `license::License::question`.)
+    #[test]
+    fn infer_setup_step_recognizes_the_question_about_the_license() {
+        let question = "embraOS is licensed, not sold, under the embraOS Proprietary License,\nVersion 2.0, November 26, 2026. It is for personal and academic\nnon-commercial use; commercial use needs a separate license.\n\nembraOS is experimental and is provided as is, without warranty. It runs\nan AI system that can act on its own with the access you give it.\n\nDo you accept the embraOS Proprietary License?";
+        assert_eq!(AppState::infer_setup_step(question), SetupStep::License);
+        // A model's terms name a licence too, and stay a model's terms.
+        assert_eq!(
+            AppState::infer_setup_step("It is licensed under the Apache License 2.0 (LICENSE, Section 5).\n\nDo you accept the Model Acceptable Use Policy?"),
+            SetupStep::Terms
+        );
+        let mut app = AppState::new();
+        app.mode = AppMode::Setup(SetupState { step: SetupStep::License });
         assert_eq!(app.input_placeholder(), "↑/↓ to choose, Enter to answer");
     }
 

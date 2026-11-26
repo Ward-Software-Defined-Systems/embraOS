@@ -42,6 +42,7 @@ async fn handle_turn(
         pending_openai_compat_setup,
         pending_session_delete,
         pending_backup_restore,
+        license: the_license,
     } = ctx;
     let self_in_turn = in_turn.clone();
     match req.request_type {
@@ -1988,7 +1989,12 @@ async fn handle_turn(
             // Not beside a running turn: a briefing is a turn, and a turn
             // that has waited half an hour for a local model made the
             // session look idle to the gate below.
-            if !new_session && is_sealed && history_len > 0 && running.is_none() {
+            //
+            // Not while the licence waits for its answer: the question
+            // follows this attach (`console_request`), and it is what the
+            // console is shown first. No attempt is recorded, so the attach
+            // after the answer briefs as it would have.
+            if !new_session && is_sealed && history_len > 0 && running.is_none() && !the_license.open() {
                 let meta = store.get_meta(&session_name).await.ok().flatten();
                 let (idle_ok, idle_secs) = match &meta {
                     Some(m) => resume_briefing_idle_ok(m.last_active, chrono::Utc::now()),

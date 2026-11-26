@@ -2529,6 +2529,7 @@ mod key_setup_model_step_tests {
                 pending_openai_compat_setup: Arc::new(Mutex::new(None)),
                 pending_session_delete: Arc::new(Mutex::new(None)),
                 pending_backup_restore: Arc::new(Mutex::new(None)),
+                license: license::Gate::without_a_text(),
             };
             let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
             handle_provider_command(arg, &tx, &ctx).await;
@@ -2563,6 +2564,7 @@ mod key_setup_model_step_tests {
             pending_openai_compat_setup: pending_openai_compat_setup.clone(),
             pending_session_delete: Arc::new(Mutex::new(None)),
             pending_backup_restore: Arc::new(Mutex::new(None)),
+            license: license::Gate::without_a_text(),
         };
         // The switch: refused, with the way to a model.
         let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);

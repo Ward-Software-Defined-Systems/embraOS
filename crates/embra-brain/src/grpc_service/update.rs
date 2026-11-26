@@ -490,6 +490,8 @@ pub(super) enum SetupCommand {
     /// The provider gateway's certificate authority goes in before the
     /// provider is set up.
     Ca,
+    /// The licence's text: the first boot's first question is about it.
+    License,
     /// A native model's file (experimental) is installed, watched and
     /// removed while the setup runs: the setup's own question may be
     /// waiting for a download.
@@ -512,6 +514,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
     match command.trim() {
         "/backup" => SetupCommand::Backup,
         "/ca" => SetupCommand::Ca,
+        "/license" => SetupCommand::License,
         "/native" => SetupCommand::Native,
         "/network" => SetupCommand::Network,
         "/reboot" => SetupCommand::Reboot,
@@ -525,7 +528,7 @@ pub(super) fn setup_command(command: &str) -> SetupCommand {
 /// the command but that it was not run: the word may be one no command has.
 pub(super) fn later_notice(command: &str) -> String {
     let shown: String = command.trim().chars().take(40).collect();
-    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca, /native, /network, /reboot, /theme and /web-token are.")
+    format!("Not run: {shown}. Commands are answered once setup is complete (the configuration, then Learning Mode); until then /backup, /ca, /license, /native, /network, /reboot, /theme and /web-token are.")
 }
 
 /// What the stages before a session do with a client's frame: the
@@ -540,9 +543,10 @@ pub(super) fn later_notice(command: &str) -> String {
 /// that someone else has seen is replaced there (`/web-token rotate`), and
 /// the look of the console all of that is done in is chosen there
 /// (`/theme`), and a native model's file is installed and watched there
-/// (`/native`: the setup's own question may wait for a download). So
-/// `/backup`, `/ca`, `/native`, `/network`, `/reboot`, `/theme` and
-/// `/web-token` are answered as in a session (of `/native`, the forms that
+/// (`/native`: the setup's own question may wait for a download), and the
+/// licence's text is read there, which the first question is about
+/// (`/license`). So `/backup`, `/ca`, `/license`, `/native`, `/network`,
+/// `/reboot`, `/theme` and `/web-token` are answered as in a session (of `/native`, the forms that
 /// change no stored configuration), the confirmation of a restore is taken,
 /// and any other command gets one line.
 #[derive(Clone)]
@@ -584,6 +588,9 @@ impl SetupCommands {
                 match setup_command(&cmd.command) {
                     SetupCommand::Backup => handle_backup_command(&cmd.args, &self.tx, &self.pending_restore).await,
                     SetupCommand::Ca => super::ca::handle_ca_command(&cmd.args, &self.tx).await,
+                    SetupCommand::License => {
+                        super::license::handle_license_command(&cmd.args, &self.tx, &crate::license::License::machine()).await;
+                    }
                     SetupCommand::Native => {
                         use crate::native_model::{Env, jobs::Jobs};
                         super::native::handle_native_before_a_session(&cmd.args, &self.tx, &Env::in_force(), Jobs::shared()).await
@@ -721,7 +728,7 @@ mod backup_tests {
             assert_eq!(door.take(command(other, "now")).await, None);
             let line = said(&mut rx);
             assert_eq!(line, vec![later_notice(other)], "{other}");
-            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca, /native, /network, /reboot, /theme and /web-token are"), "{line:?}");
+            assert!(line[0].starts_with(&format!("Not run: {other}.")) && line[0].contains("/backup, /ca, /license, /native, /network, /reboot, /theme and /web-token are"), "{line:?}");
         }
 
         // A frame the stages never read is still not theirs, and says nothing.
@@ -764,10 +771,12 @@ mod backup_tests {
         assert_eq!(setup_command("/themes"), SetupCommand::Later);
         assert_eq!(setup_command("/web-tokens"), SetupCommand::Later);
         assert_eq!(setup_command("/ca"), SetupCommand::Ca);
+        assert_eq!(setup_command("/license"), SetupCommand::License);
+        assert_eq!(setup_command("/licenses"), SetupCommand::Later);
         assert_eq!(setup_command("/cas"), SetupCommand::Later);
         assert_eq!(setup_command("/backups"), SetupCommand::Later);
         assert_eq!(setup_command(""), SetupCommand::Later);
-        assert!(later_notice(&"/x".repeat(100)).len() < 220, "a long word is cut");
+        assert!(later_notice(&"/x".repeat(100)).len() < 232, "a long word is cut");
     }
 
     /// The stages before a session read the stream in two places: the

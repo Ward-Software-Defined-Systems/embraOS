@@ -925,18 +925,19 @@ pub async fn run_config_wizard_grpc(
     db: &WardsonDbClient,
 ) -> Result<SystemConfig> {
     use crate::native_model::{Env, jobs::Jobs};
-    run_config_wizard_with(tx, response_rx, db, &Env::in_force(), Jobs::shared()).await
+    run_config_wizard_with(tx, response_rx, db, &Env::in_force(), Jobs::shared(), &crate::license::License::machine()).await
 }
 
-/// The wizard, with where a native model's records and updater are and the
-/// brain's jobs: the machine's own in `run_config_wizard_grpc`, a test's in
-/// a test.
+/// The wizard, with where a native model's records and updater are, the
+/// brain's jobs, and the licence's text and record: the machine's own in
+/// `run_config_wizard_grpc`, a test's in a test.
 pub(crate) async fn run_config_wizard_with(
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     response_rx: &mut mpsc::Receiver<String>,
     db: &WardsonDbClient,
     native_env: &crate::native_model::Env,
     native_jobs: &crate::native_model::jobs::Jobs,
+    license: &crate::license::License,
 ) -> Result<SystemConfig> {
     // Welcome
     let _ = tx.send(Ok(ConversationResponse {
@@ -948,6 +949,26 @@ pub(crate) async fn run_config_wizard_with(
             }
         )),
     })).await;
+
+    // Step 0: the licence, before the name. The notice and the question,
+    // whose first option accepts nothing. The setup waits here until the
+    // text this release carries is accepted, and the acceptance is recorded
+    // on STATE: the option that shows the text is followed by the question,
+    // the refusing one leaves the console free for a command (`/reboot`,
+    // `/backup`), and any other line brings the question again
+    // (`take_answer`). A wizard that is restarted at its confirmation finds
+    // the record and asks nothing, and so does an image that carries no
+    // text to show.
+    if crate::grpc_service::license::ask(tx, license).await {
+        use crate::grpc_service::license::{Surface, Taken, take_answer};
+        loop {
+            let answer = response_rx.recv().await.ok_or_else(|| anyhow::anyhow!("setup channel closed during the license step"))?;
+            if take_answer(&answer, tx, license, Surface::FirstBoot).await == Taken::Accepted {
+                info!("Config wizard: the license is accepted");
+                break;
+            }
+        }
+    }
 
     // Step 1: Name
     let _ = tx.send(Ok(ConversationResponse {
@@ -1254,7 +1275,7 @@ pub(crate) async fn run_config_wizard_with(
         .to_lowercase();
     if confirm.contains("no") || confirm == "2" {
         // Restart — recursive call (simple approach for now)
-        return Box::pin(run_config_wizard_with(tx, response_rx, db, native_env, native_jobs)).await;
+        return Box::pin(run_config_wizard_with(tx, response_rx, db, native_env, native_jobs, license)).await;
     }
 
     // Save config — populate the legacy api_key (active provider's
@@ -2457,6 +2478,91 @@ mod wizard_channel_tests {
         assert_eq!(key_prompt.field_type, SetupFieldType::Secret as i32);
     }
 
+    /// A machine whose image carries no licence text: the wizard asks
+    /// nothing about it. The tests that are not about the licence run on
+    /// one.
+    fn no_license() -> crate::license::License {
+        crate::license::License::at("/nonexistent/embra-license-text", "/nonexistent/embra-license-acceptance")
+    }
+
+    /// The first boot asks about the licence before the name: the notice
+    /// and a question whose first answer accepts nothing, no default. The
+    /// setup waits at the question: the refusing answer leaves the console
+    /// free for a command, any other line brings the question again, the
+    /// showing answer shows the whole text and asks, and the accepting
+    /// answer is recorded on STATE as given at the first boot; then comes
+    /// the name. A wizard that starts again finds the record and asks
+    /// nothing.
+    #[tokio::test]
+    async fn the_first_boot_asks_about_the_license_before_the_name() {
+        use crate::license::{self, Standing};
+        let (root, the_license) = license::test_support::machine("config-wizard", true);
+        let (_native_root, env) = crate::native_model::test_support::machine("config-wizard-license");
+        let jobs = crate::native_model::jobs::Jobs::default();
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let run = |answers: Vec<&'static str>| {
+            let (env, jobs, db, the_license) = (env.clone(), jobs.clone(), &db, &the_license);
+            async move {
+                let (tx, mut prompts) = mpsc::channel(256);
+                let (answer_tx, mut response_rx) = mpsc::channel::<String>(64);
+                for answer in answers {
+                    answer_tx.send(answer.to_string()).await.unwrap();
+                }
+                drop(answer_tx);
+                let err = super::run_config_wizard_with(&tx, &mut response_rx, db, &env, &jobs, the_license).await.unwrap_err().to_string();
+                drop(tx);
+                let mut frames = Vec::new();
+                while let Some(Ok(f)) = prompts.recv().await {
+                    frames.push(f);
+                }
+                (err, frames)
+            }
+        };
+
+        // Nobody answers: the setup is at the licence's question, its first.
+        let (err, frames) = run(vec![]).await;
+        assert!(err.contains("setup channel closed during the license step"), "{err}");
+        let asked = setup_prompts(&frames);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].field_type, SetupFieldType::Selector as i32);
+        assert_eq!(asked[0].options, ["I do not accept", "Show the full text", "I accept the license"], "the refusing answer first: Enter alone accepts nothing");
+        assert_eq!(asked[0].default_value, "", "no default");
+        assert!(asked[0].prompt.starts_with("embraOS is licensed, not sold, under the embraOS Proprietary License,\nVersion "), "{}", asked[0].prompt);
+        assert!(asked[0].prompt.ends_with("/license shows the full text.\n\nDo you accept the embraOS Proprietary License?"), "{}", asked[0].prompt);
+
+        // Declined: told so, with no list of choices after it, and the setup waits.
+        let (err, frames) = run(vec!["I do not accept"]).await;
+        assert!(err.contains("setup channel closed during the license step"), "{err}");
+        assert_eq!(setup_prompts(&frames).len(), 1, "the console is free for a command");
+        assert_eq!(system_texts(&frames).last().map(String::as_str), Some(license::NOT_ACCEPTED_AT_FIRST_BOOT));
+
+        // Declined, a line that is no answer, the text asked for: still at the question, nothing recorded.
+        let (err, frames) = run(vec!["I do not accept", "", "Embra", "Show the full text"]).await;
+        assert!(err.contains("setup channel closed during the license step"), "{err}");
+        assert_eq!(setup_prompts(&frames).len(), 4, "the question, and again after each line but the refusing one");
+        assert!(setup_prompts(&frames).iter().all(|p| p.prompt.ends_with("Do you accept the embraOS Proprietary License?")), "the name is not asked");
+        let said = system_texts(&frames);
+        assert_eq!(said.iter().filter(|t| t.as_str() == license::NOT_ACCEPTED_AT_FIRST_BOOT).count(), 1);
+        assert!(said.iter().any(|t| t.starts_with("embraOS PROPRIETARY LICENSE\n")), "the whole text was shown");
+        assert!(matches!(the_license.standing(), Standing::Open(_)));
+        assert!(!root.join("state").exists(), "nothing was recorded");
+
+        // Accepted: recorded, and the name is asked next.
+        let (err, frames) = run(vec!["I accept the license", "Embra"]).await;
+        assert!(err.contains("setup channel closed"), "{err}");
+        let asked = setup_prompts(&frames);
+        assert!(asked[0].prompt.ends_with("Do you accept the embraOS Proprietary License?"));
+        assert_eq!(asked[1].prompt, "What would you like to name your intelligence?");
+        assert!(system_texts(&frames).iter().any(|t| t.starts_with("Accepted on this machine and recorded: the embraOS Proprietary License, Version ")));
+        let Standing::Accepted(accepted) = the_license.standing() else { panic!("the acceptance was recorded") };
+        assert_eq!(accepted.by, "wizard");
+
+        // A wizard that starts again (a console that came back, a restart at the confirmation): nothing is asked of it.
+        let (_, frames) = run(vec!["Embra"]).await;
+        assert_eq!(setup_prompts(&frames)[0].prompt, "What would you like to name your intelligence?");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// The native answer (experimental) asks neither a provider nor a key:
     /// after the routing question come the model, the timezone and the
     /// confirmation, whose summary names the model. The record embrad
@@ -2482,7 +2588,7 @@ mod wizard_channel_tests {
                     answer_tx.send(answer.to_string()).await.unwrap();
                 }
                 drop(answer_tx);
-                let err = super::run_config_wizard_with(&tx, &mut response_rx, db, &env, &jobs).await.unwrap_err().to_string();
+                let err = super::run_config_wizard_with(&tx, &mut response_rx, db, &env, &jobs, &no_license()).await.unwrap_err().to_string();
                 drop(tx);
                 let mut frames = Vec::new();
                 while let Some(Ok(f)) = prompts.recv().await {

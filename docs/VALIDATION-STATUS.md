@@ -107,7 +107,9 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | A slot that does not come up: three tries, then the slot before it | QEMU | |
 | A manifest that was changed, or signed with another key, is refused | QEMU | |
 | The automatic check: the `update` block, the notice of a newer release, `/update auto` | QEMU; bare metal (the block, the notice); Fusion (the notice) | |
-| `/update rollback`; `--tag`; `--allow-downgrade` | | on any machine |
+| `/update rollback` | QEMU (after a trial boot that confirmed: the slot before it the default again, and booted at the next reboot) | |
+| `--tag`; `--allow-downgrade` | | on any machine |
+| The licence after an update, on an instance set up on `v0.28.0-phase2` (no record) and on one whose record names another text: the release's trial boot confirms with no console attached; the first console is asked right after its attach, and `/license` says how the record stands (none, or of another text, both named); a message is not sent on and brings the question back, a command is told to wait, `/update status` is answered; the accepting choice is recorded, a turn follows it, and nothing is asked after a restart; the refusing choice leaves the console free, and `/update rollback` with `/reboot now` boots the release before, where nothing is asked; a console that still shows the question once another has accepted answers its choice with `… is accepted on this machine already`; after a newer text was accepted, the release before asks about its own again | QEMU (the updates staged by a rig: slot B written and GRUB's environment set for its trial, no signed release) | a signed update that brings the question; a restore of a snapshot taken before an acceptance; the page in a browser; the display console |
 
 ## Backups
 
@@ -200,7 +202,7 @@ Every row is the 4B (`qwen3.5-4b`) on the machine's processor, unless it names t
 | The eight themes on the desktop page and the phone's page: the contrast of every text against what is painted behind it, measured on the page in each theme (the main view, the Tools tab and the picker; the chat, the command list and the picker), and the edge of every field | QEMU, in Chrome 156 | Safari on an iPhone; Firefox |
 | What no rule of the stylesheet sets: the words the activity strip draws while its feed is away, a line the web console writes into the terminal itself, and the ring of every card of the picker on a page of another theme, each measured on the page in every theme | QEMU, in Chrome 156 | |
 | The themes on the display console: each one drawn, a change followed within a few seconds, the stored theme at the first paint after a boot | QEMU; bare metal (HDMI) | |
-| The picker (a press, a status poll while it is open, Escape, the keyboard's ring, Apply from a browser that observes) and `/theme` (the list, a name, `reset`, a word that is no theme, and a name at the first-boot wizard's first question) | QEMU, in Chrome 156; bare metal (the picker on the display console, with its mouse) | the picker on a phone |
+| The picker (a press, a status poll while it is open, Escape, the keyboard's ring, Apply from a browser that observes) and `/theme` (the list, a name, `reset`, a word that is no theme, and a name at the first-boot wizard's question for the name) | QEMU, in Chrome 156; bare metal (the picker on the display console, with its mouse) | the picker on a phone |
 
 ## Turns and the model wait
 
@@ -220,6 +222,7 @@ Every row is the 4B (`qwen3.5-4b`) on the machine's processor, unless it names t
 | What | Validated on | TBD |
 |---|---|---|
 | A console that leaves at a question of the first-boot wizard: its conversation ends there, no Learning Mode and no model call follow, and the next console starts the wizard | QEMU | |
+| The licence at the first boot: the notice with the text's version line and three choices before the name, drawn by the terminal console with its marker on the choice that accepts nothing; that choice leaves the console free (`/reboot` and `/backup list` answered, `/provider` told to wait), and a line that is no answer brings the question back; the choice that shows the whole text; the accepting choice recorded on STATE, the name's question after it, and `/license` saying when and where it was given | QEMU | the page in a browser; the display console; two consoles at the question |
 | The configuration wizard, Learning Mode, the identity import | QEMU; QEMU on Apple Silicon | Learning Mode with a real model while two consoles are attached |
 | The re-seal ceremony | a raw disk image on the build host | a machine installed from the ISO; a disk converted for a hypervisor |
 

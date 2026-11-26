@@ -182,7 +182,7 @@ EMBRA_DISK_IF=nvme ./scripts/run-qemu-aarch64.sh disk.qcow2   # a disk on that b
 > names that address; the browser warns about the machine's own CA until its
 > certificate is imported once, `/api/ca.crt`: QUICK-START.md, The web console's certificate).
 
-Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM provider
+Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (the licence's question, the name, the provider gateway or direct, LLM provider
 + credentials, timezone), then Learning Mode forms and seals the soul.
 Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge packs
 load before the wizard writes a configuration, so their nodes have no vectors until

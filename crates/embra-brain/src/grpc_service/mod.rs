@@ -5,6 +5,7 @@
 mod attach;
 mod ca;
 mod learning_loop;
+pub(crate) mod license;
 mod native;
 mod network;
 mod provider_setup;
@@ -225,12 +226,13 @@ impl BrainService for BrainGrpcService {
                 pending_openai_compat_setup: pending_openai_compat_setup.clone(),
                 pending_session_delete: pending_session_delete.clone(),
                 pending_backup_restore: pending_backup_restore.clone(),
+                license: license::Gate::machine(),
             };
 
             // Before a session (the wizard and Learning Mode below) a
             // command is answered or told to wait, never dropped: `/backup`
-            // and `/reboot` work from the first prompt, which is where a
-            // machine that was installed again is restored.
+            // and `/reboot` work during the first boot's setup, which is
+            // where a machine that was installed again is restored.
             let setup_commands = SetupCommands::new(&tx, &pending_backup_restore);
 
             // Check for first-run: no config in WardSONDB
@@ -326,19 +328,7 @@ impl BrainService for BrainGrpcService {
                     msg = incoming.next() => {
                         match msg {
                             Some(Ok(req)) => {
-                                if let Err(e) = handle_request(
-                                    req, &tx, &ctx, &config_tz, &api_key, &stop_rx
-                                ).await {
-                                    error!("Error handling request: {}", e);
-                                    let _ = tx.send(Ok(ConversationResponse {
-                                        response_type: Some(conversation_response::ResponseType::System(
-                                            SystemMessage {
-                                                content: format!("Error: {}", e),
-                                                msg_type: SystemMessageType::Error as i32,
-                                            }
-                                        )),
-                                    })).await;
-                                }
+                                console_request(req, &tx, &ctx, &config_tz, &api_key, &stop_rx).await;
                             }
                             Some(Err(e)) => {
                                 warn!("Stream error: {}", e);
@@ -897,6 +887,42 @@ struct ServiceCtx {
     pending_openai_compat_setup: Arc<Mutex<Option<OpenAiCompatSetupState>>>,
     pending_session_delete: Arc<Mutex<Option<PendingSessionDelete>>>,
     pending_backup_restore: Arc<Mutex<Option<update::PendingBackupRestore>>>,
+    /// The licence's question on this console (`license::Gate`).
+    license: license::Gate,
+}
+
+/// One request a console sent, in the operational loop.
+///
+/// The licence comes first: while the text this release carries is not
+/// accepted on the machine, a console's input waits for the answer
+/// (`license::Gate::hold`), and the question follows an attach. Only what
+/// a console sends comes this way. A trigger's turn, and the turn
+/// `/continue` hands over, are the brain's own and go to `handle_request`
+/// as they did.
+async fn console_request(
+    req: ConversationRequest,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    ctx: &ServiceCtx,
+    config_tz: &str,
+    api_key: &str,
+    stop_rx: &watch::Receiver<u64>,
+) {
+    let attach = matches!(req.request_type, Some(conversation_request::RequestType::SessionAttach(_)));
+    let Some(req) = ctx.license.hold(req, tx).await else { return };
+    if let Err(e) = handle_request(req, tx, ctx, config_tz, api_key, stop_rx).await {
+        error!("Error handling request: {}", e);
+        let _ = tx
+            .send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                    content: format!("Error: {}", e),
+                    msg_type: SystemMessageType::Error as i32,
+                })),
+            }))
+            .await;
+    }
+    if attach {
+        ctx.license.after_attach(tx).await;
+    }
 }
 
 /// The Operational status line the console's status bar parses

@@ -565,6 +565,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/update", "check the published release; apply, status, rollback, source, auto"),
         ("/web-token", "the web console's access token (/web-token rotate makes a new one and signs every browser out)"),
         ("/theme", "the look of the web console, this page and the display: pick one for the whole machine"),
+        ("/license", "the embraOS license: how it stands on this machine, and its whole text"),
         ("/feedback-loop", "trigger the feedback loop (experimental)"),
     ]),
 ];
