@@ -90,7 +90,7 @@
 <text x="892" y="435.0" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">reached through any card, wired or Wi-Fi:</text>
 <text x="892" y="446.6" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">AI providers · Anthropic, Gemini,</text>
 <text x="892" y="458.2" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Ollama, LM Studio (local or remote)</text>
-<text x="892" y="469.8" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Brave Search (web_search)</text>
+<text x="892" y="469.8" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Brave Search (web_search) · Higgsfield (images)</text>
 <text x="892" y="481.4" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">GitHub · GitLab (gh_*, gl_*, git)</text>
 <text x="892" y="493.0" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">GitHub Releases · the signed OS update</text>
 <text x="892" y="504.6" font-family="DejaVu Sans, sans-serif" font-size="9.8" font-weight="normal" fill="#aaa8b3" text-anchor="start">Hugging Face · a native model's files</text>
@@ -128,7 +128,7 @@
 <text x="892" y="312.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">embra-boot · the boot contract: the kernel line,</text>
 <text x="892" y="323.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">partitions by GPT name, grubenv, the release stamp,</text>
 <text x="892" y="334.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the network's and clock's records, the web token,</text>
-<text x="892" y="345.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the native models' catalogue and records</text>
+<text x="892" y="345.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">native models' catalogue and records, the licence</text>
 <text x="892" y="356.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">embra-update · backups, restores, signed releases,</text>
 <text x="892" y="367.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">the installer, DATA's growth, a native model's files</text>
 <text x="892" y="378.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">wardsondb · vendored fork, reached over REST only</text>
@@ -138,7 +138,7 @@
 <text x="892" y="606.2" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">/embra/state ← STATE: soul.sha256, keys (0600), CA</text>
 <text x="892" y="617.4" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">drop-ins, imported-intelligence/, update-source,</text>
 <text x="892" y="628.6" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">network/, native-model/, web-console/ (the token),</text>
-<text x="892" y="639.8" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">last-known-time</text>
+<text x="892" y="639.8" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">last-known-time, license-acceptance</text>
 <text x="892" y="651.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">/embra/data ← DATA: WardSONDB, backups, models</text>
 <text x="892" y="662.2" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">/embra/workspace: the one place the tools write</text>
 <polyline points="150,142 150,199" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>

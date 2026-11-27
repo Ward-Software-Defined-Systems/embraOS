@@ -22,7 +22,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable, closed with `v0.23.0-phase1` (2026-11-01). Phase 2 — In progress, first released as `v0.24.0-phase2` (2026-11-13), latest release `v0.28.0-phase2` (2026-11-22; the working branch is `phase2`): the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, the network on every card (DHCP or a static address, Wi-Fi, a hostname, a clock checked while the OS runs), the drivers of the hypervisors, of wired hardware, of the common Wi-Fi card families and of Intel's and AMD's graphics, with their firmware and microcode, the web console on the machine's display with keyboard and mouse, turns that survive a failed model call, a restart or a power cut (`/continue`), eight themes for the web console, and a UEFI installer ISO for bare metal and the hypervisors. On `main`, not yet released: native models (experimental), a model that runs on the machine itself ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
+**Current Status:** Phase 1 — Stable, closed with `v0.23.0-phase1` (2026-11-01). Phase 2 — In progress, first released as `v0.24.0-phase2` (2026-11-13), latest release `v0.28.0-phase2` (2026-11-22; the working branch is `phase2`): the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, the network on every card (DHCP or a static address, Wi-Fi, a hostname, a clock checked while the OS runs), the drivers of the hypervisors, of wired hardware, of the common Wi-Fi card families and of Intel's and AMD's graphics, with their firmware and microcode, the web console on the machine's display with keyboard and mouse, turns that survive a failed model call, a restart or a power cut (`/continue`), eight themes for the web console, and a UEFI installer ISO for bare metal and the hypervisors. On `main`, not yet released: native models (experimental), a model that runs on the machine itself; image generation on Higgsfield beside Gemini, through the provider gateway while one is on; and the license's version 2.0, accepted at the installer and at the first boot ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
 > **Supported platforms.** embraOS boots on UEFI firmware with Secure Boot off, on x86_64
 > and aarch64: from the disk image, from the same disk converted for a hypervisor, or
@@ -30,9 +30,10 @@
 > Apple Silicon; VMware ESXi 8.0 U2 (the OVA and the ISO); Microsoft Hyper-V generation 2
 > (the VHDX and the ISO); VMware Fusion on Apple Silicon (the ISO); Parallels Desktop 26.5
 > on an Intel Mac (the machine it imports and the ISO) and Parallels Desktop on Apple
-> Silicon (the ISO); and bare metal on five machines so far: a YouYeeToo X1 single-board
+> Silicon (the ISO); and bare metal on seven machines so far: a YouYeeToo X1 single-board
 > computer, a Lenovo ThinkPad E550 laptop, an AWOW NY41S stick PC, a Beelink SER mini PC
-> with an AMD processor, and a Raspberry Pi 5 through a UEFI firmware. The drivers of
+> with an AMD processor, a Supermicro X11SSW-F server board, a Minisforum mini PC with a
+> hybrid Intel processor, and a Raspberry Pi 5 through a UEFI firmware. The drivers of
 > wired hardware and of the common Wi-Fi card families, with their firmware, and the CPU
 > microcode are in the image. The latest release,
 > `v0.28.0-phase2`, publishes the installer ISOs (x86_64 and aarch64, one per storage
@@ -42,7 +43,8 @@
 
 Phase 2–5 add a full TUI rewrite, an image factory for other hypervisors and bare metal (the A/B slots with rollback, the signed update, the hypervisor and bare-metal drivers with their firmware, the display console and the installer ISO landed in Phase 2's waves; LUKS and mTLS follow) and sovereign intelligence through native LLMs, models that run on the machine itself (Phase 2, in progress and experimental); a governed module system with an `embractl` management CLI; a custom kernel; and the custom embraOS-QNM-Core model option with Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
-> **Native models — experimental.** embraOS can run the conversational model on the
+> **Native models — experimental (CPU only, GPU support in development).** embraOS can run
+> the conversational model on the
 > machine itself. The image carries llama.cpp's model server, and the first-boot wizard's
 > third answer, or `/native install <model>` and `/native use <model>` in a session, puts
 > one of four models on the machine's own processor: Qwen3.5 4B or 9B, or, on a machine
@@ -63,7 +65,10 @@ Phase 2–5 add a full TUI rewrite, an image factory for other hypervisors and b
 > a monitoring, inspection and data-loss-prevention reverse proxy for LLM traffic:
 > `/local-ai-gateway https://<host>:4000` sends Anthropic, Gemini, Ollama and LM Studio
 > requests through its unified listener, each in the provider's own format and with the
-> operator's own key, and `/local-ai-gateway off` restores the direct path. A URL is stored
+> operator's own key, and `/local-ai-gateway off` restores the direct path. The requests
+> `image_generate` makes of Higgsfield take the same route through a gateway built from its
+> [`higgsfield` branch](https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway/tree/higgsfield),
+> which has that route. A URL is stored
 > only once the listener has identified itself with the gateway's `x-local-ai-gateway`
 > header, and the gateway's own certificate authority is trusted through the operator's
 > CA drop-ins (`/ca import` on a running machine, `seed-state.sh --ca-dir` on a stopped
@@ -89,8 +94,9 @@ Phase 2–5 add a full TUI rewrite, an image factory for other hypervisors and b
 > split. Operator-vetted for the full toolset: **`Qwen3.6-27b`** and
 > **`Qwen3.8-27b`** — both dense, so 27B means 27B active. The preferred pick is
 > `Qwen3.8-27b` at BF16 on Ollama, `qwen3.8:27b-mlx-bf16`. Experiment freely with
-> others; these are the confirmed two. The two native models that run on the machine
-> itself (above) are far smaller and are not among them. This is about the
+> others; these are the confirmed two. The native models that run on the machine
+> itself (above) are four-bit conversions for the machine's own processor, two of them
+> far smaller, and are not among them. This is about the
 > **conversational** model only: the knowledge graph's semantic search uses a separate,
 > much smaller sentence-embedding model that ships inside the image and runs in-process —
 > nothing to pull, configure or pay for, whichever backend you pick, and it stays local
