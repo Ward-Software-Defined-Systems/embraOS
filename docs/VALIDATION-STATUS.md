@@ -77,7 +77,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 
 | What | Validated on | TBD |
 |---|---|---|
-| A DHCP lease on every card: one card, several, a USB card, a card or a link that comes late, no card | QEMU; bare metal (the onboard port); the laptop (its wired port); the Beelink (its wired port and its Wi-Fi card, each with a lease at the same time); the Supermicro (one of its two onboard ports, the other without a cable); the Minisforum (one 10 GbE port of its Intel X710, on `i40e`; the card's other port and the two 2.5 GbE ports, on `igc`, are found and have no cable) | on a machine: a USB Ethernet adapter, and a cable plugged in after the boot |
+| A DHCP lease on every card: one card, several, a USB card, a card or a link that comes late, no card | QEMU; bare metal (the onboard port); the laptop (its wired port); the Beelink (its wired port and its Wi-Fi card, each with a lease at the same time); the Supermicro (one of its two onboard ports, the other without a cable); the Minisforum (one 10 GbE port of its Intel X710, on `i40e`; the card's other port and the two 2.5 GbE ports, on `igc`, are found and have no link) | on a machine: a USB Ethernet adapter, and a cable plugged in after the boot |
 | `/network static` on a network without DHCP | QEMU; bare metal; the laptop (an address of its own on a card) | |
 | `/network hostname` | QEMU | the name in a router's list |
 | The web console's certificate and its CA | QEMU, with curl as the client: by address and by name, a name set with `/network hostname`, an address that changes, the CA of an earlier release issued again once | a browser with the CA imported; a name a DNS server serves |
