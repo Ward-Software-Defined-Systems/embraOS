@@ -1247,6 +1247,8 @@ mod tests {
         for request in &requests {
             let keyed = request.headers.get("authorization").is_some();
             assert_eq!(keyed, request.url.path() != "/out/r-1.png", "{}: the key goes to the API alone", request.url.path());
+            let agent = request.headers.get("user-agent").and_then(|v| v.to_str().ok());
+            assert_eq!(agent, Some(embra_tools_core::USER_AGENT), "{}: the API and the picture's host are told who asks", request.url.path());
         }
     }
 
@@ -1614,6 +1616,7 @@ mod tests {
         }
         for put in requests.iter().filter(|r| r.method.as_str() == "PUT") {
             assert!(put.headers.get("authorization").is_none(), "the key went to the storage");
+            assert_eq!(put.headers.get("user-agent").and_then(|v| v.to_str().ok()), Some(embra_tools_core::USER_AGENT), "the storage is told who puts");
             assert_eq!(put.body, png());
         }
         let submission = requests.iter().find(|r| r.url.path() == "/xai/grok-imagine-image-2.0").expect("submitted");

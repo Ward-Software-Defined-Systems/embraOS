@@ -474,4 +474,38 @@ mod tests {
             hits.join("\n")
         );
     }
+
+    /// A turn's request names the OS on each of the three chat providers:
+    /// each takes a long-lived client that starts from the builder which
+    /// sets the user agent (`net::builder_with`). The stand-in refuses
+    /// every request at once; what is read is how each was asked.
+    #[tokio::test]
+    async fn a_turn_of_every_chat_provider_names_the_os() {
+        use futures::StreamExt as _;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any()).respond_with(ResponseTemplate::new(400).set_body_string("{}")).mount(&server).await;
+        let providers: Vec<Box<dyn LlmProvider>> = vec![
+            Box::new(anthropic::AnthropicProvider::new("k".into()).with_base_url(server.uri())),
+            Box::new(gemini::GeminiProvider::new("k".into()).with_base_url(server.uri())),
+            Box::new(openai_compat::OpenAICompatProvider::lm_studio(server.uri(), None, "m".into())),
+        ];
+        let system = SystemPromptBundle { text: "s".into(), session_name: "main".into() };
+        let mut asked = 0;
+        for provider in &providers {
+            let tools = provider.build_tool_manifest(&[]);
+            // A stream that ends in the refusal, or the refusal itself: the
+            // request has been answered either way.
+            if let Ok(mut stream) = provider.stream_turn(&[ApiMessage::user_text("hi")], &system, &tools, LlmRequestOptions::default()).await {
+                while stream.next().await.is_some() {}
+            }
+            let requests = server.received_requests().await.unwrap();
+            assert!(requests.len() > asked, "{} sent no request", provider.display_name());
+            for request in &requests[asked..] {
+                let named: Vec<&str> = request.headers.get_all("user-agent").iter().map(|v| v.to_str().unwrap()).collect();
+                assert_eq!(named, vec![embra_tools_core::USER_AGENT], "{}: {} {}", provider.display_name(), request.method, request.url.path());
+            }
+            asked = requests.len();
+        }
+    }
 }

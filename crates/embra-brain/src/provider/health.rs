@@ -952,6 +952,7 @@ mod tests {
         let req = &server.received_requests().await.unwrap()[0];
         assert_eq!(req.headers.get("x-api-key").unwrap(), "sk-test");
         assert_eq!(req.headers.get("anthropic-version").unwrap(), ANTHROPIC_API_VERSION);
+        assert_eq!(req.headers.get("user-agent").unwrap(), embra_tools_core::USER_AGENT, "the probe names the OS");
 
         let t = target(ProviderKind::Anthropic, "claude-nope", "");
         let p = probe_model_url(&t, &format!("{}/v1/models/claude-nope", server.uri()), "mock").await;

@@ -281,8 +281,10 @@ fn operator_roots_in(dir: &Path) -> Vec<reqwest::Certificate> {
 /// anything can verify its host (`ca::fetch`). What it returns is trusted
 /// by nothing but the fingerprint the operator confirms. Guard
 /// `certificate_verification_is_switched_off_in_one_place_for_one_caller`.
+/// It names the OS as every client here does (`builder_with`).
 pub(crate) fn unverified(timeout: std::time::Duration) -> reqwest::Client {
     reqwest::Client::builder()
+        .user_agent(embra_tools_core::USER_AGENT)
         .danger_accept_invalid_certs(true)
         .redirect(Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
@@ -298,8 +300,15 @@ pub(crate) fn builder() -> reqwest::ClientBuilder {
 }
 
 /// `builder()` on the roots given; `builder()` passes the reading in force.
+/// Every client starts here, so every request the brain sends another host
+/// names the OS: `User-Agent: embraOS/<workspace version>`
+/// (`embra_tools_core::USER_AGENT`, the one the tools, the Guardian's broker
+/// and the updater send) on a provider's API, on the provider gateway, where
+/// it is the client a row names, on a probe, and on the hosts an image is
+/// fetched from or put to. A request that sets the header itself is sent
+/// with its own. Guard `every_client_the_brain_builds_names_the_os`.
 fn builder_with(roots: &[reqwest::Certificate]) -> reqwest::ClientBuilder {
-    let mut builder = reqwest::Client::builder().redirect(same_origin_redirect_policy());
+    let mut builder = reqwest::Client::builder().user_agent(embra_tools_core::USER_AGENT).redirect(same_origin_redirect_policy());
     for cert in roots {
         builder = builder.add_root_certificate(cert.clone());
     }
@@ -1340,6 +1349,46 @@ mod tests {
             refused += usize::from(ours.is_none());
         }
         assert!(refused >= 2, "the two malformed files are refused by both");
+    }
+
+    /// Every client the brain builds names the OS to the host it asks: the
+    /// builder every provider, probe and image call starts from, the
+    /// long-lived client the chat takes, the client pinned to one host's
+    /// addresses, and the one that fetches a certificate. A request that
+    /// names an agent of its own is sent with that one alone. The two
+    /// long-lived clients with bounds of their own (Anthropic's, the local
+    /// presets') are read in `a_turn_of_every_chat_provider_names_the_os`.
+    #[tokio::test]
+    async fn every_client_the_brain_builds_names_the_os() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any()).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        let bound = std::time::Duration::from_secs(10);
+        let at = |name: &str| format!("{}/{name}", server.uri());
+        builder().timeout(bound).build().unwrap().get(at("builder")).send().await.unwrap();
+        shared().get(at("shared")).send().await.unwrap();
+        direct_client(None, bound).unwrap().get(at("direct")).send().await.unwrap();
+        unverified(bound).get(at("unverified")).send().await.unwrap();
+        // A request's own agent takes the place of the client's.
+        let its_own = format!("{}+a-request-of-its-own", embra_tools_core::USER_AGENT);
+        shared().get(at("its-own")).header("User-Agent", &its_own).send().await.unwrap();
+        let named: Vec<(String, Vec<String>)> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.url.path().to_string(), r.headers.get_all("user-agent").iter().map(|v| v.to_str().unwrap().to_string()).collect()))
+            .collect();
+        let os = || vec![embra_tools_core::USER_AGENT.to_string()];
+        assert_eq!(
+            named,
+            vec![
+                ("/builder".to_string(), os()),
+                ("/shared".to_string(), os()),
+                ("/direct".to_string(), os()),
+                ("/unverified".to_string(), os()),
+                ("/its-own".to_string(), vec![its_own]),
+            ]
+        );
     }
 
     /// Certificate verification is switched off in one function, and one

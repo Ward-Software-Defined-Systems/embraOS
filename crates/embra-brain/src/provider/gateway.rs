@@ -654,6 +654,8 @@ mod tests {
             for header in ["anthropic-version", "x-goog-api-key", "openai-organization", "authorization", "x-api-key"] {
                 assert!(!req.headers.contains_key(header), "{header} was sent");
             }
+            // The one thing the question says of its sender: which OS asks.
+            assert_eq!(req.headers.get("user-agent").and_then(|v| v.to_str().ok()), Some(embra_tools_core::USER_AGENT));
         }
     }
 
