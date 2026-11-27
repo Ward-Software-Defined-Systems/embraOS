@@ -149,8 +149,8 @@ fn target(status: &BootStatus) -> Result<Target, String> {
     if status.trial || status.pending == Some(booted) {
         return Err("this boot is a trial of a staged slot; let it confirm (every service healthy) before staging another release".into());
     }
-    let dev = partitions::find_partition(other.partition_name()).ok_or_else(|| format!("no partition named {}", other.partition_name()))?;
-    let esp = partitions::find_partition(slot::ESP_PARTITION).ok_or_else(|| format!("no partition named {}", slot::ESP_PARTITION))?;
+    let dev = partitions::find_partition_beside_root(other.partition_name()).ok_or_else(|| format!("no partition named {}", other.partition_name()))?;
+    let esp = partitions::find_partition_beside_root(slot::ESP_PARTITION).ok_or_else(|| format!("no partition named {}", slot::ESP_PARTITION))?;
     Ok(Target { booted, other, dev, esp })
 }
 
@@ -273,7 +273,7 @@ pub fn status_command(out: &mut impl Write) -> Outcome {
                 Err(e) => format!("unreadable: {e}"),
             }
         } else {
-            match partitions::find_partition(s.partition_name()) {
+            match partitions::find_partition_beside_root(s.partition_name()) {
                 Some(dev) => match slot_io::release_of(s, &dev) {
                     Ok(Some(r)) => format!("{} ({}, {}, {})", r.version, r.build_id, r.arch, r.engine),
                     Ok(None) => "empty or unreadable".to_string(),
@@ -298,7 +298,7 @@ pub fn rollback_command(out: &mut impl Write) -> Outcome {
         return Outcome::Refused("refused: this boot has no slot on its kernel line, so there is no other slot".into());
     };
     let other = booted.other();
-    let Some(dev) = partitions::find_partition(other.partition_name()) else {
+    let Some(dev) = partitions::find_partition_beside_root(other.partition_name()) else {
         return Outcome::Refused(format!("refused: no partition named {}", other.partition_name()));
     };
     let release = match slot_io::release_of(other, &dev) {
@@ -309,7 +309,7 @@ pub fn rollback_command(out: &mut impl Write) -> Outcome {
     if status.status_of(other) == Some(SlotStatus::Pending) || status.pending == Some(other) {
         return Outcome::Refused(format!("refused: slot {other} is staged and untried; reboot to try it, or apply again"));
     }
-    let Some(esp_dev) = partitions::find_partition(slot::ESP_PARTITION) else {
+    let Some(esp_dev) = partitions::find_partition_beside_root(slot::ESP_PARTITION) else {
         return Outcome::Refused(format!("refused: no partition named {}", slot::ESP_PARTITION));
     };
     match esp::with_env_mut(&esp_dev, |env| {

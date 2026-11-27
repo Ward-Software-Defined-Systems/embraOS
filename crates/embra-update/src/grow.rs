@@ -74,7 +74,7 @@ fn gib(sectors: u64) -> String {
 /// but the one after a disk grew); a line and `Nothing` when DATA or its
 /// geometry cannot be found, a line and `Failed` when a step failed.
 pub fn grow_data_command(op: &mut Operator) -> Outcome {
-    let Some(data) = partitions::find_partition(embra_boot::slot::DATA_PARTITION) else {
+    let Some(data) = partitions::find_partition_beside_root(embra_boot::slot::DATA_PARTITION) else {
         return Outcome::Nothing("no DATA partition by name; nothing to grow".into());
     };
     let node = data.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

@@ -130,6 +130,12 @@ pub const DOWNGRADE_KEY: &str = "embra.downgrade";
 /// (`embra.install=<disk>`, `embra.upgrade=<disk>`) needs it, since it
 /// asks nothing.
 pub const LICENSE_KEY: &str = "embra.license";
+/// `embra.esp=<partition identifier>`: the partition the boot menu was read
+/// from, by its GPT identifier. The menu of an installed disk names its own
+/// (`buildroot/board/embraos/grub.cfg.in`), and embra-init takes the slot,
+/// STATE and DATA from the disk that holds that partition, so that a second
+/// disk with the same layout is never taken for the one that was started.
+pub const ESP_KEY: &str = "embra.esp";
 
 /// What embrad runs: the services, or one maintenance job from the boot
 /// menu (`embra.mode=update|backup|restore`), or the installer from the
@@ -392,6 +398,25 @@ impl Cmdline {
     pub fn license_accepted(&self) -> bool {
         self.last(LICENSE_KEY) == Some("accept")
     }
+
+    /// `embra.esp=<partition identifier>`, the partition the boot menu was
+    /// read from: the last value that is written as a GPT identifier is.
+    /// GRUB says `none` of a device that is no partition; that, and any
+    /// other word, is no value, so a garbled knob leaves the one before it.
+    pub fn boot_partition(&self) -> Option<&str> {
+        self.values(ESP_KEY).filter(|v| partition_identifier(v)).last()
+    }
+}
+
+/// A GPT partition identifier as GRUB (`probe --part-uuid`) and the kernel
+/// (`PARTUUID=` in a partition's uevent) both write one: five groups of
+/// hexadecimal digits, 8-4-4-4-12, in either case.
+pub fn partition_identifier(v: &str) -> bool {
+    let mut groups = v.split('-');
+    let whole = [8usize, 4, 4, 4, 12]
+        .iter()
+        .all(|len| groups.next().is_some_and(|g| g.len() == *len && g.bytes().all(|b| b.is_ascii_hexdigit())));
+    whole && groups.next().is_none()
 }
 
 /// A bare device name (`vda`, `sda`, `nvme0n1`): lowercase letters and digits.
@@ -669,5 +694,73 @@ mod time_server_tests {
             assert_eq!(TimeServer::parse(bad), None, "{bad:?}");
         }
         assert_eq!(TimeServer::NTP_PORT, 123);
+    }
+}
+
+#[cfg(test)]
+mod boot_partition_tests {
+    use super::*;
+
+    #[test]
+    fn the_boot_menus_partition_is_an_identifier_and_the_last_well_formed_one_wins() {
+        let id = "0fc63daf-8483-4772-8e79-3d69d8477de4";
+        assert_eq!(Cmdline::parse("console=ttyS0 quiet embra.slot=a").boot_partition(), None, "a line without the knob");
+        assert_eq!(Cmdline::parse(&format!("embra.slot=a embra.esp={id} embra.web=1")).boot_partition(), Some(id));
+        // The last one that is an identifier: an entry's knob or the host's string comes after the menu's own.
+        let other = "A1B2C3D4-0000-1111-2222-333344445555";
+        assert_eq!(Cmdline::parse(&format!("embra.esp={id} quiet embra.esp={other}")).boot_partition(), Some(other));
+        // What GRUB says of a device that is no partition, and every other word, is no value.
+        for garbled in ["none", "", "vda1", "0fc63daf-8483-4772-8e79", "0fc63daf-8483-4772-8e79-3d69d8477de4-00", "0fc63daf84834772-8e79-3d69d8477de4", "zfc63daf-8483-4772-8e79-3d69d8477de4"] {
+            assert_eq!(Cmdline::parse(&format!("embra.esp={id} embra.esp={garbled}")).boot_partition(), Some(id), "{garbled:?}");
+            assert!(!partition_identifier(garbled), "{garbled:?}");
+        }
+        assert!(partition_identifier(id) && partition_identifier(other));
+    }
+
+    /// The installed disk's boot menu asks GRUB once for the identifier of
+    /// the partition it was read from, and every kernel line it writes
+    /// carries it, before the entry's knobs and the host's string, which may
+    /// name another. The variable is exported: an entry inside a submenu
+    /// reads an unexported one as empty.
+    #[test]
+    fn the_installed_disks_boot_menu_names_the_partition_it_was_read_from() {
+        let menu = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../buildroot/board/embraos/grub.cfg.in")).unwrap();
+        let code: Vec<&str> = menu.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+        // Asked once, of $root, into a variable of its own.
+        let asked: Vec<&str> = code.iter().copied().filter(|l| l.starts_with("probe ")).collect();
+        assert_eq!(asked, [r#"probe --set=esp_uuid --part-uuid "$root""#]);
+        // The knob is made of that answer alone, and of none when GRUB has no partition to name.
+        let at = code.iter().position(|l| l.starts_with("probe ")).unwrap();
+        assert_eq!(
+            code[at + 1..at + 6],
+            [
+                r#"if [ -n "$esp_uuid" ]; then"#,
+                r#"if [ "$esp_uuid" != "none" ]; then"#,
+                r#"set esp_knob="embra.esp=$esp_uuid""#,
+                "fi",
+                "fi",
+            ]
+        );
+        for line in &code {
+            if line.contains("set esp_knob=") {
+                assert!(matches!(*line, "set esp_knob=" | r#"set esp_knob="embra.esp=$esp_uuid""#), "{line}");
+            }
+        }
+        assert!(code.iter().position(|l| *l == "set esp_knob=").unwrap() < at, "the knob starts empty");
+        // Every kernel line: GRUB's defaults, this knob, the entry's knobs, the host's string.
+        let kernel: Vec<&str> = code.iter().copied().filter(|l| l.starts_with("linux ")).collect();
+        assert!(!kernel.is_empty());
+        for line in kernel {
+            assert!(line.ends_with(" embra.slot=$1 embra.web=1 $esp_knob $3 $extra"), "{line}");
+        }
+        let exported = code.iter().find(|l| l.starts_with("export ")).expect("the menu's export line");
+        for name in ["esp_knob", "esp_uuid"] {
+            assert!(exported.split_whitespace().any(|w| w == name), "{name} is not exported: {exported}");
+        }
+        // The knob's name is the one this file reads.
+        assert!(menu.contains(&format!("{ESP_KEY}=$esp_uuid")));
+        // The medium's own menu boots the medium and names no disk.
+        let medium = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../buildroot/board/embraos/grub-installer.cfg.in")).unwrap();
+        assert!(!medium.contains(ESP_KEY));
     }
 }

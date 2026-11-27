@@ -40,9 +40,11 @@ fn main() {
         eprintln!("[embra-init] Boot sequence would be:");
         eprintln!("[embra-init]   1. Mount /proc, /sys, /dev");
         eprintln!("[embra-init]   2. Mount the SquashFS rootfs of the slot the kernel line names (embra.slot=a|b,");
-        eprintln!("[embra-init]      partition rootfs_a|rootfs_b by GPT name; the Phase 1 name rootfs, then /dev/vda2) → /mnt/root");
-        eprintln!("[embra-init]   3. Mount STATE (GPT name state, then /dev/vda3) → /mnt/root/embra/state");
-        eprintln!("[embra-init]   4. Mount DATA (GPT name data, then /dev/vda4) → /mnt/root/embra/data");
+        eprintln!("[embra-init]      partition rootfs_a|rootfs_b by GPT name, on the disk that holds the partition the boot menu");
+        eprintln!("[embra-init]      was read from, embra.esp=<identifier>; without it the first disk that carries the name, the");
+        eprintln!("[embra-init]      Phase 1 name rootfs, then /dev/vda2) → /mnt/root");
+        eprintln!("[embra-init]   3. Mount STATE (GPT name state on that disk, then /dev/vda3) → /mnt/root/embra/state");
+        eprintln!("[embra-init]   4. Mount DATA (GPT name data on that disk, then /dev/vda4) → /mnt/root/embra/data");
         eprintln!("[embra-init]   5. Mount ephemeral tmpfs → /mnt/root/embra/ephemeral");
         eprintln!("[embra-init]   6. Switch root to /mnt/root (move the mount, chroot; pivot_root fails from an initramfs)");
         eprintln!("[embra-init]   7. exec /sbin/embrad");
@@ -112,6 +114,14 @@ fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
     // path of run-qemu.sh, a Phase 1 disk) tries slot A and then the Phase 1
     // name `rootfs`; /dev/vda2 is the last resort. A kernel from one slot
     // never gets the rootfs of another: an invalid slot value is fatal.
+    //
+    // Nor does a kernel from one disk get the rootfs, STATE or DATA of
+    // another. Every installed disk carries the same names, and GRUB reads
+    // the kernel from its own disk; the menu names the partition it was read
+    // from (embra.esp=<identifier>), and the three partitions are taken from
+    // the disk that holds it. A line that names none leaves the names over
+    // every disk, the first that carries one, as it was before the menu
+    // said: a second such disk is then said on both consoles.
     let booted = cmdline.slot()?;
     let rootfs_names: Vec<&str> = match booted {
         Some(s) => vec![s.partition_name()],
@@ -121,7 +131,12 @@ fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
         Some(s) => say!(console, "Waiting for block devices (slot {s})..."),
         None => say!(console, "Waiting for block devices (no slot on the kernel line)..."),
     }
-    let rootfs_dev = resolve_partition(console, &rootfs_names, "/dev/vda2")?;
+    let disk = boot_disk(console, &cmdline);
+    let disk = disk.as_deref();
+    let rootfs_dev = resolve_partition(console, disk, &rootfs_names, "/dev/vda2")?;
+    if disk.is_none() {
+        say_of_other_disks(console, &rootfs_names);
+    }
 
     std::fs::create_dir_all(NEWROOT)?;
 
@@ -141,7 +156,7 @@ fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&state_path)?;
     let data_flags = DATA_FLAGS;
 
-    let state_dev = resolve_partition(console, &[slot::STATE_PARTITION], "/dev/vda3")?;
+    let state_dev = resolve_partition(console, disk, &[slot::STATE_PARTITION], "/dev/vda3")?;
     say!(console, "Mounting STATE partition from {} (nosuid,nodev,noexec)", state_dev.display());
     mount(
         Some(state_dev.as_path()),
@@ -155,7 +170,7 @@ fn boot(console: &mut BootConsole) -> Result<(), Box<dyn std::error::Error>> {
     let data_path = format!("{}/embra/data", NEWROOT);
     std::fs::create_dir_all(&data_path)?;
 
-    let data_dev = resolve_partition(console, &[slot::DATA_PARTITION], "/dev/vda4")?;
+    let data_dev = resolve_partition(console, disk, &[slot::DATA_PARTITION], "/dev/vda4")?;
     say!(console, "Mounting DATA partition from {} (nosuid,nodev,noexec)", data_dev.display());
     mount(
         Some(data_dev.as_path()),
@@ -342,12 +357,79 @@ fn free_initramfs(root: &std::path::Path, newroot: &std::path::Path) -> std::io:
 }
 
 
-/// The partition of the first of `names` that appears within five seconds,
-/// else `legacy` when that node exists (a disk without GPT names, under a
-/// printed warning), else an error naming what was looked for.
+/// The disk this boot takes its slot, STATE and DATA from: the one that
+/// holds the partition the boot menu was read from (`embra.esp=`, which the
+/// menu of an installed disk puts on the kernel line). `None` when the line
+/// names none (a menu from before it said, the direct-kernel path, a Phase 1
+/// disk) or a partition that no disk here holds: the partitions are then
+/// taken by name over every disk.
 #[cfg(target_os = "linux")]
-fn resolve_partition(console: &mut BootConsole, names: &[&str], legacy: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+fn boot_disk(console: &mut BootConsole, cmdline: &embra_boot::Cmdline) -> Option<String> {
+    use embra_boot::partitions::{self, BootDisk};
+    // A disk on USB appears seconds after the kernel starts: the wait is the
+    // one the installer gives its medium. A disk that is there costs none.
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    let named = cmdline.boot_partition()?;
+    match partitions::wait_for_boot_disk(named, WAIT) {
+        BootDisk::Named(disk) => {
+            say!(console, "The boot menu was read from disk {disk}: this boot's partitions are that disk's");
+            Some(disk)
+        }
+        BootDisk::NamedOnSeveral { taken, disks } => {
+            say!(
+                console,
+                "WARNING: {} disks hold the partition the boot menu was read from ({}): one is a copy of another. Taking {taken}, the first",
+                disks.len(),
+                disks.join(", ")
+            );
+            Some(taken)
+        }
+        BootDisk::NotFound => {
+            say!(
+                console,
+                "WARNING: no disk here holds the partition the boot menu was read from ({named}) after {} s; the partitions are taken by name, from the first disk that carries each",
+                WAIT.as_secs()
+            );
+            None
+        }
+    }
+}
+
+/// Said once on both consoles when the partitions were taken by name and
+/// more than one disk carries the slot's: the first was taken, and it may
+/// not be the disk that was started.
+#[cfg(target_os = "linux")]
+fn say_of_other_disks(console: &mut BootConsole, rootfs_names: &[&str]) {
+    let Some(disks) = rootfs_names.iter().map(|name| embra_boot::partitions::disks_with(name)).find(|disks| !disks.is_empty()) else {
+        return;
+    };
+    if let Some(warning) = embra_boot::partitions::several_disks_warning(&disks) {
+        say!(console, "WARNING: {warning}");
+    }
+}
+
+/// The partition of the first of `names` that appears within five seconds:
+/// on `disk` and on no other when the boot's disk is known, where a missing
+/// one is an error. Without a disk, over every disk, else `legacy` when
+/// that node exists (a disk without GPT names, under a printed warning),
+/// else an error naming what was looked for.
+#[cfg(target_os = "linux")]
+fn resolve_partition(console: &mut BootConsole, disk: Option<&str>, names: &[&str], legacy: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+    if let Some(disk) = disk {
+        return match embra_boot::partitions::wait_for_partition_on(disk, names, WAIT) {
+            Some((name, path)) => {
+                say!(console, "partition '{name}' is {}", path.display());
+                Ok(path)
+            }
+            None => Err(format!(
+                "disk {disk}, which the boot menu was read from, has no partition named {} after {}s; another disk's is never taken in its place",
+                names.join(" or "),
+                WAIT.as_secs()
+            )
+            .into()),
+        };
+    }
     if let Some((name, path)) = embra_boot::partitions::wait_for_partition(names, WAIT) {
         say!(console, "partition '{name}' is {}", path.display());
         return Ok(path);

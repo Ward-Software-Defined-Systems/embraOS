@@ -106,6 +106,58 @@ pub fn write_status(cmdline: &Cmdline, mode: BootMode, confirmed: &Confirmed, st
     }
 }
 
+/// What a boot says of its disk on a machine that holds more than one with
+/// the layout; nothing on a machine with one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiskNote {
+    /// The boot menu named its disk, and the partitions in use are that disk's.
+    Told(String),
+    /// The partitions in use were taken by name: they are the first such
+    /// disk's, which may not be the one that was started.
+    Untold(String),
+}
+
+/// `menu_disk` is the disk that holds the partition the boot menu named
+/// (`embra.esp=`), when the line names one and one disk holds it; `root` the
+/// disk the root filesystem is on; `carrying` every disk with a partition
+/// named like the ESP.
+pub fn disk_note(menu_disk: Option<&str>, root: Option<&str>, carrying: &[String]) -> Option<DiskNote> {
+    let root = root?;
+    if carrying.len() < 2 {
+        return None;
+    }
+    let all = carrying.join(", ");
+    Some(if menu_disk == Some(root) {
+        DiskNote::Told(format!(
+            "{} disks here carry the embraOS layout ({all}); this boot's partitions are {root}'s, the disk its boot menu was read from",
+            carrying.len()
+        ))
+    } else {
+        DiskNote::Untold(format!(
+            "{} disks here carry the embraOS layout ({all}), and this boot could not tell which one it was started from: its partitions are {root}'s. {}",
+            carrying.len(),
+            partitions::MENU_REMEDY
+        ))
+    })
+}
+
+/// [`disk_note`] of this machine, into the log.
+fn say_of_the_disk(cmdline: &Cmdline) {
+    use partitions::BootDisk;
+    let menu_disk = cmdline.boot_partition().and_then(|identifier| {
+        match partitions::boot_disk_in(Path::new(partitions::SYS_CLASS_BLOCK), Path::new(partitions::SYS_BLOCK), identifier) {
+            BootDisk::Named(disk) => Some(disk),
+            // A copy of the disk beside it, or no such partition: the menu's word names no one disk.
+            BootDisk::NamedOnSeveral { .. } | BootDisk::NotFound => None,
+        }
+    });
+    match disk_note(menu_disk.as_deref(), partitions::root_disk().as_deref(), &partitions::disks_with(slot::ESP_PARTITION)) {
+        Some(DiskNote::Told(line)) => info!("{line}"),
+        Some(DiskNote::Untold(line)) => warn!("{line}"),
+        None => {}
+    }
+}
+
 /// After every service is healthy. On a trial boot the block on the ESP is
 /// rewritten with the booted slot active and the trial cleared; on any
 /// other boot with a slot the block is read for the status; a boot without
@@ -123,7 +175,11 @@ pub fn after_services_healthy(cmdline: &Cmdline, mode: BootMode) -> Confirmed {
         write_status(cmdline, mode, &c, None, release.as_ref());
         return c;
     };
-    let Some(dev) = partitions::find_partition(slot::ESP_PARTITION) else {
+    say_of_the_disk(cmdline);
+    // The ESP of the disk this boot's root filesystem is on: a second disk
+    // with the layout has an ESP of the same name, and its block is another
+    // installation's.
+    let Some(dev) = partitions::find_partition_beside_root(slot::ESP_PARTITION) else {
         let c = if cmdline.trial() {
             error!("slot {booted} cannot be confirmed: no partition named {}", slot::ESP_PARTITION);
             Confirmed::Failed(format!("no partition named {}", slot::ESP_PARTITION))
@@ -209,6 +265,38 @@ mod tests {
         assert!(!remove_empty_engine_marker(&dir).unwrap());
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "fjall");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// One disk with the layout: nothing is said. Two: which disk this
+    /// boot's partitions are on, as information when the boot menu named
+    /// that disk and as a warning when the partitions were taken by name.
+    #[test]
+    fn a_second_disk_with_the_layout_is_said_and_a_boot_that_could_not_tell_them_apart_is_a_warning() {
+        let one = ["nvme0n1".to_string()];
+        let two = ["nvme0n1".to_string(), "nvme1n1".to_string()];
+        assert_eq!(disk_note(Some("nvme0n1"), Some("nvme0n1"), &one), None);
+        assert_eq!(disk_note(None, Some("nvme0n1"), &one), None);
+        assert_eq!(disk_note(None, Some("nvme0n1"), &[]), None, "a Phase 1 disk has no partition of the name");
+        assert_eq!(disk_note(Some("nvme1n1"), None, &two), None, "a development run has no disk under its root");
+        // The menu named the disk the root is on: the second disk's install, started and running.
+        match disk_note(Some("nvme1n1"), Some("nvme1n1"), &two) {
+            Some(DiskNote::Told(line)) => assert_eq!(
+                line,
+                "2 disks here carry the embraOS layout (nvme0n1, nvme1n1); this boot's partitions are nvme1n1's, the disk its boot menu was read from"
+            ),
+            other => panic!("{other:?}"),
+        }
+        // No word from the menu, or a word that names another disk than the one in use: a warning that says what to do.
+        for menu_disk in [None, Some("nvme1n1")] {
+            match disk_note(menu_disk, Some("nvme0n1"), &two) {
+                Some(DiskNote::Untold(line)) => assert_eq!(
+                    line,
+                    "2 disks here carry the embraOS layout (nvme0n1, nvme1n1), and this boot could not tell which one it was started from: \
+                     its partitions are nvme0n1's. The boot menu of a current release names its disk; an upgrade in place from the installation medium writes that menu"
+                ),
+                other => panic!("{menu_disk:?}: {other:?}"),
+            }
+        }
     }
 
     #[test]
