@@ -587,9 +587,10 @@ mt7921_power_table_walk() {
 # MediaTek's licence text on the rootfs is the one of the pinned release,
 # and every firmware of the family the root filesystem holds is walked the
 # way the driver walks it: the names the family's modules declare, and the
-# pinned firmware whatever they declare. A run that walked nothing is no
-# pass: with the family's modules on the rootfs, some firmware of theirs
-# is there to walk.
+# pinned firmware whatever they declare. Modules of the family that
+# declare no firmware are a rejection: the walk would go by nothing of
+# theirs. Guard: the_build_walks_a_wifi_firmwares_power_table_as_the_driver_does
+# (embra-boot), on stand-in files.
 assert_mt7921_power_tables() {
     local tgt="$1" fw="$1/lib/firmware" ko modules=0 names="" name said walked="" pin have pinned=0 pinned_code=""
     # shellcheck source=buildroot/board/embraos/wireless.sh
@@ -623,11 +624,7 @@ assert_mt7921_power_tables() {
         walked="$walked ${name##*/}"
         echo "  firmware $name: $said"
     done
-    case " $walked " in
-        *" ${pinned_code##*/} "*) ;;
-        *) reject_image "the pinned firmware /lib/firmware/$pinned_code was not walked" ;;
-    esac
-    echo "firmware: the driver takes the power table of each mt7921 family firmware on the rootfs ($(echo $walked | wc -w) files); the MT7922's two files are the pinned ones, under the licence text the rootfs carries"
+    echo "firmware: the driver takes the power table of each mt7921 family firmware on the rootfs ($(echo $walked | wc -w | tr -d ' ') walked); the MT7922's two files are the pinned ones, under the licence text the rootfs carries"
 }
 
 # assert_boot_initrds <target dir> <triple>: the two initrds post_build.sh

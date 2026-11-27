@@ -842,6 +842,266 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The image check of the mt7921 family's Wi-Fi firmware
+    /// (`scripts/lib/image-common.sh`), run on stand-in files of the
+    /// driver's layout. The walk gives the kernel driver's verdict on a
+    /// firmware's power table (`mt7921_load_clc`: a firmware it refuses
+    /// leaves the card found, its driver loaded and no interface), and the
+    /// check holds a root filesystem to the pinned pair, to the pinned
+    /// release's licence text and to a walk of every firmware the family's
+    /// modules name, the pinned one whatever they name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_build_walks_a_wifi_firmwares_power_table_as_the_driver_does() {
+        use std::path::PathBuf;
+        use std::process::Command;
+        // FW_FEATURE_NON_DL and FW_TYPE_CLC: the region that is the table.
+        const NOT_DOWNLOADED: u8 = 1 << 6;
+        const POWER_TABLE: u8 = 2;
+        // The image scripts' own options, their library, and one function.
+        const SHELL: &str = r#"set -euo pipefail; BUILDROOT_DIR="$1"; source "$2"; shift 2; "#;
+        const CODE: &str = "WIFI_RAM_CODE_MT7922_1.bin";
+        const PATCH: &str = "WIFI_MT7922_patch_mcu_1_1_hdr.bin";
+        const OTHER: &str = "WIFI_RAM_CODE_MT7961_1.bin";
+        const PINNED: [&str; 3] = [CODE, PATCH, "LICENCE.mediatek"];
+        const ROM: &[u8] = b"rom patch";
+        const TERMS: &str = "MediaTek's terms";
+
+        // A region: its data, the length its record states, its features
+        // and its type.
+        type Region = (Vec<u8>, u32, u8, u8);
+        fn region(data: Vec<u8>, feature: u8, kind: u8) -> Region {
+            let says = u32::try_from(data.len()).unwrap();
+            (data, says, feature, kind)
+        }
+        fn plain(bytes: usize) -> Region {
+            region(vec![0xA5; bytes], 0, 0)
+        }
+        fn table(records: &[Vec<u8>]) -> Region {
+            region(records.concat(), NOT_DOWNLOADED, POWER_TABLE)
+        }
+        // A firmware of the family's layout: the regions' data in order, a
+        // record of 40 bytes a region (its length at byte 20, its features
+        // at 24, its type at 25), and a trailer of 36 bytes whose third
+        // byte counts the regions.
+        fn firmware(regions: &[Region]) -> Vec<u8> {
+            let mut file: Vec<u8> = regions.iter().flat_map(|r| r.0.iter().copied()).collect();
+            for (_, says, feature, kind) in regions {
+                let mut record = [0u8; 40];
+                record[20..24].copy_from_slice(&says.to_le_bytes());
+                record[24] = *feature;
+                record[25] = *kind;
+                file.extend_from_slice(&record);
+            }
+            let mut trailer = [0u8; 36];
+            trailer[2] = u8::try_from(regions.len()).unwrap();
+            file.extend_from_slice(&trailer);
+            file
+        }
+        // A record of a power table: the length it states in its first four
+        // bytes, and the bytes it has. The filling is no length a table
+        // here could hold, so a walk that began anywhere else would say so.
+        fn record(says: u32, bytes: usize) -> Vec<u8> {
+            let mut record = vec![0xA5; bytes];
+            record[..4].copy_from_slice(&says.to_le_bytes());
+            record
+        }
+
+        let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lib/image-common.sh");
+        let root = std::env::temp_dir().join(format!("embra-power-table-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // What the check removes on a refusal is this stand-in of the image.
+        let scratch = root.join("buildroot");
+        let image = scratch.join("output/images/embraos.img");
+        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+        let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim_end().to_owned();
+
+        // The walk: one line, and the driver's verdict as the status.
+        let walk = |file: &[u8]| {
+            let path = root.join("firmware.bin");
+            std::fs::write(&path, file).unwrap();
+            let out = Command::new("bash")
+                .args(["-c", &format!("{SHELL}mt7921_power_table_walk \"$1\""), "walk"])
+                .arg(&scratch)
+                .arg(&library)
+                .arg(&path)
+                .output()
+                .expect("bash runs the walk");
+            assert_eq!(text(&out.stderr), "", "the walk says what it finds on its one line");
+            (out.status.code(), text(&out.stdout))
+        };
+        let (taken, refused) = (Some(0), Some(1));
+        let says = |verdict: Option<i32>, line: &str| (verdict, line.to_owned());
+
+        // The table stands among other regions and is read where it stands;
+        // a record may end where the table ends.
+        let good = firmware(&[plain(100), table(&[record(32, 32), record(48, 48)]), plain(24)]);
+        assert_eq!(walk(&good), says(taken, "2 records fill the table's 80 bytes"));
+        assert_eq!(walk(&firmware(&[table(&[record(16, 16)])])), says(taken, "1 records fill the table's 16 bytes"));
+        // The file of the release Buildroot carries: its second record says
+        // sixteen bytes more than the table has left.
+        let past = firmware(&[plain(100), table(&[record(32, 32), record(64, 48)])]);
+        assert_eq!(walk(&past), says(refused, "record 2 says it is 64 bytes long where 48 are left of the table"));
+        // A record shorter than its own header, and a table that ends inside
+        // a header.
+        assert_eq!(walk(&firmware(&[table(&[record(8, 32)])])), says(refused, "record 1 says it is 8 bytes long where 32 are left of the table"));
+        assert_eq!(
+            walk(&firmware(&[table(&[record(32, 32), vec![0; 8]])])),
+            says(refused, "after 1 records 8 bytes are left, fewer than a record's header")
+        );
+        // The table is the region that is not downloaded and has the table's
+        // type, both; a firmware without one is taken as it is.
+        assert_eq!(walk(&firmware(&[plain(64)])), says(taken, "no power table"));
+        assert_eq!(walk(&firmware(&[region(record(64, 48), 0, POWER_TABLE)])), says(taken, "no power table"));
+        assert_eq!(walk(&firmware(&[region(record(64, 48), NOT_DOWNLOADED, 1)])), says(taken, "no power table"));
+        assert_eq!(
+            walk(&firmware(&[region(record(64, 48), NOT_DOWNLOADED | 1, POWER_TABLE)])),
+            says(refused, "record 1 says it is 64 bytes long where 48 are left of the table")
+        );
+        // A region that runs past the file's data, more region records than
+        // the file holds, and a file shorter than a trailer.
+        let mut long = plain(10);
+        long.1 = 11;
+        assert_eq!(walk(&firmware(&[plain(4), long])), says(refused, "region 1 runs past the file's data"));
+        let mut counts = firmware(&[]);
+        counts[2] = 3;
+        assert_eq!(walk(&counts), says(refused, "its 3 region records are longer than the file"));
+        assert_eq!(walk(&[0; 35]), says(refused, "shorter than a firmware's trailer"));
+
+        // The check, on a root filesystem: the family's modules with the
+        // names they declare, the firmware, and MediaTek's licence text.
+        let tree = |name: &str, modules: &[&str], files: &[(&str, &[u8])], licence: &str| -> PathBuf {
+            let target = root.join(name);
+            for (n, declared) in modules.iter().enumerate() {
+                let module = target.join("lib/modules/6.18.60/kernel/drivers/net/wireless/mediatek/mt76/mt7921").join(format!("mt7921-{n}.ko"));
+                std::fs::create_dir_all(module.parent().unwrap()).unwrap();
+                std::fs::write(module, format!("\u{7f}ELF\0{}\0", declared.replace(' ', "\0"))).unwrap();
+            }
+            let firmware = target.join("lib/firmware/mediatek");
+            std::fs::create_dir_all(&firmware).unwrap();
+            for (file, bytes) in files {
+                std::fs::write(firmware.join(file), bytes).unwrap();
+            }
+            let texts = target.join("usr/share/licenses/linux-firmware");
+            std::fs::create_dir_all(&texts).unwrap();
+            std::fs::write(texts.join("LICENCE.mediatek"), licence).unwrap();
+            target
+        };
+        // A hash file of the recipe's form for a tree's own files.
+        let pins = |name: &str, target: &Path, files: &[&str]| -> PathBuf {
+            let mut lines = String::from("# Locally computed\n");
+            for file in files {
+                let dir = if file.starts_with("LICENCE") { "usr/share/licenses/linux-firmware" } else { "lib/firmware/mediatek" };
+                let out = Command::new("sha256sum").arg(target.join(dir).join(file)).output().expect("sha256sum runs");
+                lines += &format!("sha256  {}  {file}\n", &text(&out.stdout)[..64]);
+            }
+            let path = root.join(name);
+            std::fs::write(&path, lines).unwrap();
+            path
+        };
+        let check = |target: &Path, pins: &Path| {
+            std::fs::write(&image, b"").unwrap();
+            let out = Command::new("bash")
+                .args(["-c", &format!("{SHELL}MT7922_FIRMWARE_PINS=\"$1\"; assert_mt7921_power_tables \"$2\""), "check"])
+                .arg(&scratch)
+                .arg(&library)
+                .arg(pins)
+                .arg(target)
+                .output()
+                .expect("bash runs the check");
+            (out.status.code(), text(&out.stdout), text(&out.stderr), image.exists())
+        };
+        let rejected = |target: &Path, pins: &Path, why: &str| {
+            let (code, out, err, kept) = check(target, pins);
+            assert!(code == Some(1) && !kept && err.contains(why), "status {code:?}, the image kept: {kept}, looked for: {why}\n{out}\n{err}");
+        };
+        let declared = [
+            "firmware=mediatek/WIFI_RAM_CODE_MT7922_1.bin firmware=mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin license=Dual",
+            "firmware=mediatek/WIFI_RAM_CODE_MT7961_1.bin firmware=mediatek/WIFI_RAM_CODE_MT7961_1a.bin",
+        ];
+        let other = firmware(&[table(&[record(16, 16)])]);
+
+        // The pinned pair under its licence text is taken: each firmware of
+        // the family that is there is walked, a declared name that is not
+        // there is passed over, and the image stays.
+        let rootfs = tree("pinned", &declared, &[(CODE, &good[..]), (PATCH, ROM), (OTHER, &other[..])], TERMS);
+        let pinned = pins("pinned.hash", &rootfs, &PINNED);
+        let (code, out, err, kept) = check(&rootfs, &pinned);
+        assert_eq!((code, err.as_str(), kept), (Some(0), "", true), "{out}");
+        assert!(
+            out.contains("firmware mediatek/WIFI_RAM_CODE_MT7922_1.bin: 2 records fill the table's 80 bytes")
+                && out.contains("firmware mediatek/WIFI_RAM_CODE_MT7961_1.bin: 1 records fill the table's 16 bytes")
+                && out.contains("(2 walked)"),
+            "{out}"
+        );
+        // Each file of the pair is held to the recipe's hash, and the text
+        // to the pinned release's: the image as it was built before the
+        // recipe, half the pair, no firmware at all, another text.
+        let before = firmware(&[table(&[record(32, 32)])]);
+        let built_before = tree("built-before", &declared, &[(CODE, &before[..]), (PATCH, ROM), (OTHER, &other[..])], TERMS);
+        rejected(&built_before, &pinned, "/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin is not the file buildroot/package/embra-mt7922-firmware pins");
+        let half = tree("half", &declared, &[(CODE, &good[..]), (PATCH, b"another rom patch"), (OTHER, &other[..])], TERMS);
+        rejected(&half, &pinned, "/lib/firmware/mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin is not the file buildroot/package/embra-mt7922-firmware pins");
+        let absent = tree("absent", &declared, &[(PATCH, ROM), (OTHER, &other[..])], TERMS);
+        rejected(&absent, &pinned, "WIFI_RAM_CODE_MT7922_1.bin is not the file buildroot/package/embra-mt7922-firmware pins (its sha256 is none: the file is absent)");
+        let other_text = tree("other-text", &declared, &[(CODE, &good[..]), (PATCH, ROM), (OTHER, &other[..])], "another text");
+        rejected(&other_text, &pinned, "MediaTek's licence text on the rootfs");
+        // A firmware the driver would refuse stops the build: another of
+        // the family's, and the pinned one itself, as when a later recipe
+        // pins such a file.
+        let family = tree("family", &declared, &[(CODE, &good[..]), (PATCH, ROM), (OTHER, &past[..])], TERMS);
+        rejected(
+            &family,
+            &pinned,
+            "/lib/firmware/mediatek/WIFI_RAM_CODE_MT7961_1.bin carries a power table the kernel's mt7921 driver refuses (record 2 says it is 64 bytes long where 48 are left of the table)",
+        );
+        let bad_pin = tree("bad-pin", &declared, &[(CODE, &past[..]), (PATCH, ROM), (OTHER, &other[..])], TERMS);
+        rejected(&bad_pin, &pins("bad-pin.hash", &bad_pin, &PINNED), "/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin carries a power table the kernel's mt7921 driver refuses");
+        // The pinned firmware is walked whatever the modules name: with
+        // modules that name other files, and with none of the family there.
+        let unnamed = tree("unnamed", &["firmware=mediatek/WIFI_RAM_CODE_MT7961_1.bin"], &[(CODE, &past[..]), (PATCH, ROM), (OTHER, &other[..])], TERMS);
+        rejected(&unnamed, &pins("unnamed.hash", &unnamed, &PINNED), "/lib/firmware/mediatek/WIFI_RAM_CODE_MT7922_1.bin carries a power table");
+        let no_modules = tree("no-modules", &[], &[(CODE, &good[..]), (PATCH, ROM)], TERMS);
+        let (code, out, err, kept) = check(&no_modules, &pinned);
+        assert_eq!((code, err.as_str(), kept), (Some(0), "", true), "{out}");
+        assert!(out.contains("(1 walked)"), "{out}");
+        // Modules of the family that declare no firmware leave the walk
+        // nothing to go by.
+        let silent = tree("silent", &["license=Dual"], &[(CODE, &good[..]), (PATCH, ROM)], TERMS);
+        rejected(&silent, &pinned, "declare no Wi-Fi firmware");
+        // The hash file names the pair, and is there.
+        rejected(&rootfs, &pins("one.hash", &rootfs, &[CODE, "LICENCE.mediatek"]), "names 1 firmware files");
+        rejected(&rootfs, &root.join("none.hash"), "has no hash file");
+
+        // The recipe's own hash file is of the form the check reads, and
+        // the recipe fetches the files it names.
+        let recipe = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../buildroot/package/embra-mt7922-firmware");
+        let hashes = std::fs::read_to_string(recipe.join("embra-mt7922-firmware.hash")).unwrap();
+        let mut named: Vec<&str> = hashes
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let fields: Vec<&str> = line.split("  ").collect();
+                assert!(
+                    fields.len() == 3 && fields[0] == "sha256" && fields[1].len() == 64 && fields[1].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                    "{line}"
+                );
+                fields[2]
+            })
+            .collect();
+        named.sort_unstable();
+        let mut pair_and_text = PINNED;
+        pair_and_text.sort_unstable();
+        assert_eq!(named, pair_and_text);
+        let mk = std::fs::read_to_string(recipe.join("embra-mt7922-firmware.mk")).unwrap();
+        assert!(PINNED.iter().all(|file| mk.contains(file)), "the recipe fetches the files its hash file names");
+        // The image build runs the check among the root filesystem's.
+        let scripts = std::fs::read_to_string(&library).unwrap();
+        let checks = scripts.split("\nassert_rootfs_invariants() {\n").nth(1).and_then(|rest| rest.split("\n}\n").next()).expect("the root filesystem's checks");
+        assert!(checks.contains("\n    assert_mt7921_power_tables \"$BUILDROOT_DIR/output/target\"\n"), "{checks}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn a_device_asks_for_the_modules_whose_patterns_match_it() {
         let aliases = "# Aliases extracted from modules themselves.\n\
