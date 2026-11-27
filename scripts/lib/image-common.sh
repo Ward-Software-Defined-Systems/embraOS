@@ -71,6 +71,15 @@ INTEL_MICROCODE_RECIPE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buil
 # build of the version the recipe names.
 LLAMA_CPP_RECIPE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/package/embra-llama-cpp/embra-llama-cpp.mk"
 
+# The Wi-Fi firmware of MediaTek's MT7922 is pinned by a recipe too:
+# buildroot/package/embra-mt7922-firmware names a release of linux-firmware,
+# and its hash file the sha256 of the card's two files and of MediaTek's
+# licence text. The release Buildroot's own package carries has a file the
+# kernel's driver refuses. assert_mt7921_power_tables proves that the image
+# holds the pinned files and that the driver takes every power table of its
+# family.
+MT7922_FIRMWARE_PINS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/package/embra-mt7922-firmware/embra-mt7922-firmware.hash"
+
 # The embedding model (KG-02), pinned by sha256 like CI's Bootlin SDK: the
 # payload is fetched, never committed, and a changed upstream file fails
 # the build instead of silently shipping different weights. Verified
@@ -508,6 +517,119 @@ assert_firmware_present() {
     [ -z "$fatal" ] || reject_image "a mandatory driver has none of its firmware under /lib/firmware (the family is not installed):${fatal}"
 }
 
+# firmware_u8 <file> <offset>, firmware_le32 <file> <offset>: one field of a
+# firmware file as a number. Read byte by byte, so that the byte order of the
+# host that builds the image does not enter into it.
+firmware_u8() { od -An -tu1 -j "$2" -N1 "$1" | tr -d ' \n'; }
+firmware_le32() {
+    local bytes
+    bytes="$(od -An -tu1 -j "$2" -N4 "$1")"
+    # shellcheck disable=SC2086
+    set -- $bytes
+    [ $# -eq 4 ] || return 1
+    echo $(($1 + ($2 << 8) + ($3 << 16) + ($4 << 24)))
+}
+
+# mt7921_power_table_walk <firmware file>: the kernel's mt7921_load_clc on a
+# Wi-Fi firmware of its family, as far as it decides whether the firmware is
+# taken (linux 6.18, drivers/net/wireless/mediatek/mt76/mt7921/mcu.c; the
+# layouts are mt76_connac2_fw_trailer, mt76_connac2_fw_region and
+# mt7921_clc). The file ends with a trailer of 36 bytes whose third byte
+# counts the regions; before it stand that many region records of 40 bytes,
+# each with its length at byte 20, its features at byte 24 and its type at
+# byte 25. The region that is not downloaded (feature bit 6) and has type 2
+# is the power table: a row of records that each begin with their own length
+# in four bytes, a header of 16 bytes included. The driver refuses the whole
+# firmware when a region runs past the file's data, when fewer than 16 bytes
+# are left for a record, and when a record's length is under 16 or more than
+# is left. One line says what was found; the status is 1 where the driver
+# refuses. When the kernel pin moves, read that function again.
+mt7921_power_table_walk() {
+    local f="$1" size regions data offset=0 i at len feature kind base="" table=0 off=0 n=0 rec
+    size="$(file_size "$f")"
+    [ "${size:-0}" -ge 36 ] || { echo "shorter than a firmware's trailer"; return 1; }
+    regions="$(firmware_u8 "$f" $((size - 34)))"
+    data=$((size - 36 - regions * 40))
+    [ "$data" -ge 0 ] || { echo "its $regions region records are longer than the file"; return 1; }
+    for ((i = 0; i < regions; i++)); do
+        at=$((size - 36 - (regions - i) * 40))
+        len="$(firmware_le32 "$f" $((at + 20)))" || { echo "region $i could not be read"; return 1; }
+        [ "$len" -le $((data - offset)) ] || { echo "region $i runs past the file's data"; return 1; }
+        feature="$(firmware_u8 "$f" $((at + 24)))"
+        kind="$(firmware_u8 "$f" $((at + 25)))"
+        if [ $((feature & 64)) -ne 0 ] && [ "$kind" -eq 2 ]; then
+            base="$offset"; table="$len"
+            break
+        fi
+        offset=$((offset + len))
+    done
+    [ -n "$base" ] || { echo "no power table"; return 0; }
+    while [ "$off" -lt "$table" ]; do
+        [ $((table - off)) -ge 16 ] || { echo "after $n records $((table - off)) bytes are left, fewer than a record's header"; return 1; }
+        rec="$(firmware_le32 "$f" $((base + off)))" || { echo "record $((n + 1)) could not be read"; return 1; }
+        if [ "$rec" -lt 16 ] || [ "$rec" -gt $((table - off)) ]; then
+            echo "record $((n + 1)) says it is $rec bytes long where $((table - off)) are left of the table"
+            return 1
+        fi
+        n=$((n + 1)); off=$((off + rec))
+    done
+    echo "$n records fill the table's $table bytes"
+}
+
+# assert_mt7921_power_tables <target dir>: the kernel's mt7921 driver family
+# (MT7920, MT7921, MT7922) reads a power table out of the Wi-Fi firmware it
+# loads and refuses the firmware when a record runs past the table
+# ("Invalid CLC record", then "hardware init failed"): the card is found,
+# its driver is loaded, and no interface comes up. linux-firmware carried
+# such a file for the MT7922 in two releases, 20251011 among them, the one
+# Buildroot 2026.02 has, which is why that card's two files are a recipe of
+# this tree. Here the card's two files are the ones the recipe pins,
+# MediaTek's licence text on the rootfs is the one of the pinned release,
+# and every firmware of the family the root filesystem holds is walked the
+# way the driver walks it: the names the family's modules declare, and the
+# pinned firmware whatever they declare. A run that walked nothing is no
+# pass: with the family's modules on the rootfs, some firmware of theirs
+# is there to walk.
+assert_mt7921_power_tables() {
+    local tgt="$1" fw="$1/lib/firmware" ko modules=0 names="" name said walked="" pin have pinned=0 pinned_code=""
+    # shellcheck source=buildroot/board/embraos/wireless.sh
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/board/embraos/wireless.sh"
+    [ -f "$MT7922_FIRMWARE_PINS" ] || reject_image "the MT7922's firmware has no hash file ($MT7922_FIRMWARE_PINS)"
+    while read -r pin name; do
+        pinned=$((pinned + 1))
+        case "$name" in WIFI_RAM_CODE_*) pinned_code="mediatek/$name" ;; esac
+        have="$(sha256_of "$fw/mediatek/$name" 2>/dev/null || true)"
+        [ "$have" = "$pin" ] \
+            || reject_image "/lib/firmware/mediatek/$name is not the file buildroot/package/embra-mt7922-firmware pins (its sha256 is ${have:-none: the file is absent}): the recipe was not selected or sourced (buildroot/Config.in), or linux-firmware's own install ran after it"
+    done < <(sed -n 's/^sha256  \([0-9a-f]\{64\}\)  \(WIFI_[A-Za-z0-9_]*\.bin\)$/\1 \2/p' "$MT7922_FIRMWARE_PINS")
+    { [ "$pinned" -eq 2 ] && [ -n "$pinned_code" ]; } \
+        || reject_image "$MT7922_FIRMWARE_PINS names $pinned firmware files; the card's two are the firmware (WIFI_RAM_CODE_…) and its ROM patch"
+    pin="$(sed -n 's/^sha256  \([0-9a-f]\{64\}\)  LICENCE\.mediatek$/\1/p' "$MT7922_FIRMWARE_PINS")"
+    have="$(sha256_of "$tgt/usr/share/licenses/linux-firmware/LICENCE.mediatek" 2>/dev/null || true)"
+    { [ -n "$pin" ] && [ "$have" = "$pin" ]; } \
+        || reject_image "MediaTek's licence text on the rootfs (/usr/share/licenses/linux-firmware/LICENCE.mediatek) is not the text of the release the MT7922's firmware is pinned to ($MT7922_FIRMWARE_PINS): the recipe has to install that release's text with the files"
+    for ko in "$tgt"/lib/modules/*/kernel/drivers/net/wireless/mediatek/mt76/mt7921/*.ko; do
+        [ -f "$ko" ] || continue
+        modules=$((modules + 1))
+        names="$names $(embraos_module_firmware "$ko" | grep '/WIFI_RAM_CODE_' | tr '\n' ' ' || true)"
+    done
+    if [ "$modules" -gt 0 ] && [ -z "${names// /}" ]; then
+        reject_image "the mt7921 family's $modules modules on the rootfs declare no Wi-Fi firmware: the walk of their power tables has nothing to go by (embraos_module_firmware, board/embraos/wireless.sh)"
+    fi
+    for name in $(printf '%s\n' $names "$pinned_code" | LC_ALL=C sort -u); do
+        [ -f "$fw/$name" ] || continue
+        said="$(mt7921_power_table_walk "$fw/$name")" \
+            || reject_image "/lib/firmware/$name carries a power table the kernel's mt7921 driver refuses ($said): a card that needs the file is found, its driver loaded, and no interface comes up. buildroot/package/embra-mt7922-firmware pins such a file from a later release of linux-firmware"
+        walked="$walked ${name##*/}"
+        echo "  firmware $name: $said"
+    done
+    case " $walked " in
+        *" ${pinned_code##*/} "*) ;;
+        *) reject_image "the pinned firmware /lib/firmware/$pinned_code was not walked" ;;
+    esac
+    echo "firmware: the driver takes the power table of each mt7921 family firmware on the rootfs ($(echo $walked | wc -w) files); the MT7922's two files are the pinned ones, under the licence text the rootfs carries"
+}
+
 # assert_boot_initrds <target dir> <triple>: the two initrds post_build.sh
 # wrote beside the repository's. ucode.cpio is a newc archive (070701) and,
 # on x86_64, carries the two microcode files as the concatenations the
@@ -646,6 +768,7 @@ assert_rootfs_invariants() {
     assert_license_text "$BUILDROOT_DIR/output/target"
     assert_firmware_families
     assert_firmware_present "$BUILDROOT_DIR/output/target"
+    assert_mt7921_power_tables "$BUILDROOT_DIR/output/target"
     # Post-Buildroot assert. Both ways this package can fail are SILENT: a package
     # whose Config.in is not sourced from buildroot/Config.in has its defconfig
     # symbol dropped without warning, and <PKG>_NAME is a Buildroot-reserved

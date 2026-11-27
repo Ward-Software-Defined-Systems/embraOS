@@ -1,0 +1,9 @@
+# Locally computed from the files of linux-firmware's tag 20261019, fetched
+# from gitlab.com/kernel-firmware/linux-firmware and compared byte for byte
+# with git.kernel.org's copy of the same tag. WHENCE of that tag names the
+# firmware's build 20260724143402 and the patch's 20260724143257a. The licence
+# text (LICENSES/LICENCE.mediatek there) is byte for byte the one of 20251011,
+# where it stood at the top of the tree.
+sha256  d100e5e04c324fc8da6302112d1e0b4fac952286447d2419eabcd8fb0a1f5b93  WIFI_RAM_CODE_MT7922_1.bin
+sha256  7fc9075d6d54b31e0539734614ca971fa52caf41b642a3000c8a4501591a4d98  WIFI_MT7922_patch_mcu_1_1_hdr.bin
+sha256  a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805  LICENCE.mediatek

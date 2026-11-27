@@ -1,0 +1,15 @@
+config BR2_PACKAGE_EMBRA_MT7922_FIRMWARE
+	bool "embra-mt7922-firmware"
+	depends on BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7922
+	help
+	  The Wi-Fi firmware of MediaTek's MT7922 (the firmware and its
+	  ROM patch) at the release of linux-firmware embraOS pins: the
+	  version in embra-mt7922-firmware.mk, each file's sha256 in the
+	  hash file beside it. The recipe installs the two files over
+	  the ones of Buildroot's linux-firmware package, whose release
+	  carries a file the kernel's driver refuses (the recipe's
+	  comment has the account).
+
+	  It goes when Buildroot's linux-firmware is 20251021 or later.
+
+	  https://gitlab.com/kernel-firmware/linux-firmware

@@ -144,6 +144,11 @@ BR2_PACKAGE_EMBRA_LLAMA_CPP=y
 # /lib/firmware with their licence texts; the ones the mandatory drivers
 # want at probe go into /boot/firmware.cpio.gz (post_build.sh).
 BR2_PACKAGE_EMBRA_FIRMWARE_ALL=y
+# The MT7922's Wi-Fi firmware at a later release of linux-firmware: the
+# package's own release carries a file the kernel's driver refuses
+# (buildroot/package/embra-mt7922-firmware has the account, and the image
+# check walks every power table of the driver's family).
+BR2_PACKAGE_EMBRA_MT7922_FIRMWARE=y
 # CPU microcode (William, 2026-11-08: included now): Intel's from the bundle
 # this tree pins (package/embra-intel-microcode: the version in its recipe,
 # the archive's sha256 beside it; Buildroot's own intel-microcode recipe
