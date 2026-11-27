@@ -286,6 +286,7 @@ pub fn status_command(out: &mut impl Write) -> Outcome {
         let booted = if Some(s) == status.slot { " (booted)" } else { "" };
         let _ = writeln!(out, "slot {s}: {line}{mark}{booted}");
     }
+    let _ = writeln!(out, "boot menu: {}", crate::boot_menu::standing_words(&crate::boot_menu::standing()));
     Outcome::Done
 }
 

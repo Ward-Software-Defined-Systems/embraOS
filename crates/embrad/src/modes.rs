@@ -189,6 +189,24 @@ pub fn run_grow_data() {
     }
 }
 
+/// The boot menu on the ESP follows the default slot: `embra-update
+/// boot-menu` once every service is healthy, a trial confirmed first. A
+/// release is a slot, and an OS update writes no ESP, so the menu travels in
+/// the slot and is put on the ESP by the boot that confirms it. The updater
+/// says one line on both consoles when it replaced the menu and nothing on
+/// every other boot; a refusal and a failure are a line of the log, and a
+/// normal boot. Never a halt.
+pub fn run_boot_menu() {
+    let ran = run_updater(&["boot-menu", "--console"]);
+    match ran.code {
+        Some(0) => tracing::info!("the boot menu on the ESP is this slot's now: it was another release's"),
+        Some(3) => {}
+        Some(2) => tracing::warn!("the boot menu on the ESP was left as it is: {}", ran.reason),
+        Some(code) => tracing::warn!("boot-menu exited with {code}: {}", ran.reason),
+        None => tracing::warn!("boot-menu did not run: {}", ran.reason),
+    }
+}
+
 /// A menu entry's job. Every exit path reboots (the caller reboots): the
 /// menu is where the operator returns.
 pub fn run_maintenance(mode: BootMode, knobs: InstallKnobs<'_>) {

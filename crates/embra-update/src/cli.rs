@@ -20,6 +20,9 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
                                                                  the disk holds, STATE and DATA kept. The licence is shown and asked about
                                                                  first; --accept-license accepts it on the command line, and --yes needs it
   grow-data [--console]                                          give DATA the rest of its disk when a gibibyte or more follows it
+  boot-menu [--console]                                          put this release's boot menu on the ESP when this boot is of the default slot and both
+                                                                 slots hold the files the menu reads; GRUB's loader and grubenv are left (embrad runs it
+                                                                 once every service is healthy)
   model-list                                                     the native models (experimental), the licence of each with the policy on its use it comes with, and how each
                                                                  one's files stand on DATA
   model-install <model>                                          download a model's two files from the catalogue's source, the model file and the file it reads images through, check
@@ -44,6 +47,7 @@ pub enum Command {
     Rollback,
     Install { media: String, disk: Option<String>, yes: bool, console: bool, force: bool, upgrade: bool, allow_downgrade: bool, accept_license: bool },
     GrowData { console: bool },
+    BootMenu { console: bool },
     ModelList,
     ModelInstall { model: &'static NativeModel },
     ModelImport { model: &'static NativeModel, part: Part },
@@ -62,6 +66,7 @@ impl Command {
                 | Command::Apply { console: true, .. }
                 | Command::Install { console: true, .. }
                 | Command::GrowData { console: true }
+                | Command::BootMenu { console: true }
         )
     }
 }
@@ -194,6 +199,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::GrowData { console })
         }
+        "boot-menu" => {
+            if !positionals.is_empty() {
+                return Err(format!("boot-menu takes no positional: {}", positionals.join(" ")));
+            }
+            Ok(Command::BootMenu { console })
+        }
         "install" => {
             let media = media.ok_or_else(|| "install needs --media <dir>, the mounted installation medium".to_string())?;
             if let Some(d) = &disk
@@ -235,6 +246,16 @@ mod tests {
 
     fn p(s: &str) -> Result<Command, String> {
         parse(&s.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn boot_menu_takes_the_console_flag_and_nothing_else() {
+        assert_eq!(p("boot-menu"), Ok(Command::BootMenu { console: false }));
+        let on_consoles = p("boot-menu --console").unwrap();
+        assert_eq!(on_consoles, Command::BootMenu { console: true });
+        assert!(on_consoles.console(), "embrad's job speaks on the boot consoles");
+        assert!(p("boot-menu vda").unwrap_err().contains("takes no positional"));
+        assert!(USAGE.contains("\n  boot-menu [--console] "));
     }
 
     #[test]

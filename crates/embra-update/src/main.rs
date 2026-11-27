@@ -1,6 +1,7 @@
 //! embra-update — the OS's own backups and updates: snapshots of STATE and
 //! DATA and their restore; the signed release checked, written into the
-//! inactive slot and staged for GRUB; the status and the rollback; the files
+//! inactive slot and staged for GRUB; the status and the rollback; the
+//! default slot's boot menu put on the ESP; the files
 //! of the native models (experimental) on DATA, each checked against the
 //! catalogue. Run by
 //! embrad in a maintenance boot from the GRUB menu and by the brain for the
@@ -16,6 +17,7 @@
 //! stdout otherwise (`console::Operator`); no print macro touches a console
 //! that may refuse the write.
 
+mod boot_menu;
 mod cli;
 mod console;
 mod db;
@@ -188,6 +190,7 @@ fn run(cmd: Command, op: &mut console::Operator) -> anyhow::Result<Outcome> {
             Ok(install::install_command(std::path::Path::new(&media), wanted, force, op))
         }
         Command::GrowData { console: _ } => Ok(grow::grow_data_command(op)),
+        Command::BootMenu { console: _ } => Ok(boot_menu::boot_menu_command(op)),
         Command::ModelList => Ok(models::list_command(&roots, op)),
         Command::ModelInstall { model } => Ok(models::install_command(&roots, model, op)),
         // The file comes on standard input, as a backup's archive does.

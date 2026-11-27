@@ -158,6 +158,14 @@ fn say_of_the_disk(cmdline: &Cmdline) {
     }
 }
 
+/// Whether the updater is asked to put this slot's boot menu on the ESP
+/// (`embra-update boot-menu`): a boot through GRUB that needed no
+/// confirmation or got it. The updater itself reads whether the slot is the
+/// default one and leaves the ESP alone when it is not.
+pub fn menu_is_due(cmdline: &Cmdline, confirmed: &Confirmed) -> bool {
+    cmdline.slot().ok().flatten().is_some() && matches!(confirmed, Confirmed::Yes | Confirmed::NotNeeded)
+}
+
 /// After every service is healthy. On a trial boot the block on the ESP is
 /// rewritten with the booted slot active and the trial cleared; on any
 /// other boot with a slot the block is read for the status; a boot without
@@ -297,6 +305,20 @@ mod tests {
                 other => panic!("{menu_disk:?}: {other:?}"),
             }
         }
+    }
+
+    /// The updater is asked for the menu at a boot through GRUB that came
+    /// up, and never after a confirmation that was not written.
+    #[test]
+    fn the_boot_menu_is_asked_for_at_a_boot_that_came_up_through_grub() {
+        let plain = Cmdline::parse("console=ttyS0 embra.slot=a embra.web=1");
+        let trial = Cmdline::parse("console=ttyS0 embra.slot=b embra.web=1 embra.trial=1");
+        let direct = Cmdline::parse("console=ttyS0 root=/dev/vda2 ro quiet");
+        assert!(menu_is_due(&plain, &Confirmed::NotNeeded));
+        assert!(menu_is_due(&trial, &Confirmed::Yes));
+        assert!(!menu_is_due(&trial, &Confirmed::Failed("grubenv".into())), "a trial that was not confirmed leaves the ESP");
+        assert!(!menu_is_due(&trial, &Confirmed::Pending));
+        assert!(!menu_is_due(&direct, &Confirmed::NotNeeded), "a boot without a slot has no menu to follow");
     }
 
     #[test]

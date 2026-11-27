@@ -287,7 +287,17 @@ async fn run(cmdline: &Cmdline, mode: BootMode, built: Option<i64>) -> Result<St
 
     // Step 7: every service is healthy. A trial boot is confirmed on the
     // ESP now; every boot publishes its status.
-    boot::after_services_healthy(cmdline, mode);
+    let confirmed = boot::after_services_healthy(cmdline, mode);
+    // The ESP's boot menu follows the default slot: the updater puts this
+    // slot's own there when this boot is of the default slot (an update's
+    // menu arrives with the boot that confirms it). Before the
+    // reconciliation loop and its reaper, on a thread of its own: the job is
+    // a child that is waited for.
+    if boot::menu_is_due(cmdline, &confirmed)
+        && let Err(e) = tokio::task::spawn_blocking(modes::run_boot_menu).await
+    {
+        warn!("the boot menu's job could not be run: {e}");
+    }
 
     info!("All services started. Entering reconciliation loop.");
 

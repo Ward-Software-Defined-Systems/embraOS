@@ -160,6 +160,27 @@ done
 printf 'set slot_version="%s (%s, %s)"\n' "$VERSION" "$BUILD_ID" "${BUILT%%T*}" \
     > "${TARGET_DIR}/boot/embraos-slot.cfg"
 
+# The slot's own copy of the boot menu. A release is a slot: an OS update
+# writes a slot and no ESP, so the menu travels inside the slot, and once the
+# slot is the confirmed default the updater puts it on the ESP (embra-update
+# boot-menu; the path is embra_boot::esp::SLOT_MENU_PATH). post_image.sh
+# installs this very file on the image's ESP, from where the installer medium
+# takes its copy, so the three are one file (assert_slot_boot_menu,
+# scripts/lib/image-common.sh). The kernel's name is the one under /boot.
+: "${BR2_CONFIG:?post_build.sh runs under Buildroot, which exports BR2_CONFIG}"
+: "${HOST_DIR:?post_build.sh runs under Buildroot, which exports HOST_DIR}"
+# shellcheck source=boot-menu.sh
+. "${BOARD_DIR}/boot-menu.sh"
+SLOT_KERNEL=""
+for k in bzImage Image; do
+    if [ -f "${TARGET_DIR}/boot/${k}" ]; then SLOT_KERNEL="$k"; fi
+done
+SLOT_CONSOLE="$(embraos_serial_console "${BR2_CONFIG}")"
+embraos_render_boot_menu "${BOARD_DIR}/grub.cfg.in" "$SLOT_KERNEL" "$SLOT_CONSOLE" \
+    "${TARGET_DIR}/usr/share/embra/grub.cfg" "${HOST_DIR}/bin/grub-script-check"
+chmod 0644 "${TARGET_DIR}/usr/share/embra/grub.cfg"
+echo "post_build.sh: the boot menu is in the slot at /usr/share/embra/grub.cfg (${SLOT_KERNEL}, ${SLOT_CONSOLE})"
+
 # The release signing keys the updater trusts (scripts/update-signing.pub;
 # the operator's own go to STATE's update-signing.pub). The file may hold
 # no key yet, and then no manifest verifies.

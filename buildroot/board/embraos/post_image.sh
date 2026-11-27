@@ -34,7 +34,7 @@ echo "kernel: ${KERNEL_IMAGE} (inside each slot's squashfs at /boot)"
 
 # The ESP tree genimage copies whole: GRUB's loader (written by Buildroot's
 # grub2 package into efi-part/EFI/BOOT; a dropped symbol is silent, so it is
-# asserted), our grub.cfg over Buildroot's two-line one, and grubenv.
+# asserted), the slot's grub.cfg over Buildroot's two-line one, and grubenv.
 EFI_PART="${BINARIES_DIR}/efi-part"
 mkdir -p "${EFI_PART}/EFI/BOOT"
 LOADERS=$(find "${EFI_PART}/EFI/BOOT" -maxdepth 1 -iname 'boot*.efi' | wc -l)
@@ -47,14 +47,21 @@ if grep -q '^BR2_aarch64=y' "${BR2_CONFIG}"; then
 else
     SERIAL_CONSOLE="ttyS0"
 fi
-sed -e "s/@KERNEL_IMAGE@/${KERNEL_IMAGE}/g" \
-    -e "s/@SERIAL_CONSOLE@/${SERIAL_CONSOLE}/g" \
-    "${BOARD_DIR}/grub.cfg.in" > "${EFI_PART}/EFI/BOOT/grub.cfg"
-if grep -q '@[A-Z_]*@' "${EFI_PART}/EFI/BOOT/grub.cfg"; then
-    echo "ERROR: a placeholder of grub.cfg.in was not rendered:" >&2
-    grep -n '@[A-Z_]*@' "${EFI_PART}/EFI/BOOT/grub.cfg" >&2
+# The menu is the slot's own copy, which post_build.sh rendered into the root
+# filesystem before the squashfs was made (boot-menu.sh): an OS update puts
+# the slot's on the ESP, so the image's ESP carries that file and no second
+# rendering of the template. It must be this build's: its kernel line names
+# this architecture's kernel image and serial console.
+SLOT_MENU="${TARGET_DIR}/usr/share/embra/grub.cfg"
+[ -s "${SLOT_MENU}" ] || {
+    echo "ERROR: ${SLOT_MENU} is missing (post_build.sh renders the boot menu into the slot)" >&2
     exit 1
-fi
+}
+grep -q "/boot/${KERNEL_IMAGE}\" console=tty0 console=${SERIAL_CONSOLE} " "${SLOT_MENU}" || {
+    echo "ERROR: ${SLOT_MENU} does not load /boot/${KERNEL_IMAGE} with console=${SERIAL_CONSOLE}: it is another build's" >&2
+    exit 1
+}
+install -m 0644 "${SLOT_MENU}" "${EFI_PART}/EFI/BOOT/grub.cfg"
 for tool in grub-script-check grub-editenv; do
     [ -x "${HOST_DIR}/bin/${tool}" ] || {
         echo "ERROR: ${HOST_DIR}/bin/${tool} is missing (host-grub2 builds with the grub2 package)" >&2

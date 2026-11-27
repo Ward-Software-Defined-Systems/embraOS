@@ -1156,6 +1156,36 @@ assert_imported_cas() {
 # 2048 — checked on the final image, not trusted from genimage's `align` —
 # and the image is the whole number of MiB layout.sh computes with the backup
 # GPT on its last sector, not trusted from genimage's `size`.
+# assert_slot_boot_menu <the ESP's grub.cfg, read out of the image>: the slot
+# carries the boot menu (/usr/share/embra/grub.cfg in the target directory),
+# and it is byte for byte the menu on the image's ESP and the one the
+# installer medium takes with the ESP's tree (output/images/efi-part). An OS
+# update puts the slot's menu on the ESP once the slot is the confirmed
+# default (embra-update boot-menu), so the three are one file, or a machine
+# that was updated boots another menu than one that was installed.
+assert_slot_boot_menu() {
+    local esp_menu="$1"
+    local slot_menu="$BUILDROOT_DIR/output/target/usr/share/embra/grub.cfg"
+    local staged="$BUILDROOT_DIR/output/images/efi-part/EFI/BOOT/grub.cfg"
+    [ -s "$slot_menu" ] || {
+        echo "ERROR: the root filesystem carries no boot menu at /usr/share/embra/grub.cfg (post_build.sh renders it into the slot)" >&2
+        reject_image
+    }
+    [ -s "$esp_menu" ] || {
+        echo "ERROR: the boot menu could not be read from the image's ESP" >&2
+        reject_image
+    }
+    cmp -s "$slot_menu" "$esp_menu" || {
+        echo "ERROR: the boot menu on the image's ESP is not the slot's /usr/share/embra/grub.cfg" >&2
+        reject_image
+    }
+    cmp -s "$slot_menu" "$staged" || {
+        echo "ERROR: the boot menu the installer medium takes ($staged) is not the slot's /usr/share/embra/grub.cfg" >&2
+        reject_image
+    }
+    echo "boot menu: the slot's /usr/share/embra/grub.cfg is the ESP's and the installer medium's ($(wc -c < "$slot_menu" | tr -d ' ') bytes)"
+}
+
 assert_image_layout() {
     local img="$1" expected rows row nr start name i=0
     read -r -a expected <<< "$EMBRAOS_PARTITION_NAMES"
@@ -1202,6 +1232,10 @@ assert_image_layout() {
         echo "ERROR: grubenv on the ESP of $img does not name slot A active" >&2
         reject_image
     }
+    # The menu on the ESP, read out whole, is the slot's own copy.
+    local esp_menu="$BUILDROOT_DIR/output/build/.embraos-esp-grub.cfg"
+    "$mtype" -i "${img}@@$((esp_start * 512))" ::/EFI/BOOT/grub.cfg > "$esp_menu" 2>/dev/null || : > "$esp_menu"
+    assert_slot_boot_menu "$esp_menu"
     echo "image layout: $EMBRAOS_PARTITION_NAMES, 1 MiB aligned, $EMBRAOS_IMAGE_SIZE_MIB MiB with the backup GPT on the last sector; the ESP carries the loader, grub.cfg and grubenv (slot A active)"
 }
 

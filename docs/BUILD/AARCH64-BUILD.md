@@ -486,7 +486,8 @@ both arches, so there is **no per-arch sed** and nothing to revert.
 | `scripts/create_initramfs.sh` | Respects `RUST_TARGET` env var; defaults to `x86_64-unknown-linux-musl` when unset |
 | `buildroot/external.mk` | Defines `EMBRAOS_RUST_TARGET = $(if $(BR2_aarch64),aarch64-…,x86_64-…)` |
 | `buildroot/package/*/*.mk` (8) | `_SITE` now uses `target/$(EMBRAOS_RUST_TARGET)/release` — arch-neutral |
-| `buildroot/board/embraos/post_image.sh` | Detects the kernel (`Image`/`bzImage`) in `BINARIES_DIR`, stages the ESP (GRUB's loader, `grub.cfg` rendered from `grub.cfg.in` with the kernel name and `console=ttyAMA0`, `grubenv`), renders `genimage.cfg.in` from `layout.sh`, runs genimage and checks the layout |
+| `buildroot/board/embraos/post_image.sh` | Detects the kernel (`Image`/`bzImage`) in `BINARIES_DIR`, stages the ESP (GRUB's loader, the slot's `grub.cfg`, `grubenv`), renders `genimage.cfg.in` from `layout.sh`, runs genimage and checks the layout |
+| `buildroot/board/embraos/boot-menu.sh` | Renders `grub.cfg.in` with the kernel name and `console=ttyAMA0`; `post_build.sh` calls it for the slot's copy of the menu (`/usr/share/embra/grub.cfg`), the file `post_image.sh` gives the ESP |
 | `buildroot/board/embraos/genimage.cfg` → `…/genimage.cfg.in` | Static config replaced by a template: the sizes from `layout.sh` (resolved per build); the kernel lives inside each slot's SquashFS, so the template names no kernel |
 
 #### How the aarch64 pipeline tracks canonical
@@ -528,7 +529,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Acceleration on macOS | `-accel hvf` (`run-qemu.sh` passes it on every Mac; an x86_64 guest runs under HVF on an Intel Mac only) | `-accel hvf` (native — near-native speed) |
 | CPU | QEMU's default (`run-qemu.sh` passes no `-cpu`) | `-cpu host` under HVF and under KVM, `-cpu max` under TCG |
 | Kernel image | `bzImage` | `Image` |
-| Consoles | `console=tty0 console=ttyS0` | `console=tty0 console=ttyAMA0` (the serial line, last, owns `/dev/console`; embra-init's and embrad's boot messages go to it and to the display both; both consoles rendered into `grub.cfg` by `post_image.sh`, the serial one alone passed by the direct path) |
+| Consoles | `console=tty0 console=ttyS0` | `console=tty0 console=ttyAMA0` (the serial line, last, owns `/dev/console`; embra-init's and embrad's boot messages go to it and to the display both; both consoles rendered into `grub.cfg` by `post_build.sh`, the serial one alone passed by the direct path) |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
 | Port forwards | 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 | Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device virtio-gpu-pci -display cocoa` with a USB keyboard and tablet by hand ([Boot](#3-boot)) |
@@ -1074,7 +1075,7 @@ stopped before seeding or restoring.
 ### Serial console (ttyAMA0) — no action needed
 
 ARM64's `-machine virt` uses the PL011 UART (`/dev/ttyAMA0`), not 8250
-(`/dev/ttyS0`); `post_image.sh` renders `console=ttyAMA0` into `grub.cfg`, and
+(`/dev/ttyS0`); `post_build.sh` renders `console=ttyAMA0` into `grub.cfg`, and
 `run-qemu-aarch64.sh`'s direct path passes it as well.
 
 You will see `--device /dev/ttyS0` if you grep the source (`embrad`'s
