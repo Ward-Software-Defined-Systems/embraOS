@@ -1311,17 +1311,29 @@ fn device_scale(width_px: u32) -> u8 {
     if width_px >= 2560 { 2 } else { 1 }
 }
 
+/// What the display console's launcher does when its renderer (WebKit's web
+/// process) dies: it starts another and loads the page it was started with.
+/// Not `restart`, which reloads the address the view had reached: the start
+/// URL carries the token, the web console exchanges it for a cookie and
+/// redirects to the clean address, and that cookie (`SameSite=Strict`) does
+/// not travel with the reload a new renderer makes, so the reload is answered
+/// with the refusal notice, black letters on the display console's own
+/// background. The action is one of this tree's cog patches
+/// (`buildroot/patches/cog/0007-…`), and the image build looks for it in the
+/// launcher it built (`assert_display_console_launcher`).
+const KIOSK_FAILURE_ACTION: &str = "restart-home";
+
 /// The display console's arguments: cog's DRM platform, the console's
 /// background until the first paint, TLS errors ignored on the loopback
 /// (the certificate is this machine's own, 127.0.0.1 among its names), a
-/// crashed web process restarted rather than an error page nobody can
-/// dismiss, the device scale.
+/// renderer that died started again on the console's page rather than an
+/// error page nobody can dismiss, the device scale.
 fn kiosk_args(scale: u8) -> Vec<String> {
     vec![
         "--platform=drm".to_string(),
         "--bg-color=#0c0907".to_string(),
         "--ignore-tls-errors".to_string(),
-        "--webprocess-failure=restart".to_string(),
+        format!("--webprocess-failure={KIOSK_FAILURE_ACTION}"),
         format!("--device-scale={scale}"),
     ]
 }
@@ -2555,6 +2567,9 @@ mod display_console_tests {
         assert!(url.contains(&format!("token={token}")) && url.ends_with("&kiosk=1"), "{url}");
         assert!(kiosk.def.args.iter().all(|a| !a.contains(&token)), "no token in argv: {:?}", kiosk.def.args);
         assert!(kiosk.def.args.contains(&"--platform=drm".to_string()));
+        // A renderer that died is started again on the page the launcher was given.
+        assert!(kiosk.def.args.contains(&"--webprocess-failure=restart-home".to_string()), "{:?}", kiosk.def.args);
+        assert_eq!(kiosk.def.args.iter().filter(|a| a.starts_with("--webprocess-failure")).count(), 1);
         assert_eq!(env("EMBRA_WEB_TOKEN"), None);
         assert_eq!(env("LIBGL_ALWAYS_SOFTWARE"), None);
         assert_eq!(env("MESA_LOADER_DRIVER_OVERRIDE").as_deref(), Some("kms_swrast"));
@@ -2690,6 +2705,80 @@ mod display_console_tests {
         }
         // a firmware-framebuffer option with one of the letters: counted, the cautious side
         assert!(forces("video=efifb:mode=3"));
+    }
+
+    /// The failure action embrad names is one the launcher of this tree
+    /// knows: a patch of the series adds it, and the image build looks for
+    /// it, and for the two other patches that leave words, in what it built.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_failure_action_is_one_the_patched_launcher_knows_and_the_image_build_looks_for_it() {
+        use std::process::Command;
+        let tree = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+        let action = kiosk_args(1).into_iter().find_map(|a| a.strip_prefix("--webprocess-failure=").map(str::to_string)).expect("a failure action");
+        assert_eq!(action, KIOSK_FAILURE_ACTION);
+        // The series: one patch adds the action to the launcher's table, and loads the launcher's page.
+        let patches = format!("{tree}/buildroot/patches/cog");
+        let series: Vec<String> = std::fs::read_dir(&patches).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".patch")).collect();
+        let adding: Vec<&String> = series
+            .iter()
+            .filter(|n| std::fs::read_to_string(format!("{patches}/{n}")).unwrap().contains(&format!("+        {{\"{action}\", WEBPROCESS_FAIL_RESTART_HOME}},")))
+            .collect();
+        assert_eq!(adding.len(), 1, "one patch of the series adds the action {action}: {series:?}");
+        let patch = std::fs::read_to_string(format!("{patches}/{}", adding[0])).unwrap();
+        assert!(patch.contains("+        cog_web_view_connect_web_process_terminated_restart_handler_with_uri(web_view, 5, 1000, s_options.home_uri);"), "the action loads the launcher's own page");
+        // The image check, on stand-ins for a built target directory.
+        let common = format!("{tree}/scripts/lib/image-common.sh");
+        let dir = std::env::temp_dir().join(format!("embrad-kiosk-launcher-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = |name: &str, cog: Option<&str>, core: &str, drm: &str| {
+            let root = dir.join(name);
+            let t = root.join("output/target");
+            std::fs::create_dir_all(t.join("usr/bin")).unwrap();
+            std::fs::create_dir_all(t.join("usr/lib/cog/modules")).unwrap();
+            std::fs::create_dir_all(root.join("output/images")).unwrap();
+            if let Some(cog) = cog {
+                std::fs::write(t.join("usr/bin/cog"), cog).unwrap();
+            }
+            std::fs::write(t.join("usr/lib/libcogcore.so.9.2.8"), core).unwrap();
+            std::fs::write(t.join("usr/lib/cog/modules/libcogplatform-drm.so"), drm).unwrap();
+            std::fs::write(root.join("output/images/embraos.img"), b"the image this build wrote").unwrap();
+            root
+        };
+        let check = |root: &std::path::Path| {
+            let out = Command::new("bash")
+                .args(["-c", r#"set -euo pipefail; BUILDROOT_DIR="$1"; source "$2"; assert_display_console_launcher "$BUILDROOT_DIR/output/target""#, "_"])
+                .arg(root)
+                .arg(&common)
+                .output()
+                .unwrap();
+            (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), root.join("output/images/embraos.img").exists())
+        };
+        let (cog, core, drm) = (
+            format!("\0error-page\0exit\0restart\0{action}\0"),
+            "\0crashed\0exceeded the memory limit\0terminated by the API\0",
+            "\0a page flip was refused (%s): the mode was set again\0",
+        );
+        let (ok, said, err, image) = check(&target("patched", Some(&cog), core, drm));
+        assert!(ok && image, "{err}");
+        assert!(said.contains(&format!("the failure action {action}")), "{said}");
+        // An image without the launcher has nothing to check.
+        let (ok, said, err, image) = check(&target("none", None, "", ""));
+        assert!(ok && image && said.is_empty(), "{said}{err}");
+        for (name, cog, core, drm, why) in [
+            ("no-action", "\0error-page\0exit\0restart\0", core, drm, "does not know the failure action embrad starts it with (restart-home"),
+            ("no-reason", cog.as_str(), "\0crashed\0", drm, "does not say why a renderer stopped"),
+            ("no-mode", cog.as_str(), core, "\0failed to schedule a page flip: %s\0", "does not set the mode again after a refused commit"),
+        ] {
+            let (ok, _, err, image) = check(&target(name, Some(cog), core, drm));
+            assert!(!ok, "{name} passed");
+            assert!(err.contains(why), "{name}: {err}");
+            assert!(!image, "{name}: the image this build wrote is left");
+        }
+        // The check is part of the root filesystem's checks.
+        let script = std::fs::read_to_string(&common).unwrap();
+        assert!(script.contains("    assert_display_console_launcher \"$BUILDROOT_DIR/output/target\"\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// cog is named a mode only when the display console asks for one, and

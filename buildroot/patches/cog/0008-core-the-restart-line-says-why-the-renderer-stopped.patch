@@ -1,0 +1,55 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] core: the restart line says why the renderer stopped
+
+WebKit hands the handler of web-process-terminated the reason: the process
+crashed, exceeded its memory limit, or was terminated through the API. The
+restart handler logged the attempt and not the reason, so a kiosk whose
+renderer had died left nothing that told a crash from a memory limit. Both
+lines of the handler name it now.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/core/cog-webkit-utils.c
++++ b/core/cog-webkit-utils.c
+@@ -256,6 +256,22 @@ cog_handle_web_view_web_process_terminated_exit (WebKitWebView
+ }
+ 
+ 
++static const char *
++web_process_termination_reason_string (WebKitWebProcessTerminationReason reason)
++{
++    switch (reason) {
++        case WEBKIT_WEB_PROCESS_CRASHED:
++            return "crashed";
++        case WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT:
++            return "exceeded the memory limit";
++        case WEBKIT_WEB_PROCESS_TERMINATED_BY_API:
++            return "terminated by the API";
++        default:
++            return "reason unknown";
++    }
++}
++
++
+ struct RestartData {
+     unsigned tries;
+     unsigned max_tries;
+@@ -289,13 +305,15 @@ on_web_process_terminated_restart (WebKitWebView                     *web_view,
+ #endif // GLIB_CHECK_VERSION
+ 
+     if (++restart->tries >= restart->max_tries) {
+-        g_critical ("Renderer process terminated and failed to recover within %ums",
++        g_critical ("Renderer process terminated (%s) and failed to recover within %ums",
++                    web_process_termination_reason_string (reason),
+                     restart->try_window_ms);
+         // Chain up to the handler that renders an error page.
+         return cog_handle_web_view_web_process_terminated (web_view, reason, NULL);
+     }
+ 
+-    g_warning ("Renderer process terminated, restarting (attempt %u/%u).",
++    g_warning ("Renderer process terminated (%s), restarting (attempt %u/%u).",
++               web_process_termination_reason_string (reason),
+                restart->tries, restart->max_tries);
+     if (restart->uri)
+         webkit_web_view_load_uri (web_view, restart->uri);

@@ -1,0 +1,153 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] launcher: a restarted renderer is given the launcher's page
+
+--webprocess-failure=restart reloads the view when its Web process dies. A
+reload asks for the address the view had reached, and that is not always an
+address the view can be given again. A kiosk's start URL can carry a token
+which the server exchanges for a cookie and redirects away from: the view is
+left on the clean address, the cookie is SameSite=Strict, and the reload that
+a new Web process makes does not carry it. The server answers with its notice
+for a client without a token, and the kiosk shows that notice from then on; as
+plain text on a dark background colour it reads as a black screen.
+
+A new action, restart-home, starts the new Web process on the page the
+launcher was started with (the URL of the command line, or COG_URL), so the
+page is entered again the way it was entered first. The core library gets
+cog_web_view_connect_web_process_terminated_restart_handler_with_uri() for it.
+The handler without a URI reloads as before, and `restart` is unchanged.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/core/cog-webkit-utils.c
++++ b/core/cog-webkit-utils.c
+@@ -261,6 +261,7 @@ struct RestartData {
+     unsigned max_tries;
+     unsigned try_window_ms;
+     unsigned tries_timeout_id;
++    char    *uri;
+ };
+ 
+ 
+@@ -296,7 +297,10 @@ on_web_process_terminated_restart (WebKitWebView                     *web_view,
+ 
+     g_warning ("Renderer process terminated, restarting (attempt %u/%u).",
+                restart->tries, restart->max_tries);
+-    webkit_web_view_reload (web_view);
++    if (restart->uri)
++        webkit_web_view_load_uri (web_view, restart->uri);
++    else
++        webkit_web_view_reload (web_view);
+ 
+     // Reset the count of attempts if the Web process does not crash again
+     // during the configure time window.
+@@ -308,8 +312,10 @@ on_web_process_terminated_restart (WebKitWebView                     *web_view,
+ 
+ 
+ static void
+-free_restart_data (void *restart, G_GNUC_UNUSED GClosure *closure)
++free_restart_data (void *data, G_GNUC_UNUSED GClosure *closure)
+ {
++    struct RestartData *restart = data;
++    g_free (restart->uri);
+     g_slice_free (struct RestartData, restart);
+ }
+ 
+@@ -343,6 +349,36 @@ gulong
+ cog_web_view_connect_web_process_terminated_restart_handler (WebKitWebView *web_view,
+                                                              unsigned       max_tries,
+                                                              unsigned       try_window_ms)
++{
++    return cog_web_view_connect_web_process_terminated_restart_handler_with_uri (web_view,
++                                                                                 max_tries,
++                                                                                 try_window_ms,
++                                                                                 NULL);
++}
++
++/**
++ * cog_web_view_connect_web_process_terminated_restart_handler_with_uri:
++ * @web_view: A [class@WebKit.WebView].
++ * @max_tries: Maximum number of attempts in the retry window.
++ * @try_window_ms: Length of the retry window in milliseconds.
++ * @uri: (nullable): The page to load in the new Web process, or %NULL to
++ *     reload the one that was on show.
++ *
++ * As [id@cog_web_view_connect_web_process_terminated_restart_handler], with
++ * the page the new Web process is given. A reload asks for the address the
++ * view had reached, and that is not always an address the view can be given
++ * again: a start page that carries a token which the server exchanges for a
++ * cookie and redirects away from leaves the view on the clean address, and
++ * a `SameSite=Strict` cookie does not travel with the reload a new Web
++ * process makes. The page the view was started with can be loaded again.
++ *
++ * Returns: Identifier of the installed signal handler.
++ */
++gulong
++cog_web_view_connect_web_process_terminated_restart_handler_with_uri (WebKitWebView *web_view,
++                                                                      unsigned       max_tries,
++                                                                      unsigned       try_window_ms,
++                                                                      const char    *uri)
+ {
+     g_return_val_if_fail (WEBKIT_IS_WEB_VIEW (web_view), 0);
+     g_return_val_if_fail (max_tries > 0, 0);
+@@ -350,6 +386,7 @@ cog_web_view_connect_web_process_terminated_restart_handler (WebKitWebView *web_
+     struct RestartData *restart = g_slice_new0 (struct RestartData);
+     restart->max_tries = max_tries;
+     restart->try_window_ms = try_window_ms;
++    restart->uri = g_strdup (uri);
+ 
+     return g_signal_connect_data (web_view,
+                                   "web-process-terminated",
+--- a/core/cog-webkit-utils.h
++++ b/core/cog-webkit-utils.h
+@@ -52,6 +52,10 @@ cog_web_view_connect_web_process_terminated_exit_handler (WebKitWebView* web_vie
+ gulong cog_web_view_connect_web_process_terminated_restart_handler (WebKitWebView *web_view,
+                                                                     unsigned       max_tries,
+                                                                     unsigned       try_window_ms);
++gulong cog_web_view_connect_web_process_terminated_restart_handler_with_uri (WebKitWebView *web_view,
++                                                                             unsigned       max_tries,
++                                                                             unsigned       try_window_ms,
++                                                                             const char    *uri);
+ 
+ void cog_web_view_connect_default_error_handlers (WebKitWebView *web_view);
+ 
+--- a/launcher/cog-launcher.c
++++ b/launcher/cog-launcher.c
+@@ -20,6 +20,7 @@ enum webprocess_fail_action {
+     WEBPROCESS_FAIL_EXIT,
+     WEBPROCESS_FAIL_EXIT_OK,
+     WEBPROCESS_FAIL_RESTART,
++    WEBPROCESS_FAIL_RESTART_HOME,
+ };
+ 
+ static struct {
+@@ -350,6 +351,12 @@ cog_launcher_create_view(CogLauncher *self, CogShell *shell)
+         cog_web_view_connect_web_process_terminated_restart_handler(web_view, 5, 1000);
+         break;
+ 
++    case WEBPROCESS_FAIL_RESTART_HOME:
++        // The page the launcher was given, not the address the view reached
++        // from it: see cog_web_view_connect_web_process_terminated_restart_handler_with_uri().
++        cog_web_view_connect_web_process_terminated_restart_handler_with_uri(web_view, 5, 1000, s_options.home_uri);
++        break;
++
+     default:
+         g_assert_not_reached();
+     }
+@@ -1193,7 +1200,7 @@ static GOptionEntry s_cli_options[] = {
+     {"dir-handler", 'd', 0, G_OPTION_ARG_STRING_ARRAY, &s_options.dir_handlers,
+      "Add a URI scheme handler for a directory", "SCHEME:PATH"},
+     {"webprocess-failure", '\0', 0, G_OPTION_ARG_STRING, &s_options.on_failure.action_name,
+-     "Action on WebProcess failures: error-page (default), exit, exit-ok, restart.", "ACTION"},
++     "Action on WebProcess failures: error-page (default), exit, exit-ok, restart, restart-home.", "ACTION"},
+     {"config", 'C', 0, G_OPTION_ARG_FILENAME, &s_options.config_file, "Path to a configuration file", "PATH"},
+     {"bg-color", 'b', 0, G_OPTION_ARG_STRING, &s_options.background_color,
+      "Background color, as a CSS name or in #RRGGBBAA hex syntax (default: white)", "BG_COLOR"},
+@@ -1280,6 +1287,7 @@ string_to_webprocess_fail_action(const char *action)
+         {"exit", WEBPROCESS_FAIL_EXIT},
+         {"exit-ok", WEBPROCESS_FAIL_EXIT_OK},
+         {"restart", WEBPROCESS_FAIL_RESTART},
++        {"restart-home", WEBPROCESS_FAIL_RESTART_HOME},
+     };
+ 
+     if (!action) // Default.

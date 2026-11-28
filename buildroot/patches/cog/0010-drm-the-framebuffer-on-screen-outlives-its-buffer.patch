@@ -1,0 +1,176 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] drm: the framebuffer on screen outlives its buffer
+
+destroy_buffer_notify() removed a buffer's framebuffer as soon as the client's
+wl_buffer was destroyed, also when that framebuffer was on screen or had a
+flip scheduled. For the one on screen the kernel turns the plane off, and the
+output with it on a driver that has no output without its primary plane; the
+commit before this one recovers from that, with a mode set and a dark moment.
+For the one with a flip scheduled, the flip handler was left with a pointer to
+the freed object, stored it as the committed buffer and read it at the next
+flip.
+
+Such a buffer is retired instead: its client is given the release it is owed,
+as before, and the object stays with its framebuffer until another buffer has
+been shown. A renderer that is started again finds the output on and the last
+frame still on screen.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/platform/drm/cog-drm-modeset-renderer.c
++++ b/platform/drm/cog-drm-modeset-renderer.c
+@@ -75,6 +75,7 @@ struct buffer_object {
+     struct gbm_bo      *bo;
+     struct wl_resource *buffer_resource;
+     void               *renderer; /* the CogDrmModesetRenderer, typedef'd below */
++    bool                retired;  /* its wl_buffer is gone: kept for its framebuffer alone */
+ 
+     struct {
+         struct wl_resource                 *resource;
+@@ -87,8 +88,9 @@ typedef struct {
+ 
+     GSource *drm_source;
+ 
+-    struct buffer_object *committed_buffer;
+-    struct wl_list        buffer_list; /* buffer_object::link */
++    struct buffer_object *committed_buffer; /* the one on screen */
++    struct buffer_object *pending_buffer;   /* the one a flip is scheduled for */
++    struct wl_list        buffer_list;      /* buffer_object::link */
+ 
+     struct wpe_view_backend_exportable_fdo *exportable;
+ 
+@@ -114,12 +116,10 @@ get_drm_fd(CogDrmModesetRenderer *self)
+     return s->pfd.fd;
+ }
+ 
++/* What the client is owed for a buffer it exported: its release. */
+ static void
+-destroy_buffer(CogDrmModesetRenderer *renderer, struct buffer_object *buffer)
++release_buffer_exports(CogDrmModesetRenderer *renderer, struct buffer_object *buffer)
+ {
+-    drmModeRmFB(get_drm_fd(renderer), buffer->fb_id);
+-    gbm_bo_destroy(buffer->bo);
+-
+     if (buffer->export.resource) {
+         wpe_view_backend_exportable_fdo_dispatch_release_buffer(renderer->exportable, buffer->export.resource);
+         buffer->export.resource = NULL;
+@@ -130,7 +130,23 @@ destroy_buffer(CogDrmModesetRenderer *renderer, struct buffer_object *buffer)
+                                                                              buffer->export.shm_buffer);
+         buffer->export.shm_buffer = NULL;
+     }
++}
+ 
++static void
++destroy_buffer(CogDrmModesetRenderer *renderer, struct buffer_object *buffer)
++{
++    drmModeRmFB(get_drm_fd(renderer), buffer->fb_id);
++    gbm_bo_destroy(buffer->bo);
++    release_buffer_exports(renderer, buffer);
++    g_free(buffer);
++}
++
++/* The end of a retired buffer: its client was given its release when it was retired. */
++static void
++free_retired_buffer(CogDrmModesetRenderer *renderer, struct buffer_object *buffer)
++{
++    drmModeRmFB(get_drm_fd(renderer), buffer->fb_id);
++    gbm_bo_destroy(buffer->bo);
+     g_free(buffer);
+ }
+ 
+@@ -140,10 +156,27 @@ destroy_buffer_notify(struct wl_listener *listener, void *data)
+     struct buffer_object  *buffer = wl_container_of(listener, buffer, destroy_listener);
+     CogDrmModesetRenderer *renderer = buffer->renderer;
+ 
+-    if (renderer->committed_buffer == buffer)
+-        renderer->committed_buffer = NULL;
+-
+     wl_list_remove(&buffer->link);
++
++    /*
++     * The buffer on screen, and the one a flip is scheduled for, keep their
++     * framebuffer. A framebuffer that is removed while a plane shows it
++     * makes the kernel turn the plane off, and on a driver that has no
++     * output without its primary plane (simpledrm, bochs, ast, amdgpu) the
++     * output with it; the next commit carries no mode, is refused, and
++     * nothing is shown again. A client that goes away with a frame on screen
++     * (a Web process that died) does exactly that. Such a buffer is retired:
++     * its client is given the release it is owed, the framebuffer stays until
++     * another one has been shown, and the flip that was scheduled for it
++     * finds its object where it left it.
++     */
++    if (renderer->committed_buffer == buffer || renderer->pending_buffer == buffer) {
++        release_buffer_exports(renderer, buffer);
++        buffer->buffer_resource = NULL;
++        buffer->retired = true;
++        return;
++    }
++
+     destroy_buffer(renderer, buffer);
+ }
+ 
+@@ -491,6 +524,8 @@ drm_commit_buffer(CogDrmModesetRenderer *self, struct buffer_object *buffer)
+ 
+     if (ret)
+         g_warning("failed to schedule a page flip: %s", g_strerror(errno));
++    else
++        self->pending_buffer = buffer;
+ }
+ 
+ static void
+@@ -595,19 +630,16 @@ drm_page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int
+     struct buffer_object  *buffer = ((FlipHandlerData *) data)->buffer;
+     g_slice_free(FlipHandlerData, data);
+ 
+-    if (self->committed_buffer) {
+-        struct buffer_object *buffer = self->committed_buffer;
++    if (self->pending_buffer == buffer)
++        self->pending_buffer = NULL;
+ 
+-        if (buffer->export.resource) {
+-            wpe_view_backend_exportable_fdo_dispatch_release_buffer(self->exportable, buffer->export.resource);
+-            buffer->export.resource = NULL;
+-        }
++    if (self->committed_buffer) {
++        struct buffer_object *shown = self->committed_buffer;
+ 
+-        if (buffer->export.shm_buffer) {
+-            wpe_view_backend_exportable_fdo_dispatch_release_shm_exported_buffer(self->exportable,
+-                                                                                 buffer->export.shm_buffer);
+-            buffer->export.shm_buffer = NULL;
+-        }
++        if (!shown->retired)
++            release_buffer_exports(self, shown);
++        else if (shown != buffer)
++            free_retired_buffer(self, shown); /* on screen no longer */
+     }
+ 
+     self->committed_buffer = buffer;
+@@ -629,6 +661,14 @@ cog_drm_modeset_renderer_destroy(CogDrmRenderer *renderer)
+ {
+     CogDrmModesetRenderer *self = wl_container_of(renderer, self, base);
+ 
++    /* The retired buffers are in no list; which they are is read before the list is emptied. */
++    struct buffer_object *retired_committed =
++        (self->committed_buffer && self->committed_buffer->retired) ? self->committed_buffer : NULL;
++    struct buffer_object *retired_pending =
++        (self->pending_buffer && self->pending_buffer->retired && self->pending_buffer != retired_committed)
++            ? self->pending_buffer
++            : NULL;
++
+     struct buffer_object *buffer, *tmp;
+     wl_list_for_each_safe(buffer, tmp, &self->buffer_list, link) {
+         wl_list_remove(&buffer->link);
+@@ -636,6 +676,11 @@ cog_drm_modeset_renderer_destroy(CogDrmRenderer *renderer)
+         destroy_buffer(self, buffer);
+     }
+     wl_list_init(&self->buffer_list);
++    if (retired_pending)
++        free_retired_buffer(self, retired_pending);
++    if (retired_committed)
++        free_retired_buffer(self, retired_committed);
++    self->pending_buffer = NULL;
+     self->committed_buffer = NULL;
+ 
+     if (self->connector_props.props_info) {

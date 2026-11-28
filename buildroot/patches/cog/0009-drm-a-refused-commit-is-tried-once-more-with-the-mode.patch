@@ -1,0 +1,145 @@
+From: William Mangum <william@wsds.io>
+Subject: [PATCH] drm: a refused commit is tried once more, with the mode
+
+The modeset renderer sets the mode with its first commit and flips after that.
+When the output is turned off under it, every later commit is refused (EINVAL
+from an atomic commit that asks for an event on an inactive CRTC, EBUSY from a
+legacy flip), no frame-complete reaches the client, and nothing is drawn
+again: the display stays dark with the launcher running.
+
+The kernel turns an output off when the framebuffer its primary plane shows is
+removed, on every driver that has no output without that plane (simpledrm and
+the other sysfb drivers, bochs, ast, mgag200, amdgpu), and this renderer
+removes that framebuffer itself when the client that owns the buffer goes
+away: a Web process that died.
+
+A commit that is refused while the renderer believes its mode is set is asked
+once more with the mode, which is the commit the renderer starts with, and a
+warning says that it happened. The mode counts as set once a commit that
+carried it was taken (it was marked before the commit), the mode's property
+blob is destroyed after the commit, and the flip's user data is freed when a
+commit fails.
+
+Upstream: not yet submitted (embraOS carries this until it is).
+Signed-off-by: William Mangum <william@wsds.io>
+---
+--- a/platform/drm/cog-drm-modeset-renderer.c
++++ b/platform/drm/cog-drm-modeset-renderer.c
+@@ -335,7 +335,13 @@ drm_commit_buffer_nonatomic(CogDrmModesetRenderer *self, struct buffer_object *b
+     FlipHandlerData *data = g_slice_new(FlipHandlerData);
+     *data = (FlipHandlerData){self, buffer};
+ 
+-    return drmModePageFlip(get_drm_fd(self), self->crtc_id, buffer->fb_id, DRM_MODE_PAGE_FLIP_EVENT, data);
++    int ret = drmModePageFlip(get_drm_fd(self), self->crtc_id, buffer->fb_id, DRM_MODE_PAGE_FLIP_EVENT, data);
++    if (ret) {
++        int refused = errno;
++        g_slice_free(FlipHandlerData, data);
++        errno = refused;
++    }
++    return ret;
+ }
+ 
+ static int
+@@ -387,13 +393,14 @@ drm_commit_buffer_atomic(CogDrmModesetRenderer *self, struct buffer_object *buff
+ {
+     int      ret = 0;
+     uint32_t flags = DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_NONBLOCK;
++    bool     with_mode = !self->mode_set;
++    uint32_t blob_id = 0;
+ 
+     drmModeAtomicReq *req = drmModeAtomicAlloc();
+ 
+-    if (!self->mode_set) {
++    if (with_mode) {
+         flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+ 
+-        uint32_t blob_id;
+         ret = drmModeCreatePropertyBlob(get_drm_fd(self), &self->mode, sizeof(drmModeModeInfo), &blob_id);
+         if (ret) {
+             drmModeAtomicFree(req);
+@@ -404,11 +411,10 @@ drm_commit_buffer_atomic(CogDrmModesetRenderer *self, struct buffer_object *buff
+         ret |= add_crtc_property(self, req, self->crtc_id, "MODE_ID", blob_id);
+         ret |= add_crtc_property(self, req, self->crtc_id, "ACTIVE", 1);
+         if (ret) {
++            drmModeDestroyPropertyBlob(get_drm_fd(self), blob_id);
+             drmModeAtomicFree(req);
+             return -1;
+         }
+-
+-        self->mode_set = true;
+     }
+ 
+     ret |= add_plane_property(self, req, self->plane_id, "FB_ID", buffer->fb_id);
+@@ -422,6 +428,8 @@ drm_commit_buffer_atomic(CogDrmModesetRenderer *self, struct buffer_object *buff
+     ret |= add_plane_property(self, req, self->plane_id, "CRTC_W", self->mode.hdisplay);
+     ret |= add_plane_property(self, req, self->plane_id, "CRTC_H", self->mode.vdisplay);
+     if (ret) {
++        if (blob_id)
++            drmModeDestroyPropertyBlob(get_drm_fd(self), blob_id);
+         drmModeAtomicFree(req);
+         return -1;
+     }
+@@ -430,23 +438,56 @@ drm_commit_buffer_atomic(CogDrmModesetRenderer *self, struct buffer_object *buff
+     *data = (FlipHandlerData){self, buffer};
+ 
+     ret = drmModeAtomicCommit(get_drm_fd(self), req, flags, data);
++    int refused = errno;
++
++    /* The kernel holds the mode it was given; this handle to it is done with. */
++    if (blob_id)
++        drmModeDestroyPropertyBlob(get_drm_fd(self), blob_id);
++    drmModeAtomicFree(req);
++
+     if (ret) {
+-        drmModeAtomicFree(req);
++        g_slice_free(FlipHandlerData, data);
++        errno = refused;
+         return -1;
+     }
+ 
+-    drmModeAtomicFree(req);
++    /* The mode is set once a commit that carried it has been taken. */
++    if (with_mode)
++        self->mode_set = true;
+     return 0;
+ }
+ 
++static int
++drm_commit_buffer_once(CogDrmModesetRenderer *self, struct buffer_object *buffer)
++{
++    if (self->atomic_modesetting)
++        return drm_commit_buffer_atomic(self, buffer);
++    return drm_commit_buffer_nonatomic(self, buffer);
++}
++
+ static void
+ drm_commit_buffer(CogDrmModesetRenderer *self, struct buffer_object *buffer)
+ {
+-    int ret;
+-    if (self->atomic_modesetting)
+-        ret = drm_commit_buffer_atomic(self, buffer);
+-    else
+-        ret = drm_commit_buffer_nonatomic(self, buffer);
++    int ret = drm_commit_buffer_once(self, buffer);
++
++    /*
++     * A commit that carries no mode is refused while the output is off, and
++     * the output can be turned off under this renderer: the kernel does it
++     * when the framebuffer a plane shows is removed on a driver that has no
++     * output without its primary plane, and whoever held the device
++     * meanwhile may leave it off. The renderer still believes its mode is
++     * set, every later frame is refused the same way, and nothing is shown
++     * again. So a refused commit is asked once more, with the mode: the very
++     * commit this renderer starts with.
++     */
++    if (ret && self->mode_set) {
++        int refused = errno;
++
++        self->mode_set = false;
++        ret = drm_commit_buffer_once(self, buffer);
++        if (!ret)
++            g_warning("a page flip was refused (%s): the mode was set again", g_strerror(refused));
++    }
+ 
+     if (ret)
+         g_warning("failed to schedule a page flip: %s", g_strerror(errno));

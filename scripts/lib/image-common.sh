@@ -758,11 +758,36 @@ assert_license_text() {
     echo "licence: /$lic is the repository's LICENSE ($version; sha256 $(sha256_of LICENSE))"
 }
 
+# assert_display_console_launcher <target dir>: the display console's launcher
+# is cog with this tree's patches (buildroot/patches/cog). embrad starts it
+# with a failure action that one of them adds (--webprocess-failure=restart-home,
+# crates/embrad/src/supervisor.rs): a cog built without it stops at that
+# argument, the display console never comes up on any machine, and the build
+# would say nothing. Each patch that leaves words in a program is looked for
+# by them: the action in the launcher, the reason of a renderer's end in its
+# core library, the mode set again in the DRM platform. An image without the
+# launcher has nothing to check.
+assert_display_console_launcher() {
+    local tgt="$1" cog core drm
+    cog="$tgt/usr/bin/cog"
+    [ -e "$cog" ] || return 0
+    core="$(ls "$tgt"/usr/lib/libcogcore.so.*.*.* 2>/dev/null | head -1)"
+    drm="$tgt/usr/lib/cog/modules/libcogplatform-drm.so"
+    grep -a -q -F -- 'restart-home' "$cog" \
+        || reject_image "the display console's launcher (/usr/bin/cog) does not know the failure action embrad starts it with (restart-home, buildroot/patches/cog/0007): the display console would stop at its start on every machine"
+    { [ -n "$core" ] && grep -a -q -F -- 'exceeded the memory limit' "$core"; } \
+        || reject_image "the display console's launcher does not say why a renderer stopped (libcogcore, buildroot/patches/cog/0008): cog was built without this tree's patches"
+    { [ -f "$drm" ] && grep -a -q -F -- 'the mode was set again' "$drm"; } \
+        || reject_image "the display console's DRM platform does not set the mode again after a refused commit (libcogplatform-drm.so, buildroot/patches/cog/0009): cog was built without this tree's patches"
+    echo "display console: the launcher is built with this tree's patches (the failure action restart-home, the reason of a renderer's end, the mode set again)"
+}
+
 assert_rootfs_invariants() {
     local triple="${1:-}"
     assert_target_is_clean
     [ -n "$triple" ] && assert_kernel_fragments_applied "$triple"
     assert_license_text "$BUILDROOT_DIR/output/target"
+    assert_display_console_launcher "$BUILDROOT_DIR/output/target"
     assert_firmware_families
     assert_firmware_present "$BUILDROOT_DIR/output/target"
     assert_mt7921_power_tables "$BUILDROOT_DIR/output/target"
