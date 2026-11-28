@@ -653,13 +653,13 @@ impl Supervisor {
                 }
             }
             let log_path = "/embra/ephemeral/embra-console.log";
-            cmd.stderr(match std::fs::File::create(log_path) {
+            cmd.stderr(match service_log(Path::new(log_path)) {
                 Ok(f) => Stdio::from(f),
                 Err(_) => Stdio::null(),
             });
         } else {
             let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
-            let (out, err) = match std::fs::File::create(&log_path) {
+            let (out, err) = match service_log(Path::new(&log_path)) {
                 Ok(f) => match f.try_clone() {
                     Ok(f2) => (Stdio::from(f), Stdio::from(f2)),
                     Err(_) => (Stdio::from(f), Stdio::null()),
@@ -1434,6 +1434,23 @@ fn kiosk_env(token: &str, layout: Option<&str>, mode: Option<(u32, u32)>, paint:
 /// display console draws with the CPU code; the screen is still composed
 /// through GL. `embra.kioskpaint=gpu` leaves the variable out for one boot.
 const KIOSK_CPU_PAINT_ENV: &str = "WEBKIT_SKIA_ENABLE_CPU_RENDERING";
+
+/// A service's log for the run that starts now, with the log of the run
+/// before it kept beside it as `<name>.log.prev`: a service that is started
+/// again (a crash, the display console's launcher after its budget) would
+/// otherwise begin by erasing the one account of why. One run back and no
+/// further; the ephemeral tmpfs is small. A log that cannot be kept is no
+/// reason not to start: the rename is best effort, the create decides.
+fn service_log(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut kept = path.as_os_str().to_owned();
+    kept.push(".prev");
+    match std::fs::rename(path, &kept) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!("{}: the log of the run before could not be kept ({e})", path.display()),
+    }
+    std::fs::File::create(path)
+}
 
 /// The display console's directories, before each spawn (a restart finds
 /// them too): XDG_RUNTIME_DIR 0700, the homes under the ephemeral tmpfs.
@@ -2818,6 +2835,33 @@ mod display_console_tests {
         // The check is part of the root filesystem's checks.
         let script = std::fs::read_to_string(&common).unwrap();
         assert!(script.contains("    assert_display_console_launcher \"$BUILDROOT_DIR/output/target\"\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A service that is started again keeps the log of the run before it,
+    /// one run back, and starts its own from nothing.
+    #[test]
+    fn a_restarted_service_keeps_the_log_of_the_run_before() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("embrad-service-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("embra-kiosk.log");
+        let prev = dir.join("embra-kiosk.log.prev");
+        // The first start: nothing to keep.
+        service_log(&log).unwrap().write_all(b"the first run\n").unwrap();
+        assert!(!prev.exists());
+        // The second: the first run's log is beside it, the new one is empty.
+        let mut second = service_log(&log).unwrap();
+        assert_eq!(std::fs::read(&prev).unwrap(), b"the first run\n");
+        assert_eq!(std::fs::read(&log).unwrap(), b"");
+        second.write_all(b"the second run\n").unwrap();
+        // The third: one run back and no further.
+        drop(service_log(&log).unwrap());
+        assert_eq!(std::fs::read(&prev).unwrap(), b"the second run\n");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        // A directory that is not there fails as before, at the create.
+        assert!(service_log(&dir.join("absent/embra-web.log")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

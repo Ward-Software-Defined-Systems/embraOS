@@ -259,6 +259,9 @@ fn prepare(pid: u32) -> Result<Cmdline> {
     // CA bundle is written to exists now.
     if pid == 1 {
         supervisor::scrub_boot_environment();
+        // A program lost to a fault is written into the kernel's log from
+        // here on: before any service, so that the first one is covered.
+        boot::record_fatal_signals();
     }
     let cmdline = Cmdline::read();
     supervisor::prepare_environment();

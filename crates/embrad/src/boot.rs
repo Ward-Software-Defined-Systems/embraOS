@@ -158,6 +158,38 @@ fn say_of_the_disk(cmdline: &Cmdline) {
     }
 }
 
+/// The kernel's two switches that leave a record when a program dies of a
+/// fault, under `/proc/sys`. `kernel/print-fatal-signals` is every
+/// architecture's: a line with the signal, the program and the thread, and
+/// the registers, for a signal that would dump core. `debug/exception-trace`
+/// names the fault and the library it happened in; x86 has it on, arm64 has
+/// it off, and without it the kernel of an Arm machine says nothing at all
+/// when a process is lost to a trap or a bad address.
+pub const FATAL_SIGNAL_SWITCHES: [&str; 2] = ["kernel/print-fatal-signals", "debug/exception-trace"];
+
+/// Both switches turned on under `proc_sys`. What comes back is each switch
+/// that could not be written, with the reason: a kernel without one of the
+/// files is a record that is not kept, never a boot that fails.
+pub fn record_fatal_signals_in(proc_sys: &Path) -> Vec<(&'static str, io::Error)> {
+    FATAL_SIGNAL_SWITCHES
+        .iter()
+        .filter_map(|name| std::fs::write(proc_sys.join(name), "1\n").err().map(|e| (*name, e)))
+        .collect()
+}
+
+/// PID 1's own call, once at boot, before any service: the display
+/// console's renderer died on a machine and nothing on it said of what
+/// (the kernel's log is where the tools read it, `system_logs`).
+pub fn record_fatal_signals() {
+    let failed = record_fatal_signals_in(Path::new("/proc/sys"));
+    for (name, e) in &failed {
+        warn!("the kernel's record of fatal signals: /proc/sys/{name} could not be set ({e})");
+    }
+    if failed.len() < FATAL_SIGNAL_SWITCHES.len() {
+        info!("a program that dies of a fault leaves a line in the kernel's log ({} of {} switches set)", FATAL_SIGNAL_SWITCHES.len() - failed.len(), FATAL_SIGNAL_SWITCHES.len());
+    }
+}
+
 /// Whether the updater is asked to put this slot's boot menu on the ESP
 /// (`embra-update boot-menu`): a boot through GRUB that needed no
 /// confirmation or got it. The updater itself reads whether the slot is the
@@ -234,6 +266,47 @@ pub fn after_services_healthy(cmdline: &Cmdline, mode: BootMode) -> Confirmed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both of the kernel's switches are turned on, each in its own file;
+    /// a kernel without one of them is a record that is not kept and is
+    /// said, and the other is written all the same.
+    #[test]
+    fn a_program_that_dies_of_a_fault_is_recorded_by_the_kernel() {
+        let dir = std::env::temp_dir().join(format!("embrad-fatal-signals-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["kernel", "debug"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("kernel/print-fatal-signals"), "0\n").unwrap();
+        std::fs::write(dir.join("debug/exception-trace"), "0\n").unwrap();
+        assert!(record_fatal_signals_in(&dir).is_empty());
+        assert_eq!(std::fs::read_to_string(dir.join("kernel/print-fatal-signals")).unwrap(), "1\n");
+        assert_eq!(std::fs::read_to_string(dir.join("debug/exception-trace")).unwrap(), "1\n");
+        // A kernel that has no exception trace: the other switch is set, and the miss is named.
+        std::fs::remove_dir_all(dir.join("debug")).unwrap();
+        std::fs::write(dir.join("kernel/print-fatal-signals"), "0\n").unwrap();
+        let failed = record_fatal_signals_in(&dir);
+        assert_eq!(failed.iter().map(|(name, _)| *name).collect::<Vec<_>>(), ["debug/exception-trace"]);
+        assert_eq!(std::fs::read_to_string(dir.join("kernel/print-fatal-signals")).unwrap(), "1\n");
+        assert_eq!(FATAL_SIGNAL_SWITCHES, ["kernel/print-fatal-signals", "debug/exception-trace"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The record is turned on by PID 1 alone (a development host's kernel
+    /// is not this program's to set), and before the kernel line is read
+    /// and any service is registered: the first service to start is covered.
+    #[test]
+    fn pid_1_turns_the_record_on_before_any_service() {
+        let main = include_str!("main.rs");
+        let block = "    if pid == 1 {\n        supervisor::scrub_boot_environment();\n";
+        let start = main.find(block).expect("PID 1's own block of the early boot");
+        let end = start + main[start..].find("\n    }\n").expect("the block's end");
+        let call = main.find("        boot::record_fatal_signals();\n").expect("the call");
+        assert!(start < call && call < end, "the call is inside PID 1's block");
+        let read = main.find("    let cmdline = Cmdline::read();\n").expect("the kernel line's read");
+        assert!(end < read, "the block comes before the kernel line is read");
+        assert_eq!(main.matches("record_fatal_signals()").count(), 1, "called once");
+    }
     use embra_boot::{Slot, SlotStatus};
 
     #[test]
