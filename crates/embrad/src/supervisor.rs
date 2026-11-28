@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tracing::{info, warn, error};
 
-use embra_boot::{Cmdline, KioskMode};
+use embra_boot::{Cmdline, KioskMode, KioskPaint};
 
 /// WardSONDB's data directory on DATA: the `--data-dir` the database is
 /// started with, and where its engine marker lives (`boot::remove_empty_engine_marker`).
@@ -461,11 +461,15 @@ impl Supervisor {
                     }
                     let width = mode.map_or_else(|| display_width_px(drm), |(w, _)| w);
                     let scale = self.cmdline.kiosk_scale().unwrap_or_else(|| device_scale(width));
+                    let paint = self.cmdline.kiosk_paint();
+                    if paint == KioskPaint::Gpu {
+                        info!("Display console: the page is drawn by Skia's GPU backend, WebKit's default (embra.kioskpaint=gpu)");
+                    }
                     self.add_service(ServiceDef {
                         name: "embra-kiosk".to_string(),
                         binary: KIOSK_BIN.to_string(),
                         args: kiosk_args(scale),
-                        env: kiosk_env(&token, self.cmdline.keyboard_layout(), mode),
+                        env: kiosk_env(&token, self.cmdline.keyboard_layout(), mode, paint),
                         health_check: HealthCheck::ProcessAlive,
                         restart_policy: RestartPolicy::default(),
                         essential: false,
@@ -1397,9 +1401,10 @@ fn banner_token_note(stored: bool, kiosk: bool) -> String {
 /// the page it is on the display), Mesa's software path on the card
 /// (kms_swrast through GBM; never `LIBGL_ALWAYS_SOFTWARE`, which would send
 /// the web process down a path the nested display does not serve), the
-/// writable homes on the ephemeral tmpfs, the keyboard layout, and the video
-/// mode when the display console asks for one (`kiosk_video_mode`).
-fn kiosk_env(token: &str, layout: Option<&str>, mode: Option<(u32, u32)>) -> Vec<(String, String)> {
+/// writable homes on the ephemeral tmpfs, the keyboard layout, the video
+/// mode when the display console asks for one (`kiosk_video_mode`), and
+/// how the page is drawn (`KIOSK_CPU_PAINT_ENV`).
+fn kiosk_env(token: &str, layout: Option<&str>, mode: Option<(u32, u32)>, paint: KioskPaint) -> Vec<(String, String)> {
     let mut env = vec![
         (KIOSK_URL_ENV.to_string(), kiosk_url(token)),
         ("MESA_LOADER_DRIVER_OVERRIDE".to_string(), "kms_swrast".to_string()),
@@ -1414,8 +1419,21 @@ fn kiosk_env(token: &str, layout: Option<&str>, mode: Option<(u32, u32)>) -> Vec
     if let Some((w, h)) = mode {
         env.push(("COG_PLATFORM_DRM_VIDEO_MODE".to_string(), format!("{w}x{h}")));
     }
+    if paint == KioskPaint::Cpu {
+        env.push((KIOSK_CPU_PAINT_ENV.to_string(), "1".to_string()));
+    }
     env
 }
+
+/// WebKit's switch for Skia's CPU code (`WebProcessGLib.cpp`: any value but
+/// `0` turns accelerated buffers off in the web process). WebKit's default
+/// is Skia's GPU backend with painting threads of its own, and in this
+/// image the GL under it is software: GPU code with no GPU. That backend's
+/// resource cache is where a display console's renderer died on a machine
+/// (a bounds check in `GrResourceCache::refAndMakeResourceMRU`), so the
+/// display console draws with the CPU code; the screen is still composed
+/// through GL. `embra.kioskpaint=gpu` leaves the variable out for one boot.
+const KIOSK_CPU_PAINT_ENV: &str = "WEBKIT_SKIA_ENABLE_CPU_RENDERING";
 
 /// The display console's directories, before each spawn (a restart finds
 /// them too): XDG_RUNTIME_DIR 0700, the homes under the ephemeral tmpfs.
@@ -2707,6 +2725,28 @@ mod display_console_tests {
         assert!(forces("video=efifb:mode=3"));
     }
 
+    /// The page is drawn by Skia's CPU code: WebKit is told so in the
+    /// display console's environment on every boot, and `embra.kioskpaint=gpu`
+    /// leaves WebKit its own default for the one boot that carries it.
+    #[test]
+    fn the_display_console_draws_with_skias_cpu_code_unless_the_line_asks_for_webkits_default() {
+        let paint = |line: &str| {
+            let sup = registered(line, true, true);
+            let kiosk = sup.services.iter().find(|s| s.def.name == "embra-kiosk").expect("the kiosk");
+            kiosk.def.env.iter().find(|(k, _)| k == "WEBKIT_SKIA_ENABLE_CPU_RENDERING").map(|(_, v)| v.clone())
+        };
+        assert_eq!(paint("embra.web=1").as_deref(), Some("1"), "without the knob");
+        assert_eq!(paint("embra.web=1 embra.kioskpaint=cpu").as_deref(), Some("1"));
+        assert_eq!(paint("embra.web=1 embra.kioskpaint=gpu"), None, "WebKit's default: the variable is not there at all");
+        assert_eq!(paint("embra.web=1 embra.kioskpaint=fast").as_deref(), Some("1"), "a word that is neither asks nothing");
+        assert_eq!(paint("embra.web=1 embra.kioskpaint=gpu embra.kioskpaint=cpu").as_deref(), Some("1"), "the last occurrence");
+        // WebKit reads any value but "0" as the switch: the value given is "1".
+        assert_eq!(KIOSK_CPU_PAINT_ENV, "WEBKIT_SKIA_ENABLE_CPU_RENDERING");
+        // The other variables are the same either way.
+        let names = |p| kiosk_env("t", None, None, p).into_iter().map(|(k, _)| k).filter(|k| k != KIOSK_CPU_PAINT_ENV).collect::<Vec<_>>();
+        assert_eq!(names(KioskPaint::Cpu), names(KioskPaint::Gpu));
+    }
+
     /// The failure action embrad names is one the launcher of this tree
     /// knows: a patch of the series adds it, and the image build looks for
     /// it, and for the two other patches that leave words, in what it built.
@@ -2785,7 +2825,7 @@ mod display_console_tests {
     /// the scale follows the mode in use.
     #[test]
     fn the_display_console_names_its_video_mode_to_cog_only_when_it_asks_for_one() {
-        let env = |mode| kiosk_env("t", None, mode).into_iter().find(|(k, _)| k == "COG_PLATFORM_DRM_VIDEO_MODE").map(|(_, v)| v);
+        let env = |mode| kiosk_env("t", None, mode, KioskPaint::Cpu).into_iter().find(|(k, _)| k == "COG_PLATFORM_DRM_VIDEO_MODE").map(|(_, v)| v);
         assert_eq!(env(Some((1920, 1080))).as_deref(), Some("1920x1080"));
         assert_eq!(env(None), None);
         assert_eq!(DEFAULT_KIOSK_MODE, (1920, 1080));

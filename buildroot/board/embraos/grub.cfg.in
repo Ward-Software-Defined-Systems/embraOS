@@ -250,6 +250,7 @@ submenu "Diagnostics" --id diagnostics {
         echo "  embra.kbd=<layout>          the display console's keyboard layout (us)"
         echo "  embra.kioskmode=<W>x<H>     the display console's video mode (1920x1080 where the display offers it); native = the display's own"
         echo "  embra.kioskscale=1|2        the display console's scale (else 2 on a mode 2560 pixels wide or wider, 1 below)"
+        echo "  embra.kioskpaint=gpu        the display console's page drawn by WebKit's GPU code in this boot (else by its CPU code)"
         echo "  embra.ntp=<host>|off        the time server of this boot (else those set with /network time, else the DHCP lease's, then time.cloudflare.com); off asks none"
         echo "  embra.wifi=0                no Wi-Fi driver is loaded in this boot"
         echo "  embra.native=0              no model server is started in this boot (native models, experimental)"

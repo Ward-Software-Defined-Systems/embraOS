@@ -57,6 +57,32 @@ impl KioskMode {
         }
     }
 }
+/// How the display console's page is drawn. WebKit's own default is Skia's
+/// GPU backend, with painting threads of its own; in this image the GL under
+/// it is software (`kms_swrast`), and the display console asks WebKit for
+/// Skia's CPU code instead. `embra.kioskpaint=gpu` is WebKit's default for
+/// one boot.
+pub const KIOSK_PAINT_KEY: &str = "embra.kioskpaint";
+
+/// What `embra.kioskpaint=` asks of the display console's drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KioskPaint {
+    /// Skia's CPU code: what the display console draws with.
+    Cpu,
+    /// Skia's GPU backend: WebKit's default.
+    Gpu,
+}
+
+impl KioskPaint {
+    /// `cpu` or `gpu`, and nothing else.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "cpu" => Some(Self::Cpu),
+            "gpu" => Some(Self::Gpu),
+            _ => None,
+        }
+    }
+}
 /// The installation medium, instead of the scan (`embra.media=/dev/sr0`).
 pub const MEDIA_KEY: &str = "embra.media";
 /// The time server embrad asks at boot (`embra.ntp=<host>[:<port>]`), or
@@ -358,6 +384,12 @@ impl Cmdline {
     pub fn kiosk_mode(&self) -> Option<KioskMode> {
         self.values(KIOSK_MODE_KEY).filter_map(KioskMode::parse).last()
     }
+
+    /// `embra.kioskpaint=cpu|gpu`, how the display console's page is drawn;
+    /// the last value that is one of the two, and Skia's CPU code without one.
+    pub fn kiosk_paint(&self) -> KioskPaint {
+        self.values(KIOSK_PAINT_KEY).filter_map(KioskPaint::parse).last().unwrap_or(KioskPaint::Cpu)
+    }
 }
 
 impl Cmdline {
@@ -611,6 +643,34 @@ mod display_console_tests {
         assert_eq!(c.kiosk_scale(), Some(2));
         assert_eq!(Cmdline::parse("quiet").keyboard_layout(), None);
         assert_eq!(Cmdline::parse("embra.kioskscale=4").kiosk_scale(), None);
+    }
+
+    /// The boot menu's own list of knobs (Diagnostics, Command-line knobs)
+    /// names each knob of the display console, in the form it is typed in.
+    #[test]
+    fn the_boot_menus_list_of_knobs_names_the_display_consoles() {
+        let menu = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../buildroot/board/embraos/grub.cfg.in")).unwrap();
+        let start = menu.find("menuentry \"Command-line knobs\"").expect("the entry");
+        let list = &menu[start..start + menu[start..].find("\n    }\n").expect("the entry's end")];
+        for key in [KIOSK_KEY, KEYBOARD_KEY, KIOSK_MODE_KEY, KIOSK_SCALE_KEY, KIOSK_PAINT_KEY] {
+            assert!(list.lines().any(|l| l.trim_start().starts_with(&format!("echo \"  {key}="))), "the list has no line for {key}");
+        }
+        assert!(list.contains(&format!("echo \"  {KIOSK_PAINT_KEY}=gpu ")), "the one value that asks for something");
+    }
+
+    /// The display console draws with Skia's CPU code unless the line asks
+    /// for WebKit's default, and a value that is neither word asks nothing.
+    #[test]
+    fn the_drawing_knob_takes_cpu_or_gpu_and_the_last_well_formed_one_wins() {
+        assert_eq!(Cmdline::parse("embra.web=1").kiosk_paint(), KioskPaint::Cpu, "without the knob");
+        assert_eq!(Cmdline::parse("embra.kioskpaint=gpu").kiosk_paint(), KioskPaint::Gpu);
+        assert_eq!(Cmdline::parse("embra.kioskpaint=cpu").kiosk_paint(), KioskPaint::Cpu);
+        assert_eq!(Cmdline::parse("embra.kioskpaint=gpu embra.kioskpaint=cpu").kiosk_paint(), KioskPaint::Cpu, "the last occurrence");
+        assert_eq!(Cmdline::parse("embra.kioskpaint=cpu embra.kioskpaint=gpu").kiosk_paint(), KioskPaint::Gpu);
+        for line in ["embra.kioskpaint=GPU", "embra.kioskpaint=1", "embra.kioskpaint=", "embra.kioskpaint=gpu,cpu", "embra.kioskpaint=hardware"] {
+            assert_eq!(Cmdline::parse(line).kiosk_paint(), KioskPaint::Cpu, "{line}");
+        }
+        assert_eq!(Cmdline::parse("embra.kioskpaint=gpu embra.kioskpaint=fast").kiosk_paint(), KioskPaint::Gpu, "a word that is neither is passed over");
     }
 
     #[test]

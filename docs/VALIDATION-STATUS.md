@@ -74,6 +74,7 @@ x86_64 under QEMU on Linux is the reference platform: what the manual describes 
 | The menu: Copy, Paste, This console's URL | QEMU; QEMU on an Intel Mac and on Apple Silicon | |
 | The dropdowns, and the notices for what needs a browser | QEMU (standard VGA); bare metal | |
 | The console comes back after its renderer dies: the launcher starts another on the console's URL, the picture on the display stays until the new one has drawn, and the launcher's log names the reason | QEMU (standard VGA, a firmware framebuffer and virtio-gpu; the renderer ended by a signal: the page back within a second and the output never off, twelve times in a row; the launcher itself killed and started again by embrad) | VMware Fusion on Apple Silicon, where a display console went dark for good when its renderer died; a machine; Intel graphics; a renderer that dies by itself |
+| The page's content drawn by Skia's CPU code, and `embra.kioskpaint=gpu` for WebKit's default | QEMU (the switch in the renderer's environment and the same page with it; the knob leaves it out; at rest the renderer costs the processors the same either way) | that a renderer no longer dies under a native model's generation on VMware Fusion on Apple Silicon, where one did with WebKit's default (the knob gives the comparison); a machine; what a turn costs with each |
 
 ## The network
 

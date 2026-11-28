@@ -39,7 +39,7 @@ pub mod state;
 pub mod status;
 
 pub use clock::ClockStatus;
-pub use cmdline::{BootMode, Cmdline, CmdlineError, KioskMode, TimeServer};
+pub use cmdline::{BootMode, Cmdline, CmdlineError, KioskMode, KioskPaint, TimeServer};
 pub use grubenv::{GrubEnv, GrubEnvError};
 pub use release::{Release, ReleaseError};
 pub use slot::Slot;
